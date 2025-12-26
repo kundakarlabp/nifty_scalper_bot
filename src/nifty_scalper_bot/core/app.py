@@ -3057,63 +3057,73 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     order_manager.attach_persistent_state(persistent_state)
 
     bracket_manager: BracketManager | None = None
+    # ----------------------------------------------------------------
+    # 1. Initialize BracketManager (Clean)
+    # ----------------------------------------------------------------
     if settings.execution.enable_bracket_manager:
         try:
-            LOGGER.debug(
-                "Entered initialize_components bracket manager wiring",
-                extra={"event": "init.bracket_manager.enter"},
-            )
+            LOGGER.debug("Initializing BracketManager...")
             
-            # ✅ FIX 1: Pass IndicatorEngine and MarketDataManager
             bracket_manager = BracketManager(
                 order_manager=order_manager,
                 indicator_engine=indicator_engine,
                 market_data=market_data_manager
             )
             
-            # Use the BracketManager's internal toggle to avoid shadowing the flag.
+            # Configure
             bracket_manager._auto_reduce_sl = settings.execution.bracket_auto_reduce_sl
-            
-            # NEW: Set cleanup age from config
             bracket_manager._stale_cleanup_age = getattr(settings.execution, "bracket_stale_cleanup_seconds", 86400)
             
+            # Attach to OrderManager
             order_manager.set_bracket_manager(bracket_manager=bracket_manager)
-            ctx.bracket_manager = bracket_manager
-            # ✅ FIX 2: Wire up ATR Feedback Loop
-            # This ensures BracketManager always has the latest ATR for fallback calculations
-            if indicator_engine and hasattr(indicator_engine, "register_callback"):
-                
-                def _feed_atr_to_manager(symbol: str, indicators: dict) -> None:
-                    atr = indicators.get("ATR")
-                    if atr and atr > 0:
-                        bracket_manager.feed_atr_updates(symbol, float(atr))
+            LOGGER.info("✅ BracketManager initialized and attached.")
 
-                # Register this listener with the engine
-                try:
-                    indicator_engine.register_callback(_feed_atr_to_manager)
-                    LOGGER.info("✅ Wired IndicatorEngine -> BracketManager ATR feed")
-                except AttributeError:
-                    LOGGER.debug("IndicatorEngine does not support callbacks (skipping feed wiring)")
+        except Exception as exc:
+            LOGGER.error(f"Failed to initialize BracketManager: {exc}")
+  
+           
+    # ----------------------------------------------------------------
+    # 2. Wire & Start BracketManager Services (Safe Zone)
+    # ----------------------------------------------------------------
+    if ctx.bracket_manager:
+        LOGGER.info("🔌 Wiring BracketManager Feeds...")
 
-            LOGGER.info(
-                "Bracket manager wired",
-                extra={
-                    "event": "init.bracket_manager",
-                    "auto_reduce_sl": bracket_manager._auto_reduce_sl,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "Failure in initialize_components bracket wiring: %s",
-                exc,
-                extra={"event": "init.bracket_manager.error"},
-                exc_info=exc,
-            )
-    else:
-        LOGGER.info(
-            "BracketManager disabled by configuration",
-            extra={"event": "init.bracket_manager.disabled"},
-        )
+        # A. Wire ATR Feed (Moved from Init)
+        if ctx.indicator_engine and hasattr(ctx.indicator_engine, "register_callback"):
+            def _feed_atr_to_manager(symbol: str, indicators: dict) -> None:
+                atr = indicators.get("ATR")
+                if atr and atr > 0:
+                    ctx.bracket_manager.feed_atr_updates(symbol, float(atr))
+            
+            try:
+                ctx.indicator_engine.register_callback(_feed_atr_to_manager)
+                LOGGER.info("✅ Wired IndicatorEngine -> BracketManager ATR feed")
+            except Exception as e:
+                LOGGER.warning(f"Failed to wire ATR feed: {e}")
+
+        # B. Wire DataHub Ticks (Prevent Zombie Mode)
+        if ctx.market_data and hasattr(ctx.market_data, "data_hub"):
+            def _feed_ticks_to_bracket_safe(sym, tick):
+                ltp = tick.get("ltp")
+                if ltp:
+                    ctx.bracket_manager.on_tick(sym, ltp)
+            
+            try:
+                ctx.market_data.data_hub.subscribe("bracket_feed", _feed_ticks_to_bracket_safe)
+                LOGGER.info("✅ Wired DataHub ticks to BracketManager")
+            except Exception as e:
+                LOGGER.error(f"Failed to wire ticks: {e}")
+
+        # C. Restore State & Start Tasks
+        try:
+            await asyncio.to_thread(ctx.bracket_manager.load_state)
+            LOGGER.info(f"♻️ Restored virtual brackets: {ctx.bracket_manager.get_stats()}")
+        except Exception as e:
+            LOGGER.error(f"Failed to restore brackets: {e}")
+
+        # Start the background feed task (if you added the helper function)
+        # asyncio.create_task(_run_atr_feed_task(ctx))
+    
 
     if risk_state is not None:
 
@@ -4922,6 +4932,26 @@ async def startup_sequence(ctx: BotContext) -> None:
             await asyncio.to_thread(ctx.order_manager.reconcile_open_orders)
         except Exception as e:
             LOGGER.error(f"Reconciliation failed: {e}")
+
+    # ----------------------------------------------------------------
+    # ✅ FIX: Wire DataHub -> Bracket Manager (Moved here to avoid crash)
+    # ----------------------------------------------------------------
+    if ctx.bracket_manager and ctx.market_data:
+        try:
+            # 1. Define the tick handler using the fully loaded 'ctx'
+            def _feed_ticks_to_bracket_safe(sym, tick):
+                # Ensure we have LTP
+                ltp = tick.get("ltp")
+                if ltp and ctx.bracket_manager:
+                    ctx.bracket_manager.on_tick(sym, ltp)
+
+            # 2. Subscribe to the DataHub
+            if hasattr(ctx.market_data, "data_hub") and ctx.market_data.data_hub:
+                ctx.market_data.data_hub.subscribe("bracket_feed", _feed_ticks_to_bracket_safe)
+                LOGGER.info("✅ Wired DataHub ticks to BracketManager")
+                
+        except Exception as e:
+            LOGGER.error(f"Failed to wire bracket ticks: {e}")
             
     LOGGER.info("✅ Startup sequence fully complete.")
 
