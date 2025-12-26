@@ -3081,7 +3081,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         except Exception as exc:
             LOGGER.error(f"Failed to initialize BracketManager: {exc}")
   
-   # ----------------------------------------------------------------
+    # ----------------------------------------------------------------
     # 2. Wire & Start BracketManager Services (Safe Zone)
     # ----------------------------------------------------------------
     if ctx.bracket_manager:
@@ -3115,16 +3115,18 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         # C. Restore State & Start Tasks
         try:
+            # THIS LINE CAUSED THE ERROR - IT MUST BE INDENTED 12 SPACES
             await asyncio.to_thread(ctx.bracket_manager.load_state)
-            LOGGER.info(f"♻️ Restored virtual brackets: {ctx.bracket_manager.get_stats()}")
+            stats = ctx.bracket_manager.get_stats()
+            LOGGER.info(f"♻️ Restored virtual brackets: {stats}")
         except Exception as e:
             LOGGER.error(f"Failed to restore brackets: {e}")
 
-        # Start the background feed task (if you added the helper function)
-        # asyncio.create_task(_run_atr_feed_task(ctx))
+        # D. Start Background ATR Feed Task
         if "_run_atr_feed_task" in globals():
-             loop = asyncio.get_running_loop()
-             loop.create_task(_run_atr_feed_task(ctx))
+            loop = asyncio.get_running_loop()
+            loop.create_task(_run_atr_feed_task(ctx))
+            LOGGER.info("✅ Started background ATR feed task")
     
     
 
