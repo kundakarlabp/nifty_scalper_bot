@@ -782,8 +782,22 @@ class PersistentStateManager:
     def __init__(self, base_path: str | Path = "data") -> None:
         self._logger = get_logger(__name__)
         self._lock = RLock()
-        self._base_path = Path(base_path)
-        self._base_path.mkdir(parents=True, exist_ok=True)
+        
+        # ✅ FIX: Robust directory creation with fallback
+        self._base_path = Path(base_path).resolve()
+        
+        try:
+            self._base_path.mkdir(parents=True, exist_ok=True)
+            self._logger.info(f"✅ Data directory ready: {self._base_path}")
+        except OSError as exc:
+            self._logger.error(f"❌ Failed to create base directory: {exc}")
+            # Fallback to /tmp for Railway/Cloud
+            import tempfile
+            fallback = Path(tempfile.gettempdir()) / "nifty_bot_data"
+            fallback.mkdir(parents=True, exist_ok=True)
+            self._base_path = fallback
+            self._logger.warning(f"⚠️ Using fallback directory: {self._base_path}")
+
         self._mode = "json"
         self._trade_cache: list[TradeDict] = []
         self._fill_cache: list[FillDict] = []
@@ -1675,27 +1689,43 @@ class PersistentStateManager:
             extra_payload = positions_raw
         self._db.save_shadow_equity(equity_value, extra_payload)
 
+    def _ensure_base_dir(self) -> None:
+        """Ensure base directory exists before writing (safety net)."""
+        try:
+            if not self._base_path.exists():
+                self._base_path.mkdir(parents=True, exist_ok=True)
+                self._logger.debug(f"Created missing base directory: {self._base_path}")
+        except Exception as exc:
+            self._logger.error(f"Directory check failed: {exc}", exc_info=True)
+            raise
+
     def _write_trades_json(self) -> None:
+        self._ensure_base_dir()  # ✅ ADD
         data = json.dumps(self._trade_cache, indent=2, sort_keys=True)
         self._trades_path.write_text(data, encoding="utf-8")
 
     def _write_fills_json(self) -> None:
+        self._ensure_base_dir()  # ✅ ADD
         data = json.dumps(self._fill_cache, indent=2, sort_keys=True)
         self._fills_path.write_text(data, encoding="utf-8")
 
     def _write_positions_json(self) -> None:
+        self._ensure_base_dir()  # ✅ ADD
         data = json.dumps(self._position_cache, indent=2, sort_keys=True)
         self._positions_path.write_text(data, encoding="utf-8")
 
     def _write_orders_json(self) -> None:
+        self._ensure_base_dir()  # ✅ ADD
         data = json.dumps(self._orders_cache, indent=2, sort_keys=True)
         self._orders_path.write_text(data, encoding="utf-8")
 
     def _write_brackets_json(self) -> None:
+        self._ensure_base_dir()  # ✅ ADD
         data = json.dumps(self._bracket_cache, indent=2, sort_keys=True)
         self._brackets_path.write_text(data, encoding="utf-8")
 
     def _write_shadow_json(self) -> None:
+        self._ensure_base_dir()  # ✅ ADD
         data = json.dumps(self._shadow_state, indent=2, sort_keys=True)
         self._shadow_path.write_text(data, encoding="utf-8")
 
