@@ -3081,52 +3081,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         except Exception as exc:
             LOGGER.error(f"Failed to initialize BracketManager: {exc}")
   
-    # ----------------------------------------------------------------
-    # 2. Wire & Start BracketManager Services (Safe Zone)
-    # ----------------------------------------------------------------
-    if ctx.bracket_manager:
-        LOGGER.info("🔌 Wiring BracketManager Feeds...")
 
-        # A. Wire ATR Feed (Moved from Init)
-        if ctx.indicator_engine and hasattr(ctx.indicator_engine, "register_callback"):
-            def _feed_atr_to_manager(symbol: str, indicators: dict) -> None:
-                atr = indicators.get("ATR")
-                if atr and atr > 0:
-                    ctx.bracket_manager.feed_atr_updates(symbol, float(atr))
-            
-            try:
-                ctx.indicator_engine.register_callback(_feed_atr_to_manager)
-                LOGGER.info("✅ Wired IndicatorEngine -> BracketManager ATR feed")
-            except Exception as e:
-                LOGGER.warning(f"Failed to wire ATR feed: {e}")
-
-        # B. Wire DataHub Ticks (Prevent Zombie Mode)
-        if ctx.market_data and hasattr(ctx.market_data, "data_hub"):
-            def _feed_ticks_to_bracket_safe(sym, tick):
-                ltp = tick.get("ltp")
-                if ltp:
-                    ctx.bracket_manager.on_tick(sym, ltp)
-            
-            try:
-                ctx.market_data.data_hub.subscribe("bracket_feed", _feed_ticks_to_bracket_safe)
-                LOGGER.info("✅ Wired DataHub ticks to BracketManager")
-            except Exception as e:
-                LOGGER.error(f"Failed to wire ticks: {e}")
-
-        # C. Restore State & Start Tasks
-        try:
-            # THIS LINE CAUSED THE ERROR - IT MUST BE INDENTED 12 SPACES
-            ctx.bracket_manager.load_state()
-            stats = ctx.bracket_manager.get_stats()
-            LOGGER.info(f"♻️ Restored virtual brackets: {stats}")
-        except Exception as e:
-            LOGGER.error(f"Failed to restore brackets: {e}")
-
-        # D. Start Background ATR Feed Task
-        if "_run_atr_feed_task" in globals():
-            loop = asyncio.get_running_loop()
-            loop.create_task(_run_atr_feed_task(ctx))
-            LOGGER.info("✅ Started background ATR feed task")
     
     
 
