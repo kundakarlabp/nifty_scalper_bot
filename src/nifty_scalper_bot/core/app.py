@@ -4800,6 +4800,11 @@ async def startup_sequence(ctx: BotContext) -> None:
             elif hasattr(ctx.streamer, "start"): 
                 res = ctx.streamer.start()
                 if inspect.isawaitable(res): await res
+            # ✅ FIX: Explicitly start Telegram Bot
+            if ctx.telegram_bot:
+                LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
+                await ctx.telegram_bot.start()
+            
                 
             LOGGER.info("✅ All subsystems started.")
         except Exception as e:
