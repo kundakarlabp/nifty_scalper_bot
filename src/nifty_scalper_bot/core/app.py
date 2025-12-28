@@ -4894,9 +4894,10 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.error(f"Reconciliation failed: {e}")
 
     # ----------------------------------------------------------------
-    # ✅ FIX: Wire DataHub -> Bracket Manager (Moved here to avoid crash)
+    # ✅ FIX: Wire DataHub -> Bracket Manager (Corrected Attribute Name)
     # ----------------------------------------------------------------
-    if ctx.bracket_manager and ctx.market_data:
+    # CHANGE: ctx.market_data -> ctx.market_data_manager
+    if ctx.bracket_manager and ctx.market_data_manager: 
         try:
             # 1. Define the tick handler using the fully loaded 'ctx'
             def _feed_ticks_to_bracket_safe(sym, tick):
@@ -4906,8 +4907,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                     ctx.bracket_manager.on_tick(sym, ltp)
 
             # 2. Subscribe to the DataHub
-            if hasattr(ctx.market_data, "data_hub") and ctx.market_data.data_hub:
-                ctx.market_data.data_hub.subscribe("bracket_feed", _feed_ticks_to_bracket_safe)
+            # CHANGE: ctx.market_data -> ctx.market_data_manager
+            if hasattr(ctx.market_data_manager, "data_hub") and ctx.market_data_manager.data_hub:
+                ctx.market_data_manager.data_hub.subscribe("bracket_feed", _feed_ticks_to_bracket_safe)
                 LOGGER.info("✅ Wired DataHub ticks to BracketManager")
                 
         except Exception as e:
