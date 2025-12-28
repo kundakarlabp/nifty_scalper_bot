@@ -562,63 +562,55 @@ class TelegramBot:
         self._started_at: datetime = datetime.now(timezone.utc)
         self._um: t.Any | None = None
 
-    # --------------------------------------------------------------------------
-    # ✅ CRITICAL FIX: Add this start method to initialize and run the bot
+# --------------------------------------------------------------------------
+    # ✅ FIX: Robust Start Method (Integrates with Existing Handlers)
     # --------------------------------------------------------------------------
     async def start(self) -> None:
         """Initialize the Telegram application and start the polling loop."""
         if self._app is not None:
-            return  # Already started
-
-        log.info("Initializing TelegramBot execution...")
-        
-        # 1. Build the Application (Was missing)
-        try:
-            from telegram.ext import ApplicationBuilder, CommandHandler
-            builder = ApplicationBuilder().token(self.deps.token)
-            # Add timeouts to prevent network flakes
-            builder.read_timeout(30).write_timeout(30).connect_timeout(30)
-            self._app = builder.build()
-        except Exception as e:
-            log.error(f"Failed to build Telegram App: {e}")
+            log.warning("TelegramBot is already running.")
             return
 
-        # 2. Register Command Handlers
-        # We define a helper to wrap class methods as handlers
-        async def _status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if await self._guard(update):
-                status_text, _ = self._reconcile_status_line()
-                await update.message.reply_text(status_text or "System Nominal", parse_mode=ParseMode.HTML)
+        log.info("🚀 Initializing TelegramBot execution...")
 
-        # Basic Health Commands
-        self._app.add_handler(CommandHandler("status", _status_handler))
-        self._app.add_handler(CommandHandler("ping", self._cmd_ping_stub)) # You need to define _cmd_ping_stub or use lambda
-        
-        # Register External Regime Commands (defined at top of your file)
-        register_regime_commands(self, self._app)
-
-        # 3. Start the Lifecycle
         try:
+            # 1. Build the Application (Reuse existing builder logic)
+            # This ensures timeouts/persistence settings from self.builder() are applied
+            if self._app is None:
+                self._app = self.builder().build()
+            
+            # 2. Register ALL Command Handlers (Reuse existing wiring)
+            # This ensures /help, /stop, and all other commands work, not just /status
+            self._wire_handlers(self._app)
+
+            # 3. Start the Lifecycle
             await self._app.initialize()
             await self._app.start()
-            
-            # 4. START POLLING (The missing heartbeat)
+
+            # 4. START POLLING (Critical Fix)
+            # If no webhook URL is set, we force polling mode
             if self.deps.enable_polling_fallback or not self.deps.webhook_url:
+                log.info("✅ Starting Telegram Polling (Background Mode)...")
+                
+                # Clear any stuck webhook hooks first
+                await self._app.bot.delete_webhook(drop_pending_updates=True)
+                
+                # Start the Updater
                 if self._app.updater:
-                    await self._app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-                    log.info("✅ Telegram Polling Started Successfully")
+                    await self._app.updater.start_polling(
+                        poll_interval=1.0, 
+                        allowed_updates=["message", "callback_query"]
+                    )
+                    log.info("✅ Telegram Polling Active")
                 else:
                     log.error("❌ Telegram Updater not available.")
-            
-            # 5. Start Background Workers
-            self._ensure_alert_worker()
-            
-        except Exception as e:
-            log.error(f"Telegram start sequence failed: {e}", exc_info=True)
 
-    async def _cmd_ping_stub(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if await self._guard(update):
-            await update.message.reply_text("Pong! 🏓")
+            # 5. Start Background Workers
+            if hasattr(self, "_ensure_alert_worker"):
+                self._ensure_alert_worker()
+
+        except Exception as e:
+            log.error(f"❌ Telegram start sequence failed: {e}", exc_info=True)
 
     def _command_registered(self, app: Application, command: str) -> bool:
         """Return ``True`` when *command* is already wired on *app*.
