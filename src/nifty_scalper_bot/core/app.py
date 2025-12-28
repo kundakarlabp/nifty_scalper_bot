@@ -2270,7 +2270,9 @@ def calculate_greeks_simple(
 
 def _setup_telegram(ctx: BotContext) -> None:
     """Wire the Telegram controller with full access to bot components."""
-    settings = ctx.settings.telegram
+    # CORRECTED: Use .notifications, NOT .telegram
+    settings = ctx.settings.notifications 
+    
     if not settings.bot_token or not settings.chat_id:
         LOGGER.info("Telegram disabled: credentials missing.")
         return
