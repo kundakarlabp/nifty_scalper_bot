@@ -5264,6 +5264,7 @@ class NiftyScalperApp:
         self, config: AppConfig | None = None, settings: Settings | None = None
     ) -> None:
         base_settings = settings or get_settings()
+        ctx = None
         if config is not None:
             base_settings = replace(base_settings, app=config)
         self._settings = base_settings
