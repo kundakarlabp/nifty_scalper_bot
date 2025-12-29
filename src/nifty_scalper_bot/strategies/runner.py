@@ -1616,6 +1616,36 @@ class StrategyRunner:
         trade_price: float,
         timestamp: datetime,
     ) -> None:
+        # -----------------------------------------------------------
+        # 🛡️ GUARD 1: Signal Debounce (Anti-Whipsaw)
+        # -----------------------------------------------------------
+        with self._lock:
+            state = self._symbol_state.get(base_symbol)
+            if state and state.last_signal_at:
+                delta = (timestamp - state.last_signal_at).total_seconds()
+                debounce_limit = self._risk_manager.settings.signal_debounce_seconds
+                
+                if delta < debounce_limit:
+                    self._logger.info(
+                        f"⏳ DEBOUNCE: Ignoring {base_symbol} signal. "
+                        f"Wait {debounce_limit - delta:.1f}s more."
+                    )
+                    return
+
+        # -----------------------------------------------------------
+        # 🛡️ GUARD 2: Position Check (No Pyramiding)
+        # -----------------------------------------------------------
+        if self._position_manager:
+            active_contract = self._position_manager.get_active_contract(base_symbol)
+            if active_contract and not self._risk_manager.settings.allow_pyramiding:
+                 self._logger.info(
+                     f"🛡️ SKIPPED: Already active on {active_contract.symbol}. Pyramiding Disabled."
+                 )
+                 # Update signal timer to prevent log spam
+                 with self._lock:
+                     if state: state.last_signal_at = timestamp
+                 return
+
         # ✅ FIX: Define side and use 'trade_price' instead of 'price'
         side = "LONG" if signal.action == "BUY" else "SHORT"
         confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
@@ -1890,6 +1920,10 @@ class StrategyRunner:
                     ),
                 )
 
+                # ✅ UPDATE SIGNAL TIMER
+                with self._lock:
+                    state = self._symbol_state.get(base_symbol)
+                    if state: state.last_signal_at = timestamp
                 self._set_trade_cooldown(base_symbol, timestamp)
             else:
                 self._logger.error("🔴 Order ID is None (OrderManager failed silently)")
