@@ -672,6 +672,8 @@ class RiskSettings:
     max_lots_per_trade: int = 6
     atr_stop_multiple: float = 1.0
     contract_lot_size: int = 75
+    allow_pyramiding: bool = False
+    signal_debounce_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         # Keep the historical ``daily_pnl_cap_pct`` alias in sync with the
@@ -1127,6 +1129,8 @@ def _build_risk_settings() -> RiskSettings:
         max_lots_per_trade=max_lots,
         atr_stop_multiple=atr_multiple,
         contract_lot_size=contract_lot_size,
+        allow_pyramiding=_env_bool("RISK_ALLOW_PYRAMIDING", default=False),
+        signal_debounce_seconds=_env_float("RISK_SIGNAL_DEBOUNCE_SECONDS", default=60.0),
     )
 
 
