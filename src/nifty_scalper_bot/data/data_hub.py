@@ -118,7 +118,13 @@ class DataHub:
     # Ingestion (Write Path)
     # ----------------------------------------------------------------
 
-    # data_hub.py, around line 89: Find ingest_tick
+    def ingest_tick_sync(self, tick: dict) -> None:
+        """Synchronous bridge to schedule ingest_tick on the running loop."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.ingest_tick(tick))
+        except RuntimeError:
+            pass
 
     
     async def ingest_tick(self, tick: Tick) -> None:
@@ -281,7 +287,7 @@ class DataHub:
             if symbol not in self._tick_subscribers:
                 self._tick_subscribers[symbol] = set()
                 if self._mdm:
-                    self._mdm.subscribe(symbol, self.ingest_tick)
+                    self._mdm.subscribe(symbol, self.ingest_tick_sync)
             self._tick_subscribers[symbol].add(callback)
 
     def unsubscribe_ticks(self, symbol: str, callback: TickListener) -> None:
