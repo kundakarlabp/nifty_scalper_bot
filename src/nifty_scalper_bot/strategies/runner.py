@@ -1514,24 +1514,24 @@ class StrategyRunner:
 
         # 6. Execute Signal
         if signal and signal.action != "HOLD":
-            # Final Throttling Check
             with self._lock:
                 state = self._symbol_state.get(symbol)
                 if state:
                     if state.last_signal_at:
                         elapsed = (now - state.last_signal_at).total_seconds()
                         if elapsed < self._config.signal_cooldown_seconds:
-                            self._logger.info(f"⏳ Signal Cooldown active for {symbol} ({elapsed:.1f}s < {self._config.signal_cooldown_seconds}s)")
+                             # ... log ...
                             return
                     
-                    state.last_signal_at = now
+                    # state.last_signal_at = now  <-- COMMENTED OUT / DELETED
+                    
                     state.strategy_data["last_signal"] = {
                         "action": signal.action,
                         "reason": signal.reason,
                         "timestamp": now.isoformat()
                     }
 
-            self._logger.info(f"🚀 SIGNAL EXECUTING: {symbol} [{signal.action}] Reason: {signal.reason}")
+            self._logger.info(f"🚀 SIGNAL EXECUTING: {symbol} ...")
             self._handle_signal(signal, price, now)
 
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
