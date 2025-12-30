@@ -170,7 +170,7 @@ class StrategyRunnerConfig:
 
     signal_cooldown_seconds: float = 3.0
     trade_cooldown_seconds: float = 10.0
-    min_indicator_bars: int = 50
+    min_indicator_bars: int = 5
     max_trade_history: int = 100
 
     def __post_init__(self) -> None:
@@ -1507,7 +1507,7 @@ class StrategyRunner:
                 # [DIAGNOSTIC] Log if strategy checked but returned nothing
                 if signal is None:
                     # Log mostly at debug, but force INFO occasionally to prove it's running
-                    log_throttled(self._logger, f"strat_check_{symbol}", f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL", interval_sec=300.0)
+                    log_throttled(self._logger, f"strat_check_{symbol}", f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL", interval_sec=10.0)
             else:
                 # [DIAGNOSTIC] Log why we didn't even ask
                 log_throttled(self._logger, f"not_ready_{symbol}", f"⏳ Indicators NOT READY for {symbol} (Need {self._config.min_indicator_bars} bars)", interval_sec=60.0)
