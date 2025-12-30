@@ -2270,24 +2270,39 @@ def calculate_greeks_simple(
 
 def _setup_telegram(ctx: BotContext) -> None:
     """Wire the Telegram controller with full access to bot components."""
-    # CORRECTED: Use .notifications, NOT .telegram
-    settings = ctx.settings.notifications 
+    settings = ctx.settings.notifications
     
-    if not settings.bot_token or not settings.chat_id:
-        LOGGER.info("Telegram disabled: credentials missing.")
+    # -----------------------------------------------------------
+    # ✅ FIX: Map 'Settings' fields to 'TelegramDeps' requirements
+    # -----------------------------------------------------------
+    # 1. Fix Attribute Name: It is 'token', not 'bot_token'
+    bot_token = settings.token
+    
+    # 2. Fix Chat ID: Extract the first ID from the whitelist set
+    # The settings object uses a Set[int], but the bot needs a single target.
+    chat_id = next(iter(settings.whitelist_chat_ids)) if settings.whitelist_chat_ids else None
+
+    # Defensive check
+    if not bot_token or not chat_id:
+        LOGGER.info(
+            "Telegram disabled: credentials missing.",
+            extra={
+                "has_token": bool(bot_token),
+                "has_chat_id": bool(chat_id)
+            }
+        )
         return
 
     try:
-        # Local import to avoid circular dependency issues
         from nifty_scalper_bot.notifications.telegram_controller import (
             TelegramBot,
             TelegramDeps,
         )
 
-        # 1. Bundle all managers into dependencies
+        # 3. Initialize with extracted values
         deps = TelegramDeps(
-            token=settings.bot_token,
-            chat_id=settings.chat_id,
+            token=str(bot_token),  # Ensure string format
+            chat_id=str(chat_id),  # Ensure string format
             app_version="1.0.0",
             risk_manager=ctx.risk_manager,
             order_manager=ctx.order_manager,
@@ -2298,10 +2313,9 @@ def _setup_telegram(ctx: BotContext) -> None:
             stream_supervisor=getattr(ctx, "stream_supervisor", None),
             data_hub=ctx.data_hub,
             instrument_resolver=getattr(ctx, "instrument_resolver", None),
-            enable_polling_fallback=True,  # Critical for Railway
+            enable_polling_fallback=True,
         )
 
-        # 2. Initialize the Bot
         ctx.telegram_bot = TelegramBot(deps)
         LOGGER.info("✅ Telegram Controller wired successfully.")
 
