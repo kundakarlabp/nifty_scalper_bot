@@ -325,6 +325,7 @@ class StrategyRunner:
         config: StrategyRunnerConfig | None = None,
         data_hub: "DataHub | None" = None,
         strike_selector: StrikeSelector | None = None,
+        bracket_manager: Any | None = None,
     ) -> None:
         self._market_data = market_data_manager
         self._indicator_engine = indicator_engine
@@ -337,6 +338,7 @@ class StrategyRunner:
         self._logger = get_logger(__name__)
         self._data_hub = data_hub
         self._strike_selector = strike_selector
+        self._bracket_manager = bracket_manager
         self._symbol_source: MarketDataManager | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
 
@@ -836,7 +838,7 @@ class StrategyRunner:
             self._logger.info(f"✅ SUBSCRIBED via MarketData: {symbol}")
 
     def _ingest_bar(self, symbol: str, bar: OneMinuteBar) -> None:
-        """Persist the completed minute bar in the indicator engine cache."""
+        """Persist the completed minute bar and UPDATE BRACKET MANAGER."""
         self._logger.debug(
             "Entered StrategyRunner._ingest_bar",
             extra={"event": "ingest_bar", "symbol": symbol},
@@ -856,6 +858,15 @@ class StrategyRunner:
                 volume=bar.volume,
                 timestamp=bar.end,
             )
+
+            # ✅ CRITICAL FIX: Real-time ATR Feed to BracketManager
+            if self._bracket_manager:
+                atr = self._indicator_engine.compute_atr(symbol, period=14)
+                if atr and atr > 0:
+                    if hasattr(self._bracket_manager, "update_market_stats"):
+                        self._bracket_manager.update_market_stats(symbol, atr=float(atr))
+                        self._logger.debug(f"💉 Injected ATR {atr:.2f} into BracketManager for {symbol}")
+
         except Exception as exc:
             self._logger.error(
                 "Failure in _ingest_bar: %s",
