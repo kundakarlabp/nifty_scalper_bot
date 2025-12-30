@@ -3501,6 +3501,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         data_hub=data_hub,
         strike_selector=strike_selector,
         message_bus=message_bus,
+        bracket_manager=bracket_manager,
     )
     strategy_runner.attach_persistent_state(persistent_state)
     strategy_runner.restore_trades(persistent_state.load_trades())
