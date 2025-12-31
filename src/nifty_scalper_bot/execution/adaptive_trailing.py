@@ -10,7 +10,8 @@ from typing import Literal, Callable, Optional, Any, TYPE_CHECKING
 from nifty_scalper_bot.utils.logging import get_logger
 
 # Import SafeATRProvider for type hinting and runtime use
-from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
+# ✅ FIX: Export ATRSnapshot so other modules can import it from here
+from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider, ATRSnapshot
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.storage.journal import AtomicKV
