@@ -1639,7 +1639,7 @@ class OrderManager:
         )
         self.trade_store.add_trade(intent)
 
-# ---------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 6. PAYLOAD OPTIMIZATION (SL-M Fix) - CORRECTED
         # ---------------------------------------------------------------------
         
@@ -1732,6 +1732,21 @@ class OrderManager:
             except Exception as exc:
                 return exc
 
+        # ✅ FIX: Define call_args BEFORE the loop starts
+        # This ensures the variable exists for the 'isinstance' check below
+        call_args = {
+            "symbol": normalized_symbol,
+            "side": normalized_side,
+            "quantity": quantity,
+            "product": product,
+            "order_type": final_order_type,
+            "price": price,
+            "trigger_price": trigger_price,
+            "tag": tag,
+            "variety": variety,
+            "client_order_id": unique_client_id
+        }
+
         for attempt in range(1, 4):
             # -----------------------------------------------------------------
             # ✅ FIX: Re-hydrate Enums to prevent Adapter Crash
@@ -1745,21 +1760,6 @@ class OrderManager:
                 elif ot_str == "SL": call_args["order_type"] = OrderType.STOP_LOSS
                 elif ot_str == "SL-M": call_args["order_type"] = OrderType.STOP_LOSS_MARKET
             try:
-                # Prepare arguments for the call
-                # ✅ CORRECTED: Use normalized strings (converted before loop)
-                call_args = {
-                    "symbol": normalized_symbol, 
-                    "side": normalized_side,  # ✅ Already normalized String
-                    "quantity": quantity, 
-                    "product": product, 
-                    "order_type": final_order_type, # ✅ Already normalized String
-                    "price": price, 
-                    "trigger_price": trigger_price,
-                    "tag": tag, 
-                    "variety": variety, 
-                    "client_order_id": unique_client_id
-                }
-
                 # ✅ Run in thread with 3s timeout to prevent hanging
                 result_holder = {"resp": None}
                 
