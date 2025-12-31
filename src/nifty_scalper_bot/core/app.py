@@ -4733,10 +4733,30 @@ async def startup_sequence(ctx: BotContext) -> None:
             targets = _get_symbols(ctx.config, ctx.instrument_resolver, ctx.broker_client)
             
             # B. Calculate Current Month Futures (Vital for Orchestrator Data)
-            from datetime import datetime
+            from datetime import datetime, timedelta
+            import calendar
+            
             now = datetime.now()
-            y_str = now.strftime("%y")
-            m_str = now.strftime("%b").upper()
+            
+            # --- START ROLLOVER FIX (TUESDAY) ---
+            year = now.year
+            month = now.month
+            last_day = calendar.monthrange(year, month)[1]
+            expiry_date = datetime(year, month, last_day)
+            
+            # 1 = Tuesday
+            while expiry_date.weekday() != 1: 
+                expiry_date -= timedelta(days=1)
+                
+            if now.date() > expiry_date.date():
+                target_date = expiry_date + timedelta(days=7)
+            else:
+                target_date = now
+                
+            y_str = target_date.strftime("%y")
+            m_str = target_date.strftime("%b").upper()
+            # --- END ROLLOVER FIX ---
+            
             future_symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
             
             # Resolve Future Token
