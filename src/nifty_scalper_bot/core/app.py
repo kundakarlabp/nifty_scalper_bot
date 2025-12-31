@@ -1920,38 +1920,63 @@ def _get_symbols(
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback
+    # 6. Manual Fallback (Nearest Weekly/Monthly Logic)
     if not final_symbols:
         import datetime
         import calendar
+        from datetime import timedelta
         
         now = datetime.datetime.now()
-        year = now.year
-        month = now.month
+        today = now.date()
         
-        # Calculate last TUESDAY of current month
-        last_day = calendar.monthrange(year, month)[1]
-        expiry_date = datetime.datetime(year, month, last_day)
+        # ---------------------------------------------------------
+        # CONFIG: Target Weekday (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri)
+        # NIFTY 50 = 3 (Thursday) | FINNIFTY = 1 (Tuesday) | BANKNIFTY = 2 (Wednesday)
+        # ---------------------------------------------------------
+        target_weekday = 3 
         
-        # 1 = Tuesday (Change back to 3 for Thursday)
-        while expiry_date.weekday() != 1: 
-            expiry_date -= datetime.timedelta(days=1)
+        # 1. Find the Nearest Target Day
+        days_ahead = target_weekday - today.weekday()
+        if days_ahead < 0: # Target day already passed this week
+            days_ahead += 7
+        
+        # If today IS the expiry day but it's late (after 3:30 PM), move to next week
+        if days_ahead == 0 and now.hour >= 16:
+             days_ahead += 7
+             
+        next_expiry = today + timedelta(days=days_ahead)
+        
+        # 2. Check if this is a Monthly Expiry
+        # Logic: Is it the last expiry of the month?
+        last_day_of_month = calendar.monthrange(next_expiry.year, next_expiry.month)[1]
+        potential_monthly_expiry = datetime.date(next_expiry.year, next_expiry.month, last_day_of_month)
+        
+        # Backtrack from end of month to find the monthly expiry date
+        while potential_monthly_expiry.weekday() != target_weekday:
+            potential_monthly_expiry -= timedelta(days=1)
             
-        # If today is AFTER the expiry, move to next month (JAN)
-        if now.date() > expiry_date.date():
-            next_month_date = expiry_date + datetime.timedelta(days=7)
-            month_suffix = next_month_date.strftime("%y%b").upper()
+        is_monthly = (next_expiry == potential_monthly_expiry)
+        
+        # 3. Format the Symbol (Zerodha Convention)
+        if is_monthly:
+            # Monthly Format: 26JAN (YYMMM)
+            symbol_date_part = next_expiry.strftime("%y%b").upper()
         else:
-            month_suffix = now.strftime("%y%b").upper()
+            # Weekly Format: 26109 (YYMDD) where M is 1-9, O, N, D
+            y_str = next_expiry.strftime("%y")
+            d_str = next_expiry.strftime("%d")
+            m_map = {10: 'O', 11: 'N', 12: 'D'}
+            m_code = m_map.get(next_expiry.month, str(next_expiry.month))
+            symbol_date_part = f"{y_str}{m_code}{d_str}"
 
-        LOGGER.info(f"📅 Expiry Selection: Today={now.date()} LastTue={expiry_date.date()} -> Suffix={month_suffix}")
+        LOGGER.info(f"📅 Expiry Selected: {next_expiry} (Monthly={is_monthly}) -> Code: {symbol_date_part}")
 
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
-                sym = f"NFO:NIFTY{month_suffix}{strike}{kind}"
+                sym = f"NFO:NIFTY{symbol_date_part}{strike}{kind}"
                 final_symbols.append(sym)
+        
         LOGGER.info(f"Generated fallback symbols: {final_symbols}")
-
     return final_symbols
     
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
