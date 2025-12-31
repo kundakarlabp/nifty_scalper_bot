@@ -969,23 +969,25 @@ class IndicatorEngine:
     def compute_atr(self, symbol: str, period: int = 14) -> object | None:
         """Compute ATR for volatility-adaptive trailing."""
         # Lazy import to avoid circular dependency
-        from nifty_scalper_bot.execution.adaptive_trailing import ATRSnapshot
+        from nifty_scalper_bot.indicators.atr_provider import ATRSnapshot
         
-        hist = self._history.get(symbol)
+        # ✅ FIX 1: Use correct variable name (plural)
+        hist = self._histories.get(symbol)
+        
         if not hist or len(hist) < max(period + 5, 25):
             return None
             
         try:
-            # Extract OHLC
-            closes = np.array([float(h.get("close", 0)) for h in hist[-period-20:]])
-            highs = np.array([float(h.get("high", 0)) for h in hist[-period-20:]])
-            lows = np.array([float(h.get("low", 0)) for h in hist[-period-20:]])
+            # ✅ FIX 2: Use accessor methods (get_closes) instead of treating object like a dict
+            lookback = period + 20
+            closes = np.array(hist.get_closes(lookback), dtype=float)
+            highs = np.array(hist.get_highs(lookback), dtype=float)
+            lows = np.array(hist.get_lows(lookback), dtype=float)
             
             if len(closes) < period:
                 return None
 
             # Calculate True Range (TR)
-            # TR = Max(High-Low, Abs(High-PrevClose), Abs(Low-PrevClose))
             tr_values = []
             for i in range(1, len(closes)):
                 tr = max(
@@ -994,17 +996,16 @@ class IndicatorEngine:
                     abs(lows[i] - closes[i-1]),
                 )
                 tr_values.append(max(tr, 0.01))
-            
+        
             if not tr_values:
                 return None
                 
             tr_array = np.array(tr_values)
             
-            # Current ATR (Simple Moving Average of TR for robustness)
+            # Current ATR
             current_atr = float(np.mean(tr_array[-period:]))
             
-            # Historical ATR (20-bar average of ATR itself)
-            # This serves as the "baseline" volatility
+            # Historical ATR (for ratio)
             atr_history = []
             for i in range(len(tr_array) - period, 0, -1):
                 window = tr_array[i : i + period]
@@ -1017,9 +1018,9 @@ class IndicatorEngine:
             atr_ratio = current_atr / avg_atr_20 if avg_atr_20 > 0.01 else 1.0
             
             return ATRSnapshot(
-                current_atr=current_atr,
-                avg_atr_20=avg_atr_20,
-                atr_ratio=atr_ratio
+                value=current_atr,  # Correct field name for ATRSnapshot
+                timestamp=0.0,      # Placeholder, caller usually fills this
+                period=period
             )
             
         except Exception as e:
@@ -1027,26 +1028,20 @@ class IndicatorEngine:
             return None
 
     def calculate_slope(self, symbol: str, indicator_name: str = "close", period: int = 5) -> float:
-        """
-        Calculate trend velocity (angle of indicator over last N bars).
-        Returns: Slope in degrees (-90 to +90).
-        """
         try:
-            # 1. Fetch History
-            history = self._history.get(symbol)
-            if not history or len(history._closes) < period:
+            # ✅ FIX: Use self._histories (plural)
+            history = self._histories.get(symbol)
+            
+            if not history or len(history) < period:
                 return 0.0
-
-            # 2. Extract Data Series
+            
+            # Use getters based on indicator_name
             if indicator_name == "close":
-                values = list(history._closes)[-period:]
-            elif indicator_name == "ema_50":
-                # On-the-fly EMA calculation for history
-                closes = list(history._closes)
-                if len(closes) < 50 + period: return 0.0
-                # Using pandas ewm or manual loop - manual for speed here
-                # Simplified: Just slope of price for now, or fetch actual indicator if cached
-                values = closes[-period:] # Fallback to Price Slope if indicator cache missing
+                values = history.get_closes(period)
+            elif indicator_name == "high":
+                values = history.get_highs(period)
+            elif indicator_name == "low":
+                values = history.get_lows(period)
             else:
                 return 0.0
 
