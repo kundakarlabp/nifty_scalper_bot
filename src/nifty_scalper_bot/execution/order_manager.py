@@ -696,6 +696,19 @@ class OrderManager:
         # ✅ FIX: Restore state on startup
         self._load_orders()
 
+    # ✅ ADDED: Missing _configure_options_policy method
+    def _configure_options_policy(self) -> None:
+        """
+        Refresh options execution policy with current market data manager.
+        Called on init and when components are updated.
+        """
+        if self._market_data:
+            self._options_policy.set_market_data(self._market_data)
+        
+        # Also ensure resolver is linked if available
+        if hasattr(self._options_policy, "set_instrument_resolver") and self._resolver:
+             self._options_policy.set_instrument_resolver(self._resolver)
+
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
 
