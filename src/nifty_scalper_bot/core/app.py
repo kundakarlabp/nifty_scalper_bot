@@ -1930,14 +1930,13 @@ def _get_symbols(
         today = now.date()
         
         # ---------------------------------------------------------
-        # CONFIG: Target Weekday (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri)
-        # NIFTY 50 = 3 (Thursday) | FINNIFTY = 1 (Tuesday) | BANKNIFTY = 2 (Wednesday)
+        # CONFIG: Target Weekday (3 = Thursday for NIFTY 50)
         # ---------------------------------------------------------
         target_weekday = 3 
         
         # 1. Find the Nearest Target Day
         days_ahead = target_weekday - today.weekday()
-        if days_ahead < 0: # Target day already passed this week
+        if days_ahead < 0: # Target day already passed this week, go to next
             days_ahead += 7
         
         # If today IS the expiry day but it's late (after 3:30 PM), move to next week
@@ -1947,7 +1946,7 @@ def _get_symbols(
         next_expiry = today + timedelta(days=days_ahead)
         
         # 2. Check if this is a Monthly Expiry
-        # Logic: Is it the last expiry of the month?
+        # Logic: Is it the last Thursday of the month?
         last_day_of_month = calendar.monthrange(next_expiry.year, next_expiry.month)[1]
         potential_monthly_expiry = datetime.date(next_expiry.year, next_expiry.month, last_day_of_month)
         
@@ -1962,7 +1961,8 @@ def _get_symbols(
             # Monthly Format: 26JAN (YYMMM)
             symbol_date_part = next_expiry.strftime("%y%b").upper()
         else:
-            # Weekly Format: 26109 (YYMDD) where M is 1-9, O, N, D
+            # Weekly Format: 26102 (YYMDD)
+            # Month mapping: 1-9 is '1'-'9', Oct='O', Nov='N', Dec='D'
             y_str = next_expiry.strftime("%y")
             d_str = next_expiry.strftime("%d")
             m_map = {10: 'O', 11: 'N', 12: 'D'}
