@@ -1923,8 +1923,29 @@ def _get_symbols(
     # 6. Manual Fallback
     if not final_symbols:
         import datetime
+        import calendar
+        
         now = datetime.datetime.now()
-        month_suffix = now.strftime("%y%b").upper()
+        year = now.year
+        month = now.month
+        
+        # Calculate last TUESDAY of current month
+        last_day = calendar.monthrange(year, month)[1]
+        expiry_date = datetime.datetime(year, month, last_day)
+        
+        # 1 = Tuesday (Change back to 3 for Thursday)
+        while expiry_date.weekday() != 1: 
+            expiry_date -= datetime.timedelta(days=1)
+            
+        # If today is AFTER the expiry, move to next month (JAN)
+        if now.date() > expiry_date.date():
+            next_month_date = expiry_date + datetime.timedelta(days=7)
+            month_suffix = next_month_date.strftime("%y%b").upper()
+        else:
+            month_suffix = now.strftime("%y%b").upper()
+
+        LOGGER.info(f"📅 Expiry Selection: Today={now.date()} LastTue={expiry_date.date()} -> Suffix={month_suffix}")
+
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
                 sym = f"NFO:NIFTY{month_suffix}{strike}{kind}"
