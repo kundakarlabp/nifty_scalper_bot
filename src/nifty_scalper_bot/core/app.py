@@ -1641,7 +1641,7 @@ class RuntimeSelfChecker:
             return str(symbols)
         
         # ✅ FIX: Return the standard Zerodha format
-        return "256265"
+        return "NSE:NIFTY 50"
 
 
 def _configure_rate_limiter(cfg: Any) -> RateLimiter:
