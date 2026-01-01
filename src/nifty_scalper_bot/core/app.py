@@ -4716,15 +4716,6 @@ async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration and Option-Only Trading."""
 
     LOGGER.info("Starting Nifty Scalper Bot...")
-   
-        # ✅ FIX: Align exactly with the 'L' in LOGGER above
-        import os
-        try:
-            os.makedirs("data", exist_ok=True)
-            LOGGER.info("✅ Verified/Created 'data/' directory.")
-        except Exception as e:
-            LOGGER.critical(f"❌ Failed to create data directory: {e}")
-
     
     _validate_config(ctx.config)
     broker_ready = True
