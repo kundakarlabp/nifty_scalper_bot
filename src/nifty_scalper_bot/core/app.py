@@ -1920,7 +1920,7 @@ def _get_symbols(
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback (Nearest Weekly/Monthly Logic)
+    # 6. Manual Fallback (Corrected for Zerodha Weekly & Monthly)
     if not final_symbols:
         import datetime
         import calendar
@@ -1929,51 +1929,42 @@ def _get_symbols(
         now = datetime.datetime.now()
         today = now.date()
         
-        # ---------------------------------------------------------
-        # CONFIG: Target Weekday (3 = Thursday for NIFTY 50)
-        # ---------------------------------------------------------
-        target_weekday = 3 
-        
-        # 1. Find the Nearest Target Day
+        # 1. Find Next Thursday (Expiry)
+        target_weekday = 3 # Thursday
         days_ahead = target_weekday - today.weekday()
-        if days_ahead < 0: # Target day already passed this week, go to next
+        if days_ahead < 0: 
             days_ahead += 7
-        
-        # If today IS the expiry day but it's late (after 3:30 PM), move to next week
-        if days_ahead == 0 and now.hour >= 16:
+        if days_ahead == 0 and now.hour >= 16: # If today is expiry but market closed
              days_ahead += 7
              
         next_expiry = today + timedelta(days=days_ahead)
         
-        # 2. Check if this is a Monthly Expiry
-        # Logic: Is it the last Thursday of the month?
+        # 2. Identify if it is a Monthly Expiry
         last_day_of_month = calendar.monthrange(next_expiry.year, next_expiry.month)[1]
-        potential_monthly_expiry = datetime.date(next_expiry.year, next_expiry.month, last_day_of_month)
-        
-        # Backtrack from end of month to find the monthly expiry date
-        while potential_monthly_expiry.weekday() != target_weekday:
-            potential_monthly_expiry -= timedelta(days=1)
+        potential_monthly = datetime.date(next_expiry.year, next_expiry.month, last_day_of_month)
+        while potential_monthly.weekday() != target_weekday:
+            potential_monthly -= timedelta(days=1)
             
-        is_monthly = (next_expiry == potential_monthly_expiry)
+        is_monthly = (next_expiry == potential_monthly)
         
-        # 3. Format the Symbol (Zerodha Convention)
+        # 3. Format Symbol (Zerodha Standard)
         if is_monthly:
-            # Monthly Format: 26JAN (YYMMM)
-            symbol_date_part = next_expiry.strftime("%y%b").upper()
+            # Monthly: NIFTY26JAN... (YYMMM)
+            date_code = next_expiry.strftime("%y%b").upper()
         else:
-            # Weekly Format: 26102 (YYMDD)
-            # Month mapping: 1-9 is '1'-'9', Oct='O', Nov='N', Dec='D'
-            y_str = next_expiry.strftime("%y")
-            d_str = next_expiry.strftime("%d")
+            # Weekly: NIFTY26102... (YYMDD)
+            # Month Codes: 1-9, O(Oct), N(Nov), D(Dec)
+            y = next_expiry.strftime("%y")
+            d = next_expiry.strftime("%d")
             m_map = {10: 'O', 11: 'N', 12: 'D'}
-            m_code = m_map.get(next_expiry.month, str(next_expiry.month))
-            symbol_date_part = f"{y_str}{m_code}{d_str}"
+            m = m_map.get(next_expiry.month, str(next_expiry.month))
+            date_code = f"{y}{m}{d}"
 
-        LOGGER.info(f"📅 Expiry Selected: {next_expiry} (Monthly={is_monthly}) -> Code: {symbol_date_part}")
+        LOGGER.info(f"📅 Expiry: {next_expiry} | Type: {'Monthly' if is_monthly else 'Weekly'} | Code: {date_code}")
 
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
-                sym = f"NFO:NIFTY{symbol_date_part}{strike}{kind}"
+                sym = f"NFO:NIFTY{date_code}{strike}{kind}"
                 final_symbols.append(sym)
         
         LOGGER.info(f"Generated fallback symbols: {final_symbols}")
