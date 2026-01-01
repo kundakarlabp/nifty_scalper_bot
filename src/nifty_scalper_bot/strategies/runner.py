@@ -1934,13 +1934,23 @@ class StrategyRunner:
                     ),
                 )
 
-                # ✅ UPDATE SIGNAL TIMER
-                with self._lock:
-                    state = self._symbol_state.get(base_symbol)
-                    if state: state.last_signal_at = timestamp
-                self._set_trade_cooldown(base_symbol, timestamp)
+                
+            # 2. ✅ FIX: ALWAYS Update Timer (Debounce) regardless of success/failure
+            # This stops the "Infinite Retry" loop immediately.
+            with self._lock:
+                state = self._symbol_state.get(base_symbol)
+                if state: 
+                    state.last_signal_at = timestamp
+                    # Also update the specific trade symbol to prevent hammering
+                    if trade_symbol != base_symbol:
+                        sym_state = self._symbol_state.get(trade_symbol)
+                        if sym_state: sym_state.last_signal_at = timestamp
+
+            if order_id:
+                self._logger.info(f"🟢 ORDER SUBMITTED! ID: {order_id}")
+                # ... (Rest of success logic: set_trade_cooldown, etc.) ...
             else:
-                self._logger.error("🔴 Order ID is None (OrderManager failed silently)")
+                self._logger.error(f"🔴 Order Failed for {trade_symbol}. Cooldown applied.")
 
         except OrderPlacementError as exc:
             self._logger.error(f"Order placement failed: {exc}", exc_info=True)
