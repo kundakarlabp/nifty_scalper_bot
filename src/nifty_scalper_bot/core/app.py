@@ -1920,7 +1920,7 @@ def _get_symbols(
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. Manual Fallback (Corrected for Zerodha Weekly & Monthly)
+    # 6. Manual Fallback (Tuesday Expiry Logic)
     if not final_symbols:
         import datetime
         import calendar
@@ -1929,31 +1929,40 @@ def _get_symbols(
         now = datetime.datetime.now()
         today = now.date()
         
-        # 1. Find Next Thursday (Expiry)
-        target_weekday = 3 # Thursday
+        # ---------------------------------------------------------
+        # CONFIG: Target Weekday (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri)
+        # ✅ FIX: Set to 1 for TUESDAY Expiry
+        # ---------------------------------------------------------
+        target_weekday = 1 
+        
+        # 1. Find the Nearest Tuesday
         days_ahead = target_weekday - today.weekday()
-        if days_ahead < 0: 
+        if days_ahead < 0: # Target day passed this week, go to next
             days_ahead += 7
-        if days_ahead == 0 and now.hour >= 16: # If today is expiry but market closed
+        
+        # If today IS expiry but market closed, skip to next week
+        if days_ahead == 0 and now.hour >= 16:
              days_ahead += 7
              
         next_expiry = today + timedelta(days=days_ahead)
         
-        # 2. Identify if it is a Monthly Expiry
+        # 2. Check if it is a Monthly Expiry
+        # Logic: Is it the last Tuesday of the month?
         last_day_of_month = calendar.monthrange(next_expiry.year, next_expiry.month)[1]
         potential_monthly = datetime.date(next_expiry.year, next_expiry.month, last_day_of_month)
+        
+        # Backtrack from month-end to find the last Tuesday
         while potential_monthly.weekday() != target_weekday:
             potential_monthly -= timedelta(days=1)
             
         is_monthly = (next_expiry == potential_monthly)
         
-        # 3. Format Symbol (Zerodha Standard)
+        # 3. Format Symbol (Zerodha Convention)
         if is_monthly:
             # Monthly: NIFTY26JAN... (YYMMM)
             date_code = next_expiry.strftime("%y%b").upper()
         else:
-            # Weekly: NIFTY26102... (YYMDD)
-            # Month Codes: 1-9, O(Oct), N(Nov), D(Dec)
+            # Weekly: NIFTY26106... (YYMDD)
             y = next_expiry.strftime("%y")
             d = next_expiry.strftime("%d")
             m_map = {10: 'O', 11: 'N', 12: 'D'}
