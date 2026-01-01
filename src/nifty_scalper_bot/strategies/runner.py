@@ -39,6 +39,7 @@ from nifty_scalper_bot.core.message_bus import MessageBus, Message, MessageType
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.signal_generator import Signal
+from nifty_scalper_bot.indicators.atr_provider import ATRSnapshot
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.logging import get_logger
