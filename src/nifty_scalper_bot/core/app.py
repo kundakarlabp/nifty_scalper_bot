@@ -5472,40 +5472,24 @@ class NiftyScalperApp:
         application = self._ctx.telegram_application
         controller = _HTTP_CONTROLLER
         
-        # 1. Webhook Mode (Existing Logic)
+        # 1. Telegram App
         if application is not None:
-            if controller is None:
-                LOGGER.warning(
-                    "telegram_application_controller_missing",
-                    extra={"event": "telegram_application_controller_missing"},
-                )
-            else:
+            # Check if Webhook is actually configured
+            if self.settings.notifications.webhook_enabled and self.settings.notifications.public_base_url:
                 try:
                     await application.initialize()
                     await application.start()
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.exception(
-                        "telegram_application_start_failed",
-                        extra={
-                            "event": "telegram_application_start_failed",
-                            "err": str(exc),
-                        },
-                    )
-                    controller.notify_application_ready(ready=False)
-                else:
-                    controller.notify_application_ready()
+                    if controller:
+                        controller.notify_application_ready()
                     self._telegram_application_started = True
-                    LOGGER.info(
-                        "telegram_application_started",
-                        extra={"event": "telegram_application_started"},
-                    )
-
-        # 2. Polling Mode (FIXED)
-        # Replaces the broken 'elif' block causing SyntaxError
-        elif self._ctx.telegram_bot is not None:
-            LOGGER.info("🚀 Starting Telegram Polling (Background Mode)...")
-            # Calls the start() method we added to TelegramBot
-            await self._ctx.telegram_bot.start()
+                    LOGGER.info("telegram_application_started (Webhook)")
+                except Exception as exc:
+                    LOGGER.exception("telegram_application_start_failed")
+            
+            # ✅ FIX: Fallback to Polling if Webhook is NOT enabled
+            elif self._ctx.telegram_bot:
+                LOGGER.info("🚀 Starting Telegram Polling (Background)...")
+                await self._ctx.telegram_bot.start()
 
     async def stop(self) -> None:
         """Stop the trading stack gracefully."""
