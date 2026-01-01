@@ -1671,18 +1671,25 @@ class StrategyRunner:
         action = signal.action
 
         # [VWAP TREND FILTER]
-        # Only BUY Call/Put if Price is ABOVE its own VWAP
+        # Only apply if the strategy explicitly requests trend following.
+        # Strategies like 'SMC', 'RSI Divergence', or 'Gamma Scalping' might buy BELOW VWAP.
+        
+        should_check_vwap = True
+        
+        # Check signal metadata to see if strategy wants to bypass VWAP check
+        if signal.metadata and signal.metadata.get("ignore_vwap"):
+            should_check_vwap = False
+            self._logger.info(f"ℹ️ VWAP Check Bypassed by Strategy: {signal.strategy_name}")
+
         current_vwap = None
         with self._lock:
             if state := self._symbol_state.get(base_symbol):
                 current_vwap = state.vwap
         
-        if current_vwap and current_vwap > 0:
+        if should_check_vwap and current_vwap and current_vwap > 0:
             vwap_dist = ((trade_price - current_vwap) / current_vwap) * 100
             
             # SCALP RULE: For BUY (Long), Price must be ABOVE VWAP
-            # We allow a very small tolerance (e.g. 0.05%) to avoid noise at the exact line,
-            # or strictly enforce it. Below strictly enforces it as per user's "SCALP RULE" comment.
             if action == "BUY" and trade_price < current_vwap:
                 self._logger.warning(
                     f"🛑 VWAP BLOCK: Price {trade_price:.2f} < VWAP {current_vwap:.2f} (Dist: {vwap_dist:.2f}%). Skipping BUY."
@@ -1701,6 +1708,7 @@ class StrategyRunner:
                 return
             
             self._logger.info(f"📊 VWAP PASS: Price={trade_price:.2f} > VWAP={current_vwap:.2f} Dist={vwap_dist:.2f}%")
+            
         selection: SelectedContract | None = None
         selector = self._strike_selector
 
