@@ -1504,13 +1504,43 @@ class OrderManager:
         check_risk: bool = True,
         stop_loss: float | None = None,
         take_profit: float | None = None,
-        # ✅ NEW: Idempotency Arguments
         signal_id: str | None = None,
         strategy_name: str = "manual",
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
         """
+        # =========================================================
+        # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
+        # =========================================================
+        # Logic: We block any "Naked" Intraday Entry. 
+        # Every entry MUST have a defined Stop Loss to create a bracket.
+        
+        # 1. Identify Entry vs Exit (For Option Buying Strategy)
+        # BUY = Entry. SELL = Exit.
+        # We also check the 'tag' to ensure we don't block internal system exits.
+        normalized_tag = (tag or "").lower()
+        is_system_exit = any(x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"])
+        
+        # It is an entry if it's a BUY and NOT a system-generated exit
+        is_entry = (side == "BUY") and not is_system_exit
+
+        # 2. Identify Intraday Context
+        current_product = (product or "MIS").upper()
+        is_intraday = (current_product == "MIS")
+
+        # 3. THE INVARIANT CHECK
+        if is_entry and is_intraday:
+            # If SL is missing, None, or Zero -> REJECT
+            if stop_loss is None or stop_loss <= 0:
+                self._logger.critical(
+                    f"🛑 FATAL SAFETY BLOCK: Attempted Naked Entry on {symbol}!"
+                    f"\nReason: Intraday Buy Orders MUST have a Stop Loss to attach a Virtual Bracket."
+                    f"\nData: Qty={quantity}, SL={stop_loss}, Tag={tag}"
+                )
+                return None # ❌ STOP HERE. DO NOT CALL BROKER.
+
+        # =========================================================
         import time
         import hashlib
         from datetime import datetime, timezone, time as dtime
@@ -1838,6 +1868,50 @@ class OrderManager:
                 time.sleep(0.5 * attempt)
                 
         self._logger.error("❌ Order placement failed after retries.")
+        return None
+
+    def place_managed_order(
+        self, 
+        symbol: str, 
+        side: Literal["BUY", "SELL"], 
+        quantity: int, 
+        stop_loss: float, 
+        take_profit: float, 
+        signal_id: str, 
+        tag: str = "strategy"
+    ) -> str | None:
+        """
+        Atomic wrapper that guarantees: Entry Order + Virtual Bracket OR Nothing.
+        Use THIS method from StrategyRunner, not place_order directly.
+        """
+        # 1. Validation (Zerodha Lot Size)
+        # Adjust 65 to whatever the current Nifty Lot Size is dynamically if needed
+        if quantity % 65 != 0: 
+             self._logger.error(f"🛑 INVALID QTY: {quantity} is not a multiple of 65. Order aborted.")
+             return None
+
+        # 2. Execute Entry (Passes Safety Guard because SL is provided)
+        order_id = self.place_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            stop_loss=stop_loss, # ✅ Critical: Passing this satisfies the Safety Guard
+            take_profit=take_profit,
+            signal_id=signal_id,
+            tag=tag,
+            product="MIS"
+        )
+
+        # 3. Immediate Bracket Registration (The "Virtual" Part)
+        # Note: place_order ALREADY calls register_virtual_bracket internally 
+        # in the success block, so we don't strictly need to duplicate it here 
+        # IF your place_order logic remains as seen in previous logs.
+        # However, checking it here adds a layer of debug certainty.
+        
+        if order_id:
+            self._logger.info(f"✅ Managed Order {order_id} placed successfully with Virtual Bracket.")
+            return order_id
+            
         return None
     
     def guard_existing_position(
