@@ -1661,7 +1661,6 @@ class StrategyRunner:
                      if state: state.last_signal_at = timestamp
                  return
 
-        # ✅ FIX: Define side and use 'trade_price' instead of 'price'
         side = "LONG" if signal.action == "BUY" else "SHORT"
         confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
 
@@ -1670,22 +1669,20 @@ class StrategyRunner:
             return
         action = signal.action
 
-        # [VWAP TREND FILTER]
-        # Only apply if the strategy explicitly requests trend following.
-        # Strategies like 'SMC', 'RSI Divergence', or 'Gamma Scalping' might buy BELOW VWAP.
-        
+        # ===========================================================
+        # ✅ FIX 1: SMART VWAP FILTER (Unshackles Elite Strategies)
+        # ===========================================================
         should_check_vwap = True
-        
-        # Check signal metadata to see if strategy wants to bypass VWAP check
         if signal.metadata and signal.metadata.get("ignore_vwap"):
             should_check_vwap = False
-            self._logger.info(f"ℹ️ VWAP Check Bypassed by Strategy: {signal.strategy_name}")
+            self._logger.debug(f"ℹ️ VWAP Check Bypassed by Strategy: {signal.strategy_name}")
 
         current_vwap = None
         with self._lock:
             if state := self._symbol_state.get(base_symbol):
                 current_vwap = state.vwap
         
+        # Only block if Strategy did NOT opt-out
         if should_check_vwap and current_vwap and current_vwap > 0:
             vwap_dist = ((trade_price - current_vwap) / current_vwap) * 100
             
@@ -1697,18 +1694,17 @@ class StrategyRunner:
                 self._record_trade(
                     base_symbol, 
                     TradeRecord(
-                        timestamp, 
-                        action, 
-                        signal.quantity, 
-                        trade_price, 
-                        "skipped", 
-                        "vwap_filter"
+                        timestamp, action, signal.quantity, trade_price, 
+                        "skipped", "vwap_filter"
                     )
                 )
                 return
             
             self._logger.info(f"📊 VWAP PASS: Price={trade_price:.2f} > VWAP={current_vwap:.2f} Dist={vwap_dist:.2f}%")
-            
+
+        # ===========================================================
+        # Contract Selection Logic
+        # ===========================================================
         selection: SelectedContract | None = None
         selector = self._strike_selector
 
@@ -1721,27 +1717,20 @@ class StrategyRunner:
             if not option_type and self._legacy_side_to_type:
                 option_type = "CE" if direction == "BULLISH" else "PE"
 
-            # Resolve side
             sell_premium = bool(metadata.get("sell_premium")) and not self._options_long_only
             entry_side: OrderSide = "SELL" if sell_premium else "BUY"
 
-            # Check active contract
+            # Check active contract reuse logic
             if self._position_manager:
                 active = self._position_manager.get_active_contract(base_symbol)
                 if active:
-                    self._logger.info(f"🟡 Found active contract: {active.symbol}")
                     if self._position_manager.is_flat(active.symbol):
                         self._position_manager.clear_active_contract(base_symbol)
                     else:
                         reuse = True
                         if active.option_type != option_type and not self._allow_hedge_entries:
                             reuse = False
-
                         if reuse:
-                            pos = self._position_manager.get_position(active.symbol)
-                            if pos:
-                                trade_price = getattr(pos, "current_price", trade_price) or trade_price
-
                             selection = SelectedContract(
                                 symbol=active.symbol,
                                 option_type=active.option_type,
@@ -1751,178 +1740,115 @@ class StrategyRunner:
                                 delta=None,
                                 metadata={"source": "position_manager"},
                             )
-
                             trade_symbol = selection.symbol
-                            self._logger.info(f"🟡 Reusing active contract: {trade_symbol}")
 
-            # [FIX] Strategy-Specified Contract Bypass
-            # If the strategy runs on a specific Option symbol, use it directly.
+            # Strategy Explicit Bypass
             if not selection and (base_symbol.endswith("CE") or base_symbol.endswith("PE")):
-                self._logger.info(f"🎯 Strategy provided explicit contract: {base_symbol}. Bypassing selector.")
                 selection = SelectedContract(
                     symbol=base_symbol,
-                    option_type="CE" if base_symbol.endswith("CE") else "PE",
-                    strike=0.0,
-                    expiry=timestamp,
-                    ltp=trade_price,
-                    delta=None,
-                    metadata={"source": "strategy_explicit"}
+                    option_type="CE" if "CE" in base_symbol else "PE",
+                    strike=0.0, expiry=timestamp, ltp=trade_price, delta=None,
+                    metadata={"source": "explicit"}
                 )
                 trade_symbol = base_symbol
 
-            # Strike selection
+            # Selector Call
             if selector and not selection:
-                self._logger.info(f"🟡 3. SELECTING STRIKE for {base_symbol}...")
-                safe_opt_type: Literal['CE', 'PE'] | None = None
-
-                if option_type in ('CE', 'PE'):
-                    safe_opt_type = cast(Literal['CE', 'PE'], option_type)
-
-                selector_side: Literal["BUY", "SELL"] = "BUY" if direction == "BULLISH" else "SELL"
-
+                safe_opt_type = cast(Literal['CE', 'PE'], option_type) if option_type in ('CE', 'PE') else None
+                selector_side = "BUY" if direction == "BULLISH" else "SELL"
                 try:
                     selection = selector.select_contract(
-                        underlying=base_symbol,
-                        side=selector_side,
-                        underlying_price=trade_price,
-                        option_type=safe_opt_type,
+                        underlying=base_symbol, side=selector_side,
+                        underlying_price=trade_price, option_type=safe_opt_type,
                     )
-
                 except Exception as e:
                     self._logger.error(f"❌ Strike Selection Failed: {e}")
                     selection = None
 
                 if selection:
-                    self._logger.info(f"🟢 STRIKE SELECTED: {selection.symbol}")
                     trade_symbol = selection.symbol
                     trade_price = selection.ltp or trade_price
 
             if not selection:
-                # [DIAGNOSTIC] More detail on failure
-                self._logger.warning(
-                    f"🔴 Execution Stopped: No Contract Selected for {base_symbol}. "
-                    f"Check: 1. Liquidity filters in settings. 2. Market hours. 3. Option chain data availability."
-                )
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        signal.quantity,
-                        trade_price,
-                        "skipped",
-                        "no_contract",
-                    ),
-                )
+                self._logger.warning(f"🔴 No Contract Selected for {base_symbol}.")
                 return
 
-            # Monthly lockout check
-            self._logger.info(f"🟡 4. CALCULATING RISK for {trade_symbol}...")
+            # Monthly Lockout Check
             lockout, _ = self._monthly_lockout_active(selection.expiry, timestamp)
             if lockout:
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        signal.quantity,
-                        trade_price,
-                        "skipped",
-                        "monthly_lockout",
-                    ),
-                )
                 return
 
-            # Apply premium targets
+            # Apply Premium Targets & Risk Sizing
             signal = self._apply_premium_targets(signal, trade_price, entry_side)
-
-            # Risk sizing
             atr_val = _extract_float(metadata, "atr")
+            
             sized_qty = self._risk_manager.suggest_position_size(
-                side=entry_side,
-                price=trade_price,
-                stop_loss=signal.stop_loss,
-                atr=atr_val,
-                requested_quantity=signal.quantity,
-                confidence=signal.confidence,
-                symbol=trade_symbol,
+                side=entry_side, price=trade_price, stop_loss=signal.stop_loss,
+                atr=atr_val, requested_quantity=signal.quantity,
+                confidence=signal.confidence, symbol=trade_symbol,
             )
 
             if sized_qty <= 0:
                 self._logger.warning(f"🔴 Risk Manager returned 0 qty")
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        signal.quantity,
-                        trade_price,
-                        "blocked",
-                        "risk_sizing_zero",
-                    ),
-                )
                 return
 
-            # Validate position
+            # Validate Position Limits
             allowed, reason = self._risk_manager.validate_new_position(
-                symbol=trade_symbol,
-                side="LONG" if entry_side == "BUY" else "SHORT",
-                quantity=int(sized_qty),
-                entry_price=trade_price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
+                symbol=trade_symbol, side="LONG" if entry_side == "BUY" else "SHORT",
+                quantity=int(sized_qty), entry_price=trade_price,
+                stop_loss=signal.stop_loss, take_profit=signal.take_profit,
             )
 
             if not allowed:
-                # [DIAGNOSTIC] Full breakdown of blockage
-                self._logger.warning(
-                    f"🔴 RISK BLOCK: {reason} | Symbol: {trade_symbol} | "
-                    f"Qty: {sized_qty} | Balance: {self._risk_manager.account_balance}"
-                )
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        int(sized_qty),
-                        trade_price,
-                        "blocked",
-                        str(reason),
-                    ),
-                )
+                self._logger.warning(f"🔴 RISK BLOCK: {reason} | {trade_symbol}")
                 self._set_signal_cooldown(base_symbol, timestamp)
                 return
 
-            # Execute order
-            self._logger.info(f"🟡 5. SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty}")
+            # ===========================================================
+            # ✅ FIX 2: ATOMIC EXECUTION & INFINITE LOOP PREVENTION
+            # ===========================================================
+            self._logger.info(f"🟡 SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty}")
             
-            # BLOCKING CALL - Safe here because we are in a worker thread (via to_thread)
+            # Generate Unique ID for Idempotency
+            unique_tag = f"{signal.strategy_name[:3]}_{int(timestamp.timestamp())}"
+
+            # Execute Order via OrderManager
             order_id = self._order_manager.place_order(
                 symbol=trade_symbol,
                 side=entry_side,
                 quantity=int(sized_qty),
                 order_type=OrderType.MARKET,
                 price=trade_price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
+                stop_loss=signal.stop_loss,    # Crucial for Safety Guard
+                take_profit=signal.take_profit, # Crucial for Virtual Bracket
+                signal_id=signal.id,
+                tag=unique_tag
             )
 
-            if order_id:
-                self._logger.info(f"🟢 6. ORDER SUBMITTED! ID: {order_id}")
+            # ✅ CRITICAL FIX: Always update timer OUTSIDE the success block
+            # This stops the infinite retry loop immediately.
+            with self._lock:
+                state = self._symbol_state.get(base_symbol)
+                if state: 
+                    state.last_signal_at = timestamp
+                    # Also debounce the specific option symbol
+                    if trade_symbol != base_symbol:
+                        opt_state = self._symbol_state.get(trade_symbol)
+                        if opt_state: opt_state.last_signal_at = timestamp
 
-                # ========================================
-                # FIX #2: SAFE ASYNC SCHEDULING
-                # ========================================
+            if order_id:
+                self._logger.info(f"🟢 ORDER SUBMITTED! ID: {order_id}")
+                
+                # Async Verification
                 if self._main_loop and self._main_loop.is_running():
                     asyncio.run_coroutine_threadsafe(
                         self._verify_order_status(order_id, trade_symbol, 3.0),
                         self._main_loop
                     )
-                else:
-                    self._logger.warning("Main loop not available for order verification")
 
                 self._notify_orchestrator_submission(signal, base_symbol)
-
+                
+                # Update Active Contract Tracking
                 if self._position_manager and selection:
                     if self._allow_hedge_entries or not self._position_manager.get_active_contract(base_symbol):
                         self._position_manager.set_active_contract(base_symbol, selection)
@@ -1933,40 +1859,20 @@ class StrategyRunner:
                 self._record_trade(
                     base_symbol,
                     TradeRecord(
-                        timestamp,
-                        action,
-                        int(sized_qty),
-                        trade_price,
-                        "submitted",
-                        signal.reason,
-                        order_id,
+                        timestamp, action, int(sized_qty), trade_price,
+                        "submitted", signal.reason, order_id,
                     ),
                 )
-
                 
-            # 2. ✅ FIX: ALWAYS Update Timer (Debounce) regardless of success/failure
-            # This stops the "Infinite Retry" loop immediately.
-            with self._lock:
-                state = self._symbol_state.get(base_symbol)
-                if state: 
-                    state.last_signal_at = timestamp
-                    # Also update the specific trade symbol to prevent hammering
-                    if trade_symbol != base_symbol:
-                        sym_state = self._symbol_state.get(trade_symbol)
-                        if sym_state: sym_state.last_signal_at = timestamp
-
-            if order_id:
-                self._logger.info(f"🟢 ORDER SUBMITTED! ID: {order_id}")
-                # ... (Rest of success logic: set_trade_cooldown, etc.) ...
+                # Set longer cooldown on success
+                self._set_trade_cooldown(base_symbol, timestamp)
             else:
-                self._logger.error(f"🔴 Order Failed for {trade_symbol}. Cooldown applied.")
+                self._logger.error(f"🔴 Order Execution Failed for {trade_symbol}")
+                # Timer was already updated above, so we won't retry instantly.
 
-        except OrderPlacementError as exc:
-            self._logger.error(f"Order placement failed: {exc}", exc_info=True)
-            self._record_trade(
-                base_symbol,
-                TradeRecord(timestamp, action, signal.quantity, trade_price, "error", str(exc)),
-            )
+        except Exception as exc:
+            self._logger.error(f"🔴 ENTRY LOGIC CRASH: {exc}", exc_info=True)
+            # Ensure cooldown even on crash
             self._set_signal_cooldown(base_symbol, timestamp)
 
 
