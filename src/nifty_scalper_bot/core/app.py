@@ -2321,7 +2321,7 @@ def _setup_telegram(ctx: BotContext) -> None:
     # -----------------------------------------------------------
     # ✅ FIX: Map 'Settings' fields to 'TelegramDeps' requirements
     # -----------------------------------------------------------
-    bot_token = settings.bot_token
+    bot_token = settings.token
     
     # 2. Fix Chat ID: Extract the first ID from the whitelist set
     # The settings object uses a Set[int], but the bot needs a single target.
