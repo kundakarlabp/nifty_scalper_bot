@@ -1217,24 +1217,40 @@ def get_http_app() -> FastAPI:
     @app.on_event("startup")
     async def _start_telegram_bot_service() -> None:
         """
-        CRITICAL FIX: Explicitly await the TelegramBot startup sequence.
-        This fixes 'coroutine never awaited' and ensures polling starts.
+        Start Telegram Bot and send a startup notification.
         """
+        from nifty_scalper_bot.core.bot_context import get_latest_bot_context
+        
         try:
-            # 1. Retrieve the Global Context
             ctx = get_latest_bot_context()
-            
-            # 2. Check if Telegram Bot is initialized
             if ctx and ctx.telegram_bot:
-                LOGGER.info("🚀 Triggering TelegramBot explicit startup sequence...")
+                LOGGER.info("🚀 Triggering TelegramBot explicit startup...")
                 
-                # 3. AWAIT the start method (This is the magic fix)
-                # This calls initialize() -> start() -> start_polling()
+                # 1. Start the Bot (Connects to API)
                 await ctx.telegram_bot.start()
                 
-        except Exception as exc:
-            LOGGER.error(f"❌ Failed to start TelegramBot service: {exc}", exc_info=True)
+                # 2. ✅ NEW: Send "Bot Online" Message
+                # We wait a moment to ensure the connection is stable
+                await asyncio.sleep(1.0)
+                
+                startup_msg = (
+                    "<b>🟢 Nifty Scalper Bot Online</b>\n"
+                    f"📅 <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+                    "🚀 System initialized successfully."
+                )
+                
+                # Use the internal application to send the message
+                if ctx.telegram_bot._app:
+                    await ctx.telegram_bot._app.bot.send_message(
+                        chat_id=ctx.settings.notifications.chat_id,
+                        text=startup_msg,
+                        parse_mode="HTML"
+                    )
+                    LOGGER.info("✅ Startup message sent to Telegram.")
 
+        except Exception as exc:
+            LOGGER.error(f"❌ Failed to start Telegram/Send Message: {exc}", exc_info=True)
+            
     @app.on_event("shutdown")
     async def _stop_telegram_bot_service() -> None:
         """Ensure clean shutdown of Telegram Bot."""
