@@ -562,115 +562,59 @@ class TelegramBot:
         self._started_at: datetime = datetime.now(timezone.utc)
         self._um: t.Any | None = None
 
-    # --------------------------------------------------------------------------
-    # ✅ FIX: Robust Start Method (Integrates with Existing Handlers)
-    # --------------------------------------------------------------------------
-    async def start(self) -> None:
-        """Initialize the Telegram application and start the polling loop."""
-        if self._app is not None:
-            log.warning("TelegramBot is already running.")
-            return
-
-        log.info("🚀 Initializing TelegramBot execution...")
-
-        try:
-            # 1. Build the Application (Reuse existing builder logic)
-            # This ensures timeouts/persistence settings from self.builder() are applied
-            if self._app is None:
-                self._app = self.builder().build()
-            
-            # 2. Register ALL Command Handlers (Reuse existing wiring)
-            # This ensures /help, /stop, and all other commands work, not just /status
-            self._wire_handlers(self._app)
-
-            # 3. Start the Lifecycle
-            await self._app.initialize()
-            await self._app.start()
-
-            # 4. START POLLING (Critical Fix)
-            # If no webhook URL is set, we force polling mode
-            if self.deps.enable_polling_fallback or not self.deps.webhook_url:
-                log.info("✅ Starting Telegram Polling (Background Mode)...")
-                
-                # Clear any stuck webhook hooks first
-                await self._app.bot.delete_webhook(drop_pending_updates=True)
-                
-                # Start the Updater
-                if self._app.updater:
-                    await self._app.updater.start_polling(
-                        poll_interval=1.0, 
-                        allowed_updates=["message", "callback_query"]
-                    )
-                    log.info("✅ Telegram Polling Active")
-                else:
-                    log.error("❌ Telegram Updater not available.")
-
-            # 5. Start Background Workers
-            if hasattr(self, "_ensure_alert_worker"):
-                self._ensure_alert_worker()
-
-        except Exception as e:
-            log.error(f"❌ Telegram start sequence failed: {e}", exc_info=True)
-
-    # [INSERT THIS BEFORE _command_registered method]
-    
     async def start(self) -> None:
         """
-        Explicitly start the Telegram application (Lifecycle Management).
-        Fixes 'coroutine never awaited' error by awaiting initialize/start.
+        Single entry point to start Telegram Bot (Webhook or Polling).
+        Handles lifecycle explicitly to avoid RuntimeWarnings.
         """
+        # 1. Guard against double-start
         if self._app is not None and self._app.running:
-            log.warning("TelegramBot is already running.")
+            log.warning("⚠️ TelegramBot start requested but already running. Ignoring.")
             return
 
         log.info("🚀 Initializing TelegramBot execution...")
 
         try:
-            # 1. Build the Application if missing
+            # 2. Build App if missing
             if self._app is None:
                 self._app = self.builder().build()
                 self._wire_handlers(self._app)
 
-            # 2. Lifecycle: Initialize (Loads handlers)
-            await self._app.initialize()
+            # 3. Lifecycle: Initialize & Start (Connects to Telegram)
+            # We await these to fix the 'coroutine never awaited' warning
+            if not self._app._initialized:
+                await self._app.initialize()
+            if not self._app.running:
+                await self._app.start()
 
-            # 3. Lifecycle: Start (Connects to API)
-            await self._app.start()
-
-            # 4. Start Polling/Webhook (Non-blocking)
+            # 4. Mode Selection: Webhook vs Polling
             if self.deps.webhook_url:
+                log.info("Telegram attempting Webhook mode...")
                 started = await self._start_webhook_stack()
                 if not started and self.deps.enable_polling_fallback:
+                    log.warning("Webhook failed; falling back to polling.")
                     await self._activate_polling_fallback("webhook setup failed")
             elif self.deps.enable_polling_fallback:
-                log.info("📡 Starting Telegram Polling...")
-                # Clear hooks to ensure polling works
+                log.info("Telegram using Polling mode (background).")
+                # Clear any existing webhooks to free the port
                 await self._app.bot.delete_webhook(drop_pending_updates=True)
                 
-                # start_polling is non-blocking in v20+ (runs in background task)
-                await self._app.updater.start_polling(
-                    drop_pending_updates=True, 
-                    allowed_updates=Update.ALL_TYPES
-                )
-                self._mark_polling_started()
-                log.info("✅ Telegram Polling Active")
-
-            # 5. Start Background Alert Workers
+                # Use updater.start_polling (Non-blocking) instead of run_polling
+                if self._app.updater:
+                    await self._app.updater.start_polling(
+                        drop_pending_updates=True, 
+                        allowed_updates=Update.ALL_TYPES,
+                        poll_interval=1.0,
+                        timeout=30
+                    )
+                    self._mark_polling_started()
+                    log.info("✅ Telegram Polling Active")
+            
+            # 5. Start Alert Workers
             self._ensure_alert_worker()
 
         except Exception as e:
             log.error(f"❌ Telegram start sequence failed: {e}", exc_info=True)
-
-    async def stop(self) -> None:
-        """Stop the Telegram Bot cleanly."""
-        if self._app:
-            log.info("🛑 Stopping Telegram Bot...")
-            if self._app.updater and self._app.updater.running:
-                await self._app.updater.stop()
-            if self._app.running:
-                await self._app.stop()
-            await self._app.shutdown()
-            log.info("✅ Telegram Bot Stopped.")
 
     def _command_registered(self, app: Application, command: str) -> bool:
         """Return ``True`` when *command* is already wired on *app*.
@@ -859,43 +803,47 @@ class TelegramBot:
         self._fallback_active = False
 
     async def _start_polling_if_needed(self) -> None:
-        """Ensure PTB polling is running when webhook transport is disabled."""
-
+        """
+        Ensure PTB polling is running using the non-blocking updater.
+        FIX: Replaced application.run_polling (blocking) with updater.start_polling.
+        """
+        # 1. Config Check
         if not self.deps.enable_polling_fallback:
             return
+
+        # 2. App State Check
         app = self._app
-        if app is None:
-            return
-        if self._polling_task is not None and not self._polling_task.done():
+        if app is None or app.updater is None:
             return
 
-        async def _runner(application: Application) -> None:
-            task = asyncio.current_task()
-            try:
-                self._mark_polling_started()
-                log.info(
-                    "telegram_polling_started",
-                    extra={"event": "telegram_polling_started"},
-                )
-                await t.cast(
-                    t.Coroutine[t.Any, t.Any, None],
-                    application.run_polling(
-                        stop_signals=None,
-                        allowed_updates=None,
-                    ),
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - defensive log surface
-                log.error("telegram_polling_failed", exc_info=exc)
-                self._metrics.polling_errors += 1
-            finally:
-                self._mark_polling_stopped()
-                if task is not None and self._polling_task is task:
-                    self._polling_task = None
+        # 3. Guard: If Updater is already running, do nothing to prevent conflicts.
+        if app.updater.running:
+            return
 
-        loop = asyncio.get_running_loop()
-        self._polling_task = loop.create_task(_runner(app), name="telegram-polling")
+        try:
+            self._mark_polling_started()
+            log.info(
+                "telegram_polling_started",
+                extra={"event": "telegram_polling_started"},
+            )
+
+            # ✅ THE FIX: Use updater.start_polling
+            # This is non-blocking (starts background tasks) and respects existing lifecycle.
+            # We added timeouts to fix your 'telegram_send_failed' network errors.
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                poll_interval=1.0,
+                timeout=30,         # Long-polling timeout
+                read_timeout=30,    # HTTP read timeout
+                write_timeout=30,   # HTTP write timeout
+                connect_timeout=30  # Connection establishment timeout
+            )
+
+        except Exception as exc:
+            log.error("telegram_polling_failed", exc_info=exc)
+            self._metrics.polling_errors += 1
+            self._mark_polling_stopped()
 
     # -----------------
     # Lifecycle control
