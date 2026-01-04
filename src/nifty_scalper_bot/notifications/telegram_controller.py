@@ -581,7 +581,6 @@ class TelegramBot:
                 self._wire_handlers(self._app)
 
             # 3. Lifecycle: Initialize & Start (Connects to Telegram)
-            # We await these to fix the 'coroutine never awaited' warning
             if not self._app._initialized:
                 await self._app.initialize()
             if not self._app.running:
@@ -599,16 +598,8 @@ class TelegramBot:
                 # Clear any existing webhooks to free the port
                 await self._app.bot.delete_webhook(drop_pending_updates=True)
                 
-                # Use updater.start_polling (Non-blocking) instead of run_polling
-                if self._app.updater:
-                    await self._app.updater.start_polling(
-                        drop_pending_updates=True, 
-                        allowed_updates=Update.ALL_TYPES,
-                        poll_interval=1.0,
-                        timeout=30
-                    )
-                    self._mark_polling_started()
-                    log.info("✅ Telegram Polling Active")
+                # ✅ FIX: Delegate to the method with timeouts and guards
+                await self._start_polling_if_needed()
             
             # 5. Start Alert Workers
             self._ensure_alert_worker()
@@ -805,7 +796,7 @@ class TelegramBot:
     async def _start_polling_if_needed(self) -> None:
         """
         Ensure PTB polling is running using the non-blocking updater.
-        FIX: Replaced application.run_polling (blocking) with updater.start_polling.
+        FIX: Uses updater.start_polling with increased timeouts to prevent network flakes.
         """
         # 1. Config Check
         if not self.deps.enable_polling_fallback:
@@ -816,7 +807,7 @@ class TelegramBot:
         if app is None or app.updater is None:
             return
 
-        # 3. Guard: If Updater is already running, do nothing to prevent conflicts.
+        # 3. GUARD: If Updater is already running, STOP here.
         if app.updater.running:
             return
 
@@ -827,24 +818,23 @@ class TelegramBot:
                 extra={"event": "telegram_polling_started"},
             )
 
-            # ✅ THE FIX: Use updater.start_polling
-            # This is non-blocking (starts background tasks) and respects existing lifecycle.
-            # We added timeouts to fix your 'telegram_send_failed' network errors.
+            # ✅ CRITICAL NETWORK FIX: Added timeouts (30s)
             await app.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
                 poll_interval=1.0,
-                timeout=30,         # Long-polling timeout
-                read_timeout=30,    # HTTP read timeout
-                write_timeout=30,   # HTTP write timeout
-                connect_timeout=30  # Connection establishment timeout
+                timeout=30,          # Long-polling timeout
+                read_timeout=30,     # Fixes 'send_failed'
+                write_timeout=30,    # Fixes 'send_failed'
+                connect_timeout=30   # Fixes 'polling_error'
             )
+            
+            log.info("✅ Telegram Polling Active (Background Mode)")
 
         except Exception as exc:
             log.error("telegram_polling_failed", exc_info=exc)
             self._metrics.polling_errors += 1
             self._mark_polling_stopped()
-
     # -----------------
     # Lifecycle control
     # -----------------
