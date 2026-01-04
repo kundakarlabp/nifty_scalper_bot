@@ -861,15 +861,23 @@ class StrategyRunner:
             )
 
             if self._bracket_manager:
-                atr = self._indicator_engine.compute_atr(symbol, period=14)
-                if atr and atr > 0:
-                     # ✅ FIX: Import from the SOURCE (atr_provider), not the consumer (adaptive_trailing)
-                     from nifty_scalper_bot.indicators.atr_provider import ATRSnapshot
-                     
-                     snapshot = ATRSnapshot(timestamp=bar.end, atr=float(atr), close=bar.close)
+                # Get ATR (Returns ATRSnapshot object OR float)
+                raw_atr = self._indicator_engine.compute_atr(symbol, period=14)
+                
+                # Unwrap the value safely
+                atr_value = 0.0
+                if hasattr(raw_atr, 'value'):
+                    atr_value = float(raw_atr.value) # It's a Snapshot
+                elif hasattr(raw_atr, 'atr'):
+                    atr_value = float(raw_atr.atr)   # Alternate format
+                elif isinstance(raw_atr, (int, float)):
+                    atr_value = float(raw_atr)       # It's a raw number
+
+                if atr_value > 0:
                      if hasattr(self._bracket_manager, "update_market_stats"):
-                         self._bracket_manager.update_market_stats(symbol, atr=float(atr))
-                         self._logger.debug(f"💉 Injected ATR {atr:.2f} into BracketManager for {symbol}")
+                         # Pass the simple float value to the manager
+                         self._bracket_manager.update_market_stats(symbol, atr=atr_value)
+                         self._logger.debug(f"💉 Injected ATR {atr_value:.2f} into BracketManager for {symbol}")
 
         except Exception as exc:
             self._logger.error(
