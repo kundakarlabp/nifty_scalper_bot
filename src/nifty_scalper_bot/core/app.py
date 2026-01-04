@@ -2381,7 +2381,7 @@ def _setup_telegram(ctx: BotContext) -> None:
     settings = ctx.settings.notifications
     
     # 1. Extract Credentials
-    bot_token = settings.bot_token
+    bot_token = settings.token
     # Handle Set[int] -> Single ID conversion safely
     chat_id = next(iter(settings.whitelist_chat_ids)) if settings.whitelist_chat_ids else None
 
