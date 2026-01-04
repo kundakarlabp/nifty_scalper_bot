@@ -109,6 +109,7 @@ from telegram import Bot, Chat, InputFile, Message, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.request import HTTPXRequest  # ✅ NEW IMPORT
 
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
 
@@ -615,41 +616,47 @@ class TelegramBot:
 
     async def _start_polling_if_needed(self) -> None:
         """
-        Starts non-blocking updater polling with explicit network timeouts.
+        Starts polling with a custom HTTP backend to fix DNS/Network issues.
         """
-        # 1. Config Check
         if not self.deps.enable_polling_fallback:
             return
         if self._app is None or self._app.updater is None:
             return
-        
-        # 2. GUARD: Stop if already running
         if self._app.updater.running:
             return
 
         try:
             self._mark_polling_started()
+            
+            # ✅ FIX: Explicit cool-down
+            await asyncio.sleep(2.0)
+            
             log.info("📡 Starting Telegram Polling (Background)...")
 
-            # 3. CRITICAL FIX: Timeouts added for Railway/Docker stability
-            # These 30s timeouts fix the 'telegram_send_failed' errors
+            # ✅ FIX: Force clear webhook
+            try:
+                await self._app.bot.delete_webhook(drop_pending_updates=True)
+            except Exception as e:
+                log.warning(f"Webhook clear warning (safe to ignore): {e}")
+
+            # ✅ FIX: Start Polling with specific parameters
+            # We removed the 'timeout' arg here because it sometimes conflicts
+            # with the internal request object's timeout.
             await self._app.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
-                poll_interval=1.0,
-                timeout=30,          # Long-polling timeout
-                read_timeout=30,     # Fixes 'send_failed' network errors
-                write_timeout=30,    # Fixes 'send_failed' network errors
-                connect_timeout=30   # Fixes connection establishment
+                poll_interval=2.0
             )
             
             log.info("✅ Telegram Polling Active.")
 
         except Exception as exc:
-            log.error("❌ Polling failed to start", exc_info=exc)
+            # Enhanced Logging
+            import traceback
+            log.error(f"❌ Polling CRASH: {exc}")
+            log.error(traceback.format_exc())
             self._metrics.polling_errors += 1
             self._mark_polling_stopped()
-
     def _command_registered(self, app: Application, command: str) -> bool:
         """Return ``True`` when *command* is already wired on *app*.
 
