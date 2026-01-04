@@ -695,6 +695,12 @@ class OrderManager:
         self._bracket_index: dict[str, str] = {}
         # ✅ FIX: Restore state on startup
         self._load_orders()
+        
+        # ---------------------------------------------------------
+        # 🛡️ CIRCUIT BREAKER STATE (Kill Switch)
+        # ---------------------------------------------------------
+        self._consecutive_failures: int = 0
+        self._max_failures: int = 5  # Stop trading after 5 back-to-back errors
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
@@ -1510,6 +1516,15 @@ class OrderManager:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
         """
+        # ---------------------------------------------------------
+        # 🛡️ CIRCUIT BREAKER CHECK
+        # ---------------------------------------------------------
+        if self._consecutive_failures >= self._max_failures:
+            self._logger.critical(
+                f"💀 KILL SWITCH ENGAGED: {self._consecutive_failures} consecutive broker errors. "
+                "Trading Halted to prevent API ban / account blowup."
+            )
+            return None
         # =========================================================
         # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
         # =========================================================
@@ -1815,6 +1830,11 @@ class OrderManager:
                 order_id = response.get("order_id") if isinstance(response, dict) else str(response)
                 
                 if order_id:
+                    # ✅ RESET Kill Switch on success
+                    self._consecutive_failures = 0
+                    
+                    # A. Update Trade Store
+                    self.trade_store.update_status(trade_id, "FILLED", order_id)
                     # A. Update Trade Store
                     self.trade_store.update_status(trade_id, "FILLED", order_id)
 
@@ -1857,6 +1877,9 @@ class OrderManager:
                     return order_id
                     
             except Exception as e:
+                # ✅ ADD THIS: Count the failure
+                self._consecutive_failures += 1
+                
                 msg = str(e).lower()
                 # Fail Fast logic
                 if any(x in msg for x in ["400", "invalid", "market closed", "bad request", "insufficient funds"]):
