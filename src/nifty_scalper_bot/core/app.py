@@ -2380,23 +2380,15 @@ def _setup_telegram(ctx: BotContext) -> None:
     """Wire the Telegram controller with full access to bot components."""
     settings = ctx.settings.notifications
     
-    # -----------------------------------------------------------
-    # ✅ FIX: Map 'Settings' fields to 'TelegramDeps' requirements
-    # -----------------------------------------------------------
-    bot_token = settings.token
-    
-    # 2. Fix Chat ID: Extract the first ID from the whitelist set
-    # The settings object uses a Set[int], but the bot needs a single target.
+    # 1. Extract Credentials
+    bot_token = settings.bot_token
+    # Handle Set[int] -> Single ID conversion safely
     chat_id = next(iter(settings.whitelist_chat_ids)) if settings.whitelist_chat_ids else None
 
-    # Defensive check
+    # 2. Validation with Explicit Logging
     if not bot_token or not chat_id:
-        LOGGER.info(
-            "Telegram disabled: credentials missing.",
-            extra={
-                "has_token": bool(bot_token),
-                "has_chat_id": bool(chat_id)
-            }
+        LOGGER.warning(
+            f"⚠️ Telegram DISABLED: Missing Credentials. Token={'OK' if bot_token else 'MISSING'}, ChatID={'OK' if chat_id else 'MISSING'}"
         )
         return
 
@@ -4085,7 +4077,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # Initialize Telegram Bot with all components wired
     try:
         _setup_telegram(ctx)
-        LOGGER.info("✅ Telegram Bot initialized", extra={"event": "telegram_ready"})
+        # ✅ FIX: Only log success if the bot object was actually created
+        if ctx.telegram_bot:
+            LOGGER.info("✅ Telegram Bot initialized", extra={"event": "telegram_ready"})
+        else:
+            # This explains why you might see "Initialized" but get no messages
+            LOGGER.warning("⚠️ Telegram Bot NOT initialized (Check Token/Chat ID)")
     except Exception as telegram_exc:
         LOGGER.error(f"❌ Telegram initialization failed: {telegram_exc}", exc_info=True)
 
