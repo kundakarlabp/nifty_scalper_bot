@@ -30,6 +30,7 @@ import nifty_scalper_bot.config.settings as app_settings
 from nifty_scalper_bot.core.trading_switch import TradingSwitchState, trading_switch
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.trade_store import TradeStore, TradeIntent
+from nifty_scalper_bot.data.bracket_store import BracketStore
 from nifty_scalper_bot.data.persistent_state import (
     BracketDict,
     PersistentStateManager,
@@ -693,8 +694,9 @@ class OrderManager:
         )
         self._brackets: dict[str, BracketState] = {}
         self._bracket_index: dict[str, str] = {}
-        # ✅ FIX: Restore state on startup
-        self._load_orders()
+        self._bracket_store = BracketStore() # Initialize SQLite Store
+        self._load_orders()                  # Restore Physical Orders
+        self._restore_virtual_brackets()     # Restore Virtual Brackets (New)
         
         # ---------------------------------------------------------
         # 🛡️ CIRCUIT BREAKER STATE (Kill Switch)
@@ -4384,6 +4386,40 @@ class OrderManager:
 
         except Exception as e:
             self._logger.error(f"Failed to save orders: {e}")
+
+    def _restore_virtual_brackets(self) -> None:
+        """Hydrates virtual brackets from SQLite on startup."""
+        try:
+            saved_brackets = self._bracket_store.load_all_brackets()
+            if not saved_brackets:
+                return
+
+            restored_count = 0
+            for b_data in saved_brackets:
+                # Ensure the BracketManager is available
+                if self._bracket_manager:
+                    try:
+                        self._bracket_manager.restore_bracket(
+                            order_id=b_data['order_id'],
+                            symbol=b_data['symbol'],
+                            side=b_data['side'],
+                            qty=b_data['qty'],
+                            entry_price=b_data['entry_price'],
+                            sl=b_data['current_sl'], # Ensure mapping matches DB schema
+                            tp=b_data.get('tp1'),
+                            trailing_enabled=b_data.get('trailing_active', False),
+                            highest_ltp=b_data.get('highest_ltp', 0.0),
+                            tag=b_data.get('tag')
+                        )
+                        restored_count += 1
+                    except Exception as e:
+                        self._logger.warning(f"Skipped restoring bracket {b_data.get('order_id')}: {e}")
+            
+            if restored_count > 0:
+                self._logger.info(f"✅ Restored {restored_count} Virtual Brackets from SQLite.")
+
+        except Exception as e:
+            self._logger.error(f"❌ Failed to restore virtual brackets: {e}")
 
     def _load_orders(self) -> None:
         """Restore orders from disk on startup."""
@@ -9014,14 +9050,22 @@ class OrderManager:
                         extra={"event": "orphan_adopted", "symbol": broker_sym}
                     )
                     
-                    # A. Create Local Record (Swallow errors to ensure safety check runs)
+                    # [UPGRADE] Use Smart Guard (Adopt + Virtual Bracket + Persistence)
                     try:
-                        self._adopt_orphan_position(broker_sym, data)
+                        success = self.guard_orphan_position(broker_sym, data['qty'], data['price'])
+                        
+                        if success:
+                            self._logger.info(f"✅ Orphan {broker_sym} successfully guarded & persisted.")
+                        else:
+                            # Fallback: If smart guard fails (e.g. BracketManager missing),
+                            # we MUST ensure a Hard Broker SL exists.
+                            self._logger.warning(f"⚠️ Smart Guard failed for {broker_sym}. Checking Hard SL...")
+                            self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
+                            
                     except Exception as e:
-                        self._logger.error(f"Adoption Error: {e}")
-
-                    # B. Check/Place Safety Bracket
-                    self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
+                        self._logger.error(f"Orphan Handling Error: {e}")
+                        # Final Safety Net
+                        self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
 
             # 3. HANDLE GHOSTS (Local Exists, Broker Missing) -> Manual Exit Detected
             # ------------------------------------------------------
@@ -9193,6 +9237,24 @@ class OrderManager:
                 tag=strategy_tag,
                 activate_immediately=True
             )
+            # Persist to SQLite Immediately
+            try:
+                # Assuming BracketManager has a method to get dict, or construct it manually
+                bracket_dict = {
+                    "order_id": synthetic_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": abs_qty,
+                    "entry_price": average_price,
+                    "current_sl": sl_price,
+                    "tp1": tp_price,
+                    "trailing_active": True, # Enabled by guard logic
+                    "tag": strategy_tag
+                }
+                self._bracket_store.save_bracket(bracket_dict)
+                self._logger.info(f"💾 Guard Bracket Saved to SQLite: {symbol}")
+            except Exception as e:
+                self._logger.error(f"Failed to save guard bracket: {e}")
             
             self._bracket_manager.confirm_entry_fill(synthetic_id, average_price)
             
