@@ -5184,6 +5184,36 @@ async def _reconcile_state(ctx: BotContext) -> None:
                             average_price=avg_price
                         )
 
+            # =================================================================
+            # ✅ D. CLEANUP GHOST BRACKETS (Safety Cleanup)
+            # =================================================================
+            # If a Bracket exists but the Position is gone (Manual Exit), kill the Bracket.
+            # This prevents the bot from opening unwanted positions if price hits old levels.
+            if bm and ctx.position_manager:
+                # 1. Get symbols that currently have active brackets
+                # Accessing protected member safely for reconciliation
+                if hasattr(bm, "_symbol_map"):
+                    managed_symbols = set(bm._symbol_map.keys())
+                    
+                    # 2. Get symbols that actually have open positions (Real Broker State)
+                    real_positions = {
+                        p.symbol for p in ctx.position_manager.get_open_positions() 
+                        if p.quantity != 0
+                    }
+                    
+                    # 3. Identify Ghosts (Managed but no Position)
+                    ghosts = managed_symbols - real_positions
+                    
+                    for ghost_sym in ghosts:
+                        # Double check if it actually has active brackets inside
+                        if bm.is_symbol_managed(ghost_sym):
+                            LOGGER.warning(
+                                f"👻 GHOST BRACKET DETECTED: {ghost_sym} has protection but no Open Position. "
+                                "Performing Safety Cleanup..."
+                            )
+                            # Force kill the bracket so it doesn't misfire and open a new trade
+                            bm.manual_override_close(ghost_sym, reason="State Reconciliation (Ghost)")
+
         except Exception as exc:
             LOGGER.error(f"Position Sync/Adoption Failed: {exc}", exc_info=True)
 
