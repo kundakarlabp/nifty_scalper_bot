@@ -9115,7 +9115,6 @@ class OrderManager:
         except Exception as e:
             self._logger.warning(f"Accounting adoption failed (non-critical): {e}")
 
-        # --- STEP 2: Fix Protection (The Sniper Logic) ---
         # --- STEP 2: Fix Protection (Smart Recovery) ---
         try:
             import time
@@ -9237,13 +9236,23 @@ class OrderManager:
     def _ensure_safety_bracket(self, symbol: str, quantity: int, entry_price: float) -> None:
         """
         CRITICAL SAFETY NET: Places Hard SL/TP on the Broker.
-        ADAPTED FOR ZERODHA: Uses SL-LIMIT (fake SL-M) instead of blocked SL-M.
+        FIX: Checks active BROKER orders, not internal brackets, to ensure redundancy.
         """
-        # 1. Check if already protected
+        # 1. Check if an ACTIVE SL order actually exists at the broker
+        has_broker_protection = False
         with self._lock:
-            for b in self._brackets.values():
-                if b.symbol == symbol and b.remaining_position() > 0:
-                    return 
+            for order in self._orders.values():
+                # Check for Open/Pending Stop Loss orders for this symbol
+                if (order.symbol == symbol and 
+                    order.status in [OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.SUBMITTED] and
+                    # Check against likely Enum values or Strings for SL
+                    str(order.order_type).upper() in ["SL", "SL-M", "STOP_LOSS", "STOP_LOSS_MARKET"]):
+                    has_broker_protection = True
+                    break
+        
+        if has_broker_protection:
+            self._logger.info(f"🛡️ Safety check passed: Broker SL already exists for {symbol}.")
+            return 
 
         self._logger.warning(
             f"🛡️ NAKED POSITION DETECTED: {symbol}. Placing Compliant Safety Orders.",
@@ -9258,24 +9267,29 @@ class OrderManager:
         qty = abs(quantity)
 
         # Calculate Prices
-        if quantity > 0: # LONG
+        if quantity > 0: # LONG position -> Exit via SELL
             trigger_price = round(entry_price * (1 - SL_PCT), 1)
-            limit_price = round(trigger_price * (1 - BUFFER_PCT), 1) # Sell lower than trigger
+            # Sell Limit should be LOWER than Trigger to ensure fill
+            limit_price = round(trigger_price * (1 - BUFFER_PCT), 1) 
             tp_price = round(entry_price * (1 + TP_PCT), 1)
-        else: # SHORT
+        else: # SHORT position -> Exit via BUY
             trigger_price = round(entry_price * (1 + SL_PCT), 1)
-            limit_price = round(trigger_price * (1 + BUFFER_PCT), 1) # Buy higher than trigger
+            # Buy Limit should be HIGHER than Trigger to ensure fill
+            limit_price = round(trigger_price * (1 + BUFFER_PCT), 1) 
             tp_price = round(entry_price * (1 - TP_PCT), 1)
 
-        # Place STOP LOSS (SL-LIMIT instead of SL-M)
+        # Place STOP LOSS (SL-LIMIT)
         try:
+            # Force "SL" string if utilizing Zerodha/Kite Connect specifics directly
+            sl_order_type = "SL" if hasattr(OrderType, 'STOP_LOSS') else OrderType.STOP_LOSS
+
             self.place_order(
                 symbol=symbol,
                 side=exit_side,
                 quantity=qty,
-                order_type=OrderType.STOP_LOSS, # ✅ Using SL-Limit
-                price=limit_price,              # ✅ Required for SL-Limit
-                trigger_price=trigger_price,
+                order_type=sl_order_type,   # ✅ Ensures "SL" (Stop-Limit)
+                price=limit_price,          # ✅ Limit Price
+                trigger_price=trigger_price, # ✅ Trigger Price
                 tag="safety_sl_hard",
                 variety="regular"
             )
