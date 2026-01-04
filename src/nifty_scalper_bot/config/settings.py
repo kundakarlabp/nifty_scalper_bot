@@ -865,9 +865,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
     smc_cfg = SMCStrategyConfig(
         enabled=_env_bool("SMC_ENABLED", default=True),
         min_confidence=_env_float("SMC_MIN_CONFIDENCE", default=75.0, minimum=0.0),
-        #equal_level_tolerance_pct=_env_float(
-            "SMC_EQUAL_LEVEL_TOLERANCE_PCT", default=2.0, minimum=0.0
-        ),
         sweep_distance_points=_env_float(
             "SMC_SWEEP_DISTANCE_POINTS", default=30.0, minimum=0.0
         ),
