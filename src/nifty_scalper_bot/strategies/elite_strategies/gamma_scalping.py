@@ -1,11 +1,12 @@
 """
 Gamma Scalping Strategy.
-World-Class implementation with Greeks validation and Theta awareness.
+World-Class implementation with Greeks Validation (Gamma/Theta Efficiency) and Momentum.
+Refactored for Push-Based Architecture (Zero-Latency).
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Dict, Optional
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
@@ -22,9 +23,13 @@ LOGGER = get_logger(__name__)
 
 class GammaScalpingStrategy(EliteStrategy):
     """
-    Trade directional gamma edges with delta and theta proxies.
-    Captures moves where Gamma (Acceleration) > Theta (Decay).
+    Trade directional gamma edges.
+    Captures explosive moves where Gamma (Acceleration) justifies the Theta (Decay) cost.
+    Entry: High Momentum + Positive Gamma Environment.
     """
+
+    # ✅ OPTIMIZATION: Use slots for memory efficiency
+    __slots__ = ("_gamma_config",)
 
     def __init__(self, config: GammaScalpingStrategyConfig, indicator_engine: Any) -> None:
         """
@@ -34,132 +39,150 @@ class GammaScalpingStrategy(EliteStrategy):
             config: Strategy configuration dataclass.
             indicator_engine: Data provider.
         """
-        # CRITICAL FIX: Correct init signature
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._gamma_config = config
 
-    def _evaluate_signal(self) -> EliteSignal | None:
+    def get_required_indicators(self) -> set[str]:
         """
-        Core Logic:
-        1. Check Momentum (MACD / RSI).
-        2. Check Volume (Is market active?).
-        3. Validate Physics (Theta vs Gamma).
-        4. Execute Scalp.
+        Declare which indicators this strategy needs pre-calculated.
+        The StrategyManager will inject these into _evaluate_signal.
         """
-        symbol = self._gamma_config.symbol
-        
-        # 1. Fetch Indicators
-        required_indicators = {
-            "ltp", "macd", "volume", "avg_volume", 
-            "minutes_since_open", "rsi",
-            "delta", "gamma", "theta" # Greeks are vital here
+        return {
+            "gamma", 
+            "theta", 
+            "delta", 
+            "ltp", 
+            "volume", 
+            "average_volume",
+            "macd",         # Momentum Trigger
+            "macd_signal",  # Signal Line
+            "atr"           # Volatility for stops
         }
+
+    def _evaluate_signal(
+        self, 
+        symbol: str, 
+        indicators: Dict[str, Any], 
+        current_price: float, 
+        position: Any | None = None
+    ) -> EliteSignal | None:
+        """
+        Modern Signature: Evaluates signal using injected data.
         
-        indicators = self._indicator_engine.get_indicators(symbol, required_indicators)
-        
+        Args:
+            symbol: Ticker symbol.
+            indicators: Dictionary containing pre-fetched indicators.
+            current_price: Latest LTP.
+            position: Current open position (if any).
+        """
         try:
-            ltp = float(indicators.get("ltp") or 0)
-            macd = float(indicators.get("macd") or 0)
-            vol = float(indicators.get("volume") or 0)
-            avg_vol = float(indicators.get("avg_volume") or 1)
-            rsi = float(indicators.get("rsi") or 50)
-            mins_open = float(indicators.get("minutes_since_open") or 0)
+            # 1. Safe Data Extraction (Fast Path)
+            gamma = float(indicators.get("gamma") or 0.0)
+            theta = float(indicators.get("theta") or 0.0)
+            delta = float(indicators.get("delta") or 0.0)
             
-            # Greeks (If available, else default to neutral)
-            gamma = float(indicators.get("gamma") or 0)
-            theta = float(indicators.get("theta") or 0)
+            macd = float(indicators.get("macd") or 0.0)
+            signal_line = float(indicators.get("macd_signal") or 0.0)
             
-        except (ValueError, TypeError):
-            return None
+            atr = float(indicators.get("atr") or 0.0)
+            vol = float(indicators.get("volume") or 0.0)
+            avg_vol = float(indicators.get("average_volume") or 1.0)
 
-        if ltp == 0:
-            return None
+            # Sanity Checks
+            if current_price <= 0:
+                return None
 
-        # 2. Time Window Check
-        # Gamma scalping needs movement. Avoid lunch lull (11:30 - 13:00).
-        # Best times: 09:30-11:00 and 14:00-15:00
-        # (Simplified logic: just check if market has been open for > 15 mins)
-        if mins_open < 15:
-            return None
+            # 2. Logic: Gamma Filter (Acceleration)
+            # We are looking for "Long Gamma" setups (Buying explosive moves).
+            # Gamma must be positive and significant enough to drive price.
+            # (Note: Gamma is usually small, e.g., 0.001 to 0.05)
+            min_gamma = getattr(self._gamma_config, "min_gamma", 0.0005)
+            if gamma < min_gamma:
+                return None
 
-        # 3. Volume Check
-        # Need liquidity to scalp. Vol > 1.2x Avg
-        vol_ratio = vol / avg_vol if avg_vol > 0 else 0
-        if vol_ratio < 1.2:
-            return None 
+            # 3. Logic: Theta Efficiency (Cost of Time)
+            # Don't buy if Theta is burning too hard relative to the move.
+            # Theta is usually negative for long options.
+            # If Theta < -10 (burning fast) AND Gamma is not super high, skip.
+            if theta < -15.0 and gamma < 0.002:
+                # Too expensive to hold this position
+                return None
 
-        # 4. Directional Logic
-        side: str | None = None
-        
-        # Long Gamma (Buy Option): Price moving away from strike
-        # We use MACD as a proxy for momentum acceleration
-        if macd > 0 and rsi > 55 and rsi < 75:
+            # 4. Logic: Momentum Trigger (MACD Crossover)
+            # This is a Scalper: We want to enter EXACTLY when momentum shifts.
+            # Bullish Crossover: MACD crosses above Signal
+            bullish_momentum = (macd > signal_line) and (macd - signal_line) > 0.5
+            
+            # Bearish Crossover (for Shorting Options/Futures, or exiting)
+            # If trading Options Long, we generally only care about Bullish Momentum of the option price.
+            # However, if this strategy manages FUTURES, we can short.
+            # Assuming Option Buying for Gamma Scalping here.
+            
+            if not bullish_momentum:
+                return None
+
+            # 5. Logic: Volume Confirmation
+            # Acceleration needs fuel.
+            vol_ratio = vol / avg_vol
+            if vol_ratio < 1.0: # At least average volume
+                return None
+
+            # 6. Construct Signal (Buy Scalp)
             side = "BUY"
-        elif macd < 0 and rsi < 45 and rsi > 25:
-            side = "SELL" # BaseStrategy handles PE mapping
+            
+            # Fallback ATR
+            if atr == 0: atr = current_price * 0.01
 
-        if not side:
+            # Tight Scalp Targets
+            # Stop Loss: Recent volatility (ATR)
+            stop_loss = current_price - (atr * 1.0)
+            
+            # Take Profit: Gamma moves are fast. 
+            # Target 2x ATR or a fixed Gamma spike
+            tp1 = current_price + (atr * 1.5)
+            tp2 = current_price + (atr * 3.0)
+
+            # 7. Confidence Scoring
+            # Base 65% (Scalping is noisy).
+            confidence = 65.0
+            
+            # Boost if Gamma is high (Acceleration is likely)
+            if gamma > 0.002: confidence += 15.0
+            
+            # Boost if Volume is Absorbing (>2x)
+            if vol_ratio > 2.0: confidence += 10.0
+
+            LOGGER.info(
+                f"⚡ Gamma Scalp: {symbol} {side} | Gamma: {gamma:.4f} | Theta: {theta:.2f} | MACD Diff: {(macd-signal_line):.2f}",
+                extra={
+                    "event": "gamma_scalping_signal",
+                    "symbol": symbol,
+                    "gamma": gamma,
+                    "theta": theta,
+                    "vol_ratio": vol_ratio
+                }
+            )
+
+            return EliteSignal(
+                symbol=symbol,
+                signal=side,
+                confidence=min(confidence, 99.0),
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                target=tp1,
+                quantity=self._gamma_config.quantity or 1,
+                strategy_name="Gamma_Scalp_Pro",
+                metadata={
+                    "type": "Momentum_Acceleration",
+                    "gamma_efficiency": f"{gamma:.4f}/{theta:.1f}",
+                    "momentum": "MACD_Bullish",
+                    "vol_ratio": round(vol_ratio, 2)
+                }
+            )
+
+        except Exception as e:
+            LOGGER.error(f"Gamma Strategy Error on {symbol}: {e}", exc_info=True)
             return None
-
-        # 5. 🛡️ SAFETY GATE (Physics Check)
-        if not self.validate_option_health(symbol, side):
-            LOGGER.info(f"⛔ Rejected {symbol}: Failed Greeks/Liquidity Check")
-            return None
-
-        # 6. Gamma/Theta Efficiency Check
-        # We want High Gamma, Low Theta. 
-        # If Theta burn is > 20 pts/day, the move must be violent to profit.
-        if abs(theta) > 20.0 and vol_ratio < 2.0:
-            LOGGER.info(f"⛔ Rejected {symbol}: High Theta ({theta}) vs Low Vol ({vol_ratio})")
-            return None
-
-        # 7. Risk Management (Scalp Settings)
-        # Tight stops, quick targets.
-        trigger_pts = self._gamma_config.hedge_trigger_points or 10.0
-        
-        if side == "BUY":
-            stop_loss = ltp - (trigger_pts * 0.8) # Tight stop
-            tp1 = ltp + trigger_pts
-            tp2 = ltp + (trigger_pts * 2.0)
-        else:
-            stop_loss = ltp + (trigger_pts * 0.8)
-            tp1 = ltp - trigger_pts
-            tp2 = ltp - (trigger_pts * 2.0)
-
-        # 8. Confidence Calculation
-        # Scalping is high freq, lower confidence per trade usually
-        confidence = 0.65
-        if vol_ratio > 2.0: confidence += 0.15
-        if abs(gamma) > 0.05: confidence += 0.10 # High gamma bonus
-
-        # 9. Construct Signal
-        LOGGER.info(
-            f"🚀 Gamma Scalp: {symbol} {side} | Vol: {vol_ratio:.1f}x | MACD: {macd:.2f}",
-            extra={
-                "event": "gamma_scalping_signal",
-                "symbol": symbol,
-                "gamma": gamma,
-                "theta": theta
-            }
-        )
-
-        return EliteSignal(
-            symbol=symbol,
-            side=side,
-            confidence=min(confidence, 0.99),
-            entry_price=ltp,
-            stop_loss=stop_loss,
-            take_profit_1=tp1,
-            take_profit_2=tp2,
-            quantity=self._gamma_config.quantity or 1,
-            strategy_name="Gamma_Scalping_Pro",
-            metadata={
-                "volume_ratio": vol_ratio,
-                "macd": macd,
-                "gamma": gamma,
-                "theta": theta
-            }
-        )
 
 
 __all__ = ["GammaScalpingStrategy"]
