@@ -1211,6 +1211,42 @@ def get_http_app() -> FastAPI:
                         extra=extra_payload,
                     )
 
+    # ----------------------------------------------------------------
+    # ✅ FIX: Explicit Telegram Startup for Python-Telegram-Bot v20+
+    # ----------------------------------------------------------------
+    @app.on_event("startup")
+    async def _start_telegram_bot_service() -> None:
+        """
+        CRITICAL FIX: Explicitly await the TelegramBot startup sequence.
+        This fixes 'coroutine never awaited' and ensures polling starts.
+        """
+        try:
+            # 1. Retrieve the Global Context
+            ctx = get_latest_bot_context()
+            
+            # 2. Check if Telegram Bot is initialized
+            if ctx and ctx.telegram_bot:
+                LOGGER.info("🚀 Triggering TelegramBot explicit startup sequence...")
+                
+                # 3. AWAIT the start method (This is the magic fix)
+                # This calls initialize() -> start() -> start_polling()
+                await ctx.telegram_bot.start()
+                
+        except Exception as exc:
+            LOGGER.error(f"❌ Failed to start TelegramBot service: {exc}", exc_info=True)
+
+    @app.on_event("shutdown")
+    async def _stop_telegram_bot_service() -> None:
+        """Ensure clean shutdown of Telegram Bot."""
+        try:
+            ctx = get_latest_bot_context()
+            if ctx and ctx.telegram_bot:
+                LOGGER.info("🛑 Shutting down Telegram Bot...")
+                await ctx.telegram_bot.stop()
+        except Exception:
+            pass
+    # ----------------------------------------------------------------
+
     app.include_router(selftest_router)
     # Ensure the instrument resolver is warmed from any broker dump / csv
     # when the FastAPI app starts. This guarantees resolver lookups (symbols→tokens)
