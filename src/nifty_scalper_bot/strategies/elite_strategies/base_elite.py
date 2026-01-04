@@ -1,13 +1,13 @@
 """
 Base abstractions and helpers for elite strategies.
 Production-Grade: Optimized Dispatch (Zero-Reflection Runtime) & Type Safety.
-Resolves: Can't instantiate abstract class errors.
+Fixed: Resolves Abstract Method and Constructor Parameter mismatches.
 """
 
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Set, Optional, Mapping
 
@@ -73,16 +73,22 @@ class EliteSignal:
 class EliteStrategy(Strategy):
     """
     Abstract base class for all Elite Strategies.
-    Implements a Hybrid Architecture: Supports both Legacy (Pull) and Modern (Push) logic.
+    Hybrid Architecture: Corrected to support Parent Class parameter requirements.
     """
 
     def __init__(self, config: EliteStrategyConfig, indicator_engine: Any) -> None:
         """
-        Initialize strategy logic.
+        Initialize strategy logic and synchronize with core Strategy parent.
         """
-        # Auto-detect name from config class (e.g. SMCStrategyConfig -> SMC)
+        # 1. Detect name from config class
         name = config.__class__.__name__.replace("Config", "").replace("Strategy", "")
-        super().__init__(name=name)
+        
+        # 2. ✅ FIX: Satisfy Strategy.__init__ requirement for 'parameters'
+        # We convert the config dataclass to a dictionary to pass to the parent
+        params = asdict(config) if hasattr(config, "__dataclass_fields__") else {}
+        
+        # 3. Call parent with both Name and Parameters
+        super().__init__(name=name, parameters=params)
         
         self._config = config
         self._indicator_engine = indicator_engine
@@ -93,8 +99,6 @@ class EliteStrategy(Strategy):
         # PERFORMANCE OPTIMIZATION:
         # Inspect the signature ONCE at startup to decide execution path.
         sig = inspect.signature(self._evaluate_signal)
-        # Legacy: _evaluate_signal(self) -> 0 params
-        # Modern: _evaluate_signal(self, symbol, indicators, ...) -> >0 params
         self._is_legacy_signature = len(sig.parameters) == 0
         
         if self._is_legacy_signature:
@@ -103,9 +107,7 @@ class EliteStrategy(Strategy):
             LOGGER.debug(f"🚀 {self.name}: Running in Modern Mode (Push-Based)")
 
     def get_required_indicators(self) -> Set[str]:
-        """
-        Override this in subclasses to declare needed data.
-        """
+        """Override this in subclasses to declare needed data."""
         return set()
 
     def generate_signal(
@@ -116,13 +118,13 @@ class EliteStrategy(Strategy):
         position: Any | None = None
     ) -> Signal | None:
         """
-        ✅ THE BRIDGE: Satisfies the abstract requirement of the parent 'Strategy' class.
-        This resolves the 'Can't instantiate abstract class' error in your logs.
+        ✅ THE BRIDGE: Implements abstract method required by the parent 'Strategy' class.
+        Resolves: 'Can't instantiate abstract class' error in logs.
         """
         if not self._config.enabled:
             return None
 
-        # Dispatch to the specific evaluation logic implemented in child classes
+        # Route the call to our specific evaluation logic
         elite_signal = self._evaluate_signal(
             symbol=symbol, 
             indicators=indicators, 
@@ -136,10 +138,7 @@ class EliteStrategy(Strategy):
         return None
 
     def evaluate(self) -> Signal | None:
-        """
-        Main entry point called by the Strategy Runner loop.
-        Acts as a 'Bridge' to handle data fetching automatically if needed.
-        """
+        """Main entry point for polling-based runners."""
         if not self._config.enabled:
             return None
 
@@ -150,13 +149,11 @@ class EliteStrategy(Strategy):
                 return None
 
         try:
-            # Dispatch based on detected signature
             if self._is_legacy_signature:
                 elite_signal = self._evaluate_signal() # type: ignore
                 if elite_signal:
                     return self._process_signal(elite_signal)
             else:
-                # Direct bridge to the modern signature with pre-fetched data
                 symbol = getattr(self._config, "symbol", None)
                 if not symbol:
                     return None
@@ -179,16 +176,11 @@ class EliteStrategy(Strategy):
         current_price: float = 0.0, 
         position: Any | None = None
     ) -> EliteSignal | None:
-        """
-        Abstract method to implement trading logic.
-        Must be overridden by subclasses.
-        """
+        """Abstract logic hook for child strategies."""
         raise NotImplementedError("Strategy must implement _evaluate_signal")
 
     def _process_signal(self, signal: EliteSignal) -> Signal:
-        """
-        Converts internal EliteSignal to the bot's standard Signal format.
-        """
+        """Converts internal EliteSignal to core Signal format."""
         self._last_signal_at = signal.timestamp
         self._last_signal = signal
         self._signals_generated += 1
@@ -212,11 +204,8 @@ class EliteStrategy(Strategy):
         )
 
     def get_stats(self) -> dict[str, Any]:
-        """Return diagnostic statistics for the strategy."""
-        last_payload: dict[str, Any] | None = None
-        if self._last_signal is not None:
-            last_payload = self._last_signal.to_payload()
-            
+        """Return diagnostic statistics."""
+        last_payload = self._last_signal.to_payload() if self._last_signal else None
         return {
             "strategy": self.name,
             "enabled": self._config.enabled,
@@ -227,7 +216,6 @@ class EliteStrategy(Strategy):
 
     @property
     def config(self) -> EliteStrategyConfig:
-        """Return strategy configuration reference."""
         return self._config
 
 
