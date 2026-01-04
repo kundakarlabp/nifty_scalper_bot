@@ -2697,8 +2697,10 @@ class MarketDataManager:
                             "candidate": candidate,
                         },
                     )
-                    # Attempt to fetch full market depth
-                    payload = broker.get_quote([candidate])
+                    # [FIX]: Use singular candidate (str) instead of list [candidate]
+                    # The Zerodha client expects a string for get_quote(), and passing a list 
+                    # causes it to format the list as string "['NFO:...']" which fails on the broker side.
+                    payload = broker.get_quote(str(candidate))
                 except Exception as broker_exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in _seed_quote_from_broker broker call: %s",
@@ -2715,26 +2717,17 @@ class MarketDataManager:
                 if not isinstance(payload, Mapping) or not payload:
                     continue
 
-                # Extract the specific symbol data
-                quote_candidate = payload.get(candidate) or payload.get(symbol)
-                
-                # Handle cases where API returns just the values without keys
-                if not isinstance(quote_candidate, Mapping) and payload:
-                    first_value = next(iter(payload.values()), None)
-                    if isinstance(first_value, Mapping):
-                        quote_candidate = first_value
-
-                if isinstance(quote_candidate, Mapping):
-                    quote = quote_candidate
-                    self._logger.info(
-                        "Condition met: mdm_seed_candidate_success",
-                        extra={
-                            "event": "mdm_seed_candidate_success",
-                            "symbol": symbol,
-                            "candidate": candidate,
-                        },
-                    )
-                    break
+                # In singular get_quote(), payload IS the quote data for the requested symbol
+                quote = payload
+                self._logger.info(
+                    "Condition met: mdm_seed_candidate_success",
+                    extra={
+                        "event": "mdm_seed_candidate_success",
+                        "symbol": symbol,
+                        "candidate": candidate,
+                    },
+                )
+                break
 
             # ------------------------------------------------------------------
             # STRATEGY 2: LTP Fallback (If Depth Failed)
