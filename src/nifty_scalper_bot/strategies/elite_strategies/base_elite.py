@@ -1,6 +1,7 @@
 """
 Base abstractions and helpers for elite strategies.
 Production-Grade: Optimized Dispatch (Zero-Reflection Runtime) & Type Safety.
+Resolves: Can't instantiate abstract class errors.
 """
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Set, Optional
+from typing import Any, Dict, Set, Optional, Mapping
 
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
@@ -16,6 +17,7 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 from nifty_scalper_bot.strategies.signal_generator import Signal, Strategy
 from nifty_scalper_bot.utils.logging import get_logger
 
+# Initialize structured logger
 LOGGER = get_logger(__name__)
 
 
@@ -23,7 +25,7 @@ LOGGER = get_logger(__name__)
 class EliteSignal:
     """
     Container for elite strategy signal output.
-    Optimized with __slots__ for reduced memory footprint during high-frequency generation.
+    Optimized with __slots__ for reduced memory footprint.
     """
 
     symbol: str
@@ -77,10 +79,6 @@ class EliteStrategy(Strategy):
     def __init__(self, config: EliteStrategyConfig, indicator_engine: Any) -> None:
         """
         Initialize strategy logic.
-        
-        Args:
-            config: Strategy configuration object.
-            indicator_engine: Data provider service.
         """
         # Auto-detect name from config class (e.g. SMCStrategyConfig -> SMC)
         name = config.__class__.__name__.replace("Config", "").replace("Strategy", "")
@@ -94,7 +92,6 @@ class EliteStrategy(Strategy):
 
         # PERFORMANCE OPTIMIZATION:
         # Inspect the signature ONCE at startup to decide execution path.
-        # This avoids running 'inspect.signature' on every tick (which is slow).
         sig = inspect.signature(self._evaluate_signal)
         # Legacy: _evaluate_signal(self) -> 0 params
         # Modern: _evaluate_signal(self, symbol, indicators, ...) -> >0 params
@@ -108,68 +105,69 @@ class EliteStrategy(Strategy):
     def get_required_indicators(self) -> Set[str]:
         """
         Override this in subclasses to declare needed data.
-        The StrategyRunner will pre-fetch these before calling _evaluate_signal.
-        
-        Returns:
-            Set of indicator names (e.g. {'rsi', 'vwap', 'atr'})
         """
         return set()
+
+    def generate_signal(
+        self, 
+        symbol: str, 
+        indicators: Mapping[str, Any], 
+        current_price: float, 
+        position: Any | None = None
+    ) -> Signal | None:
+        """
+        ✅ THE BRIDGE: Satisfies the abstract requirement of the parent 'Strategy' class.
+        This resolves the 'Can't instantiate abstract class' error in your logs.
+        """
+        if not self._config.enabled:
+            return None
+
+        # Dispatch to the specific evaluation logic implemented in child classes
+        elite_signal = self._evaluate_signal(
+            symbol=symbol, 
+            indicators=indicators, 
+            current_price=current_price, 
+            position=position
+        )
+
+        if elite_signal:
+            return self._process_signal(elite_signal)
+            
+        return None
 
     def evaluate(self) -> Signal | None:
         """
         Main entry point called by the Strategy Runner loop.
         Acts as a 'Bridge' to handle data fetching automatically if needed.
         """
-        # 1. Global Kill Switch
         if not self._config.enabled:
             return None
 
-        # 2. Cooldown Check
+        # Cooldown check
         if self._last_signal_at:
             elapsed = (datetime.now(timezone.utc) - self._last_signal_at).total_seconds()
             if elapsed < self._config.cooldown_seconds:
                 return None
 
-        elite_signal: EliteSignal | None = None
-
         try:
-            # 3. Execution Dispatch (The Bridge)
+            # Dispatch based on detected signature
             if self._is_legacy_signature:
-                # LEGACY PATH: Strategy is responsible for fetching its own data
                 elite_signal = self._evaluate_signal() # type: ignore
+                if elite_signal:
+                    return self._process_signal(elite_signal)
             else:
-                # MODERN PATH: We fetch data here and inject it (Dependency Injection)
+                # Direct bridge to the modern signature with pre-fetched data
                 symbol = getattr(self._config, "symbol", None)
                 if not symbol:
                     return None
                 
-                # Get the manifest of what data is needed
                 req_inds = self.get_required_indicators()
-                if not req_inds:
-                    # If modern signature but no indicators requested, fail safe
-                    return None
-                
-                # Bulk fetch data (Vectorized/Cached access)
                 indicators = self._indicator_engine.get_indicators(symbol, list(req_inds))
-                
-                # Safe LTP extraction
                 ltp = float(indicators.get("ltp") or 0.0)
-                if ltp == 0:
-                    return None
                 
-                # Inject data into strategy logic
-                elite_signal = self._evaluate_signal(
-                    symbol=symbol,
-                    indicators=indicators,
-                    current_price=ltp
-                )
-
-            # 4. Signal Processing
-            if elite_signal:
-                return self._process_signal(elite_signal)
+                return self.generate_signal(symbol, indicators, ltp)
 
         except Exception as e:
-            # Catch strategy-specific crashes so the main bot loop doesn't die
             LOGGER.error(f"Error evaluating {self.name}: {e}", exc_info=True)
         
         return None
@@ -190,34 +188,26 @@ class EliteStrategy(Strategy):
     def _process_signal(self, signal: EliteSignal) -> Signal:
         """
         Converts internal EliteSignal to the bot's standard Signal format.
-        Handles bookkeeping (timestamp updates, counters).
         """
         self._last_signal_at = signal.timestamp
         self._last_signal = signal
         self._signals_generated += 1
 
-        # Use signal defaults if not computed by strategy
-        sl = signal.stop_loss
-        tp = signal.target
-
-        # Enrich metadata for logging/debugging
         metadata = signal.metadata.copy()
         metadata.update({
             "strategy": self.name,
             "mode": "Legacy" if self._is_legacy_signature else "Push",
-            "quantity": signal.quantity,
-            "generated_at": signal.timestamp.isoformat()
+            "quantity": signal.quantity
         })
 
-        # Return standardized object for OrderManager
         return Signal(
             action=signal.signal,
             symbol=signal.symbol,
             confidence=signal.confidence,
             price=signal.entry_price,
             tag=f"{self.name}",
-            stop_loss=sl,
-            take_profit=tp,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.target,
             metadata=metadata,
         )
 
