@@ -1964,34 +1964,58 @@ class StrategyRunner:
             # Ensure cooldown even on crash
             self._set_signal_cooldown(base_symbol, timestamp)
 
-
-    # ========================================
-    # FIX #2: NON-BLOCKING VERIFICATION
-    # ========================================
     async def _verify_order_status(
         self, order_id: str, symbol: str, delay_seconds: float
     ) -> None:
-        """Verify order was accepted by broker after submission."""
+        """
+        World-Class Verification: Detects STUCK Limit orders and CHASES them.
+        """
         await asyncio.sleep(delay_seconds)
 
         try:
-            # Check order status in a thread to avoid blocking the loop
+            # Run in thread to avoid blocking main loop
             if hasattr(self._order_manager, "get_order"):
                 order = await asyncio.to_thread(self._order_manager.get_order, order_id)
                 
-                if not order:
-                    self._logger.warning(f"❓ Order {order_id} not found in manager after {delay_seconds}s")
-                    return
+                if not order: return
 
                 status = str(order.status).upper()
-                if status in ["REJECTED", "CANCELLED", "ERROR"]:
-                    self._logger.error(f"🔴 ORDER {order_id} FAILED: {status} | Msg: {getattr(order, 'message', 'N/A')}")
+                
+                # 🛡️ ACTIVE CHASE LOGIC
+                # If Limit Order is ignored by market (OPEN) after 3s, we must act.
+                if status in ["OPEN", "PENDING", "SUBMITTED"]:
+                    self._logger.warning(f"⏳ ORDER {order_id} STUCK ({status}). Initiating Chase...")
+                    
+                    # Strategy: Modify Price to be more aggressive
+                    # Buy: Current LTP + 0.5% | Sell: Current LTP - 0.5%
+                    # This effectively converts it to a Market order without losing queue priority completely
+                    
+                    # 1. Get Fresh Price
+                    new_price = 0.0
+                    if self._market_data:
+                        q = await asyncio.to_thread(self._market_data.get_quote, symbol)
+                        if q:
+                            # Panic Chase: Cross the spread aggressively
+                            base = q.get("ask" if order.side == "BUY" else "bid", 0)
+                            if base > 0:
+                                buff = 1.005 if order.side == "BUY" else 0.995
+                                new_price = round(base * buff, 2)
+                    
+                    if new_price > 0:
+                        self._logger.info(f"🏃 CHASING: Modifying {order_id} to {new_price}")
+                        await asyncio.to_thread(
+                            self._order_manager.modify_order, 
+                            order_id=order_id, 
+                            price=new_price
+                        )
+                    else:
+                        self._logger.error("❌ Could not get fresh price for Chase.")
+
                 elif status == "COMPLETE":
-                    self._logger.info(f"✅ ORDER {order_id} FILLED for {symbol}")
-                else:
-                    self._logger.info(f"⏳ ORDER {order_id} STATUS: {status}")
+                    self._logger.info(f"✅ ORDER {order_id} FILLED.")
+                    
         except Exception as exc:
-            self._logger.warning(f"Order verification warning: {exc}")
+            self._logger.warning(f"Order verification/chase warning: {exc}")
 
     def _handle_exit_signal(
         self,
