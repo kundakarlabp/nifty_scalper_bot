@@ -117,7 +117,7 @@ from nifty_scalper_bot.shadow.shadow_paper import ShadowPaperTrader
 from nifty_scalper_bot.storage import HubStore
 from nifty_scalper_bot.strategies.elite_strategies.builder import (
     build_elite_strategies,
-    elite_strategy_tags,
+    get_strategy_tags as elite_strategy_tags,
 )
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.orchestrator import StrategyOrchestrator
