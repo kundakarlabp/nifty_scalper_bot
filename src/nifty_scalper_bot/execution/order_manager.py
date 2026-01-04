@@ -9116,6 +9116,7 @@ class OrderManager:
             self._logger.warning(f"Accounting adoption failed (non-critical): {e}")
 
         # --- STEP 2: Fix Protection (The Sniper Logic) ---
+        # --- STEP 2: Fix Protection (Smart Recovery) ---
         try:
             import time
             safe_symbol = symbol.replace(':', '_')
@@ -9124,58 +9125,64 @@ class OrderManager:
             side = "BUY" if quantity > 0 else "SELL"
             abs_qty = abs(quantity)
             
-            # Calculate Levels (Dynamic ATR -> Fallback Fixed %)
-            sl_price, tp_price = 0.0, 0.0
-            used_atr = False
-            
-            # Attempt ATR Calculation
+            # 1. Get Current Market Price (Crucial for Safety)
+            current_ltp = average_price # Fallback
+            if self._market_data:
+                quote = self._market_data.get_quote(symbol)
+                if quote:
+                    current_ltp = float(quote.get("last_price") or quote.get("ltp") or average_price)
+
+            # 2. Determine ATR
+            atr_val = 0.0
             if hasattr(self, '_indicator_engine') and self._indicator_engine:
                 try:
-                    atr = self._indicator_engine.compute_atr(symbol)
-                    if atr and isinstance(atr, (int, float)) and atr > 0:
-                        sl_dist = atr * 2.0
-                        tp_dist = atr * 3.0
-                        if side == "BUY":
-                            sl_price = round_tick(average_price - sl_dist)
-                            tp_price = round_tick(average_price + tp_dist)
-                        else:
-                            sl_price = round_tick(average_price + sl_dist)
-                            tp_price = round_tick(average_price - tp_dist)
-                        used_atr = True
+                    raw_atr = self._indicator_engine.compute_atr(symbol)
+                    # Handle both float and ATRSnapshot object
+                    if hasattr(raw_atr, 'value'): atr_val = float(raw_atr.value)
+                    elif hasattr(raw_atr, 'atr'): atr_val = float(raw_atr.atr)
+                    elif isinstance(raw_atr, (int, float)): atr_val = float(raw_atr)
                 except Exception:
                     pass
 
-            # Fallback to Fixed % (10% SL, 20% TP)
-            if sl_price <= 0:
-                sl_pct = 0.10
-                tp_pct = 0.20
-                if side == "BUY":
-                    sl_price = round_tick(average_price * (1 - sl_pct))
-                    tp_price = round_tick(average_price * (1 + tp_pct))
-                else:
-                    sl_price = round_tick(average_price * (1 + sl_pct))
-                    tp_price = round_tick(average_price * (1 - tp_pct))
+            # 3. Calculate Target Levels
+            if atr_val > 0:
+                sl_dist = atr_val * 2.0
+                tp_dist = atr_val * 3.0
+                strategy_tag = "auto_guard_atr"
+            else:
+                # Fallback: 10% SL, 20% TP
+                sl_dist = average_price * 0.10
+                tp_dist = average_price * 0.20
+                strategy_tag = "auto_guard_fixed"
 
-            strategy_tag = "auto_guard_atr" if used_atr else "auto_guard_fixed"
+            if side == "BUY":
+                ideal_sl = round_tick(average_price - sl_dist)
+                tp_price = round_tick(average_price + tp_dist)
+                
+                # 🛑 SAFETY CHECK: Is LTP already below Ideal SL?
+                # If yes, set Emergency SL just below LTP to allow breathing room
+                if current_ltp < ideal_sl:
+                    sl_price = round_tick(current_ltp * 0.99) # 1% below current agony
+                    self._logger.warning(f"📉 Deep Loss Detected ({current_ltp} < {ideal_sl}). Setting Emergency SL at {sl_price}")
+                else:
+                    sl_price = ideal_sl
+            else: # SELL
+                ideal_sl = round_tick(average_price + sl_dist)
+                tp_price = round_tick(average_price - tp_dist)
+                
+                if current_ltp > ideal_sl:
+                    sl_price = round_tick(current_ltp * 1.01) # 1% above current agony
+                    self._logger.warning(f"📉 Deep Loss Detected ({current_ltp} > {ideal_sl}). Setting Emergency SL at {sl_price}")
+                else:
+                    sl_price = ideal_sl
 
             self._logger.info(
                 f"🛡️ GUARDING ORPHAN: {symbol} | {side} {abs_qty} | "
-                f"SL: {sl_price} | TP: {tp_price} | Mode: {strategy_tag.upper()}",
+                f"LTP: {current_ltp} | SL: {sl_price} | TP: {tp_price}",
                 extra={"event": "orphan_guarding", "symbol": symbol}
             )
 
-            # 🛑 FIX: Validate prices before registering
-            if sl_price <= 0 or tp_price <= 0:
-                self._logger.warning(
-                    f"⚠️ Invalid protection levels for {symbol}: SL={sl_price}, TP={tp_price}. Setting MONITOR mode.",
-                    extra={"event": "orphan_guard_monitor_only"}
-                )
-                # Set dummy values that won't trigger (SL=0, TP=999999) or disable logic
-                # Better approach: Don't activate immediate triggers if 0
-                sl_price = 0.0
-                tp_price = 0.0 
-            
-            # Register with Sniper Engine
+            # Register
             self._bracket_manager.register_virtual_bracket(
                 order_id=synthetic_id,
                 symbol=symbol,
@@ -9188,7 +9195,6 @@ class OrderManager:
                 activate_immediately=True
             )
             
-            # ✅ CRITICAL: Force Confirmation & Persistence
             self._bracket_manager.confirm_entry_fill(synthetic_id, average_price)
             
         except Exception as e:
