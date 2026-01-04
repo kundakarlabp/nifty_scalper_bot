@@ -52,6 +52,7 @@ from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.core.bot_context import get_latest_bot_context
 from nifty_scalper_bot.core.message_bus import (
     MessageBus, 
     Message, 
