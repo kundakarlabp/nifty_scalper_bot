@@ -850,165 +850,78 @@ class Settings:
 
 
 def _build_elite_settings() -> EliteStrategiesSettings:
-    """Construct elite strategies configuration from environment.
-
-    Args:
-        None.
-
-    Returns:
-        EliteStrategiesSettings: Parsed configuration for elite bundle.
-
-    Raises:
-        ConfigurationError: When environment values cannot be parsed.
     """
+    Builds the EliteStrategiesSettings object by parsing environment variables.
+    Aligned with the high-performance 'Push-Based' Strategy Models.
+    """
+    try:
+        # 1. SMC Strategy Configuration
+        smc_cfg = SMCStrategyConfig(
+            enabled=_env_bool("SMC_ENABLED", default=True),
+            min_confidence=_env_float("SMC_MIN_CONFIDENCE", default=70.0),
+            cooldown_seconds=_env_float("SMC_COOLDOWN", default=60.0),
+            sweep_distance_points=_env_float("SMC_SWEEP_DISTANCE", default=30.0),
+            volume_spike_mult=_env_float("SMC_VOLUME_SPIKE", default=2.0)
+        )
 
-    smc_cfg = SMCStrategyConfig(
-        enabled=_env_bool("SMC_ENABLED", default=True),
-        min_confidence=_env_float("SMC_MIN_CONFIDENCE", default=75.0, minimum=0.0),
-        sweep_distance_points=_env_float(
-            "SMC_SWEEP_DISTANCE_POINTS", default=30.0, minimum=0.0
-        ),
-        volume_spike_mult=_env_float("SMC_VOLUME_SPIKE_MULT", default=2.0, minimum=0.0),
-        order_block_volume_mult=_env_float(
-            "SMC_ORDER_BLOCK_VOLUME_MULT", default=1.5, minimum=0.0
-        ),
-    )
-    vwap_cfg = VWAPProStrategyConfig(
-        enabled=_env_bool("VWAP_PRO_ENABLED", default=True),
-        min_confidence=_env_float("VWAP_MIN_CONFIDENCE", default=72.0, minimum=0.0),
-        stddev_mult=_env_float("VWAP_STDDEV_MULT", default=1.5, minimum=0.0),
-        rsi_oversold=_env_float("VWAP_RSI_OVERSOLD", default=35.0, minimum=0.0),
-        rsi_overbought=_env_float("VWAP_RSI_OVERBOUGHT", default=65.0, minimum=0.0),
-        volume_spike=_env_float("VWAP_VOLUME_SPIKE", default=1.8, minimum=0.0),
-        max_holding_minutes=_env_float(
-            "VWAP_MAX_HOLDING_MIN", default=15.0, minimum=0.0
-        ),
-    )
-    oi_cfg = OIMaxPainStrategyConfig(
-        enabled=_env_bool("OI_MAX_PAIN_ENABLED", default=True),
-        min_confidence=_env_float("OI_MIN_CONFIDENCE", default=68.0, minimum=0.0),
-        fetch_interval_min=_env_float(
-            "OI_FETCH_INTERVAL_MIN", default=3.0, minimum=0.0
-        ),
-        min_distance_points=_env_float(
-            "OI_MIN_DISTANCE_POINTS", default=50.0, minimum=0.0
-        ),
-        pcr_bullish=_env_float("OI_PCR_BULLISH", default=1.2, minimum=0.0),
-        pcr_bearish=_env_float("OI_PCR_BEARISH", default=0.8, minimum=0.0),
-        exit_time_minutes=_env_minutes("OI_EXIT_TIME", default=900.0),
-    )
-    gamma_cfg = GammaScalpingStrategyConfig(
-        enabled=_env_bool("GAMMA_ENABLED", default=False),
-        min_confidence=_env_float("GAMMA_MIN_CONFIDENCE", default=65.0, minimum=0.0),
-        hedge_trigger_points=_env_float(
-            "GAMMA_HEDGE_TRIGGER_POINTS", default=20.0, minimum=0.0
-        ),
-        delta_threshold=_env_float("GAMMA_DELTA_THRESHOLD", default=0.2, minimum=0.0),
-        target_profit=_env_float("GAMMA_TARGET_PROFIT", default=2500.0, minimum=0.0),
-        max_theta_loss=_env_float("GAMMA_MAX_THETA_LOSS", default=500.0, minimum=0.0),
-        exit_time_minutes=_env_minutes("GAMMA_EXIT_TIME", default=840.0),
-    )
-    cpr_cfg = CPRBreakoutStrategyConfig(
-        enabled=_env_bool("CPR_ENABLED", default=True),
-        min_confidence=_env_float("CPR_MIN_CONFIDENCE", default=68.0, minimum=0.0),
-        narrow_threshold_pct=_env_float(
-            "CPR_NARROW_THRESHOLD_PCT", default=0.3, minimum=0.0
-        ),
-        volume_mult=_env_float("CPR_VOLUME_MULT", default=2.0, minimum=0.0),
-        gap_threshold_points=_env_float(
-            "CPR_GAP_THRESHOLD_POINTS", default=30.0, minimum=0.0
-        ),
-        breakout_window_start=_env_minutes(
-            "CPR_BREAKOUT_WINDOW_START", default=9 * 60 + 30
-        ),
-        breakout_window_end=_env_minutes("CPR_BREAKOUT_WINDOW_END", default=10 * 60),
-    )
-    order_flow_cfg = OrderFlowStrategyConfig(
-        enabled=_env_bool("ORDER_FLOW_ENABLED", default=True),
-        min_confidence=_env_float(
-            "ORDER_FLOW_MIN_CONFIDENCE", default=70.0, minimum=0.0
-        ),
-        imbalance_ratio_buy=_env_float(
-            "ORDER_FLOW_IMBALANCE_RATIO_BUY", default=2.5, minimum=0.0
-        ),
-        imbalance_ratio_sell=_env_float(
-            "ORDER_FLOW_IMBALANCE_RATIO_SELL", default=0.4, minimum=0.0
-        ),
-        large_order_pct=_env_float(
-            "ORDER_FLOW_LARGE_ORDER_PCT", default=15.0, minimum=0.0
-        ),
-        persistence_seconds=_env_float(
-            "ORDER_FLOW_PERSISTENCE_SEC", default=5.0, minimum=0.0
-        ),
-        target_points=_env_float("ORDER_FLOW_TARGET_POINTS", default=25.0, minimum=0.0),
-    )
-    bb_cfg = BBSqueezeStrategyConfig(
-        enabled=_env_bool("BB_SQUEEZE_ENABLED", default=True),
-        min_confidence=_env_float("BB_MIN_CONFIDENCE", default=55.0, minimum=0.0),
-        period=_env_int("BB_PERIOD", default=20, minimum=1),
-        stddev=_env_float("BB_STDDEV", default=2.0, minimum=0.0),
-        bandwidth_threshold=_env_float(
-            "BB_SQUEEZE_BANDWIDTH", default=0.4, minimum=0.0
-        ),
-        atr_percentile=_env_float("BB_ATR_PERCENTILE", default=20.0, minimum=0.0),
-        volume_breakout=_env_float("BB_VOLUME_BREAKOUT", default=2.5, minimum=0.0),
-    )
-    rsi_cfg = RSIDivergenceStrategyConfig(
-        enabled=_env_bool("RSI_DIV_ENABLED", default=True),
-        min_confidence=_env_float("RSI_MIN_CONFIDENCE", default=62.0, minimum=0.0),
-        period=_env_int("RSI_PERIOD", default=14, minimum=1),
-        oversold=_env_float("RSI_OVERSOLD", default=35.0, minimum=0.0),
-        overbought=_env_float("RSI_OVERBOUGHT", default=65.0, minimum=0.0),
-        confirmation_volume=_env_float(
-            "RSI_CONFIRMATION_VOLUME", default=1.3, minimum=0.0
-        ),
-        swing_lookback=_env_int("RSI_SWING_LOOKBACK", default=10, minimum=1),
-    )
-    orb_cfg = ORBProStrategyConfig(
-        enabled=_env_bool("ORB_ENABLED", default=True),
-        min_confidence=_env_float("ORB_MIN_CONFIDENCE", default=63.0, minimum=0.0),
-        duration_min=_env_float("ORB_DURATION_MIN", default=15.0, minimum=0.0),
-        narrow_threshold_points=_env_float(
-            "ORB_NARROW_THRESHOLD_POINTS", default=50.0, minimum=0.0
-        ),
-        volume_mult=_env_float("ORB_VOLUME_MULT", default=2.0, minimum=0.0),
-        close_strength_pct=_env_float(
-            "ORB_CLOSE_STRENGTH_PCT", default=70.0, minimum=0.0
-        ),
-        invalid_time_minutes=_env_minutes("ORB_INVALID_TIME", default=11 * 60 + 30),
-    )
-    straddle_cfg = StraddleThetaStrategyConfig(
-        enabled=_env_bool("STRADDLE_ENABLED", default=True),
-        min_confidence=_env_float("STRADDLE_MIN_CONFIDENCE", default=73.0, minimum=0.0),
-        vix_threshold=_env_float("STRADDLE_VIX_THRESHOLD", default=13.0, minimum=0.0),
-        entry_time_minutes=_env_minutes("STRADDLE_ENTRY_TIME", default=9 * 60 + 25),
-        profit_target_pct=_env_float(
-            "STRADDLE_PROFIT_TARGET_PCT", default=65.0, minimum=0.0
-        ),
-        max_spot_move_points=_env_float(
-            "STRADDLE_MAX_SPOT_MOVE_POINTS", default=150.0, minimum=0.0
-        ),
-        exit_time_minutes=_env_minutes("STRADDLE_EXIT_TIME", default=900.0),
-    )
-    return EliteStrategiesSettings(
-        enabled=_env_bool("ELITE_STRATEGIES_ENABLED", default=True),
-        max_concurrent_strategies=_env_int(
-            "ELITE_MAX_CONCURRENT_STRATEGIES", default=3, minimum=1
-        ),
-        position_size_pct=_env_float(
-            "ELITE_POSITION_SIZE_PCT", default=2.0, minimum=0.0
-        ),
-        smc=smc_cfg,
-        vwap=vwap_cfg,
-        oi_max_pain=oi_cfg,
-        gamma_scalping=gamma_cfg,  # ✅ FIX: Updated argument name
-        cpr=cpr_cfg,
-        order_flow=order_flow_cfg,
-        bb_squeeze=bb_cfg,
-        rsi_div=rsi_cfg,
-        orb=orb_cfg,
-        straddle=straddle_cfg,
-    )
+        # 2. VWAP Pro Configuration
+        vwap_cfg = VWAPProStrategyConfig(
+            enabled=_env_bool("VWAP_ENABLED", default=True),
+            min_confidence=_env_float("VWAP_MIN_CONFIDENCE", default=70.0),
+            ema_period=_env_int("VWAP_EMA_PERIOD", default=50),
+            proximity_pct=_env_float("VWAP_PROXIMITY_PCT", default=0.15)
+        )
+
+        # 3. RSI Divergence Configuration
+        rsi_cfg = RSIDivergenceStrategyConfig(
+            enabled=_env_bool("RSI_DIV_ENABLED", default=True),
+            min_confidence=_env_float("RSI_DIV_MIN_CONFIDENCE", default=70.0),
+            rsi_period=_env_int("RSI_PERIOD", default=14)
+        )
+
+        # 4. Opening Range Breakout (ORB)
+        orb_cfg = ORBProStrategyConfig(
+            enabled=_env_bool("ORB_ENABLED", default=True),
+            min_confidence=_env_float("ORB_MIN_CONFIDENCE", default=70.0),
+            orb_minutes=_env_int("ORB_MINUTES", default=15)
+        )
+
+        # 5. Straddle/Theta Decay
+        straddle_cfg = StraddleThetaStrategyConfig(
+            enabled=_env_bool("STRADDLE_ENABLED", default=False),
+            adx_threshold=_env_float("STRADDLE_ADX_LIMIT", default=25.0),
+            min_iv=_env_float("STRADDLE_MIN_IV", default=12.0)
+        )
+
+        # 6. Gamma Scalping
+        gamma_cfg = GammaScalpingStrategyConfig(
+            enabled=_env_bool("GAMMA_ENABLED", default=False),
+            min_gamma=_env_float("GAMMA_THRESHOLD", default=0.0005)
+        )
+
+        # 7. Aggregate all into Settings Object
+        return EliteStrategiesSettings(
+            max_concurrent_strategies=_env_int("MAX_CONCURRENT_STRATS", default=3),
+            position_size_pct=_env_float("STRAT_POS_SIZE_PCT", default=2.0),
+            smc=smc_cfg,
+            vwap=vwap_cfg,
+            rsi_div=rsi_cfg,
+            orb=orb_cfg,
+            straddle=straddle_cfg,
+            gamma_scalping=gamma_cfg,
+            # Placeholder defaults for other strategies to prevent attribute errors
+            oi_max_pain=OIMaxPainStrategyConfig(enabled=False),
+            cpr=CPRBreakoutStrategyConfig(enabled=False),
+            order_flow=OrderFlowStrategyConfig(enabled=False),
+            bb_squeeze=BBSqueezeStrategyConfig(enabled=False)
+        )
+
+    except Exception as exc:
+        # If config building fails, we log it and return a safe default 
+        # to prevent the entire bot from failing to mount on Railway.
+        from nifty_scalper_bot.utils.logging import get_logger
+        get_logger(__name__).error(f"❌ Critical Error in _build_elite_settings: {exc}")
+        return EliteStrategiesSettings()
 
 
 def _build_order_settings() -> OrderSettings:
