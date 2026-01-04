@@ -52,7 +52,6 @@ from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
-from nifty_scalper_bot.core.bot_context import get_latest_bot_context
 from nifty_scalper_bot.core.message_bus import (
     MessageBus, 
     Message, 
@@ -1218,9 +1217,9 @@ def get_http_app() -> FastAPI:
     @app.on_event("startup")
     async def _start_telegram_bot_service() -> None:
         """
-        Start Telegram Bot and send a startup notification.
+        Start Telegram Bot and send a rich startup notification.
         """
-        from nifty_scalper_bot.core.bot_context import get_latest_bot_context
+        # No import needed here; get_latest_bot_context is defined globally in app.py
         
         try:
             ctx = get_latest_bot_context()
@@ -1230,17 +1229,25 @@ def get_http_app() -> FastAPI:
                 # 1. Start the Bot (Connects to API)
                 await ctx.telegram_bot.start()
                 
-                # 2. ✅ NEW: Send "Bot Online" Message
-                # We wait a moment to ensure the connection is stable
-                await asyncio.sleep(1.0)
+                # 2. Wait for connection stability (Critical for preventing send errors)
+                await asyncio.sleep(2.0)
                 
+                # 3. Determine Bot State details for the message
+                mode_icon = "🔴" if ctx.settings.enable_live else "🟡"
+                mode_text = "LIVE TRADING" if ctx.settings.enable_live else "PAPER / SHADOW"
+                
+                # 4. Construct Rich HTML Message
                 startup_msg = (
-                    "<b>🟢 Nifty Scalper Bot Online</b>\n"
-                    f"📅 <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-                    "🚀 System initialized successfully."
+                    f"<b>{mode_icon} Nifty Scalper Bot Online</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🕒 <b>Time:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+                    f"⚙️ <b>Mode:</b> <code>{mode_text}</code>\n"
+                    f"📡 <b>System:</b> <code>Initialized & Monitoring</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<i>Waiting for market data...</i>"
                 )
                 
-                # Use the internal application to send the message
+                # 5. Send Message using the internal application
                 if ctx.telegram_bot._app:
                     await ctx.telegram_bot._app.bot.send_message(
                         chat_id=ctx.settings.notifications.chat_id,
@@ -1250,7 +1257,9 @@ def get_http_app() -> FastAPI:
                     LOGGER.info("✅ Startup message sent to Telegram.")
 
         except Exception as exc:
+            # We log this but don't crash the app if Telegram fails
             LOGGER.error(f"❌ Failed to start Telegram/Send Message: {exc}", exc_info=True)
+            
             
     @app.on_event("shutdown")
     async def _stop_telegram_bot_service() -> None:
