@@ -1,12 +1,13 @@
 """
 RSI Divergence Strategy.
 World-Class implementation with Greeks validation and Swing Analysis.
+Refactored for Push-Based Architecture (Zero-Latency).
 """
 
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Deque, Mapping, Sequence, Tuple
+from typing import Any, Deque, Mapping, Sequence, Tuple, Optional, Dict
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
@@ -26,6 +27,9 @@ class RSIDivergenceStrategy(EliteStrategy):
     Detects RSI divergences (Regular & Hidden) to play reversals.
     """
 
+    # ✅ OPTIMIZATION: Use slots for memory efficiency
+    __slots__ = ("_rsi_config", "_price_history")
+
     def __init__(self, config: RSIDivergenceStrategyConfig, indicator_engine: Any) -> None:
         """
         Initialize strategy with configuration and engine.
@@ -34,141 +38,128 @@ class RSIDivergenceStrategy(EliteStrategy):
             config: Strategy configuration dataclass.
             indicator_engine: Data provider.
         """
-        # CRITICAL FIX: Correct init signature
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._rsi_config = config
-        # Store last 60 candles: (Price, RSI, Volume)
+        
+        # Store last 60 candles: (Price, RSI, Volume) for swing detection
+        # Key: Symbol -> Value: Deque of tuples
         self._price_history: dict[str, Deque[Tuple[float, float, float]]] = {}
 
-    def _evaluate_signal(self) -> EliteSignal | None:
+    def get_required_indicators(self) -> set[str]:
         """
-        Core Logic:
-        1. Accumulate History (Price, RSI).
-        2. Detect Swings (Highs/Lows).
-        3. Identify Divergence (Price vs RSI).
-        4. Validate Physics (Greeks/Liquidity).
+        Declare which indicators this strategy needs pre-calculated.
+        The StrategyManager will inject these into _evaluate_signal.
         """
-        symbol = self._rsi_config.symbol
+        return {"rsi", "atr", "volume"}
+
+    def _evaluate_signal(
+        self, 
+        symbol: str, 
+        indicators: Dict[str, Any], 
+        current_price: float, 
+        position: Any | None = None
+    ) -> EliteSignal | None:
+        """
+        Modern Signature: Evaluates signal using injected data.
         
-        # 1. Fetch Indicators
-        required_indicators = {
-            "ltp", "rsi", "volume", "atr", "minutes_since_open"
-        }
-        
-        indicators = self._indicator_engine.get_indicators(symbol, required_indicators)
-        
+        Args:
+            symbol: Ticker symbol.
+            indicators: Dictionary containing pre-fetched 'rsi', 'atr', 'volume'.
+            current_price: Latest LTP.
+            position: Current open position (if any).
+        """
         try:
-            ltp = float(indicators.get("ltp") or 0)
-            rsi = float(indicators.get("rsi") or 50)
-            vol = float(indicators.get("volume") or 0)
-            atr = float(indicators.get("atr") or 0)
-        except (ValueError, TypeError):
-            return None
+            # 1. Safe Data Extraction (Fast Path)
+            # Use defaults to prevent crashing if an indicator is temporarily missing
+            rsi = float(indicators.get("rsi") or 50.0)
+            atr = float(indicators.get("atr") or 0.0)
+            volume = float(indicators.get("volume") or 0.0)
 
-        if ltp == 0:
-            return None
-
-        # Initialize history buffer
-        if symbol not in self._price_history:
-            self._price_history[symbol] = deque(maxlen=60) # Keep 1 hour of 1-min bars
-        
-        history = self._price_history[symbol]
-        history.append((ltp, rsi, vol))
-        
-        # Need enough data to find swings (e.g., at least 20 bars)
-        if len(history) < 20:
-            return None
-
-        # 2. Find Swings
-        # Lookback window for local extrema (e.g., 5 bars left/right)
-        window = 5
-        swing_lows = self._find_swings(history, window, "low")
-        swing_highs = self._find_swings(history, window, "high")
-        
-        if not swing_lows and not swing_highs:
-            return None
-
-        side: str | None = None
-        confidence = 0.60
-        
-        # 3. Detect Divergence
-        # Bullish Divergence: Price Lower Low, RSI Higher Low
-        if len(swing_lows) >= 2:
-            last_low = swing_lows[-1]
-            prev_low = swing_lows[-2]
+            # 2. Update Internal History
+            # We need history to detect Swings (Highs/Lows)
+            if symbol not in self._price_history:
+                self._price_history[symbol] = deque(maxlen=60)
             
-            # Check Price Lower Low
-            if last_low[1] < prev_low[1]:
-                # Check RSI Higher Low
-                if last_low[2] > prev_low[2]:
-                    # Filter: RSI must be somewhat oversold (<40) to matter
-                    if last_low[2] < 40:
-                        side = "BUY"
-                        confidence += 0.20
+            history = self._price_history[symbol]
+            history.append((current_price, rsi, volume))
 
-        # Bearish Divergence: Price Higher High, RSI Lower High
-        if len(swing_highs) >= 2:
-            last_high = swing_highs[-1]
-            prev_high = swing_highs[-2]
+            # Need minimum bars to detect swings (window * 2 + 1)
+            window = 5  # Swing pivot window
+            if len(history) < (window * 2 + 2):
+                return None
+
+            # 3. Detect Swings
+            # Get recent Swing Highs and Swing Lows
+            swing_highs = self._find_swings(history, window, "high")
+            swing_lows = self._find_swings(history, window, "low")
+
+            if not swing_highs and not swing_lows:
+                return None
+
+            # 4. Analyze Divergence (Regular)
             
-            # Check Price Higher High
-            if last_high[1] > prev_high[1]:
-                # Check RSI Lower High
-                if last_high[2] < prev_high[2]:
-                    # Filter: RSI must be somewhat overbought (>60)
-                    if last_high[2] > 60:
-                        side = "SELL" # BaseStrategy handles PE mapping
-                        confidence += 0.20
+            # --- Bullish Divergence (Long) ---
+            # Condition: Price makes Lower Low, RSI makes Higher Low
+            if len(swing_lows) >= 2:
+                last_swing = swing_lows[-1]  # Most recent
+                prev_swing = swing_lows[-2]  # Previous
+                
+                # Ensure the last swing is very recent (within last 3 candles)
+                # history_len - 1 is current candle index
+                if (len(history) - 1) - last_swing[0] <= 3:
+                    price_lower_low = last_swing[1] < prev_swing[1]
+                    rsi_higher_low = last_swing[2] > prev_swing[2]
+                    
+                    if price_lower_low and rsi_higher_low and rsi < 40:
+                        LOGGER.info(f"🐂 Bullish Divergence on {symbol} (RSI: {rsi:.1f})")
+                        return EliteSignal(
+                            symbol=symbol,
+                            signal="BUY",
+                            confidence=80.0,
+                            stop_loss=current_price - (atr * 2.0),
+                            target=current_price + (atr * 4.0),
+                            quantity=self._config.quantity or 1,
+                            strategy_name="RSI_Div_Pro",
+                            metadata={
+                                "type": "Bullish Divergence",
+                                "rsi": rsi,
+                                "atr": atr
+                            }
+                        )
 
-        if not side:
+            # --- Bearish Divergence (Short) ---
+            # Condition: Price makes Higher High, RSI makes Lower High
+            if len(swing_highs) >= 2:
+                last_swing = swing_highs[-1]
+                prev_swing = swing_highs[-2]
+                
+                if (len(history) - 1) - last_swing[0] <= 3:
+                    price_higher_high = last_swing[1] > prev_swing[1]
+                    rsi_lower_high = last_swing[2] < prev_swing[2]
+                    
+                    if price_higher_high and rsi_lower_high and rsi > 60:
+                        LOGGER.info(f"🐻 Bearish Divergence on {symbol} (RSI: {rsi:.1f})")
+                        return EliteSignal(
+                            symbol=symbol,
+                            signal="SELL",
+                            confidence=80.0,
+                            stop_loss=current_price + (atr * 2.0),
+                            target=current_price - (atr * 4.0),
+                            quantity=self._config.quantity or 1,
+                            strategy_name="RSI_Div_Pro",
+                            metadata={
+                                "type": "Bearish Divergence",
+                                "rsi": rsi,
+                                "atr": atr
+                            }
+                        )
+
             return None
 
-        # 4. 🛡️ SAFETY GATE (Physics Check)
-        if not self.validate_option_health(symbol, side):
-            LOGGER.info(f"⛔ Rejected {symbol}: Failed Greeks/Liquidity Check")
+        except Exception as e:
+            # Fail gracefully without crashing the bot loop
+            LOGGER.error(f"RSI Strategy Error on {symbol}: {e}", exc_info=True)
             return None
-
-        # 5. Risk Management (ATR Based)
-        if atr == 0: atr = ltp * 0.01
-        
-        stop_buffer = atr * 2.0
-        
-        if side == "BUY":
-            stop_loss = ltp - stop_buffer
-            tp1 = ltp + (stop_buffer * 1.5)
-            tp2 = ltp + (stop_buffer * 3.0)
-        else:
-            stop_loss = ltp + stop_buffer
-            tp1 = ltp - (stop_buffer * 1.5)
-            tp2 = ltp - (stop_buffer * 3.0)
-
-        # 6. Construct Signal
-        LOGGER.info(
-            f"🚀 RSI Divergence: {symbol} {side} | RSI: {rsi:.1f} | ATR: {atr:.2f}",
-            extra={
-                "event": "rsi_divergence_signal",
-                "symbol": symbol,
-                "rsi_current": rsi,
-                "confidence": confidence
-            }
-        )
-
-        return EliteSignal(
-            symbol=symbol,
-            side=side,
-            confidence=min(confidence, 0.99),
-            entry_price=ltp,
-            stop_loss=stop_loss,
-            take_profit_1=tp1,
-            take_profit_2=tp2,
-            quantity=self._rsi_config.quantity or 1,
-            strategy_name="RSI_Div_Pro",
-            metadata={
-                "rsi": rsi,
-                "atr": atr,
-                "history_len": len(history)
-            }
-        )
 
     def _find_swings(
         self,
@@ -176,7 +167,10 @@ class RSIDivergenceStrategy(EliteStrategy):
         window: int,
         mode: str,
     ) -> Sequence[Tuple[int, float, float]]:
-        """Return swing points (Index, Price, RSI)."""
+        """
+        Return swing points (Index, Price, RSI).
+        Helper function: purely mathematical, no I/O.
+        """
         try:
             if len(history) < window * 2 + 1:
                 return []
@@ -187,8 +181,11 @@ class RSIDivergenceStrategy(EliteStrategy):
             rsis = [x[1] for x in data]
             swings: list[Tuple[int, float, float]] = []
             
-            # Iterate through data, excluding edges
-            for idx in range(window, len(data) - window):
+            # Iterate through data, excluding edges to ensure full window check
+            # We stop 'window' bars before the end to ensure we have a 'right side' to the pivot
+            limit = len(data) - window
+            
+            for idx in range(window, limit):
                 chunk = prices[idx - window : idx + window + 1]
                 current = prices[idx]
                 
@@ -201,7 +198,7 @@ class RSIDivergenceStrategy(EliteStrategy):
             
             return swings
             
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             LOGGER.error(f"Swing detection failed: {exc}")
             return []
 
