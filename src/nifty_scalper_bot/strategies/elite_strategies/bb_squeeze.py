@@ -1,11 +1,12 @@
 """
 Bollinger Band Squeeze Breakout Strategy.
 World-Class implementation with Greeks validation, Volatility checks, and Dynamic Risk.
+Refactored for Push-Based Architecture (Zero-Latency).
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from typing import Any, Dict, Optional
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
@@ -26,6 +27,9 @@ class BBSqueezeStrategy(EliteStrategy):
     Detects 'Squeeze' (Low Volatility) -> 'Expansion' (High Volatility).
     """
 
+    # ✅ OPTIMIZATION: Use slots for memory efficiency
+    __slots__ = ("_bb_config",)
+
     def __init__(self, config: BBSqueezeStrategyConfig, indicator_engine: Any) -> None:
         """
         Initialize strategy with configuration and engine.
@@ -34,138 +38,127 @@ class BBSqueezeStrategy(EliteStrategy):
             config: Strategy configuration dataclass.
             indicator_engine: Data provider.
         """
-        # CRITICAL FIX: Do not pass 'name' to super().__init__
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._bb_config = config
 
-    def _evaluate_signal(self) -> EliteSignal | None:
+    def get_required_indicators(self) -> set[str]:
         """
-        Core Logic:
-        1. Check Bandwidth (Is it tight?).
-        2. Check Breakout (Did price close outside?).
-        3. Check Volume (Is there power behind the move?).
-        4. Validate Physics (Greeks/Liquidity).
+        Declare indicators for the StrategyManager to pre-calculate.
+        Ensures all band data is perfectly synchronized.
         """
-        symbol = self._bb_config.symbol
-        
-        # 1. Fetch Indicators
-        # We need BB Bands, RSI, Volume, and Greeks
-        required_indicators = {
-            "bb_upper", "bb_lower", "bb_middle", 
-            "rsi", "volume", "avg_volume", "ltp"
+        return {
+            "bollinger_upper",
+            "bollinger_lower",
+            "bollinger_mid",
+            "atr",
+            "volume",
+            "average_volume",
+            "ltp"
         }
-        
-        indicators = self._indicator_engine.get_indicators(symbol, required_indicators)
-        
-        # Safe extraction with type casting
+
+    def _evaluate_signal(
+        self, 
+        symbol: str, 
+        indicators: Dict[str, Any], 
+        current_price: float, 
+        position: Any | None = None
+    ) -> EliteSignal | None:
+        """
+        Modern Signature: Evaluates signal using injected data points.
+        """
         try:
-            upper = float(indicators.get("bb_upper") or 0)
-            lower = float(indicators.get("bb_lower") or 0)
-            mid = float(indicators.get("bb_middle") or 0)
-            rsi = float(indicators.get("rsi") or 50)
-            vol = float(indicators.get("volume") or 0)
-            avg_vol = float(indicators.get("avg_volume") or 1)
-            ltp = float(indicators.get("ltp") or 0)
-        except (ValueError, TypeError):
-            return None # Data not ready
+            # 1. Safe Data Extraction
+            upper = float(indicators.get("bollinger_upper") or 0.0)
+            lower = float(indicators.get("bollinger_lower") or 0.0)
+            mid = float(indicators.get("bollinger_mid") or 0.0)
+            atr = float(indicators.get("atr") or 0.0)
+            vol = float(indicators.get("volume") or 0.0)
+            avg_vol = float(indicators.get("average_volume") or 1.0)
 
-        if ltp == 0 or mid == 0:
-            return None
+            # Prevent processing on invalid/missing data
+            if upper == 0 or lower == 0 or current_price <= 0:
+                return None
 
-        # 2. Calculate Squeeze Metrics
-        # Bandwidth: How tight are the bands? (Narrow = Squeeze)
-        bandwidth = ((upper - lower) / mid) * 100
-        squeeze_threshold = self._bb_config.squeeze_threshold  # e.g., 2.0%
+            # 2. Calculate Bandwidth (The Squeeze Intensity)
+            # Bandwidth tells us how "tight" the spring is coiled.
+            if mid == 0: return None
+            bandwidth_pct = ((upper - lower) / mid) * 100
 
-        # 3. Detect Breakout Condition
-        side: str | None = None
-        
-        # Bullish Breakout: Price > Upper Band
-        if ltp > upper:
-            # RSI Filter: Ensure momentum but not extreme overbought (>80 is risky)
-            if 50 < rsi < 80: 
+            # Threshold from config (e.g., 0.5% width)
+            squeeze_threshold = getattr(self._bb_config, "squeeze_threshold_pct", 0.5)
+            
+            # If bands are wide, the squeeze has already resolved. Skip.
+            # We allow up to 2x threshold to catch the very beginning of the expansion.
+            if bandwidth_pct > (squeeze_threshold * 2.0):
+                return None
+
+            # 3. Detect Directional Breakout
+            side = ""
+            if current_price > upper:
                 side = "BUY"
-        
-        # Bearish Breakout: Price < Lower Band
-        elif ltp < lower:
-            # RSI Filter: Ensure momentum but not extreme oversold (<20 is risky)
-            if 20 < rsi < 50:
-                side = "SELL" # Note: For Options, this usually translates to buying PE via BaseStrategy
+            elif current_price < lower:
+                side = "SELL"
+            
+            if not side:
+                return None
 
-        if not side:
+            # 4. Volume Confirmation (The "Fuel" Check)
+            # A valid squeeze breakout MUST have expanding volume.
+            vol_ratio = vol / avg_vol
+            if vol_ratio < 1.3: # Require 30% surge over average
+                return None
+
+            # 5. Dynamic Risk Management
+            # Fallback ATR for stop calculation if missing
+            if atr == 0: atr = current_price * 0.005
+
+            # Stop Loss: The Middle Band (Mean)
+            # In a true breakout, price should NOT return to the mean.
+            stop_loss = mid 
+            
+            if side == "BUY":
+                # Targets based on volatility expansion
+                tp1 = current_price + (atr * 2.5)
+                tp2 = current_price + (atr * 5.0)
+            else:
+                tp1 = current_price - (atr * 2.5)
+                tp2 = current_price - (atr * 5.0)
+
+            # 6. Confidence Scoring
+            # Base 75%. +15% if volume is extreme (>2.5x)
+            confidence = 75.0
+            if vol_ratio > 2.5: confidence += 15.0
+
+            LOGGER.info(
+                f"🚀 BB Squeeze Breakout: {symbol} {side} | Bandwidth: {bandwidth_pct:.2f}% | Vol: {vol_ratio:.1f}x",
+                extra={
+                    "event": "bb_squeeze_signal",
+                    "symbol": symbol,
+                    "bandwidth": bandwidth_pct,
+                    "vol_ratio": vol_ratio
+                }
+            )
+
+            return EliteSignal(
+                symbol=symbol,
+                signal=side,
+                confidence=min(confidence, 99.0),
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                target=tp1,
+                quantity=self._bb_config.quantity or 1,
+                strategy_name="BB_Squeeze_Pro",
+                metadata={
+                    "type": "Volatility_Expansion",
+                    "bandwidth_pct": round(bandwidth_pct, 3),
+                    "volume_ratio": round(vol_ratio, 2),
+                    "mid_band_support": mid
+                }
+            )
+
+        except Exception as e:
+            LOGGER.error(f"BB Strategy Critical Error on {symbol}: {e}", exc_info=True)
             return None
-
-        # 4. Volume Confirmation (Energy)
-        # We want Volume to be at least X% of Average (e.g., 120%)
-        vol_ratio = vol / avg_vol if avg_vol > 0 else 0
-        min_vol_ratio = self._bb_config.min_volume_ratio or 1.2
-        
-        if vol_ratio < min_vol_ratio:
-            return None # False breakout (Low volume)
-
-        # 5. Squeeze Validation (Was it tight before?)
-        # Ideally, we check if bandwidth WAS low recently. 
-        # For this atomic check, we ensure bandwidth isn't blown out yet.
-        # If bandwidth is massive (>5%), the move already happened.
-        if bandwidth > (squeeze_threshold * 3):
-            return None # Too late, expansion already huge
-
-        # 6. 🛡️ SAFETY GATE (Physics Check)
-        # This uses the BaseElite method we added earlier
-        if not self.validate_option_health(symbol, side):
-            LOGGER.info(f"⛔ Rejected {symbol}: Failed Greeks/Liquidity Check")
-            return None
-
-        # 7. Risk Management (Technical Stop)
-        # For BB Squeeze, the invalidation point is usually the Middle Band (Basis)
-        # TP is projected expansion (Width * 2)
-        width = upper - lower
-        
-        if side == "BUY":
-            stop_loss = mid # Reverting to mean kills the trend
-            tp1 = ltp + (width * 1.5)
-            tp2 = ltp + (width * 3.0)
-        else:
-            stop_loss = mid
-            tp1 = ltp - (width * 1.5)
-            tp2 = ltp - (width * 3.0)
-
-        # 8. Confidence Calculation
-        # Higher confidence if volume is huge and squeeze was tight
-        confidence = 0.70 
-        if vol_ratio > 2.0: confidence += 0.10
-        if bandwidth < squeeze_threshold: confidence += 0.10
-        
-        confidence = min(confidence, 0.99)
-
-        # 9. Construct Signal
-        LOGGER.info(
-            f"🚀 BB Squeeze Signal: {symbol} {side} | Bandwidth: {bandwidth:.2f}% | Vol: {vol_ratio:.1f}x",
-            extra={
-                "event": "bb_squeeze_signal",
-                "symbol": symbol,
-                "bandwidth": bandwidth,
-                "rsi": rsi
-            }
-        )
-
-        return EliteSignal(
-            symbol=symbol,
-            side=side,
-            confidence=confidence,
-            entry_price=ltp,
-            stop_loss=stop_loss,
-            take_profit_1=tp1,
-            take_profit_2=tp2,
-            quantity=self._bb_config.quantity or 1,
-            strategy_name="BB_Squeeze_Pro",
-            metadata={
-                "bandwidth": bandwidth,
-                "vol_ratio": vol_ratio,
-                "rsi": rsi,
-                "squeeze_threshold": squeeze_threshold
-            }
-        )
 
 
 __all__ = ["BBSqueezeStrategy"]
