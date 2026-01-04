@@ -6,9 +6,9 @@ Production-Grade: Optimized Dispatch (Zero-Reflection Runtime) & Type Safety.
 from __future__ import annotations
 
 import inspect
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Mapping, Set, Tuple
+from typing import Any, Dict, Set, Optional
 
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
@@ -21,249 +21,218 @@ LOGGER = get_logger(__name__)
 
 @dataclass(slots=True)
 class EliteSignal:
-    """Container for elite strategy signal output."""
+    """
+    Container for elite strategy signal output.
+    Optimized with __slots__ for reduced memory footprint during high-frequency generation.
+    """
 
     symbol: str
-    side: str
+    signal: str  # Standardized name (was 'side')
     confidence: float
     entry_price: float
     stop_loss: float | None
-    take_profit_1: float | None
-    take_profit_2: float | None
+    target: float | None
     quantity: int = 1
     strategy_name: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    
+    # Backwards compatibility fields for execution engine
+    take_profit_1: float | None = None 
+    take_profit_2: float | None = None
+    side: str = field(init=False) # Computed property for legacy support
+    
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    def __post_init__(self) -> None:
+        """Normalize fields for backward compatibility."""
+        # 1. Alias 'signal' to 'side' so old code works
+        object.__setattr__(self, 'side', self.signal)
+        
+        # 2. Map 'target' to 'take_profit_1' if missing
+        if self.target and not self.take_profit_1:
+             object.__setattr__(self, 'take_profit_1', self.target)
+
     def to_payload(self) -> dict[str, Any]:
-        """Return serialisable representation of the signal."""
+        """Return serializable representation for telemetry/logs."""
         return {
             "symbol": self.symbol,
-            "side": self.side,
+            "side": self.signal,
             "confidence": self.confidence,
             "entry_price": self.entry_price,
             "stop_loss": self.stop_loss,
-            "take_profit_1": self.take_profit_1,
-            "take_profit_2": self.take_profit_2,
+            "target": self.target,
             "quantity": self.quantity,
             "strategy": self.strategy_name,
-            "timestamp": self.timestamp.isoformat(),
             "metadata": self.metadata,
+            "timestamp": self.timestamp.isoformat(),
         }
 
 
 class EliteStrategy(Strategy):
-    """Base class for high-probability elite setups."""
+    """
+    Abstract base class for all Elite Strategies.
+    Implements a Hybrid Architecture: Supports both Legacy (Pull) and Modern (Push) logic.
+    """
 
-    def __init__(self, config: EliteStrategyConfig, indicator_engine: Any):
-        """Initialize the elite strategy base with optimized dispatch."""
+    def __init__(self, config: EliteStrategyConfig, indicator_engine: Any) -> None:
+        """
+        Initialize strategy logic.
         
-        # Initialize parent with correct signature (name + parameters dict)
-        super().__init__(
-            name=self.__class__.__name__,
-            parameters=asdict(config) if is_dataclass(config) else {}
-        )
+        Args:
+            config: Strategy configuration object.
+            indicator_engine: Data provider service.
+        """
+        # Auto-detect name from config class (e.g. SMCStrategyConfig -> SMC)
+        name = config.__class__.__name__.replace("Config", "").replace("Strategy", "")
+        super().__init__(name=name)
         
         self._config = config
         self._indicator_engine = indicator_engine
-        
-        # State tracking
         self._last_signal_at: datetime | None = None
+        self._signals_generated = 0
         self._last_signal: EliteSignal | None = None
-        self._signals_generated: int = 0
-        
-        # ⚙️ PRODUCTION SAFETY SETTINGS
-        self.min_oi = 50000
-        self.max_spread_pct = 5.0
-        self.min_delta = 0.30
-        self.max_iv_percentile = 85.0
 
-        # 🚀 PERFORMANCE OPTIMIZATION: Cache the dispatch decision ONCE.
-        # We check the signature here so we don't slow down the trading loop later.
+        # PERFORMANCE OPTIMIZATION:
+        # Inspect the signature ONCE at startup to decide execution path.
+        # This avoids running 'inspect.signature' on every tick (which is slow).
         sig = inspect.signature(self._evaluate_signal)
-        # If it takes more than 0 params (excluding self), it's the new signature.
+        # Legacy: _evaluate_signal(self) -> 0 params
+        # Modern: _evaluate_signal(self, symbol, indicators, ...) -> >0 params
         self._is_legacy_signature = len(sig.parameters) == 0
         
         if self._is_legacy_signature:
-            LOGGER.debug(f"{self.name}: Detected Legacy Signature (0 args)")
+            LOGGER.debug(f"⚠️ {self.name}: Running in Legacy Mode (Pull-Based)")
         else:
-            LOGGER.debug(f"{self.name}: Detected Modern Signature (4 args)")
+            LOGGER.debug(f"🚀 {self.name}: Running in Modern Mode (Push-Based)")
 
     def get_required_indicators(self) -> Set[str]:
         """
-        Return the set of indicators required by this strategy.
-        Elite strategies fetch their own data via _indicator_engine inside _evaluate_signal.
+        Override this in subclasses to declare needed data.
+        The StrategyRunner will pre-fetch these before calling _evaluate_signal.
+        
+        Returns:
+            Set of indicator names (e.g. {'rsi', 'vwap', 'atr'})
         """
         return set()
 
-    def generate_signal(
-        self, 
-        symbol: str, 
-        indicators: Mapping[str, Any], 
-        current_price: float, 
-        position: Any | None = None
-    ) -> Signal | None:
+    def evaluate(self) -> Signal | None:
         """
-        Standard interface implementation bridging to elite logic.
-        Uses cached dispatch logic for maximum performance.
+        Main entry point called by the Strategy Runner loop.
+        Acts as a 'Bridge' to handle data fetching automatically if needed.
         """
+        # 1. Global Kill Switch
         if not self._config.enabled:
             return None
 
+        # 2. Cooldown Check
+        if self._last_signal_at:
+            elapsed = (datetime.now(timezone.utc) - self._last_signal_at).total_seconds()
+            if elapsed < self._config.cooldown_seconds:
+                return None
+
+        elite_signal: EliteSignal | None = None
+
         try:
-            # ✅ CONTEXT INJECTION: Inject symbol into config for legacy strategies
-            # We use object.__setattr__ to bypass potential frozen/slots checks
-            if hasattr(self._config, "symbol"):
-                object.__setattr__(self._config, "symbol", symbol)
-
-            # -----------------------------------------------------------
-            # 🚀 OPTIMIZED DISPATCH (Zero Reflection)
-            # -----------------------------------------------------------
+            # 3. Execution Dispatch (The Bridge)
             if self._is_legacy_signature:
-                # The Old Way: Pass nothing (Strategy reads self._config.symbol)
-                elite_signal = self._evaluate_signal()
+                # LEGACY PATH: Strategy is responsible for fetching its own data
+                elite_signal = self._evaluate_signal() # type: ignore
             else:
-                # The New Way: Pass arguments directly
-                elite_signal = self._evaluate_signal(symbol, indicators, current_price, position)
-
-            if elite_signal:
-                # 🛡️ SAFETY GATE: Validate Trade Quality
-                if not self.validate_option_health(elite_signal.symbol, elite_signal.side):
-                    LOGGER.info(f"⛔ Rejected {elite_signal.symbol}: Failed Safety Check")
+                # MODERN PATH: We fetch data here and inject it (Dependency Injection)
+                symbol = getattr(self._config, "symbol", None)
+                if not symbol:
                     return None
-
-                self._update_state(elite_signal)
-                return self._convert_to_core_signal(elite_signal)
                 
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error(f"Strategy {self.name} failed evaluation: {exc}", exc_info=True)
-            return None
+                # Get the manifest of what data is needed
+                req_inds = self.get_required_indicators()
+                if not req_inds:
+                    # If modern signature but no indicators requested, fail safe
+                    return None
+                
+                # Bulk fetch data (Vectorized/Cached access)
+                indicators = self._indicator_engine.get_indicators(symbol, list(req_inds))
+                
+                # Safe LTP extraction
+                ltp = float(indicators.get("ltp") or 0.0)
+                if ltp == 0:
+                    return None
+                
+                # Inject data into strategy logic
+                elite_signal = self._evaluate_signal(
+                    symbol=symbol,
+                    indicators=indicators,
+                    current_price=ltp
+                )
+
+            # 4. Signal Processing
+            if elite_signal:
+                return self._process_signal(elite_signal)
+
+        except Exception as e:
+            # Catch strategy-specific crashes so the main bot loop doesn't die
+            LOGGER.error(f"Error evaluating {self.name}: {e}", exc_info=True)
+        
         return None
 
-    def _evaluate_signal(self, *args, **kwargs) -> EliteSignal | None:
-        """Internal hook for strategy-specific logic."""
-        raise NotImplementedError("Subclasses must implement _evaluate_signal")
+    def _evaluate_signal(
+        self, 
+        symbol: str = "", 
+        indicators: Dict[str, Any] = {}, 
+        current_price: float = 0.0, 
+        position: Any | None = None
+    ) -> EliteSignal | None:
+        """
+        Abstract method to implement trading logic.
+        Must be overridden by subclasses.
+        """
+        raise NotImplementedError("Strategy must implement _evaluate_signal")
 
-    @property
-    def name(self) -> str:
-        """Return strategy identifier."""
-        return self.__class__.__name__
+    def _process_signal(self, signal: EliteSignal) -> Signal:
+        """
+        Converts internal EliteSignal to the bot's standard Signal format.
+        Handles bookkeeping (timestamp updates, counters).
+        """
+        self._last_signal_at = signal.timestamp
+        self._last_signal = signal
+        self._signals_generated += 1
 
-    # ==========================================================================
-    # 🛡️ SAFETY & RISK ENGINE
-    # ==========================================================================
-
-    def validate_option_health(self, symbol: str, direction: str) -> bool:
-        """🛡️ GATEKEEPER: Stops the bot from trading 'Garbage Options'."""
-        # Only validate Options contracts
-        if "CE" not in symbol and "PE" not in symbol:
-            return True
-
-        quote = self._indicator_engine.get_quote(symbol)
-        greeks = self._indicator_engine.get_indicators(symbol, ["delta", "theta", "iv_percentile"])
-        
-        if not quote:
-            return False
-
-        # 1. LIQUIDITY CHECK
-        oi = quote.get('oi', 0) or 0
-        if oi < self.min_oi:
-            LOGGER.debug(f"⛔ {symbol}: Low Liquidity (OI: {oi}). Skip.")
-            return False
-
-        # 2. SPREAD CHECK
-        bid = float(quote.get('bid', 0) or 0)
-        ask = float(quote.get('ask', 0) or 0)
-        if bid > 0:
-            spread_pct = ((ask - bid) / bid) * 100
-            if spread_pct > self.max_spread_pct:
-                LOGGER.debug(f"⛔ {symbol}: Spread wide ({spread_pct:.2f}%). Skip.")
-                return False
-
-        # 3. GREEKS CHECK
-        if greeks:
-            delta = abs(float(greeks.get('delta') or 0.5))
-            if delta < self.min_delta:
-                LOGGER.debug(f"⛔ {symbol}: Weak Delta ({delta:.2f}). Skip.")
-                return False
-                
-            theta = float(greeks.get('theta') or 0.0)
-            if direction == "BUY" and theta < -20.0: 
-                LOGGER.debug(f"⛔ {symbol}: High Theta Burn ({theta}). Skip.")
-                return False
-                
-            iv_p = float(greeks.get('iv_percentile') or 50.0)
-            if direction == "BUY" and iv_p > self.max_iv_percentile:
-                LOGGER.debug(f"⛔ {symbol}: IV Expensive ({iv_p}). Skip.")
-                return False
-
-        return True
-
-    def calculate_option_rr(self, premium: float, side: str = "BUY") -> Tuple[float, float]:
-        """💰 RISK LOGIC: Calculates SL/TP based on Premium %."""
-        # Standard Risk Profile
-        SL_PCT = 0.15 
-        TP_PCT = 0.30 
-
-        if side == "BUY":
-            sl_price = round(premium * (1 - SL_PCT), 1)
-            tp_price = round(premium * (1 + TP_PCT), 1)
-        else:
-            sl_price = round(premium * (1 + SL_PCT), 1)
-            tp_price = round(premium * (1 - TP_PCT), 1)
-            
-        # Bounds Check
-        sl_price = max(0.05, sl_price)
-        tp_price = max(0.05, tp_price)
-            
-        return sl_price, tp_price
-
-    def _convert_to_core_signal(self, signal: EliteSignal) -> Signal:
-        """Adapter converting elite signal to core signal format."""
+        # Use signal defaults if not computed by strategy
         sl = signal.stop_loss
-        tp = signal.take_profit_1
-        
-        # Auto-calculate Risk/Reward if not provided by strategy
-        if not sl or not tp:
-            calc_sl, calc_tp = self.calculate_option_rr(signal.entry_price, signal.side)
-            if not sl: sl = calc_sl
-            if not tp: tp = calc_tp
+        tp = signal.target
 
+        # Enrich metadata for logging/debugging
         metadata = signal.metadata.copy()
         metadata.update({
             "strategy": self.name,
-            "elite_version": "2.0",
-            "tp2": signal.take_profit_2,
-            "quantity": signal.quantity
+            "mode": "Legacy" if self._is_legacy_signature else "Push",
+            "quantity": signal.quantity,
+            "generated_at": signal.timestamp.isoformat()
         })
 
+        # Return standardized object for OrderManager
         return Signal(
-            action=signal.side, # type: ignore
+            action=signal.signal,
             symbol=signal.symbol,
             confidence=signal.confidence,
             price=signal.entry_price,
-            tag=f"{self.name} elite setup",
+            tag=f"{self.name}",
             stop_loss=sl,
             take_profit=tp,
             metadata=metadata,
         )
-
-    def _update_state(self, signal: EliteSignal) -> None:
-        """Persist bookkeeping fields for telemetry."""
-        self._last_signal_at = signal.timestamp
-        self._last_signal = signal
-        self._signals_generated += 1
 
     def get_stats(self) -> dict[str, Any]:
         """Return diagnostic statistics for the strategy."""
         last_payload: dict[str, Any] | None = None
         if self._last_signal is not None:
             last_payload = self._last_signal.to_payload()
+            
         return {
             "strategy": self.name,
             "enabled": self._config.enabled,
-            "signals": self._signals_generated,
+            "signals_generated": self._signals_generated,
             "last_signal": last_payload,
+            "mode": "Legacy" if self._is_legacy_signature else "Push"
         }
 
     @property
