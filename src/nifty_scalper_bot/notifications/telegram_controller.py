@@ -562,13 +562,19 @@ class TelegramBot:
         self._started_at: datetime = datetime.now(timezone.utc)
         self._um: t.Any | None = None
 
+    # =========================================================================
+    # ✅ CORRECTED STARTUP LOGIC (Single Source of Truth)
+    # =========================================================================
+
     async def start(self) -> None:
         """
         Unified startup for Telegram Bot.
         Handles Initialization -> Start -> Polling in one safe flow.
         """
-        # 1. GUARD: Prevent double-start
+        # 1. GUARD: If app is already running, do absolutely nothing.
+        # This prevents the 'Conflict' error when app.py tries to start it twice.
         if self._app is not None and self._app.running:
+            log.warning("⚠️ TelegramBot start requested but already running. Ignoring.")
             return
 
         log.info("🚀 Initializing TelegramBot execution...")
@@ -579,7 +585,8 @@ class TelegramBot:
                 self._app = self.builder().build()
                 self._wire_handlers(self._app)
 
-            # 3. Lifecycle: Initialize & Start
+            # 3. Lifecycle: Initialize & Start (Connects to Telegram API)
+            # Explicitly awaiting these prevents 'coroutine never awaited' warnings.
             if not self._app._initialized:
                 await self._app.initialize()
             if not self._app.running:
@@ -590,13 +597,17 @@ class TelegramBot:
                 log.info("Telegram attempting Webhook mode...")
                 started = await self._start_webhook_stack()
                 if not started and self.deps.enable_polling_fallback:
-                    await self._activate_polling_fallback("webhook setup failed")
+                    log.warning("Webhook failed; switching to polling...")
+                    # Clear webhook before switching to polling
+                    await self._app.bot.delete_webhook(drop_pending_updates=True)
+                    await self._start_polling_if_needed()
             elif self.deps.enable_polling_fallback:
-                # Clear hooks to ensure polling works
+                log.info("Telegram using Polling mode.")
+                # Always clear webhook first to prevent API conflicts
                 await self._app.bot.delete_webhook(drop_pending_updates=True)
-                # Delegate to polling method
                 await self._start_polling_if_needed()
 
+            # 5. Start Alert Workers
             self._ensure_alert_worker()
 
         except Exception as e:
@@ -604,31 +615,34 @@ class TelegramBot:
 
     async def _start_polling_if_needed(self) -> None:
         """
-        Starts non-blocking polling with network timeouts.
+        Starts non-blocking updater polling with explicit network timeouts.
         """
+        # 1. Config Check
         if not self.deps.enable_polling_fallback:
             return
         if self._app is None or self._app.updater is None:
             return
         
-        # GUARD: Stop if already running
-        if self._app.updater.running: 
+        # 2. GUARD: Stop if already running
+        if self._app.updater.running:
             return
 
         try:
             self._mark_polling_started()
-            log.info("📡 Starting Telegram Polling...")
+            log.info("📡 Starting Telegram Polling (Background)...")
 
-            # CRITICAL FIX: Timeouts for network stability
+            # 3. CRITICAL FIX: Timeouts added for Railway/Docker stability
+            # These 30s timeouts fix the 'telegram_send_failed' errors
             await self._app.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
                 poll_interval=1.0,
-                timeout=30,
-                read_timeout=30,
-                write_timeout=30,
-                connect_timeout=30
+                timeout=30,          # Long-polling timeout
+                read_timeout=30,     # Fixes 'send_failed' network errors
+                write_timeout=30,    # Fixes 'send_failed' network errors
+                connect_timeout=30   # Fixes connection establishment
             )
+            
             log.info("✅ Telegram Polling Active.")
 
         except Exception as exc:
