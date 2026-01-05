@@ -337,6 +337,12 @@ class StrategyRunner:
         self._message_bus = message_bus
         self._config = config or StrategyRunnerConfig()
         self._logger = get_logger(__name__)
+        # ✅ FIX 1: Ensure 'data' directory exists to prevent Persistence Crash
+        try:
+            os.makedirs("data", exist_ok=True)
+            self._logger.info("✅ Verified 'data/' directory exists for persistence.")
+        except Exception as e:
+            self._logger.error(f"❌ Failed to create 'data/' directory: {e}")
         self._data_hub = data_hub
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
@@ -420,6 +426,8 @@ class StrategyRunner:
         self._bar_builders: Dict[str, OneMinuteBarBuilder] = {}
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
+
+    
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
