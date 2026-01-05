@@ -1909,7 +1909,10 @@ class StrategyRunner:
 
             self._logger.info(f"🟡 SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty} Limit: {execution_price}")
             
-            unique_tag = f"{signal.strategy_name[:3]}_{int(timestamp.timestamp())}"
+            # ✅ CORRECT FIX: Read from metadata safely
+            # Use .get() with a fallback 'MAN' (Manual) or 'UNK' (Unknown)
+            strat_name = signal.metadata.get("strategy", "MAN") if signal.metadata else "MAN"
+            unique_tag = f"{strat_name[:3]}_{int(timestamp.timestamp())}"
 
             order_id = self._order_manager.place_order(
                 symbol=trade_symbol,
