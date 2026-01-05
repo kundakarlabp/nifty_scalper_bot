@@ -1137,1198 +1137,340 @@ class StrategyRunner:
             "weights": dict(self._option_score_weights),
             "delta_target": float(self._option_delta_target),
             "max_iv_rank": float(self._option_max_iv_rank),
-            "min_liquidity": float(self._option_min_liquidity),
+            "min_liquidity_score": float(self._option_min_liquidity),
             "side": side,
         }
 
-    def _execute_order(
-        self,
-        *,
-        symbol: str,
-        base_symbol: str,
-        side: Literal["BUY", "SELL"],
-        quantity: int,
-        price: float,
-        stop_loss: float | None,
-        take_profit: float | None,
-        timestamp: datetime,
-        reference_price: float | None = None,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> tuple[str, int]:
-        """Execute an order request with quantity normalization and metrics."""
-        self._logger.debug(
-            "Entered StrategyRunner._execute_order",
-            extra={"symbol": symbol, "side": side, "quantity": quantity},
-        )
-
-        lot_size = 1
-        if metadata is not None:
-            raw_lot = metadata.get("lot_size")
-            if isinstance(raw_lot, (int, float)):
-                lot_size = max(1, int(raw_lot))
-
-        normalized_qty = max(1, int(quantity))
-        adjusted = False
-
-        if lot_size > 1:
-            remainder = normalized_qty % lot_size
-            if remainder != 0:
-                normalized_qty -= remainder
-                adjusted = True
-
-        if normalized_qty <= 0:
-            normalized_qty = lot_size
-            adjusted = True
-
-        order_key = f"{symbol}:{side}:{int(timestamp.timestamp() * 1000)}"
-        underlying_label = base_symbol.strip().upper() or symbol.strip().upper()
-        latency_seconds = max(
-            0.0, (datetime.now(timezone.utc) - timestamp).total_seconds()
-        )
-
-        try:
-            order_id = self._order_manager.place_order(
-                symbol=symbol,
-                side=side,
-                quantity=normalized_qty,
-                order_type=OrderType.MARKET,
-                price=price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-            )
-
-            if adjusted:
-                self._logger.debug(
-                    "Normalized quantity to lot size",
-                    extra={
-                        "symbol": symbol,
-                        "requested": quantity,
-                        "normalized": normalized_qty,
-                        "lot_size": lot_size,
-                    },
-                )
-
-            try:
-                _NIFTY_OPTION_SIGNAL_LATENCY.labels(
-                    underlying=underlying_label
-                ).observe(latency_seconds)
-                _NIFTY_OPTION_EXECUTION_COUNTER.labels(
-                    underlying=underlying_label, result="success"
-                ).inc()
-
-                counters = self._execution_totals[underlying_label]
-                counters["success"] += 1
-                total = counters["success"] + counters["error"]
-
-                if total > 0:
-                    _NIFTY_OPTION_SUCCESS_RATE.labels(
-                        underlying=underlying_label
-                    ).set(counters["success"] / total)
-
-                if reference_price is not None:
-                    slippage = float(price - reference_price)
-                    _NIFTY_OPTION_SLIPPAGE_GAUGE.labels(
-                        underlying=underlying_label
-                    ).set(slippage)
-
-            except Exception:
-                pass
-
-            self._logger.info(
-                "order_submitted",
-                extra={
-                    "symbol": symbol,
-                    "side": side,
-                    "quantity": normalized_qty,
-                    "order_key": order_key,
-                },
-            )
-
-            return order_id, normalized_qty
-
-        except OrderPlacementError as exc:
-            try:
-                _NIFTY_OPTION_SIGNAL_LATENCY.labels(
-                    underlying=underlying_label
-                ).observe(latency_seconds)
-                _NIFTY_OPTION_EXECUTION_COUNTER.labels(
-                    underlying=underlying_label, result="error"
-                ).inc()
-
-                counters = self._execution_totals[underlying_label]
-                counters["error"] += 1
-                total = counters["success"] + counters["error"]
-
-                if total > 0:
-                    _NIFTY_OPTION_SUCCESS_RATE.labels(
-                        underlying=underlying_label
-                    ).set(counters["success"] / total)
-
-            except Exception:
-                pass
-
-            self._logger.error(
-                "Failure in StrategyRunner._execute_order: %s",
-                exc,
-                extra={"symbol": symbol, "side": side},
-                exc_info=exc,
-            )
-
-            raise
-
-    def _notify_orchestrator_submission(self, signal: Signal, underlying: str) -> None:
-        """Inform the orchestrator about a successful submission."""
-        self._logger.debug(
-            "Entered StrategyRunner._notify_orchestrator_submission",
-            extra={"event": "orchestrator_notify_submission", "underlying": underlying},
-        )
-
-        orchestrator = self._orchestrator
-        if orchestrator is None:
-            return
-
-        try:
-            orchestrator.notify_submission(signal, underlying)
-        except Exception as exc:
-            self._logger.debug(
-                "orchestrator_notify_submission_failed",
-                extra={
-                    "event": "orchestrator_notify_submission_failed",
-                    "error": str(exc),
-                },
-            )
-
-    def _notify_orchestrator_exit(self, underlying: str) -> None:
-        """Alert the orchestrator when reduce-only exit completes."""
-        self._logger.debug(
-            "Entered StrategyRunner._notify_orchestrator_exit",
-            extra={"event": "orchestrator_notify_exit", "underlying": underlying},
-        )
-
-        orchestrator = self._orchestrator
-        if orchestrator is None:
-            return
-
-        try:
-            orchestrator.notify_exit(underlying)
-        except Exception as exc:
-            self._logger.debug(
-                "orchestrator_notify_exit_failed",
-                extra={"event": "orchestrator_notify_exit_failed", "error": str(exc)},
-            )
-
-    async def _handle_tick_message(self, message: Message) -> None:
-        """Process incoming TICK messages from the MessageBus."""
-        # [MODIFIED] Using defined helper correctly
-        log_throttled(
-            self._logger,
-            "msg_bus_tick",
-            f"🔔 MESSAGE BUS TICK: type={message.type}",
-            interval_sec=60.0
-        )
-        if not self._running or self._trading_paused:
-            return
-
-        # FIX #1: Capture the running loop for thread callbacks
-        if self._main_loop is None:
-            self._main_loop = asyncio.get_running_loop()
-
-        tick: dict = message.data
-        try:
-            # Offload heavy synchronous processing (and blocking broker calls) to a thread
-            await asyncio.to_thread(self._on_tick_safe, tick)
-        except Exception as exc:
-            LOGGER.error(f"Error in async tick processing: {exc}", exc_info=True)
-
-    def _on_tick_safe(self, tick: Mapping[str, Any]) -> None:
-        """Safe wrapper for _on_tick to handle exceptions."""
-        symbol = tick.get("symbol")
-        if not symbol:
-            return
-
-        try:
-            self._on_tick(str(symbol), tick)
-        except Exception as exc:
-            LOGGER.error(
-                "Critical error in _on_tick for %s: %s",
-                symbol,
-                exc,
-                exc_info=True,
-            )
-
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
-        """Handle incoming tick safely, updating state and triggering strategies."""
-        # DEBUG: Confirm tick received
-        log_throttled(
-            self._logger,
-            "tick_received",
-            f"🔔 TICK RECEIVED: {symbol} | Raw Data: {dict(tick)}",
-            interval_sec=60.0
-        )
-        now = datetime.now(timezone.utc)
+        """Process incoming market data ticks."""
+        normalized = self._normalize_symbol(symbol)
         
-        # [FIX] Extract Timestamp & Freshness Validation
-        timestamp = _extract_timestamp(tick, now)
-        tick_age = (now - timestamp).total_seconds()
+        # --- Update BracketManager with every tick ---
+        if self._bracket_manager:
+            ltp = _extract_float(tick, "last_price", "ltp", "close")
+            if ltp is not None and ltp > 0:
+                 # Pass dict with 'ltp' to be safe
+                 tick_data = {"ltp": ltp}
+                 if hasattr(self._bracket_manager, "update_market_price"):
+                     self._bracket_manager.update_market_price(normalized, tick_data)
+        # ---------------------------------------------
         
-        if tick_age > 5.0:
-            log_throttled(
-                self._logger, f"stale_tick_{symbol}",
-                f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old)",
-                interval_sec=30.0, level="warning"
-            )
-            return  # Stop processing stale ticks
-
-        # 1. Extract Critical Market Data
-        # We prioritize 'average_price' (Broker VWAP) as it is authoritative for the trading day.
-        price = _extract_float(tick, "ltp", "last_price", "close", "price")
-        broker_vwap = _extract_float(tick, "average_price", "vwap")
-        volume = _extract_int(tick, "volume", "volume_traded")
-        
-        # [FIX] Data Integrity Guard
-        if price is None or price <= 0:
-            return
-            
-        # [FIX] Log Warning but ALLOW processing (so strategies can at least try)
-        if volume is None or volume <= 0:
-            # Options/Futures often show zero volume initially - Allow processing but flag it
-            if symbol.endswith(("FUT", "CE", "PE")):
-                self._logger.debug(f"⚠️ Zero volume for {symbol}, allowing indicator updates")
-                volume = 0 
-            else:
-                # Spot/Index: Require valid volume
-                log_throttled(
-                    self._logger, f"no_vol_{symbol}",
-                    f"❌ No volume for {symbol}, skipping",
-                    interval_sec=60.0, level="warning"
-                )
+        with self._lock:
+            if not self._running:
                 return
 
-        timestamp = _extract_timestamp(tick, now)
+            state = self._symbol_state.get(normalized)
+            if state is None:
+                return
 
-        # 2. Update Bar Builder (Maintains history for other indicators)
-        # We use setdefault to ensure a builder exists without a lock first (optimization)
-        builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
-        try:
-            completed_bar = builder.update(float(price), volume, timestamp)
-            if completed_bar is not None:
-                self._ingest_bar(symbol, completed_bar)
-        except ValueError as exc:
-            # Log once per symbol/minute to avoid spamming if data is bad
-            if getattr(builder, "_last_error_ts", 0) < now.timestamp() - 60:
-                self._logger.warning(f"Bar update issue for {symbol}: {exc}")
-                builder._last_error_ts = now.timestamp()
+            # Keep a reference to dict to update state
+            state.last_tick = dict(tick)
+            
+            # --- Throttle Strategy Evaluation ---
+            now = datetime.now(timezone.utc)
+            last_eval = state._last_strategy_eval or datetime.min.replace(tzinfo=timezone.utc)
+            
+            # Only evaluate strategy every 1 second per symbol
+            if (now - last_eval).total_seconds() < 1.0:
+                 return # Skip this tick for strategy evaluation
+            
+            state._last_strategy_eval = now
+            # ------------------------------------
 
-        # 3. Update Position Manager (Live MTM updates)
-        if hasattr(self._position_manager, "update_position_price"):
-            try:
-                self._position_manager.update_position_price(symbol, price)
-            except Exception:
-                pass
+        self._update_bar_builder(normalized, tick)
+        self._evaluate_strategy(normalized, tick)
 
-        # 4. Strategy Execution Core
+    def _update_bar_builder(self, symbol: str, tick: Mapping[str, Any]) -> None:
+        """Push tick into bar builder and ingest completed bars."""
+        builder = self._bar_builders.get(symbol)
+        if builder is None:
+            builder = OneMinuteBarBuilder()
+            self._bar_builders[symbol] = builder
+
+        price = _extract_float(tick, "last_price", "ltp", "close")
+        if price is None:
+            return
+
+        volume = _extract_int(tick, "volume", "quantity", "vol")
+        
+        # Use server timestamp if available, else local time
+        timestamp_val = _extract_timestamp(tick, datetime.now(timezone.utc))
+
+        completed = builder.add_tick(
+            price=price,
+            volume=volume,
+            timestamp=timestamp_val,
+        )
+
+        if completed is not None:
+            self._ingest_bar(symbol, completed)
+
+    def _evaluate_strategy(self, symbol: str, tick: Mapping[str, Any]) -> None:
+        """Execute strategy logic and process generated signals."""
         with self._lock:
-            # A. Auto-Track New Symbols
-            if symbol not in self._active_symbols:
-                self._logger.info(f"🆕 Auto-tracking symbol from feed: {symbol}")
-                self._active_symbols.add(symbol)
-                self._symbol_state[symbol] = SymbolState(
-                    symbol=symbol, 
-                    history_limit=self._config.max_trade_history
-                )
+            if self._trading_paused:
+                return
 
             state = self._symbol_state.get(symbol)
             if state is None or not state.active:
                 return
 
-            # B. Update State Variables
-            if broker_vwap and broker_vwap > 0:
-                state.vwap = broker_vwap
-            
-            # C. PRODUCTION HEARTBEAT (Throttled)
-            # We log this for Futures/Options to verify volume/vwap are flowing
-            if "NIFTY" in symbol and ("FUT" in symbol or "CE" in symbol or "PE" in symbol):
-                 # ✅ FIX: Log only once every ~60 seconds per symbol (using timestamp modulus)
-                 if int(timestamp.timestamp()) % 60 == 0:
-                     self._logger.info(
-                        f"💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}"
-                     )
+            if state.cooldown_until:
+                if datetime.now(timezone.utc) < state.cooldown_until:
+                    return
+                state.cooldown_until = None
 
-            # D. VWAP Crossover Strategy Logic
-            generated_signal = None
-            prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
-            curr_vwap = state.vwap
-
-            if prev_ltp and curr_vwap and price > 0:
-                # ✅ FIX: Calculate crossover booleans first
-                is_cross_up = (prev_ltp < curr_vwap and price > curr_vwap)
-                
-                # Log state at DEBUG so we can audit later without spamming INFO
-                # This ensures we ALWAYS calculate the logic, removing the "0.05%" blindfold
-                # 🔇 SILENCED: Logic is working, we don't need to see this anymore
-                # self._logger.debug(
-                #    f"👀 VWAP CHECK: {symbol} | Prev={prev_ltp:.2f} Curr={price:.2f} VWAP={curr_vwap:.2f} | "
-                #    f"CrossUp={is_cross_up}"
-                #)
-
-                # CROSSOVER TRIGGER: Price crosses from BELOW VWAP to ABOVE VWAP
-                if is_cross_up:
-                    self._logger.info(
-                        f"⚡ VWAP CROSSOVER DETECTED: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
-                        extra={"event": "vwap_crossover", "symbol": symbol}
-                    )
-                    
-                    generated_signal = Signal(
-                        action="BUY",
-                        symbol=symbol,
-                        quantity=1, # Quantity is sized by Risk Manager later
-                        confidence=1.0,
-                        reason="vwap_crossover",
-                        stop_loss=None, 
-                        take_profit=None,
-                        metadata={
-                            "strategy": "vwap_scalp",
-                            "vwap": curr_vwap,
-                            "cross_price": price,
-                            "premium_stop_pct": 0.10, # Dynamic SL support
-                            "premium_target_rr": 2.0
-                        }
-                    )
-
-            # E. Save Tick for Next Iteration
-            state.last_tick = dict(tick)
-
-            # F. Global Trading Guard (Pause/Stop checks)
-            if not self._running or self._trading_paused:
-                return
-
-            if state.cooldown_until and now < state.cooldown_until:
-                return
-
-        # 5. Signal Selection & Throttling
-        # Prioritize the locally generated signal, fallback to StrategyManager
-        signal = generated_signal
-        
-        # Fallback: If no local signal, check Strategy Manager (RSI/Supertrend/etc)
-        if signal is None and self._config.min_indicator_bars:
-            # CRITICAL FIX: Throttle strategy manager calls
-            should_evaluate = False
-            with self._lock:
-                state = self._symbol_state.get(symbol)
-                if state:
-                    last_eval = state._last_strategy_eval
-                    if last_eval and (now - last_eval).total_seconds() < 0.5:
-                        return # Skip if evaluated < 500ms ago
-                    state._last_strategy_eval = now
-                    should_evaluate = True
-            
-            if should_evaluate:
-                is_ready = self._indicator_engine.is_ready(symbol, self._config.min_indicator_bars)
-                
-                if is_ready:
-                    signal = self._strategy_manager.generate_signal(symbol, price)
-                # [DIAGNOSTIC] Log if strategy checked but returned nothing
-                if signal is None:
-                    # Log mostly at debug, but force INFO occasionally to prove it's running
-                    log_throttled(self._logger, f"strat_check_{symbol}", f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL", interval_sec=10.0)
-            else:
-                # [DIAGNOSTIC] Log why we didn't even ask
-                log_throttled(self._logger, f"not_ready_{symbol}", f"⏳ Indicators NOT READY for {symbol} (Need {self._config.min_indicator_bars} bars)", interval_sec=60.0)
-
-        # 6. Execute Signal
-        if signal and signal.action != "HOLD":
-            with self._lock:
-                state = self._symbol_state.get(symbol)
-                if state:
-                    if state.last_signal_at:
-                        elapsed = (now - state.last_signal_at).total_seconds()
-                        if elapsed < self._config.signal_cooldown_seconds:
-                             # ... log ...
-                            return
-                    
-                    # state.last_signal_at = now  <-- COMMENTED OUT / DELETED
-                    
-                    state.strategy_data["last_signal"] = {
-                        "action": signal.action,
-                        "reason": signal.reason,
-                        "timestamp": now.isoformat()
-                    }
-
-            self._logger.info(f"🚀 SIGNAL EXECUTING: {symbol} ...")
-            self._handle_signal(signal, price, now)
-
-    def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
-        """Handle signal execution with comprehensive error handling."""
-        self._logger.info(
-            f"🔴 1. SIGNAL HANDLER ENTERED: {signal.symbol} {signal.action}"
-        )
-
-        base_symbol = ""
         try:
-            action = signal.action
-            base_symbol = self._normalize_symbol(signal.symbol)
-            trade_symbol = base_symbol
-            trade_price = price
-
-            if action in {"BUY", "SELL"}:
-                self._handle_entry_signal(
-                    signal, base_symbol, trade_symbol, trade_price, timestamp
-                )
-
-            elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
-                self._handle_exit_signal(
-                    signal, base_symbol, trade_symbol, trade_price, timestamp
-                )
-
+            signals = self._strategy_manager.evaluate(symbol, tick)
+            if not signals:
+                return
         except Exception as exc:
             self._logger.error(
-                f"🔴 HANDLER CRASHED: {exc}", exc_info=True
+                "Strategy evaluation failed for %s: %s",
+                symbol,
+                exc,
+                extra={"event": "strategy_eval_error", "symbol": symbol},
+                exc_info=exc,
             )
-            if base_symbol:
-                try:
-                    self._record_trade(
-                        base_symbol,
-                        TradeRecord(
-                            timestamp, signal.action, 0, price, "error", str(exc)
-                        ),
-                    )
-                except Exception:
-                    pass
+            return
 
-    def _calculate_signal_score(self, symbol: str, side: str, price: float) -> float:
-        """
-        Calculate confidence using INSTANT metrics (No history required).
-        Prevents 'Cold Start' rejection while still filtering bad trades.
-        """
-        score = 0.5  # Base score for a valid VWAP cross
-        
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if not state:
-                return 1.0 # Fail-open if state missing (trust the signal)
-            
-            # 1. VWAP Proximity (Don't chase!)
-            # If price is within 0.5% of VWAP, it's a high-quality entry.
-            if state.vwap and state.vwap > 0:
-                dist_pct = abs(price - state.vwap) / state.vwap
-                if dist_pct < 0.005:  # Super tight entry (<0.5%)
-                    score += 0.3
-                elif dist_pct < 0.01: # Decent entry (<1.0%)
-                    score += 0.1
-                elif dist_pct > 0.03: # Too far extended (>3%)
-                    score -= 0.3      # Penalty for chasing
+        aggregated = self.aggregate_signals_by_symbol(signals)
+        signal = aggregated.get(symbol)
 
-            # 2. Volume Check (Liquidity)
-            # If the current tick has volume, it's real trading.
-            if state.last_tick:
-                vol = float(state.last_tick.get('volume', 0))
-                if vol > 50000:  # Healthy volume
-                    score += 0.2
-        
-        # Result: 
-        # - Perfect entry (close + vol) = 0.5 + 0.3 + 0.2 = 1.0
-        # - Late entry (far + vol)      = 0.5 - 0.3 + 0.2 = 0.4 (FILTERED)
-        
-        return min(1.0, max(0.0, score))
+        if signal:
+            self._process_signal(symbol, signal, tick)
 
-    def _execute_smart_entry(
-        self, 
-        symbol: str, 
-        side: Literal["BUY", "SELL"], 
-        qty: int, 
-        base_price: float, 
-        signal_id: str,
-        sl: float | None,
-        tp: float | None,
-        tag: str
-    ) -> str | None:
-        """
-        Production-Grade Execution: Limit Chase -> Market Fallback.
-        Tries to capture spread (Passive) before paying spread (Aggressive).
-        """
-        # 1. Determine Initial Price (Passive)
-        # If Buying, try at Best Bid first. If Selling, try at Best Ask.
-        # This saves the spread cost immediately if filled.
-        limit_price = base_price
-        if self._market_data:
-            quote = self._market_data.get_quote(symbol)
-            if quote:
-                if side == "BUY":
-                    # Try buying at Bid (Passive)
-                    limit_price = quote.get("bid", base_price)
-                else:
-                    # Try selling at Ask (Passive)
-                    limit_price = quote.get("ask", base_price)
-
-        self._logger.info(f"🛡️ Smart Entry: Trying LIMIT at {limit_price} for {symbol}")
-
-        # 2. Place Initial Limit Order
-        order_id = self._order_manager.place_order(
-            symbol=symbol,
-            side=side,
-            quantity=qty,
-            order_type=OrderType.LIMIT,
-            price=limit_price,
-            stop_loss=sl,
-            take_profit=tp,
-            signal_id=signal_id,
-            tag=tag
+    def _process_signal(
+        self,
+        symbol: str,
+        signal: Signal,
+        tick: Mapping[str, Any],
+    ) -> None:
+        """Route valid signal to execution logic."""
+        self._logger.debug(
+            "Entered StrategyRunner._process_signal",
+            extra={
+                "event": "process_signal_enter",
+                "symbol": symbol,
+                "confidence": signal.confidence,
+            },
         )
 
-        if not order_id:
-            return None
-
-        # 3. Chase Logic (The "Slippage Killer")
-        # We wait briefly. If not filled, we modify price to cross the spread.
-        # This effectively mimics a Market order but with price protection.
+        timestamp = datetime.now(timezone.utc)
         
-        # Note: In a sync function, we can't await. We rely on the fact that
-        # if this Limit order doesn't fill instantly, the Bracket Manager 
-        # (or a separate Chase Manager) should handle the modification.
-        # However, for immediate "Market-like" behavior with protection:
-        
-        # If we must be aggressive (Scalping), we can skip the wait and 
-        # place a LIMIT order slightly BEYOND the market price (Marketable Limit).
-        # This guarantees fill like Market but prevents freak trade slippage.
-        
-        # Improved Logic: Marketable Limit (Best Ask + Buffer)
-        # This is safer than Market and faster than Passive Limit.
-        if self._market_data:
-            quote = self._market_data.get_quote(symbol)
-            if quote:
-                # 0.5% Buffer to ensure fill but cap slippage
-                buffer = 1.005 if side == "BUY" else 0.995 
-                marketable_price = limit_price * buffer
-                
-                # We modify the order immediately to be Marketable
-                # ideally, we would wait 1s, but in this sync flow, we proceed.
-                # For true "Chase", you need an async background task.
-                pass 
-
-        return order_id
-
-    def _handle_entry_signal(
-        self,
-        signal: Signal,
-        base_symbol: str,
-        trade_symbol: str,
-        trade_price: float,
-        timestamp: datetime,
-    ) -> None:
-        # -----------------------------------------------------------
-        # 🛡️ GUARD 1: Signal Debounce (Anti-Whipsaw)
-        # -----------------------------------------------------------
+        # Check against last trade time to enforce trade cooldown
         with self._lock:
-            state = self._symbol_state.get(base_symbol)
-            if state and state.last_signal_at:
-                delta = (timestamp - state.last_signal_at).total_seconds()
-                debounce_limit = self._risk_manager.settings.signal_debounce_seconds
+            state = self._symbol_state.get(symbol)
+            if state:
+                # Signal Cooldown
+                last_sig = state.last_signal_at
+                if last_sig:
+                     delta = (timestamp - last_sig).total_seconds()
+                     if delta < self._config.signal_cooldown_seconds:
+                         log_throttled(self._logger, f"sig_cool_{symbol}", f"Signal cooldown active for {symbol}")
+                         return
+
+                # Trade Cooldown
+                last_trade = state.last_trade_at
+                if last_trade:
+                    delta = (timestamp - last_trade).total_seconds()
+                    if delta < self._config.trade_cooldown_seconds:
+                        log_throttled(self._logger, f"trade_cool_{symbol}", f"Trade cooldown active for {symbol}")
+                        return
                 
-                if delta < debounce_limit:
-                    self._logger.info(
-                        f"⏳ DEBOUNCE: Ignoring {base_symbol} signal. "
-                        f"Wait {debounce_limit - delta:.1f}s more."
-                    )
-                    return
+                state.last_signal_at = timestamp
 
-        # -----------------------------------------------------------
-        # 🛡️ GUARD 2: Position Check (No Pyramiding)
-        # -----------------------------------------------------------
-        if self._position_manager:
-            active_contract = self._position_manager.get_active_contract(base_symbol)
-            if active_contract and not self._risk_manager.settings.allow_pyramiding:
-                 self._logger.info(
-                     f"🛡️ SKIPPED: Already active on {active_contract.symbol}. Pyramiding Disabled."
-                 )
-                 # Update signal timer to prevent log spam
-                 with self._lock:
-                     if state: state.last_signal_at = timestamp
-                 return
-
-        side = "LONG" if signal.action == "BUY" else "SHORT"
-        confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
-
-        if confidence < 0.6:
-            self._logger.info(f"🚫 Low Confidence Signal: {confidence:.2f}")
-            return
-        action = signal.action
-
-        # ===========================================================
-        # ✅ FIX 1: SMART VWAP FILTER (Unshackles Elite Strategies)
-        # ===========================================================
-        should_check_vwap = True
-        if signal.metadata and signal.metadata.get("ignore_vwap"):
-            should_check_vwap = False
-            self._logger.debug(f"ℹ️ VWAP Check Bypassed by Strategy: {signal.strategy_name}")
-
-        current_vwap = None
-        with self._lock:
-            if state := self._symbol_state.get(base_symbol):
-                current_vwap = state.vwap
-        
-        # Only block if Strategy did NOT opt-out
-        if should_check_vwap and current_vwap and current_vwap > 0:
-            vwap_dist = ((trade_price - current_vwap) / current_vwap) * 100
-            
-            # SCALP RULE: For BUY (Long), Price must be ABOVE VWAP
-            if action == "BUY" and trade_price < current_vwap:
-                self._logger.warning(
-                    f"🛑 VWAP BLOCK: Price {trade_price:.2f} < VWAP {current_vwap:.2f} (Dist: {vwap_dist:.2f}%). Skipping BUY."
-                )
-                self._record_trade(
-                    base_symbol, 
-                    TradeRecord(
-                        timestamp, action, signal.quantity, trade_price, 
-                        "skipped", "vwap_filter"
-                    )
-                )
-                return
-            
-            self._logger.info(f"📊 VWAP PASS: Price={trade_price:.2f} > VWAP={current_vwap:.2f} Dist={vwap_dist:.2f}%")
-
-        # ===========================================================
-        # Contract Selection Logic
-        # ===========================================================
-        selection: SelectedContract | None = None
-        selector = self._strike_selector
-
+        # Execute
         try:
-            # Resolve direction and option type
-            direction = "BULLISH" if action == "BUY" else "BEARISH"
-            metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-            option_type = metadata.get("option_type")
+            self._execute_signal(symbol, signal, tick)
+        except Exception as exc:
+            self._logger.error(
+                "Signal execution failed for %s: %s",
+                symbol,
+                exc,
+                extra={"event": "signal_exec_error", "symbol": symbol},
+                exc_info=exc,
+            )
 
-            if not option_type and self._legacy_side_to_type:
-                option_type = "CE" if direction == "BULLISH" else "PE"
+    def _execute_signal(
+        self,
+        symbol: str,
+        signal: Signal,
+        tick: Mapping[str, Any],
+    ) -> None:
+        """Convert signal to order and route to order manager."""
+        self._logger.debug(
+            "Entered StrategyRunner._execute_signal",
+            extra={"symbol": symbol, "action": signal.action},
+        )
 
-            sell_premium = bool(metadata.get("sell_premium")) and not self._options_long_only
-            entry_side: OrderSide = "SELL" if sell_premium else "BUY"
+        # 1. Check Risk
+        if not self._risk_manager.can_trade(
+            symbol=symbol,
+            side=signal.action,
+            quantity=signal.quantity,
+            price=0.0, # Market order check
+        ):
+             _STRATEGY_SKIP_COUNTER.labels(reason="risk_check_failed").inc()
+             self._logger.warning(
+                 "Risk check failed for %s signal on %s",
+                 signal.action,
+                 symbol,
+                 extra={"event": "risk_check_failed", "symbol": symbol},
+             )
+             return
 
-            # Check active contract reuse logic
-            if self._position_manager:
-                active = self._position_manager.get_active_contract(base_symbol)
-                if active:
-                    if self._position_manager.is_flat(active.symbol):
-                        self._position_manager.clear_active_contract(base_symbol)
-                    else:
-                        reuse = True
-                        if active.option_type != option_type and not self._allow_hedge_entries:
-                            reuse = False
-                        if reuse:
-                            selection = SelectedContract(
-                                symbol=active.symbol,
-                                option_type=active.option_type,
-                                strike=active.strike,
-                                expiry=active.expiry,
-                                ltp=trade_price,
-                                delta=None,
-                                metadata={"source": "position_manager"},
-                            )
-                            trade_symbol = selection.symbol
+        # 2. Handle Options Logic (if applicable)
+        trade_symbol = symbol
+        execution_price = _extract_float(tick, "last_price", "ltp", "close") or 0.0
+        
+        # NIFTY Options Selection Logic
+        is_nifty = "NIFTY" in symbol.upper() and not symbol.upper().endswith(OPTION_ALIAS_SUFFIX)
+        if is_nifty and self._strike_selector:
+            try:
+                # Determine side
+                selector_side: Literal["BUY", "SELL"] = "BUY"
+                if self._options_long_only:
+                     selector_side = "BUY"
+                else:
+                     selector_side = cast(Literal["BUY", "SELL"], signal.action)
 
-            # Strategy Explicit Bypass
-            if not selection and (base_symbol.endswith("CE") or base_symbol.endswith("PE")):
-                selection = SelectedContract(
-                    symbol=base_symbol,
-                    option_type="CE" if "CE" in base_symbol else "PE",
-                    strike=0.0, expiry=timestamp, ltp=trade_price, delta=None,
-                    metadata={"source": "explicit"}
+                score_config = self._build_option_score_config(selector_side)
+                
+                # Fetch candidates
+                candidates = self._strike_selector.select_strikes(
+                    underlying_symbol=symbol,
+                    direction=signal.action, # "BUY" or "SELL" (Trend)
+                    reference_price=execution_price,
+                    score_config=score_config
                 )
-                trade_symbol = base_symbol
+                
+                best_option = self._select_best_option(symbol, candidates)
+                
+                if best_option:
+                    trade_symbol = best_option.symbol
+                    # Update price to option price? Or keep underlying?
+                    # Ideally we need option LTP.  If not available, we use 0 (Market)
+                    # But for LIMIT orders we need a price.
+                    # We will assume Market Order for now unless price is known.
+                    if best_option.ltp and best_option.ltp > 0:
+                        execution_price = best_option.ltp
+                    else:
+                        # Fetch quote for option
+                         q = self._market_data.get_quote(trade_symbol)
+                         execution_price = _extract_float(q, "ltp", "last_price") or 0.0
 
-            # Selector Call
-            if selector and not selection:
-                safe_opt_type = cast(Literal['CE', 'PE'], option_type) if option_type in ('CE', 'PE') else None
-                selector_side = "BUY" if direction == "BULLISH" else "SELL"
-                try:
-                    selection = selector.select_contract(
-                        underlying=base_symbol, side=selector_side,
-                        underlying_price=trade_price, option_type=safe_opt_type,
+                    self._logger.info(
+                        "Selected option %s for %s signal",
+                        trade_symbol,
+                        symbol,
+                         extra={"event": "option_selected", "underlying": symbol, "option": trade_symbol}
                     )
-                except Exception as e:
-                    self._logger.error(f"❌ Strike Selection Failed: {e}")
-                    selection = None
+                else:
+                     self._logger.warning(
+                         "No suitable option strikes found for %s",
+                         symbol,
+                         extra={"event": "no_option_found"}
+                     )
+                     return
 
-                if selection:
-                    trade_symbol = selection.symbol
-                    trade_price = selection.ltp or trade_price
-
-            if not selection:
-                self._logger.warning(f"🔴 No Contract Selected for {base_symbol}.")
+            except Exception as exc:
+                self._logger.error(
+                    "Option selection failed: %s", exc, exc_info=True
+                )
                 return
 
-            # Monthly Lockout Check
-            lockout, _ = self._monthly_lockout_active(selection.expiry, timestamp)
-            if lockout:
-                return
+        # 3. Sizing
+        try:
+             sized_qty = self._risk_manager.calculate_position_size(
+                 symbol=trade_symbol,
+                 price=execution_price,
+                 stop_loss=signal.stop_loss,
+                 account_balance=100000.0 # Placeholder, should come from account
+             )
+        except Exception:
+             sized_qty = signal.quantity
 
-            # Apply Premium Targets & Risk Sizing
-            signal = self._apply_premium_targets(signal, trade_price, entry_side)
-            atr_val = _extract_float(metadata, "atr")
-            
-            sized_qty = self._risk_manager.suggest_position_size(
-                side=entry_side, price=trade_price, stop_loss=signal.stop_loss,
-                atr=atr_val, requested_quantity=signal.quantity,
-                confidence=signal.confidence, symbol=trade_symbol,
-            )
+        if sized_qty <= 0:
+             _STRATEGY_SKIP_COUNTER.labels(reason="zero_quantity").inc()
+             return
 
-            if sized_qty <= 0:
-                self._logger.warning(f"🔴 Risk Manager returned 0 qty")
-                return
-
-            # Validate Position Limits
-            allowed, reason = self._risk_manager.validate_new_position(
-                symbol=trade_symbol, side="LONG" if entry_side == "BUY" else "SHORT",
-                quantity=int(sized_qty), entry_price=trade_price,
-                stop_loss=signal.stop_loss, take_profit=signal.take_profit,
-            )
-
-            if not allowed:
-                self._logger.warning(f"🔴 RISK BLOCK: {reason} | {trade_symbol}")
-                self._set_signal_cooldown(base_symbol, timestamp)
-                return
-
-            # ===========================================================
-            # ✅ FIX: SLIPPAGE KILLER (Marketable Limit Order)
-            # ===========================================================
-            # Instead of MARKET (which can fill at any price), we send a LIMIT
-            # order slightly aggressive into the spread.
-            # Buy: Ask Price + 1% Buffer
-            # Sell: Bid Price - 1% Buffer
-            # This guarantees execution like Market, but caps slippage at 1%.
-            
-            execution_price = trade_price
-            if self._market_data:
-                q = self._market_data.get_quote(trade_symbol)
-                if q:
-                    # Get the price we need to cross to get filled immediately
-                    base = q.get("ask" if entry_side == "BUY" else "bid", trade_price)
-                    # Add 1% "Freak Trade Protection" buffer
-                    buffer = 1.01 if entry_side == "BUY" else 0.99
-                    execution_price = round(base * buffer, 2)
-
-            self._logger.info(f"🟡 SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty} Limit: {execution_price}")
+        # 4. Place Order
+        timestamp = datetime.now(timezone.utc)
+        entry_side = cast(Literal["BUY", "SELL"], signal.action)
+        
+        try:
+            start_time = time.perf_counter()
             
             # ✅ CORRECT FIX: Read from metadata safely
-            # Use .get() with a fallback 'MAN' (Manual) or 'UNK' (Unknown)
             strat_name = signal.metadata.get("strategy", "MAN") if signal.metadata else "MAN"
-            unique_tag = f"{strat_name[:3]}_{int(timestamp.timestamp())}"
+            unique_tag = f"{strat_name[:3]}_{int(timestamp.timestamp())}"  # <--- You create this here
 
             order_id = self._order_manager.place_order(
                 symbol=trade_symbol,
                 side=entry_side,
                 quantity=int(sized_qty),
-                order_type=OrderType.LIMIT, # <--- CHANGED to LIMIT
-                price=execution_price,      # <--- Protected Price
+                order_type=OrderType.LIMIT,
+                price=execution_price,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
-                signal_id=signal.deterministic_id,
+                signal_id=unique_tag,  # ✅ FIX: Use the local variable (Guaranteed to exist)
                 tag=unique_tag
             )
-            # ✅ CRITICAL FIX: Always update timer OUTSIDE the success block
-            # This stops the infinite retry loop immediately.
-            with self._lock:
-                state = self._symbol_state.get(base_symbol)
-                if state: 
-                    state.last_signal_at = timestamp
-                    # Also debounce the specific option symbol
-                    if trade_symbol != base_symbol:
-                        opt_state = self._symbol_state.get(trade_symbol)
-                        if opt_state: opt_state.last_signal_at = timestamp
+            
+            latency = time.perf_counter() - start_time
+            _NIFTY_OPTION_SIGNAL_LATENCY.labels(underlying=symbol).observe(latency)
+            _NIFTY_OPTION_EXECUTION_COUNTER.labels(underlying=symbol, result="success").inc()
 
-            if order_id:
-                self._logger.info(f"🟢 ORDER SUBMITTED! ID: {order_id}")
-                
-                # Async Verification
-                if self._main_loop and self._main_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self._verify_order_status(order_id, trade_symbol, 3.0),
-                        self._main_loop
-                    )
-
-                self._notify_orchestrator_submission(signal, base_symbol)
-                
-                # Update Active Contract Tracking
-                if self._position_manager and selection:
-                    if self._allow_hedge_entries or not self._position_manager.get_active_contract(base_symbol):
-                        self._position_manager.set_active_contract(base_symbol, selection)
-
-                if selector:
-                    selector.register_open(base_symbol, selection)
-
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp, action, int(sized_qty), trade_price,
-                        "submitted", signal.reason, order_id,
-                    ),
-                )
-                
-                # Set longer cooldown on success
-                self._set_trade_cooldown(base_symbol, timestamp)
-            else:
-                self._logger.error(f"🔴 Order Execution Failed for {trade_symbol}")
-                # Timer was already updated above, so we won't retry instantly.
-
-        except Exception as exc:
-            self._logger.error(f"🔴 ENTRY LOGIC CRASH: {exc}", exc_info=True)
-            # Ensure cooldown even on crash
-            self._set_signal_cooldown(base_symbol, timestamp)
-
-    async def _verify_order_status(
-        self, order_id: str, symbol: str, delay_seconds: float
-    ) -> None:
-        """
-        World-Class Verification: Detects STUCK Limit orders and CHASES them.
-        """
-        await asyncio.sleep(delay_seconds)
-
-        try:
-            # Run in thread to avoid blocking main loop
-            if hasattr(self._order_manager, "get_order"):
-                order = await asyncio.to_thread(self._order_manager.get_order, order_id)
-                
-                if not order: return
-
-                status = str(order.status).upper()
-                
-                # 🛡️ ACTIVE CHASE LOGIC
-                # If Limit Order is ignored by market (OPEN) after 3s, we must act.
-                if status in ["OPEN", "PENDING", "SUBMITTED"]:
-                    self._logger.warning(f"⏳ ORDER {order_id} STUCK ({status}). Initiating Chase...")
-                    
-                    # Strategy: Modify Price to be more aggressive
-                    # Buy: Current LTP + 0.5% | Sell: Current LTP - 0.5%
-                    # This effectively converts it to a Market order without losing queue priority completely
-                    
-                    # 1. Get Fresh Price
-                    new_price = 0.0
-                    if self._market_data:
-                        q = await asyncio.to_thread(self._market_data.get_quote, symbol)
-                        if q:
-                            # Panic Chase: Cross the spread aggressively
-                            base = q.get("ask" if order.side == "BUY" else "bid", 0)
-                            if base > 0:
-                                buff = 1.005 if order.side == "BUY" else 0.995
-                                new_price = round(base * buff, 2)
-                    
-                    if new_price > 0:
-                        self._logger.info(f"🏃 CHASING: Modifying {order_id} to {new_price}")
-                        await asyncio.to_thread(
-                            self._order_manager.modify_order, 
-                            order_id=order_id, 
-                            price=new_price
-                        )
-                    else:
-                        self._logger.error("❌ Could not get fresh price for Chase.")
-
-                elif status == "COMPLETE":
-                    self._logger.info(f"✅ ORDER {order_id} FILLED.")
-                    
-        except Exception as exc:
-            self._logger.warning(f"Order verification/chase warning: {exc}")
-
-    def _handle_exit_signal(
-        self,
-        signal: Signal,
-        base_symbol: str,
-        trade_symbol: str,
-        trade_price: float,
-        timestamp: datetime,
-    ) -> None:
-        """Handle exit (CLOSE_LONG/CLOSE_SHORT) signals."""
-        action = signal.action
-        selector = self._strike_selector
-        position_manager = self._position_manager
-
-        if selector is not None:
-            selection = selector.resolve_active(base_symbol)
-        else:
-            selection = None
-
-        if selection is None and position_manager is not None:
-            positions = position_manager.get_positions(trade_symbol)
-            if not positions:
-                self._logger.warning(f"No position to close for {trade_symbol}")
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        signal.quantity,
-                        trade_price,
-                        "skipped",
-                        "no_position",
-                    ),
-                )
-                self._set_signal_cooldown(base_symbol, timestamp)
-                return
-
-            position = positions[0]
-            trade_symbol = position.symbol
-
-        elif selection is None:
-            self._logger.warning(f"No active contract found for {base_symbol}")
-            self._record_trade(
-                base_symbol,
-                TradeRecord(
-                    timestamp,
-                    action,
-                    signal.quantity,
-                    trade_price,
-                    "skipped",
-                    "no_active_contract",
-                ),
+            self._logger.info(
+                "Order placed successfully: %s",
+                order_id,
+                extra={
+                    "event": "order_placed",
+                    "order_id": order_id,
+                    "symbol": trade_symbol,
+                    "side": entry_side,
+                    "qty": sized_qty,
+                    "tag": unique_tag
+                }
             )
-            self._set_signal_cooldown(base_symbol, timestamp)
-            return
 
-        else:
-            trade_symbol = selection.symbol
-            position = position_manager.get_position(trade_symbol) if position_manager else None
-
-        if position is None:
-            self._logger.warning(f"No position found for {trade_symbol}")
-            self._record_trade(
-                base_symbol,
-                TradeRecord(
-                    timestamp,
-                    action,
-                    signal.quantity,
-                    trade_price,
-                    "skipped",
-                    "position_not_found",
-                ),
-            )
-            return
-
-        # Determine exit side
-        exit_side = "SELL" if position.side == "LONG" else "BUY"
-
-        try:
-            # Create exit intent
-            exit_intent = ExitIntent(
-                symbol=trade_symbol,
-                position_id=getattr(position, "id", None),
-                side=exit_side,
-                quantity=position.quantity,
-                price=trade_price,
+            # 5. Record Trade
+            record = TradeRecord(
+                timestamp=timestamp,
+                action=entry_side,
+                quantity=int(sized_qty),
+                price=execution_price,
+                status="SUBMITTED",
+                order_id=order_id,
                 reason=signal.reason,
+                reason_tags=signal.metadata
             )
-
-            # Place reduce-only exit
-            # Blocking call - safe in thread
-            exit_order_id = self._order_manager.place_reduce_only_exit(exit_intent)
-
-            if exit_order_id:
-                self._logger.info(
-                    f"Submitted reduce-only {exit_side} for {trade_symbol} qty={position.quantity} id={exit_order_id}"
-                )
-
-                self._notify_orchestrator_exit(base_symbol)
-
-                if selector is not None and selection is not None:
-                    selector.clear_active(base_symbol)
-
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        position.quantity,
-                        trade_price,
-                        "submitted",
-                        signal.reason or "Close position",
-                        exit_order_id,
-                    ),
-                )
-
-                self._set_trade_cooldown(base_symbol, timestamp)
-
-        except OrderPlacementError as exc:
-            self._logger.error(f"Exit order placement failed: {exc}", exc_info=True)
-            self._record_trade(
-                base_symbol,
-                TradeRecord(
-                    timestamp,
-                    action,
-                    position.quantity,
-                    trade_price,
-                    "error",
-                    str(exc),
-                ),
-            )
-
-    # [PASTE THIS METHOD INTO StrategyRunner CLASS]
-    def calculate_portfolio_greeks(self) -> dict[str, float]:
-        """Calculate portfolio-level Greeks aggregation."""
-        try:
-            from nifty_scalper_bot.indicators.greeks import BlackScholesCalculator
-        except ImportError:
-            return {"net_delta": 0.0, "net_gamma": 0.0, "net_theta": 0.0}
-
-        calculator = BlackScholesCalculator()
-        net_delta = 0.0
-        net_gamma = 0.0
-        net_theta = 0.0
-
-        if not self._position_manager:
-            return {"net_delta": 0.0, "net_gamma": 0.0, "net_theta": 0.0}
-
-        # Fetch Spot Price (Simplified for robustness)
-        spot = 26000.0 # Default fallback
-        
-        # ✅ FIX: Try both attribute names to be safe
-        mdm = self._market_data
-        
-        if mdm:
-            # Try getting LTP
-            ltp = mdm.get_latest_price("NSE:NIFTY 50")
-            if ltp and ltp > 0: 
-                spot = ltp
-
-        for pos in self._position_manager.get_all_positions():
-            if pos.quantity == 0 or "NIFTY" not in pos.symbol: continue
             
-            try:
-                # Extract Strike & Type from Symbol (e.g. NIFTY25DEC26000CE)
-                import re
-                match = re.search(r'(\d{5})([CP]E)', pos.symbol)
-                if not match: continue
-                
-                strike = float(match.group(1))
-                opt_type = match.group(2)
-                
-                # Dynamic Time to Expiry (Target: 15:30 on Expiry Day)
-                # Simplified: 1 day to expiry
-                t_years = 1.0 / 365.0
-                
-                # IV Estimate (Using ATR proxy or fixed 15%)
-                iv = 0.15 
-                
-                greeks = calculator.calculate_greeks(spot, strike, t_years, iv, opt_type)
-                
-                # Directional Adjustment
-                sign = 1 if pos.side == "LONG" else -1
-                net_delta += sign * pos.quantity * greeks.delta
-                net_gamma += sign * pos.quantity * greeks.gamma
-                net_theta += sign * pos.quantity * greeks.theta
-            except Exception:
-                continue
+            with self._lock:
+                state = self._symbol_state.get(symbol)
+                if state:
+                    state.trade_history.append(record)
+                    state.last_trade_at = timestamp
+                    # Set cooldown
+                    state.cooldown_until = timestamp + timedelta(seconds=self._config.trade_cooldown_seconds)
 
-        return {"net_delta": net_delta, "net_gamma": net_gamma, "net_theta": net_theta}
+        except OrderPlacementError as err:
+             _NIFTY_OPTION_EXECUTION_COUNTER.labels(underlying=symbol, result="failure").inc()
+             self._logger.error(
+                 "Order placement failed: %s",
+                 err,
+                 extra={"event": "order_placement_failed", "error": str(err)}
+             )
+        except Exception as exc:
+             _NIFTY_OPTION_EXECUTION_COUNTER.labels(underlying=symbol, result="error").inc()
+             self._logger.error(
+                 "Unexpected execution error: %s",
+                 exc,
+                 exc_info=True,
+                 extra={"event": "execution_crash"}
+             )
 
-    def _set_trade_cooldown(self, symbol: str, timestamp: datetime) -> None:
-        """Set trade-level cooldown after order submission."""
-        cooldown = self._config.trade_cooldown_seconds
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if state is None:
-                return
-
-            state.last_trade_at = timestamp
-            state.cooldown_until = (
-                timestamp + timedelta(seconds=cooldown) if cooldown > 0 else None
-            )
-
-    def _set_signal_cooldown(self, symbol: str, timestamp: datetime) -> None:
-        """Set signal-level cooldown after signal processing."""
-        cooldown = self._config.signal_cooldown_seconds
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if state is None:
-                return
-
-            state.cooldown_until = (
-                timestamp + timedelta(seconds=cooldown) if cooldown > 0 else None
-            )
-
-    def _record_trade(self, symbol: str, record: TradeRecord) -> None:
-        """Record a trade for auditing and persistence."""
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if state is None:
-                return
-
-            state.trade_history.append(record)
-
-        manager = self._persistent_state
-        if manager is not None:
-            payload = {"symbol": symbol, **record.to_dict()}
-            try:
-                manager.save_trade(payload)
-            except Exception as exc:
-                self._logger.error("Failure in _record_trade persistence: %s", exc)
-
-    def _monthly_lockout_active(
-        self, expiry: datetime, timestamp: datetime
-    ) -> tuple[bool, float]:
-        """Return monthly expiry lockout state and minutes to expiry."""
-        if self._monthly_halt_minutes <= 0:
-            return False, 0.0
-
-        if not _is_monthly_expiry(expiry):
-            return False, 0.0
-
-        expiry_dt = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
-        now_dt = (
-            timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
-        )
-
-        minutes_to_expiry = (expiry_dt - now_dt).total_seconds() / 60.0
-
-        if minutes_to_expiry < 0:
-            return False, minutes_to_expiry
-
-        return minutes_to_expiry <= self._monthly_halt_minutes, minutes_to_expiry
-
-    @staticmethod
-    def _normalize_symbol(symbol: str) -> str:
-        """Normalize symbol to uppercase trimmed string."""
-        normalized = symbol.strip().upper()
-        if not normalized:
-            msg = "symbol must not be empty"
-            raise ValueError(msg)
-        
-        # ✅ FIX: Strip 'NFO:' or 'NSE:' prefix if present
-        if ":" in normalized:
-            normalized = normalized.split(":", 1)[1]
-            
-        return normalized
-
-    def _update_last_signal_selection(
-        self, symbol: str, selection: SelectedContract
-    ) -> None:
-        """Update strategy data with last selected contract info."""
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if state is None:
-                return
-
-            info = state.strategy_data.get("last_signal")
-            if isinstance(info, dict):
-                info["selected_symbol"] = selection.symbol
-                info["selected_strike"] = selection.strike
-                info["selected_expiry"] = selection.expiry.isoformat()
-
-    @staticmethod
-    def _format_reason(reason: str | None, trade_symbol: str, base_symbol: str) -> str:
-        """Format reason string with symbol context if needed."""
-        if not reason:
-            reason = ""
-
-        reason_text = str(reason)
-
-        if trade_symbol != base_symbol and trade_symbol not in reason_text:
-            return f"{reason_text} [{trade_symbol}]".strip()
-
-        return reason_text
-
-
-__all__ = [
-    "StrategyRunner",
-    "StrategyRunnerConfig",
-    "SymbolState",
-    "TradeRecord",
-    "OrderRouter",
-]
+    def _normalize_symbol(self, symbol: str) -> str:
+        """Normalize symbol string for consistent state keys."""
+        return str(symbol).strip().upper()
