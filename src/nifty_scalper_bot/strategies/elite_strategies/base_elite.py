@@ -164,9 +164,7 @@ class EliteStrategy(Strategy):
     def _process_signal(self, elite_signal: EliteSignal) -> Signal:
         """
         Converts internal EliteSignal to core Signal format.
-        
-        ✅ WORLD-CLASS FIX: Uses Dynamic Inheritance to bypass __slots__ restrictions.
-        This guarantees 'strategy_name' is attached, preventing the execution crash.
+        Standard implementation (Runner now handles metadata extraction).
         """
         self._last_signal_at = elite_signal.timestamp
         self._last_signal = elite_signal
@@ -179,14 +177,9 @@ class EliteStrategy(Strategy):
             "quantity": elite_signal.quantity
         })
 
-        # 1. Define a Dynamic Subclass to bypass __slots__ locking
-        # This creates a version of Signal that IS mutable/editable
-        class ExecutableSignal(Signal):
-            """Runtime wrapper to allow dynamic attribute injection."""
-            pass
-
-        # 2. Instantiate the Subclass (instead of the locked parent class)
-        core_signal = ExecutableSignal(
+        # Just instantiate the standard Signal. 
+        # No setattr, no subclassing needed anymore.
+        return Signal(
             action=elite_signal.signal,
             symbol=elite_signal.symbol,
             confidence=elite_signal.confidence,
@@ -196,15 +189,6 @@ class EliteStrategy(Strategy):
             take_profit=elite_signal.target,
             metadata=metadata,
         )
-
-        # 3. Inject Attributes (Now Guaranteed to Work)
-        # Since ExecutableSignal has a __dict__, setattr will succeed.
-        core_signal.strategy_name = self.name
-        core_signal.quantity = elite_signal.quantity
-
-        LOGGER.info(f"✅ patched signal for execution: {self.name}")
-
-        return core_signal
 
     
     def get_stats(self) -> dict[str, Any]:
