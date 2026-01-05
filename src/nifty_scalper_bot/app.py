@@ -4902,7 +4902,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             
                             engine.update_price(sym, ohlc, volume=v, timestamp=ts)
                             count += 1
-                        LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
+                        LOGGER.debug(f"✅ Hydrated {sym}: {count} bars")
                 except Exception as e:
                     LOGGER.warning(f"Failed to hydrate {sym}: {e}")
 
