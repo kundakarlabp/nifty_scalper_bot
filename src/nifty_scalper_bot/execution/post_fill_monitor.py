@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, Awaitable, cast, Iterable
 # 💡 FIX 1: Import json for safe serialization of complex objects in logging
