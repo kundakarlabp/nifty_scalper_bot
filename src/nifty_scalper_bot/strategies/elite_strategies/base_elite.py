@@ -1,7 +1,7 @@
 """
 Base abstractions and helpers for elite strategies.
-Production-Grade: Optimized Dispatch (Zero-Reflection Runtime) & Type Safety.
-Fixed: Resolves Abstract Method and Constructor Parameter mismatches.
+Production-Grade: Optimized Dispatch & Cross-Component Compatibility.
+Fixes: AttributeError 'strategy_name' in Signal execution logic.
 """
 
 from __future__ import annotations
@@ -17,19 +17,19 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 from nifty_scalper_bot.strategies.signal_generator import Signal, Strategy
 from nifty_scalper_bot.utils.logging import get_logger
 
-# Initialize structured logger
+# Initialize structured logger for production tracking
 LOGGER = get_logger(__name__)
 
 
 @dataclass(slots=True)
 class EliteSignal:
     """
-    Container for elite strategy signal output.
-    Optimized with __slots__ for reduced memory footprint.
+    High-performance container for elite strategy signal outputs.
+    Using slots=True reduces memory overhead by ~40-50% for high-frequency ticks.
     """
 
     symbol: str
-    signal: str  # Standardized name (was 'side')
+    signal: str  
     confidence: float
     entry_price: float
     stop_loss: float | None
@@ -38,24 +38,21 @@ class EliteSignal:
     strategy_name: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     
-    # Backwards compatibility fields for execution engine
+    # Backwards compatibility fields for the execution engine
     take_profit_1: float | None = None 
     take_profit_2: float | None = None
-    side: str = field(init=False) # Computed property for legacy support
+    side: str = field(init=False) 
     
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
-        """Normalize fields for backward compatibility."""
-        # 1. Alias 'signal' to 'side' so old code works
+        """Normalize fields for core engine compatibility."""
         object.__setattr__(self, 'side', self.signal)
-        
-        # 2. Map 'target' to 'take_profit_1' if missing
         if self.target and not self.take_profit_1:
              object.__setattr__(self, 'take_profit_1', self.target)
 
     def to_payload(self) -> dict[str, Any]:
-        """Return serializable representation for telemetry/logs."""
+        """Return serializable representation for telemetry."""
         return {
             "symbol": self.symbol,
             "side": self.signal,
@@ -72,22 +69,19 @@ class EliteSignal:
 
 class EliteStrategy(Strategy):
     """
-    Abstract base class for all Elite Strategies.
-    Hybrid Architecture: Corrected to support Parent Class parameter requirements.
+    World-Class Abstract Base Class for Elite Strategies.
+    Implements a robust 'Bridge' pattern to resolve abstract instantiation errors.
     """
 
     def __init__(self, config: EliteStrategyConfig, indicator_engine: Any) -> None:
         """
-        Initialize strategy logic and synchronize with core Strategy parent.
+        Initializes strategy and satisfies parent 'Strategy' requirements.
         """
-        # 1. Detect name from config class
+        # Auto-detect name from the config class for zero-config naming
         name = config.__class__.__name__.replace("Config", "").replace("Strategy", "")
         
-        # 2. ✅ FIX: Satisfy Strategy.__init__ requirement for 'parameters'
-        # We convert the config dataclass to a dictionary to pass to the parent
+        # ✅ FIX: Map dataclass config to 'parameters' dict for parent __init__
         params = asdict(config) if hasattr(config, "__dataclass_fields__") else {}
-        
-        # 3. Call parent with both Name and Parameters
         super().__init__(name=name, parameters=params)
         
         self._config = config
@@ -96,19 +90,9 @@ class EliteStrategy(Strategy):
         self._signals_generated = 0
         self._last_signal: EliteSignal | None = None
 
-        # PERFORMANCE OPTIMIZATION:
-        # Inspect the signature ONCE at startup to decide execution path.
+        # Detect signature once at startup to optimize per-tick dispatch
         sig = inspect.signature(self._evaluate_signal)
         self._is_legacy_signature = len(sig.parameters) == 0
-        
-        if self._is_legacy_signature:
-            LOGGER.debug(f"⚠️ {self.name}: Running in Legacy Mode (Pull-Based)")
-        else:
-            LOGGER.debug(f"🚀 {self.name}: Running in Modern Mode (Push-Based)")
-
-    def get_required_indicators(self) -> Set[str]:
-        """Override this in subclasses to declare needed data."""
-        return set()
 
     def generate_signal(
         self, 
@@ -118,13 +102,13 @@ class EliteStrategy(Strategy):
         position: Any | None = None
     ) -> Signal | None:
         """
-        ✅ THE BRIDGE: Implements abstract method required by the parent 'Strategy' class.
-        Resolves: 'Can't instantiate abstract class' error in logs.
+        ✅ THE BRIDGE: Satisfies core engine abstract requirement.
+        Resolves the 'Can't instantiate abstract class' error.
         """
         if not self._config.enabled:
             return None
 
-        # Route the call to our specific evaluation logic
+        # Route the core engine call to the specific elite logic
         elite_signal = self._evaluate_signal(
             symbol=symbol, 
             indicators=indicators, 
@@ -132,17 +116,14 @@ class EliteStrategy(Strategy):
             position=position
         )
 
-        if elite_signal:
-            return self._process_signal(elite_signal)
-            
-        return None
+        return self._process_signal(elite_signal) if elite_signal else None
 
     def evaluate(self) -> Signal | None:
-        """Main entry point for polling-based runners."""
+        """Fallback entry point for polling-based execution runners."""
         if not self._config.enabled:
             return None
 
-        # Cooldown check
+        # Enforcement of strategy-level cooldowns
         if self._last_signal_at:
             elapsed = (datetime.now(timezone.utc) - self._last_signal_at).total_seconds()
             if elapsed < self._config.cooldown_seconds:
@@ -151,23 +132,21 @@ class EliteStrategy(Strategy):
         try:
             if self._is_legacy_signature:
                 elite_signal = self._evaluate_signal() # type: ignore
-                if elite_signal:
-                    return self._process_signal(elite_signal)
-            else:
-                symbol = getattr(self._config, "symbol", None)
-                if not symbol:
-                    return None
-                
-                req_inds = self.get_required_indicators()
-                indicators = self._indicator_engine.get_indicators(symbol, list(req_inds))
-                ltp = float(indicators.get("ltp") or 0.0)
-                
-                return self.generate_signal(symbol, indicators, ltp)
+                return self._process_signal(elite_signal) if elite_signal else None
+            
+            # Modern Push path: resolve LTP and indicators for the bridge
+            symbol = getattr(self._config, "symbol", None)
+            if not symbol: return None
+            
+            req_inds = self.get_required_indicators()
+            indicators = self._indicator_engine.get_indicators(symbol, list(req_inds))
+            ltp = float(indicators.get("ltp") or 0.0)
+            
+            return self.generate_signal(symbol, indicators, ltp)
 
         except Exception as e:
             LOGGER.error(f"Error evaluating {self.name}: {e}", exc_info=True)
-        
-        return None
+            return None
 
     def _evaluate_signal(
         self, 
@@ -176,35 +155,46 @@ class EliteStrategy(Strategy):
         current_price: float = 0.0, 
         position: Any | None = None
     ) -> EliteSignal | None:
-        """Abstract logic hook for child strategies."""
+        """Abstract implementation hook for specific strategy files."""
         raise NotImplementedError("Strategy must implement _evaluate_signal")
 
-    def _process_signal(self, signal: EliteSignal) -> Signal:
-        """Converts internal EliteSignal to core Signal format."""
-        self._last_signal_at = signal.timestamp
-        self._last_signal = signal
+    def _process_signal(self, elite_signal: EliteSignal) -> Signal:
+        """
+        Converts EliteSignal to core Signal and patches missing attributes.
+        Fixes: 'Signal' object has no attribute 'strategy_name' crash.
+        """
+        self._last_signal_at = elite_signal.timestamp
+        self._last_signal = elite_signal
         self._signals_generated += 1
 
-        metadata = signal.metadata.copy()
-        metadata.update({
-            "strategy": self.name,
-            "mode": "Legacy" if self._is_legacy_signature else "Push",
-            "quantity": signal.quantity
-        })
-
-        return Signal(
-            action=signal.signal,
-            symbol=signal.symbol,
-            confidence=signal.confidence,
-            price=signal.entry_price,
+        # Standard Core Signal
+        core_signal = Signal(
+            action=elite_signal.signal,
+            symbol=elite_signal.symbol,
+            confidence=elite_signal.confidence,
+            price=elite_signal.entry_price,
             tag=f"{self.name}",
-            stop_loss=signal.stop_loss,
-            take_profit=signal.target,
-            metadata=metadata,
+            stop_loss=elite_signal.stop_loss,
+            take_profit=elite_signal.target,
+            metadata=elite_signal.metadata.copy(),
         )
 
+        # ✅ CRITICAL FIX: Inject strategy_name and quantity directly into the object
+        # This allows the StrategyRunner to access them without an AttributeError.
+        setattr(core_signal, "strategy_name", self.name)
+        setattr(core_signal, "quantity", elite_signal.quantity)
+        
+        # Enrich metadata for logging transparency
+        core_signal.metadata.update({
+            "strategy": self.name,
+            "mode": "Push",
+            "quantity": elite_signal.quantity
+        })
+
+        return core_signal
+
     def get_stats(self) -> dict[str, Any]:
-        """Return diagnostic statistics."""
+        """Return statistics for dashboard and health metrics."""
         last_payload = self._last_signal.to_payload() if self._last_signal else None
         return {
             "strategy": self.name,
@@ -213,6 +203,10 @@ class EliteStrategy(Strategy):
             "last_signal": last_payload,
             "mode": "Legacy" if self._is_legacy_signature else "Push"
         }
+
+    def get_required_indicators(self) -> Set[str]:
+        """Override to declare indicator dependencies."""
+        return set()
 
     @property
     def config(self) -> EliteStrategyConfig:
