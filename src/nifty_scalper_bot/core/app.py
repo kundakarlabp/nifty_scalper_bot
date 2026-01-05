@@ -5318,7 +5318,11 @@ def _alert_overnight_exposure(ctx: BotContext) -> None:
     try:
         positions = position_manager.get_all_positions()
     except Exception as exc:  # noqa: BLE001
-        LOGGER.error("Failure in _alert_overnight_exposure positions: %s", exc)
+        LOGGER.error(
+            "Failure in _alert_overnight_exposure positions",
+            extra={"error": str(exc)},
+            exc_info=True
+        )
         return
     if not positions:
         setattr(runner, "_overnight_alerted", False)
@@ -5813,17 +5817,17 @@ class NiftyScalperApp:
                         await _reconcile_state(self._ctx)
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
-                            "Periodic state reconciliation failed: %s",
-                            exc,
-                            extra={"event": "state_reconcile_failed_periodic"},
+                            "Periodic state reconciliation failed",
+                            extra={"event": "state_reconcile_failed_periodic", "error": str(exc)},
+                            exc_info=True
                         )
                     try:
                         _alert_overnight_exposure(self._ctx)
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
-                            "Overnight exposure check failed: %s",
-                            exc,
-                            extra={"event": "overnight_exposure_check_failed"},
+                            "Overnight exposure check failed",
+                            extra={"event": "overnight_exposure_check_failed", "error": str(exc)},
+                            exc_info=True
                         )
                     last_heavy = now
                 continue
