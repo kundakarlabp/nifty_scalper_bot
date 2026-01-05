@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import Any, Awaitable, cast, Iterable
 # 💡 FIX 1: Import json for safe serialization of complex objects in logging
@@ -159,7 +158,7 @@ class PostFillMonitor:
                     extra={
                         "event": "post_fill_reconcile_mismatch",
                         "count": len(mismatches),
-                        "mismatches": json.dumps(mismatches), # Safely serialized in extra
+                        "mismatches": json.dumps(mismatches, default=str),
                     },
                 )
             elif not mismatches:
@@ -315,7 +314,7 @@ class PostFillMonitor:
                 
             # 💡 FIX: Safely log the fetched payload as a JSON string
             if payload:
-                payload_str = json.dumps(payload, indent=2)
+                payload_str = json.dumps(payload, indent=2, default=str)
                 self._logger.debug(
                     "Broker positions fetched: %s",
                     payload_str,
