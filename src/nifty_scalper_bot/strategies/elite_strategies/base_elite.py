@@ -164,7 +164,9 @@ class EliteStrategy(Strategy):
     def _process_signal(self, elite_signal: EliteSignal) -> Signal:
         """
         Converts internal EliteSignal to core Signal format.
-        ✅ FIX 2: Injects 'strategy_name' to prevent execution crash.
+        
+        ✅ WORLD-CLASS FIX: Uses Dynamic Inheritance to bypass __slots__ restrictions.
+        This guarantees 'strategy_name' is attached, preventing the execution crash.
         """
         self._last_signal_at = elite_signal.timestamp
         self._last_signal = elite_signal
@@ -177,8 +179,14 @@ class EliteStrategy(Strategy):
             "quantity": elite_signal.quantity
         })
 
-        # 1. Create Core Signal
-        core_signal = Signal(
+        # 1. Define a Dynamic Subclass to bypass __slots__ locking
+        # This creates a version of Signal that IS mutable/editable
+        class ExecutableSignal(Signal):
+            """Runtime wrapper to allow dynamic attribute injection."""
+            pass
+
+        # 2. Instantiate the Subclass (instead of the locked parent class)
+        core_signal = ExecutableSignal(
             action=elite_signal.signal,
             symbol=elite_signal.symbol,
             confidence=elite_signal.confidence,
@@ -189,17 +197,16 @@ class EliteStrategy(Strategy):
             metadata=metadata,
         )
 
-        # 2. 🟢 CRITICAL FIX: Inject Attributes for Execution Engine
-        # This resolves the "no attribute 'strategy_name'" crash
-        try:
-            setattr(core_signal, "strategy_name", self.name)
-            setattr(core_signal, "quantity", elite_signal.quantity)
-        except AttributeError:
-            # Fallback if Signal uses __slots__ and forbids new attributes
-            LOGGER.warning(f"Could not inject strategy_name into Signal for {self.name}")
+        # 3. Inject Attributes (Now Guaranteed to Work)
+        # Since ExecutableSignal has a __dict__, setattr will succeed.
+        core_signal.strategy_name = self.name
+        core_signal.quantity = elite_signal.quantity
+
+        LOGGER.info(f"✅ patched signal for execution: {self.name}")
 
         return core_signal
 
+    
     def get_stats(self) -> dict[str, Any]:
         """Return diagnostic statistics."""
         last_payload = self._last_signal.to_payload() if self._last_signal else None
