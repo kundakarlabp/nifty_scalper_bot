@@ -19,6 +19,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, cast, runtime_checkable
 
 from nifty_scalper_bot.utils.logging import get_logger
+try:
+    from nifty_scalper_bot.data.bracket_store import BracketStore
+except ImportError:
+    BracketStore = None
 
 # --- NEW IMPORTS FOR WORLD-CLASS TRAILING ---
 try:
@@ -127,6 +131,30 @@ class BracketState:
         if self.lowest_ltp == float('inf') or self.lowest_ltp > self.entry_price:
             self.lowest_ltp = self.entry_price
 
+    # ✅ FIX: Add Serialization for Persistence
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert state to dictionary for SQLite persistence."""
+        return {
+            "entry_order_id": self.entry_order_id,
+            "symbol": self.symbol,
+            "side": self.side,
+            "quantity": self.quantity,
+            "entry_price": self.entry_price,
+            "sl_trigger_price": self.sl_trigger_price,
+            "tp_trigger_price": self.tp_trigger_price,
+            "remaining_quantity": self.remaining_quantity,
+            "tp_levels": [tp.to_dict() for tp in self.tp_levels],
+            "is_virtual": self.is_virtual,
+            "active": self.active,
+            "trailing_enabled": self.trailing_enabled,
+            "trailing_config": self.trailing_config,
+            "highest_ltp": self.highest_ltp,
+            "lowest_ltp": self.lowest_ltp,
+            "tag": self.tag,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at
+        }
+
 # Mock Journal for Adaptive Controller (In-Memory)
 class MockJournal:
     def set(self, key, value): pass
@@ -149,6 +177,15 @@ class BracketManager:
         # --- ATR & Trailing Setup ---
         self._indicator_engine = indicator_engine
         self._market_data = market_data
+        # ✅ FIX: Initialize Persistence Store
+        self._store = None
+        if BracketStore:
+            try:
+                self._store = BracketStore()
+                LOGGER.info("✅ BracketStore initialized for persistence.")
+            except Exception as e:
+                LOGGER.error(f"❌ Failed to init BracketStore: {e}")
+                
         self._atr_provider = None
         if SafeATRProvider and indicator_engine:
             # Initialize Safe Provider with 60s cache validity
@@ -295,6 +332,14 @@ class BracketManager:
             if symbol not in self._symbol_map:
                 self._symbol_map[symbol] = []
             self._symbol_map[symbol].append(order_id)
+            # ✅ FIX: IMMEDIATE PERSISTENCE
+            # Save to disk immediately so it survives a crash/restart
+            if self._store:
+                try:
+                    self._store.save_bracket(state.to_dict())
+                    LOGGER.info(f"💾 Bracket PERSISTED to DB: {symbol} (SL: {sl})")
+                except Exception as e:
+                    LOGGER.error(f"❌ Failed to persist bracket for {symbol}: {e}")
             
             # 7. Initialize Adaptive Controller (The "Brain")
             if trailing_atr_mult and self._atr_provider and AdaptiveTrailingController:
