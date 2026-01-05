@@ -1537,9 +1537,9 @@ class StrategyRunner:
                     signal = self._strategy_manager.generate_signal(symbol, price)
                 # [DIAGNOSTIC] Log if strategy checked but returned nothing
                 if signal is None:
-                    # Log mostly at debug, but force INFO occasionally to prove it's running
-                    log_throttled(self._logger, f"strat_check_{symbol}", f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL", interval_sec=10.0)
-            else:
+                    # ✅ FIX: Changed to DEBUG to silence production logs
+                    self._logger.debug(f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL")
+                else:
                 # [DIAGNOSTIC] Log why we didn't even ask
                 log_throttled(self._logger, f"not_ready_{symbol}", f"⏳ Indicators NOT READY for {symbol} (Need {self._config.min_indicator_bars} bars)", interval_sec=60.0)
 
