@@ -1922,7 +1922,7 @@ class StrategyRunner:
                 price=execution_price,      # <--- Protected Price
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
-                signal_id=signal.id,
+                signal_id=signal.deterministic_id,
                 tag=unique_tag
             )
             # ✅ CRITICAL FIX: Always update timer OUTSIDE the success block
