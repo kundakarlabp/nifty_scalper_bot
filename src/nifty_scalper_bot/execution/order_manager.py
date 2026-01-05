@@ -3668,47 +3668,93 @@ class OrderManager:
             )  
 
     def on_order_update(self, order_update: dict) -> None:
-        """🎯 CRITICAL: Central hub for broker order updates."""
+        """
+        🎯 CRITICAL: Central hub for broker order updates.
+        Handles state synchronization, auto-adopts unknown orders, and triggers brackets.
+        """
         order_id = order_update.get("order_id")
-        if not order_id: return
-        
-        status = str(order_update.get("status", "")).upper()
-        
-        with self._lock:
-            order = self._orders.get(order_id)
-            if not order: return
-            
-            old_status = order.status
-            # ✅ FIX: Handle String vs Enum safely
-            order.status = self._parse_status(status)
-            order.filled_quantity = int(order_update.get("filled_quantity", 0))
-            
-            avg_price = order_update.get("average_price")
-            if avg_price:
-                order.fill_price = float(avg_price)
-            elif not order.fill_price:
-                order.fill_price = float(order_update.get("price", 0))
-        
-        # FILL DETECTION -> BRACKET ACTIVATION
-        if status in ["COMPLETE", "FILLED"]:
-            self._logger.info(f"✅ FILL DETECTED: {order_id} @ {order.fill_price}")
-            
-            # A. Activate Virtual Bracket
-            if self._bracket_manager:
-                try:
-                    self._bracket_manager.confirm_entry_fill(order_id, order.fill_price)
-                    self._logger.info(f"🎯 BRACKET ACTIVATED: {order.symbol}")
-                except Exception as exc:
-                    self._logger.error(f"Bracket activation failed: {exc}")
-            else:
-                self._logger.warning("BracketManager not initialized!")
+        if not order_id:
+            return
 
-        # B. Standard Update
-        try:
-            self._handle_bracket_update(order, old_status, order_update)
-        except Exception as exc:
-            self._logger.error(f"Bracket update failed: {exc}")
-        # ✅ FIX: Persist state change
+        # Normalize status to uppercase string
+        status_raw = str(order_update.get("status", "")).upper()
+
+        with self._lock:
+            # 1. Try to retrieve the existing order
+            order = self._orders.get(order_id)
+
+            # 2. 🛡️ AUTO-ADOPTION PROTOCOL (Fix for "Unknown Order" warnings)
+            # If the order exists at Broker but not in Bot, we adopt it immediately.
+            if not order:
+                try:
+                    # Map broker fields to internal schema safely
+                    order = OrderDetails(
+                        order_id=order_id,
+                        symbol=order_update.get("tradingsymbol") or order_update.get("symbol", "UNKNOWN"),
+                        side=order_update.get("transaction_type", "BUY"),
+                        # Handle quantity robustly (e.g. "50.0" -> 50)
+                        quantity=int(float(order_update.get("quantity", 0))),
+                        order_type=OrderType.MARKET, # Default assumption for adopted trades
+                        price=float(order_update.get("price", 0.0)),
+                        trigger_price=float(order_update.get("trigger_price", 0.0)),
+                        average_price=float(order_update.get("average_price", 0.0)),
+                        filled_quantity=int(float(order_update.get("filled_quantity", 0))),
+                        status=self._parse_status(status_raw),
+                        timestamp=datetime.now(timezone.utc),
+                        tag="adopted_from_broker"
+                    )
+                    # Register into memory
+                    self._orders[order_id] = order
+                    self._logger.info(f"🆕 ADOPTED UNKNOWN ORDER: {order_id} [{order.symbol}]")
+                except Exception as e:
+                    # Log error but don't crash the update stream
+                    self._logger.warning(f"⚠️ Failed to adopt unknown order {order_id}: {e}")
+                    return
+
+            # 3. State Synchronization
+            old_status = order.status
+            new_status = self._parse_status(status_raw)
+            
+            # Only update if changed or if data is fresher
+            order.status = new_status
+            order.filled_quantity = int(float(order_update.get("filled_quantity", 0)))
+
+            # Robust Price Logic: Prefer average_price (actual fill), fallback to price
+            avg_px = order_update.get("average_price")
+            if avg_px and float(avg_px) > 0:
+                order.fill_price = float(avg_px)
+            elif not order.fill_price and order_update.get("price"):
+                order.fill_price = float(order_update.get("price", 0.0))
+
+            # 4. Fill Detection & Bracket Activation
+            # Trigger only when status transitions to COMPLETE/FILLED
+            is_filled = status_raw in ["COMPLETE", "FILLED"]
+            
+            if is_filled and old_status != OrderStatus.FILLED:
+                self._logger.info(f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}")
+
+                # A. Activate Virtual Bracket (Stop Loss / Take Profit)
+                if self._bracket_manager:
+                    try:
+                        # Pass the confirmed fill price to center the bracket
+                        execution_price = order.fill_price if order.fill_price > 0 else order.price
+                        self._bracket_manager.confirm_entry_fill(order_id, execution_price)
+                        self._logger.info(f"🎯 BRACKET ACTIVATED: {order.symbol}")
+                    except Exception as exc:
+                        self._logger.error(f"Bracket activation failed: {exc}")
+                else:
+                    self._logger.warning("BracketManager not initialized! Trade is unmanaged.")
+
+            # 5. Handle Exits (If this update was a Stop Loss hit)
+            try:
+                self._handle_bracket_update(order, old_status, order_update)
+            except Exception as exc:
+                self._logger.error(f"Bracket update logic failed: {exc}")
+
+        # 6. Persistence (Save state to disk immediately)
+        # Done outside the lock if save_orders manages its own I/O safety, 
+        # or inside if it relies on _orders not changing. 
+        # Assuming safe to call:
         self.save_orders()
     
     def place_atomic_entry(
