@@ -853,21 +853,22 @@ def _build_elite_settings() -> EliteStrategiesSettings:
     """
     Builds the EliteStrategiesSettings object by parsing environment variables.
     Aligned with the high-performance 'Push-Based' Strategy Models.
+    Unlocks ALL 10 strategies by mapping .env values to simplified config objects.
     """
     try:
         # 1. SMC Strategy Configuration
         smc_cfg = SMCStrategyConfig(
             enabled=_env_bool("SMC_ENABLED", default=True),
-            min_confidence=_env_float("SMC_MIN_CONFIDENCE", default=70.0),
+            min_confidence=_env_float("SMC_MIN_CONFIDENCE", default=45.0),
             cooldown_seconds=_env_float("SMC_COOLDOWN", default=60.0),
-            sweep_distance_points=_env_float("SMC_SWEEP_DISTANCE", default=30.0),
+            sweep_distance_points=_env_float("SMC_SWEEP_DISTANCE", default=15.0),
             volume_spike_mult=_env_float("SMC_VOLUME_SPIKE", default=2.0)
         )
 
         # 2. VWAP Pro Configuration
         vwap_cfg = VWAPProStrategyConfig(
-            enabled=_env_bool("VWAP_ENABLED", default=True),
-            min_confidence=_env_float("VWAP_MIN_CONFIDENCE", default=70.0),
+            enabled=_env_bool("VWAP_PRO_ENABLED", "VWAP_ENABLED", default=True),
+            min_confidence=_env_float("VWAP_MIN_CONFIDENCE", default=40.0),
             ema_period=_env_int("VWAP_EMA_PERIOD", default=50),
             proximity_pct=_env_float("VWAP_PROXIMITY_PCT", default=0.15)
         )
@@ -875,20 +876,21 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # 3. RSI Divergence Configuration
         rsi_cfg = RSIDivergenceStrategyConfig(
             enabled=_env_bool("RSI_DIV_ENABLED", default=True),
-            min_confidence=_env_float("RSI_DIV_MIN_CONFIDENCE", default=70.0),
+            min_confidence=_env_float("RSI_MIN_CONFIDENCE", "RSI_DIV_MIN_CONFIDENCE", default=48.0),
             rsi_period=_env_int("RSI_PERIOD", default=14)
         )
 
         # 4. Opening Range Breakout (ORB)
         orb_cfg = ORBProStrategyConfig(
             enabled=_env_bool("ORB_ENABLED", default=True),
-            min_confidence=_env_float("ORB_MIN_CONFIDENCE", default=70.0),
-            orb_minutes=_env_int("ORB_MINUTES", default=15)
+            min_confidence=_env_float("ORB_MIN_CONFIDENCE", default=55.0),
+            orb_minutes=_env_int("ORB_DURATION_MIN", "ORB_MINUTES", default=15)
         )
 
         # 5. Straddle/Theta Decay
         straddle_cfg = StraddleThetaStrategyConfig(
             enabled=_env_bool("STRADDLE_ENABLED", default=False),
+            min_confidence=_env_float("STRADDLE_MIN_CONFIDENCE", default=73.0),
             adx_threshold=_env_float("STRADDLE_ADX_LIMIT", default=25.0),
             min_iv=_env_float("STRADDLE_MIN_IV", default=12.0)
         )
@@ -896,31 +898,64 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # 6. Gamma Scalping
         gamma_cfg = GammaScalpingStrategyConfig(
             enabled=_env_bool("GAMMA_ENABLED", default=False),
+            min_confidence=_env_float("GAMMA_MIN_CONFIDENCE", default=65.0),
             min_gamma=_env_float("GAMMA_THRESHOLD", default=0.0005)
         )
 
-        # 7. Aggregate all into Settings Object
+        # 7. OI Max Pain (Unlocked)
+        # Maps 'min_deviation_pct' to 'OI_MIN_DISTANCE_POINTS'
+        oi_cfg = OIMaxPainStrategyConfig(
+            enabled=_env_bool("OI_MAX_PAIN_ENABLED", default=True),
+            min_confidence=_env_float("OI_MIN_CONFIDENCE", default=40.0),
+            min_deviation_pct=_env_float("OI_MIN_DISTANCE_POINTS", default=50.0)
+        )
+
+        # 8. CPR Breakout (Unlocked)
+        # Maps 'narrow_cpr_threshold' to 'CPR_NARROW_THRESHOLD_PCT'
+        cpr_cfg = CPRBreakoutStrategyConfig(
+            enabled=_env_bool("CPR_ENABLED", default=True),
+            min_confidence=_env_float("CPR_MIN_CONFIDENCE", default=55.0),
+            narrow_cpr_threshold=_env_float("CPR_NARROW_THRESHOLD_PCT", default=0.25)
+        )
+
+        # 9. Order Flow Imbalance (Unlocked)
+        # Maps 'imbalance_ratio_min' to 'ORDER_FLOW_IMBALANCE_RATIO_BUY'
+        of_cfg = OrderFlowStrategyConfig(
+            enabled=_env_bool("ORDER_FLOW_ENABLED", default=True),
+            min_confidence=_env_float("ORDER_FLOW_MIN_CONFIDENCE", default=60.0),
+            imbalance_ratio_min=_env_float("ORDER_FLOW_IMBALANCE_RATIO_BUY", default=2.8),
+            large_order_threshold_pct=_env_float("ORDER_FLOW_LARGE_ORDER_PCT", default=15.0)
+        )
+
+        # 10. BB Squeeze (Unlocked)
+        # Maps 'squeeze_threshold_pct' to 'BB_SQUEEZE_BANDWIDTH'
+        bb_cfg = BBSqueezeStrategyConfig(
+            enabled=_env_bool("BB_SQUEEZE_ENABLED", default=True),
+            min_confidence=_env_float("BB_MIN_CONFIDENCE", default=55.0),
+            squeeze_threshold_pct=_env_float("BB_SQUEEZE_BANDWIDTH", default=0.4)
+        )
+
+        # 11. Aggregate all into Settings Object
         return EliteStrategiesSettings(
-            max_concurrent_strategies=_env_int("MAX_CONCURRENT_STRATS", default=3),
-            position_size_pct=_env_float("STRAT_POS_SIZE_PCT", default=2.0),
+            max_concurrent_strategies=_env_int("ELITE_MAX_CONCURRENT_STRATEGIES", "MAX_CONCURRENT_STRATS", default=10),
+            position_size_pct=_env_float("ELITE_POSITION_SIZE_PCT", "STRAT_POS_SIZE_PCT", default=1.5),
             smc=smc_cfg,
             vwap=vwap_cfg,
             rsi_div=rsi_cfg,
             orb=orb_cfg,
             straddle=straddle_cfg,
             gamma_scalping=gamma_cfg,
-            # Placeholder defaults for other strategies to prevent attribute errors
-            oi_max_pain=OIMaxPainStrategyConfig(enabled=False),
-            cpr=CPRBreakoutStrategyConfig(enabled=False),
-            order_flow=OrderFlowStrategyConfig(enabled=False),
-            bb_squeeze=BBSqueezeStrategyConfig(enabled=False)
+            oi_max_pain=oi_cfg,      # ✅ Active
+            cpr=cpr_cfg,             # ✅ Active
+            order_flow=of_cfg,       # ✅ Active
+            bb_squeeze=bb_cfg        # ✅ Active
         )
 
     except Exception as exc:
         # If config building fails, we log it and return a safe default 
         # to prevent the entire bot from failing to mount on Railway.
         from nifty_scalper_bot.utils.logging import get_logger
-        get_logger(__name__).error(f"❌ Critical Error in _build_elite_settings: {exc}")
+        get_logger(__name__).error(f"❌ Critical Error in _build_elite_settings: {exc}", exc_info=True)
         return EliteStrategiesSettings()
 
 
