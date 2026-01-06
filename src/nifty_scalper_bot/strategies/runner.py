@@ -1367,9 +1367,12 @@ class StrategyRunner:
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
         # DEBUG: Confirm tick received
+        from nifty_scalper_bot.utils.logging import log_throttled
+
+        # DEBUG: Confirm tick received
         log_throttled(
             self._logger,
-            "tick_received",
+            f"tick_received_{symbol}",
             f"🔔 TICK RECEIVED: {symbol} | Raw Data: {dict(tick)}",
             interval_sec=60.0
         )
