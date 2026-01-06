@@ -3912,61 +3912,70 @@ def _coerce_int(value: Any) -> int | None:
 
 
     # -------------------------------------------------------------------------
-    # ✅ NEW: History Fetching Interface (Insert this INSIDE the class)
-    # -------------------------------------------------------------------------
     async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
         """
-        Fetch historical data, abstracting away broker-specific token logic.
-        Uses self._broker and self._resolver correctly.
+        Fetch historical data with AUTO-TOKEN-RESOLUTION.
         """
-        # 1. Resolve Token (Try internal cache first, then resolver)
-        token = getattr(self, "_token_by_symbol", {}).get(symbol)
+        # 1. Normalize Symbol
+        symbol = symbol.strip().upper()
         
-        resolver = getattr(self, "_resolver", None)
-        if not token and resolver:
-            try:
-                # Try .resolve() first
-                if hasattr(resolver, "resolve"):
-                    token = resolver.resolve(symbol)
-                # Fallback to .get_token()
-                if not token and hasattr(resolver, "get_token"):
-                    token = resolver.get_token(symbol)
-            except Exception:
-                pass
+        # 2. Resolve Token (CRITICAL FIX: Force Resolution if Cache Empty)
+        token = self._token_by_symbol.get(symbol)
         
         if not token:
-            self._logger.warning(f"❌ Token resolution failed for {symbol}")
+            self._logger.info(f"🔎 History: Cache miss for {symbol}. Attempting force resolution...")
+            
+            # Try Resolver
+            if self._resolver:
+                try:
+                    token = self._resolver.resolve(symbol)
+                    if token:
+                        self._seed_mapping(symbol, token)
+                except Exception:
+                    pass
+            
+            # Try Broker Instrument Lookup (Fallback)
+            if not token and hasattr(self._broker, "get_instrument_token"):
+                try:
+                    token = self._broker.get_instrument_token(symbol)
+                    if token:
+                        self._seed_mapping(symbol, int(token))
+                except Exception:
+                    pass
+
+        if not token:
+            self._logger.error(f"❌ History Aborted: Could not resolve token for {symbol}")
             return []
 
-        # 2. Calculate Dates
+        # 3. Calculate Dates
         to_date = datetime.now(timezone.utc)
         from_date = to_date - timedelta(days=days)
 
-        # 3. Call Broker (Using your ACTUAL _broker attribute)
-        if not self._broker:
-            self._logger.warning("Broker instance not connected.")
-            return []
-
+        # 4. Fetch Data
         try:
-            # Detect method: kite.historical_data vs generic get_history
+            # Detect Kite Connect vs Generic Broker
             fetcher = getattr(self._broker, "historical_data", None)
             
-            # If broker is a wrapper (e.g., has .kite or .client)
+            # Handle Kite Wrapper pattern
             if not fetcher:
                 client = getattr(self._broker, "kite", getattr(self._broker, "client", None))
                 if client:
                     fetcher = getattr(client, "historical_data", None)
 
             if callable(fetcher):
-                # Run blocking I/O in a thread so the bot doesn't freeze
-                return await asyncio.to_thread(fetcher, token, from_date, to_date, interval)
+                self._logger.info(f"⏳ Fetching {days}d history for {symbol} (Token: {token})...")
+                # Run blocking I/O in thread
+                data = await asyncio.to_thread(fetcher, token, from_date, to_date, interval)
+                self._logger.info(f"✅ Received {len(data) if data else 0} candles for {symbol}")
+                return data
             
-            self._logger.warning("No 'historical_data' method found on broker instance")
+            self._logger.warning("Broker has no 'historical_data' capability.")
             return []
 
         except Exception as e:
-            self._logger.error(f"History fetch failed for {symbol}: {e}")
+            self._logger.error(f"History fetch crashed for {symbol}: {e}", exc_info=True)
             return []
+            
 
 
 def _parse_expiry(value: Any) -> datetime | None:
