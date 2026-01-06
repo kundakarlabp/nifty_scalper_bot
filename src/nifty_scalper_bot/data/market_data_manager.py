@@ -3716,6 +3716,74 @@ class MarketDataManager:
         self._last_signature[symbol] = (signature, current)
         return False
 
+    # ✅ CORRECT: Indented inside the class
+    async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
+        """
+        Fetch historical data with AUTO-TOKEN-RESOLUTION.
+        """
+        # 1. Normalize Symbol
+        symbol = symbol.strip().upper()
+        
+        # 2. Resolve Token (CRITICAL FIX: Force Resolution if Cache Empty)
+        token = self._token_by_symbol.get(symbol)
+        
+        if not token:
+            self._logger.info(f"🔎 History: Cache miss for {symbol}. Attempting force resolution...")
+            
+            # Try Resolver
+            resolver = getattr(self, "_resolver", None)
+            if resolver:
+                try:
+                    resolved = resolver.resolve(symbol)
+                    if resolved:
+                        token = int(resolved)
+                        self._seed_mapping(symbol, token)
+                except Exception:
+                    pass
+            
+            # Try Broker Instrument Lookup (Fallback)
+            if not token and hasattr(self._broker, "get_instrument_token"):
+                try:
+                    t = self._broker.get_instrument_token(symbol)
+                    if t:
+                        token = int(t)
+                        self._seed_mapping(symbol, int(t))
+                except Exception:
+                    pass
+
+        if not token:
+            self._logger.error(f"❌ History Aborted: Could not resolve token for {symbol}")
+            return []
+
+        # 3. Calculate Dates
+        to_date = datetime.now(timezone.utc)
+        from_date = to_date - timedelta(days=days)
+
+        # 4. Fetch Data
+        try:
+            # Detect Kite Connect vs Generic Broker
+            fetcher = getattr(self._broker, "historical_data", None)
+            
+            # Handle Kite Wrapper pattern
+            if not fetcher:
+                client = getattr(self._broker, "kite", getattr(self._broker, "client", None))
+                if client:
+                    fetcher = getattr(client, "historical_data", None)
+
+            if callable(fetcher):
+                self._logger.info(f"⏳ Fetching {days}d history for {symbol} (Token: {token})...")
+                # Run blocking I/O in thread
+                data = await asyncio.to_thread(fetcher, token, from_date, to_date, interval)
+                self._logger.info(f"✅ Received {len(data) if data else 0} candles for {symbol}")
+                return data
+            
+            self._logger.warning("Broker has no 'historical_data' capability.")
+            return []
+
+        except Exception as e:
+            self._logger.error(f"History fetch crashed for {symbol}: {e}", exc_info=True)
+            return []
+
 
 def _compose_chain_entry(
     contract: Mapping[str, Any], quote: Mapping[str, Any]
@@ -3908,74 +3976,7 @@ def _coerce_int(value: Any) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
-        return None
-
-
-    # -------------------------------------------------------------------------
-    async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
-        """
-        Fetch historical data with AUTO-TOKEN-RESOLUTION.
-        """
-        # 1. Normalize Symbol
-        symbol = symbol.strip().upper()
-        
-        # 2. Resolve Token (CRITICAL FIX: Force Resolution if Cache Empty)
-        token = self._token_by_symbol.get(symbol)
-        
-        if not token:
-            self._logger.info(f"🔎 History: Cache miss for {symbol}. Attempting force resolution...")
-            
-            # Try Resolver
-            if self._resolver:
-                try:
-                    token = self._resolver.resolve(symbol)
-                    if token:
-                        self._seed_mapping(symbol, token)
-                except Exception:
-                    pass
-            
-            # Try Broker Instrument Lookup (Fallback)
-            if not token and hasattr(self._broker, "get_instrument_token"):
-                try:
-                    token = self._broker.get_instrument_token(symbol)
-                    if token:
-                        self._seed_mapping(symbol, int(token))
-                except Exception:
-                    pass
-
-        if not token:
-            self._logger.error(f"❌ History Aborted: Could not resolve token for {symbol}")
-            return []
-
-        # 3. Calculate Dates
-        to_date = datetime.now(timezone.utc)
-        from_date = to_date - timedelta(days=days)
-
-        # 4. Fetch Data
-        try:
-            # Detect Kite Connect vs Generic Broker
-            fetcher = getattr(self._broker, "historical_data", None)
-            
-            # Handle Kite Wrapper pattern
-            if not fetcher:
-                client = getattr(self._broker, "kite", getattr(self._broker, "client", None))
-                if client:
-                    fetcher = getattr(client, "historical_data", None)
-
-            if callable(fetcher):
-                self._logger.info(f"⏳ Fetching {days}d history for {symbol} (Token: {token})...")
-                # Run blocking I/O in thread
-                data = await asyncio.to_thread(fetcher, token, from_date, to_date, interval)
-                self._logger.info(f"✅ Received {len(data) if data else 0} candles for {symbol}")
-                return data
-            
-            self._logger.warning("Broker has no 'historical_data' capability.")
-            return []
-
-        except Exception as e:
-            self._logger.error(f"History fetch crashed for {symbol}: {e}", exc_info=True)
-            return []
-            
+        return None            
 
 
 def _parse_expiry(value: Any) -> datetime | None:
