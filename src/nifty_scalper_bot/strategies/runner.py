@@ -1372,55 +1372,74 @@ class StrategyRunner:
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
-        """Fetch and ingest historical data to prime indicators on startup."""
+        """
+        Fetch and ingest historical data using the clean MDM interface.
+        """
         self._logger.info("⏳ Starting historical data backfill...")
+        
+        # 1. Wait for connections to stabilize
         await asyncio.sleep(2.0)
         
-        # Prioritize DataHub, fallback to MarketDataManager
+        # 2. Determine Source (DataHub or MarketData)
         source = self._data_hub if self._data_hub else self._market_data
         
-        for symbol in self._active_symbols:
-            try:
-                # ✅ Clean Interface Call
-                if hasattr(source, "fetch_history"):
-                    candles = await source.fetch_history(symbol, "minute", days=3)
-                    
-                    if candles:
-                        loaded = 0
-                        for candle in candles:
-                            # Normalize Data (Handle Zerodha dict keys vs Standard)
-                            # NOTE: Ensure _extract_float/_extract_int are defined in Runner or imported
-                            payload = {
-                                "open": self._extract_float(candle, "open", "o"),
-                                "high": self._extract_float(candle, "high", "h"),
-                                "low": self._extract_float(candle, "low", "l"),
-                                "close": self._extract_float(candle, "close", "c")
-                            }
-                            vol = self._extract_int(candle, "volume", "v", "vol")
-                            
-                            # Handle Timestamp
-                            raw_ts = candle.get("date") or candle.get("timestamp")
-                            ts = datetime.now(timezone.utc)
-                            if raw_ts:
-                                if isinstance(raw_ts, str):
-                                    ts = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00'))
-                                elif isinstance(raw_ts, datetime):
-                                    ts = raw_ts
+        # 3. Check for the new interface (Added in MarketDataManager)
+        if not hasattr(source, "fetch_history"):
+            self._logger.warning("⚠️ Data source missing 'fetch_history' method. Backfill skipped.")
+            return
 
-                            if payload["close"] and payload["close"] > 0:
-                                self._indicator_engine.update_price(
-                                    symbol, payload, volume=vol, timestamp=ts
-                                )
-                                loaded += 1
+        # 4. Define Helpers (Safe extraction logic)
+        def _get_val(d, *keys, default=0.0):
+            for k in keys:
+                if d.get(k) is not None: return float(d[k])
+            return default
+
+        symbols_to_load = []
+        with self._lock:
+            symbols_to_load = list(self._active_symbols)
+
+        for symbol in symbols_to_load:
+            try:
+                # ✅ CLEAN CALL: Ask Manager for 3 days of 1-minute data
+                candles = await source.fetch_history(symbol, "minute", days=3)
+                
+                if candles:
+                    loaded = 0
+                    for candle in candles:
+                        # Normalize Data
+                        payload = {
+                            "open": _get_val(candle, "open", "o"),
+                            "high": _get_val(candle, "high", "h"),
+                            "low": _get_val(candle, "low", "l"),
+                            "close": _get_val(candle, "close", "c")
+                        }
+                        vol = int(_get_val(candle, "volume", "v", "vol"))
                         
-                        if loaded > 0:
-                            self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
-                            
+                        # Handle Timestamp
+                        raw_ts = candle.get("date") or candle.get("timestamp")
+                        ts = datetime.now(timezone.utc)
+                        if raw_ts:
+                            if isinstance(raw_ts, str):
+                                # Handle ISO format "2023-01-01T10:00:00+0530"
+                                ts = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00'))
+                            elif isinstance(raw_ts, datetime):
+                                ts = raw_ts
+
+                        # Feed Indicator Engine
+                        if payload["close"] > 0:
+                            self._indicator_engine.update_price(
+                                symbol, payload, volume=vol, timestamp=ts
+                            )
+                            loaded += 1
+                    
+                    if loaded > 0:
+                        self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
+            
             except Exception as e:
-                self._logger.debug(f"Backfill error for {symbol}: {e}")
+                self._logger.debug(f"Backfill failed for {symbol}: {e}")
         
         self._logger.info("✅ Historical backfill process finished.")
-
+        
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
