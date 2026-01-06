@@ -3692,79 +3692,91 @@ class OrderManager:
             # 1. Try to retrieve the existing order
             order = self._orders.get(order_id)
 
-            # 2. 🛡️ AUTO-ADOPTION PROTOCOL (Fix for "Unknown Order" warnings)
-            # If the order exists at Broker but not in Bot, we adopt it immediately.
+            # -----------------------------------------------------
+            # 🛡️ UNKNOWN ORDER HANDLING (The Fix)
+            # -----------------------------------------------------
             if not order:
+                # A. STOP THE SPAM: Ignore Dead Orders
+                # If a manual/ghost order is already finished (Rejected/Cancelled), 
+                # we don't need to track it. Just return silently.
+                if status_raw in ["REJECTED", "CANCELLED", "CANCELED"]:
+                    return
+
+                # B. ADOPT ACTIVE ORDERS (Manual Trades you are holding)
                 try:
-                    # Map broker fields to internal schema safely
+                    # Create the order object so we track it from now on
                     order = OrderDetails(
                         order_id=order_id,
                         symbol=order_update.get("tradingsymbol") or order_update.get("symbol", "UNKNOWN"),
                         side=order_update.get("transaction_type", "BUY"),
-                        # Handle quantity robustly (e.g. "50.0" -> 50)
                         quantity=int(float(order_update.get("quantity", 0))),
-                        order_type=OrderType.MARKET, # Default assumption for adopted trades
-                        price=float(order_update.get("price", 0.0)),
-                        trigger_price=float(order_update.get("trigger_price", 0.0)),
-                        average_price=float(order_update.get("average_price", 0.0)),
+                        order_type=OrderType.MARKET, # Assume Market for manual entries
+                        price=float(order_update.get("price", 0.0) or 0.0),
+                        trigger_price=float(order_update.get("trigger_price", 0.0) or 0.0),
+                        average_price=float(order_update.get("average_price", 0.0) or 0.0),
                         filled_quantity=int(float(order_update.get("filled_quantity", 0))),
                         status=self._parse_status(status_raw),
                         timestamp=datetime.now(timezone.utc),
-                        tag="adopted_from_broker"
+                        tag="adopted_manual_trade"
                     )
-                    # Register into memory
+                    
+                    # 1. Save to Memory (Stop "Unknown Order" warnings for future updates)
                     self._orders[order_id] = order
                     self._logger.info(f"🆕 ADOPTED UNKNOWN ORDER: {order_id} [{order.symbol}]")
+                    
+                    # 2. Persist to Disk Immediately (Survive Restarts)
+                    if hasattr(self, "save_orders"):
+                        self.save_orders()
+
                 except Exception as e:
-                    # Log error but don't crash the update stream
-                    self._logger.warning(f"⚠️ Failed to adopt unknown order {order_id}: {e}")
+                    # Log as DEBUG so it doesn't spam your console if adoption fails
+                    self._logger.debug(f"⚠️ Failed to adopt order {order_id}: {e}")
                     return
 
-            # 3. State Synchronization
+            # -----------------------------------------------------
+            # 🔄 STATE SYNCHRONIZATION
+            # -----------------------------------------------------
             old_status = order.status
             new_status = self._parse_status(status_raw)
             
-            # Only update if changed or if data is fresher
             order.status = new_status
             order.filled_quantity = int(float(order_update.get("filled_quantity", 0)))
 
-            # Robust Price Logic: Prefer average_price (actual fill), fallback to price
+            # Update Price: Prefer actual fill price ('average_price')
             avg_px = order_update.get("average_price")
             if avg_px and float(avg_px) > 0:
                 order.fill_price = float(avg_px)
-            elif not order.fill_price and order_update.get("price"):
-                order.fill_price = float(order_update.get("price", 0.0))
+            elif not order.fill_price:
+                order.fill_price = float(order_update.get("price", 0.0) or 0.0)
 
-            # 4. Fill Detection & Bracket Activation
-            # Trigger only when status transitions to COMPLETE/FILLED
+            # -----------------------------------------------------
+            # ✅ FILL PROCESSING (Trigger Stop Loss / Target)
+            # -----------------------------------------------------
             is_filled = status_raw in ["COMPLETE", "FILLED"]
             
             if is_filled and old_status != OrderStatus.FILLED:
                 self._logger.info(f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}")
 
-                # A. Activate Virtual Bracket (Stop Loss / Take Profit)
+                # Update Bracket (Stop Loss / Target)
                 if self._bracket_manager:
                     try:
-                        # Pass the confirmed fill price to center the bracket
-                        execution_price = order.fill_price if order.fill_price > 0 else order.price
-                        self._bracket_manager.confirm_entry_fill(order_id, execution_price)
+                        exec_px = order.fill_price if order.fill_price and order.fill_price > 0 else order.price
+                        self._bracket_manager.confirm_entry_fill(order_id, exec_px)
                         self._logger.info(f"🎯 BRACKET ACTIVATED: {order.symbol}")
                     except Exception as exc:
                         self._logger.error(f"Bracket activation failed: {exc}")
-                else:
-                    self._logger.warning("BracketManager not initialized! Trade is unmanaged.")
 
-            # 5. Handle Exits (If this update was a Stop Loss hit)
-            try:
-                self._handle_bracket_update(order, old_status, order_update)
-            except Exception as exc:
-                self._logger.error(f"Bracket update logic failed: {exc}")
+                # Update Positions (Critical for Dashboard accuracy)
+                if hasattr(self._positions, "update_from_order"):
+                    try:
+                        self._positions.update_from_order(order)
+                    except Exception:
+                        pass
 
-        # 6. Persistence (Save state to disk immediately)
-        # Done outside the lock if save_orders manages its own I/O safety, 
-        # or inside if it relies on _orders not changing. 
-        # Assuming safe to call:
-        self.save_orders()
+            # Final Persistence
+            if hasattr(self, "save_orders"):
+                try: self.save_orders()
+                except Exception: pass
     
     def place_atomic_entry(
         self,
