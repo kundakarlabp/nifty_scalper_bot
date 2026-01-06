@@ -1371,7 +1371,7 @@ class StrategyRunner:
 
 
     # ✅ FIX: New Method to Prime Indicators
-   async def _backfill_history(self) -> None:
+    async def _backfill_history(self) -> None:
         """Fetch and ingest historical data to prime indicators on startup."""
         self._logger.info("⏳ Starting historical data backfill for indicators...")
         
