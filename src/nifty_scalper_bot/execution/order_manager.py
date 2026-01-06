@@ -1498,6 +1498,15 @@ class OrderManager:
         # 3. Fallback: Return as is (assuming it's already a tradingsymbol)
         return symbol
 
+    def _round_to_tick(self, price: float, tick_size: float = 0.05) -> float:
+        """
+        ✅ CRITICAL FIX: Round price to nearest valid tick size.
+        Prevents '65.14' rejections on Nifty Options.
+        """
+        if price is None or price <= 0: 
+            return 0.0
+        return round(round(price / tick_size) * tick_size, 2)
+
     def place_order(
         self,
         symbol: str,
