@@ -173,6 +173,7 @@ class StrategyRunnerConfig:
     trade_cooldown_seconds: float = 10.0
     min_indicator_bars: int = 5
     max_trade_history: int = 100
+    fetch_history_on_startup: bool = True
 
     def __post_init__(self) -> None:
         if self.signal_cooldown_seconds < 0:
@@ -457,6 +458,10 @@ class StrategyRunner:
             self._subscribe_symbol(symbol)
 
         self._logger.info("Strategy runner started with symbols: %s", symbols)
+
+        # ✅ FIX: Launch Backfill Task
+        if self._config.fetch_history_on_startup and self._main_loop:
+            self._main_loop.create_task(self._backfill_history())
 
     def stop(self) -> None:
         """Stop event processing and unsubscribe from market data."""
@@ -1364,6 +1369,65 @@ class StrategyRunner:
                 exc_info=True,
             )
 
+
+    # ✅ FIX: New Method to Prime Indicators
+    async def _backfill_history(self) -> None:
+        """Fetch and ingest historical data to prime indicators on startup."""
+        self._logger.info("⏳ Starting historical data backfill for indicators...")
+        
+        # Allow connections to stabilize
+        await asyncio.sleep(2.0)
+        
+        # Determine Source (Prefer DataHub)
+        source = self._data_hub if self._data_hub else self._market_data
+        
+        # Attempt to find a fetch method
+        fetcher = getattr(source, "fetch_history", getattr(source, "get_historical_candles", None))
+        
+        if not callable(fetcher):
+            self._logger.warning("⚠️ No historical fetch method found. Indicators will start cold.")
+            return
+
+        symbols_to_load = []
+        with self._lock:
+            symbols_to_load = list(self._active_symbols)
+
+        for symbol in symbols_to_load:
+            try:
+                # Fetch 3 days of 1-minute data (Safe buffer for 50-period indicators)
+                # Note: Adjust args if your MarketDataManager uses different signature
+                candles = await fetcher(symbol, "1minute", days=3)
+                
+                if not candles:
+                    continue
+
+                loaded = 0
+                for candle in candles:
+                    # Normalize Data
+                    payload = {
+                        "open": _extract_float(candle, "open"),
+                        "high": _extract_float(candle, "high"),
+                        "low": _extract_float(candle, "low"),
+                        "close": _extract_float(candle, "close")
+                    }
+                    vol = _extract_int(candle, "volume", "v")
+                    ts = _extract_timestamp(candle, datetime.now(timezone.utc))
+                    
+                    # Feed Indicator Engine
+                    if payload["close"] is not None and payload["close"] > 0:
+                        self._indicator_engine.update_price(
+                            symbol, payload, volume=vol, timestamp=ts
+                        )
+                        loaded += 1
+                
+                if loaded > 0:
+                    self._logger.info(f"✅ Backfilled {symbol}: {loaded} bars loaded.")
+            
+            except Exception as e:
+                self._logger.warning(f"❌ Failed to backfill {symbol}: {e}")
+
+        self._logger.info("✅ Historical backfill process finished.")
+
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
         # ✅ FIX: Import logging to access integer constants (DEBUG=10, WARNING=30)
@@ -1375,7 +1439,8 @@ class StrategyRunner:
             self._logger,
             f"tick_received_{symbol}",
             f"🔔 TICK RECEIVED: {symbol} | Raw Data: {dict(tick)}",
-            interval_sec=60.0
+            interval_sec=60.0,
+            level=logging.DEBUG
         )
         
         now = datetime.now(timezone.utc)
