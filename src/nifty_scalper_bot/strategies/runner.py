@@ -1373,114 +1373,55 @@ class StrategyRunner:
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
         """Fetch and ingest historical data to prime indicators on startup."""
-        self._logger.info("⏳ Starting historical data backfill for indicators...")
-        
-        # Allow connections to stabilize
+        self._logger.info("⏳ Starting historical data backfill...")
         await asyncio.sleep(2.0)
         
-        # 1. Determine Source
+        # Prioritize DataHub, fallback to MarketDataManager
         source = self._data_hub if self._data_hub else self._market_data
         
-        # 2. 🛡️ ROBUST METHOD DISCOVERY
-        # Added 'historical_data' (Zerodha/Kite standard name)
-        fetcher = None
-        candidates = ["fetch_history", "get_historical_candles", "get_history", "fetch_candles", "historical_data"]
-        
-        # Check Source Wrapper
-        for attr in candidates:
-            if hasattr(source, attr):
-                fetcher = getattr(source, attr)
-                break
-        
-        # Check Underlying Provider (e.g. Zerodha/Kite Client)
-        provider_direct = False
-        if not fetcher and hasattr(source, "provider"):
-            provider = getattr(source, "provider")
-            for attr in candidates:
-                if hasattr(provider, attr):
-                    fetcher = getattr(provider, attr)
-                    provider_direct = True # Flag that we are bypassing the wrapper
-                    break
-
-        if not callable(fetcher):
-            self._logger.warning(
-                "⚠️ ⚠️ No historical fetch method found. Indicators will start cold."
-            )
-            return
-
-        symbols_to_load = []
-        with self._lock:
-            symbols_to_load = list(self._active_symbols)
-
-        for symbol in symbols_to_load:
+        for symbol in self._active_symbols:
             try:
-                # 3. 🛡️ TOKEN RESOLUTION (Critical for Provider Direct Calls)
-                # Zerodha requires '256265' (int), not 'NIFTY 50' (str)
-                query_key = symbol
-                if provider_direct:
-                    # Try to resolve token using MarketDataManager
-                    if hasattr(self._market_data, "get_token"):
-                        token = self._market_data.get_token(symbol)
-                        if token: query_key = token
-                    elif hasattr(self._market_data, "instrument_resolver"):
-                        # Fallback to resolver
-                        res = self._market_data.instrument_resolver
-                        if hasattr(res, "get_token"):
-                            token = res.get_token(symbol)
-                            if token: query_key = token
-
-                # 4. FETCH DATA
-                # Try fetching 3 days of 1-minute data
-                try:
-                    # Standard Wrapper Signature
-                    candles = await fetcher(query_key, "1minute", days=3)
-                except TypeError:
-                    # Zerodha/Provider Signature: (token, from, to, interval)
-                    end_dt = datetime.now(timezone.utc)
-                    start_dt = end_dt - timedelta(days=3)
-                    # Note: We await it even if it's sync (to_thread wrapper might be needed if blocking)
-                    if asyncio.iscoroutinefunction(fetcher):
-                        candles = await fetcher(query_key, start_dt, end_dt, "minute")
-                    else:
-                        candles = await asyncio.to_thread(fetcher, query_key, start_dt, end_dt, "minute")
-
-                if not candles:
-                    continue
-
-                loaded = 0
-                for candle in candles:
-                    # Normalize Data (Handle Zerodha dicts and others)
-                    payload = {
-                        "open": _extract_float(candle, "open", "o"),
-                        "high": _extract_float(candle, "high", "h"),
-                        "low": _extract_float(candle, "low", "l"),
-                        "close": _extract_float(candle, "close", "c")
-                    }
-                    vol = _extract_int(candle, "volume", "v", "vol")
+                # ✅ Clean Interface Call
+                if hasattr(source, "fetch_history"):
+                    candles = await source.fetch_history(symbol, "minute", days=3)
                     
-                    # Handle Zerodha 'date' field or standard 'timestamp'
-                    raw_ts = candle.get("date") or candle.get("timestamp")
-                    if raw_ts:
-                        ts = _extract_timestamp({"timestamp": raw_ts}, datetime.now(timezone.utc))
-                    else:
-                        ts = datetime.now(timezone.utc)
-                    
-                    # Feed Indicator Engine
-                    if payload["close"] is not None and payload["close"] > 0:
-                        self._indicator_engine.update_price(
-                            symbol, payload, volume=vol, timestamp=ts
-                        )
-                        loaded += 1
-                
-                if loaded > 0:
-                    self._logger.info(f"✅ Backfilled {symbol}: {loaded} bars loaded.")
-            
+                    if candles:
+                        loaded = 0
+                        for candle in candles:
+                            # Normalize Data (Handle Zerodha dict keys vs Standard)
+                            # NOTE: Ensure _extract_float/_extract_int are defined in Runner or imported
+                            payload = {
+                                "open": self._extract_float(candle, "open", "o"),
+                                "high": self._extract_float(candle, "high", "h"),
+                                "low": self._extract_float(candle, "low", "l"),
+                                "close": self._extract_float(candle, "close", "c")
+                            }
+                            vol = self._extract_int(candle, "volume", "v", "vol")
+                            
+                            # Handle Timestamp
+                            raw_ts = candle.get("date") or candle.get("timestamp")
+                            ts = datetime.now(timezone.utc)
+                            if raw_ts:
+                                if isinstance(raw_ts, str):
+                                    ts = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00'))
+                                elif isinstance(raw_ts, datetime):
+                                    ts = raw_ts
+
+                            if payload["close"] and payload["close"] > 0:
+                                self._indicator_engine.update_price(
+                                    symbol, payload, volume=vol, timestamp=ts
+                                )
+                                loaded += 1
+                        
+                        if loaded > 0:
+                            self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
+                            
             except Exception as e:
-                # Log at Debug to avoid spam if tokens fail
-                self._logger.debug(f"❌ Failed to backfill {symbol}: {e}")
-
+                self._logger.debug(f"Backfill error for {symbol}: {e}")
+        
         self._logger.info("✅ Historical backfill process finished.")
 
+    
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
         # ✅ FIX: Import logging to access integer constants (DEBUG=10, WARNING=30)
