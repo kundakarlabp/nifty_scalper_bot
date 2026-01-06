@@ -3716,16 +3716,18 @@ class MarketDataManager:
         self._last_signature[symbol] = (signature, current)
         return False
 
-    # ✅ CORRECT: Indented inside the class
+    # -------------------------------------------------------------------------
+    # ✅ "HUNTER-KILLER" FIX: Robust History Fetching
+    # -------------------------------------------------------------------------
     async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
         """
-        Fetch historical data with AUTO-TOKEN-RESOLUTION.
+        Fetch historical data with Aggressive Fetcher Detection & Auto-Token Resolution.
         """
         # 1. Normalize Symbol
         symbol = symbol.strip().upper()
         
-        # 2. Resolve Token (CRITICAL FIX: Force Resolution if Cache Empty)
-        token = self._token_by_symbol.get(symbol)
+        # 2. Resolve Token (Try Cache -> Resolver -> Broker)
+        token = getattr(self, "_token_by_symbol", {}).get(symbol)
         
         if not token:
             self._logger.info(f"🔎 History: Cache miss for {symbol}. Attempting force resolution...")
@@ -3734,56 +3736,81 @@ class MarketDataManager:
             resolver = getattr(self, "_resolver", None)
             if resolver:
                 try:
-                    resolved = resolver.resolve(symbol)
-                    if resolved:
-                        token = int(resolved)
-                        self._seed_mapping(symbol, token)
+                    # Try resolve() method
+                    if hasattr(resolver, "resolve"):
+                        t = resolver.resolve(symbol)
+                        if t: token = int(t)
+                    # Try get_token() method (Fallback)
+                    if not token and hasattr(resolver, "get_token"):
+                        t = resolver.get_token(symbol)
+                        if t: token = int(t)
                 except Exception:
                     pass
             
-            # Try Broker Instrument Lookup (Fallback)
-            if not token and hasattr(self._broker, "get_instrument_token"):
+            # Try Broker Instrument Lookup (Final Fallback)
+            if not token and self._broker and hasattr(self._broker, "get_instrument_token"):
                 try:
                     t = self._broker.get_instrument_token(symbol)
-                    if t:
-                        token = int(t)
-                        self._seed_mapping(symbol, int(t))
+                    if t: token = int(t)
                 except Exception:
                     pass
 
         if not token:
-            self._logger.error(f"❌ History Aborted: Could not resolve token for {symbol}")
+            self._logger.warning(f"❌ History Aborted: Could not resolve token for {symbol}")
             return []
 
         # 3. Calculate Dates
         to_date = datetime.now(timezone.utc)
         from_date = to_date - timedelta(days=days)
 
-        # 4. Fetch Data
+        # 4. Fetch Data (ROBUST SEARCH)
+        if not self._broker:
+            self._logger.error("❌ Broker instance is None.")
+            return []
+
         try:
-            # Detect Kite Connect vs Generic Broker
-            fetcher = getattr(self._broker, "historical_data", None)
+            fetcher = None
             
-            # Handle Kite Wrapper pattern
+            # List of method names to hunt for
+            candidates = ["historical_data", "get_historical_data", "history", "get_history"]
+            
+            # A. Check Broker Direct
+            for method in candidates:
+                f = getattr(self._broker, method, None)
+                if callable(f):
+                    fetcher = f
+                    break
+            
+            # B. Check Inner Client (kite/client)
             if not fetcher:
                 client = getattr(self._broker, "kite", getattr(self._broker, "client", None))
                 if client:
-                    fetcher = getattr(client, "historical_data", None)
+                    for method in candidates:
+                        f = getattr(client, method, None)
+                        if callable(f):
+                            fetcher = f
+                            break
 
             if callable(fetcher):
-                self._logger.info(f"⏳ Fetching {days}d history for {symbol} (Token: {token})...")
                 # Run blocking I/O in thread
                 data = await asyncio.to_thread(fetcher, token, from_date, to_date, interval)
-                self._logger.info(f"✅ Received {len(data) if data else 0} candles for {symbol}")
+                if data:
+                    self._logger.info(f"✅ Received {len(data)} candles for {symbol}")
+                else:
+                    self._logger.warning(f"⚠️ History fetch returned 0 candles for {symbol} (Token: {token})")
                 return data
             
-            self._logger.warning("Broker has no 'historical_data' capability.")
+            # Debugging Dump if failure persists
+            self._logger.error(
+                f"⚠️ Broker {type(self._broker).__name__} missing history capability. "
+                f"Checked: {candidates}"
+            )
             return []
 
         except Exception as e:
             self._logger.error(f"History fetch crashed for {symbol}: {e}", exc_info=True)
             return []
-
+            
 
 def _compose_chain_entry(
     contract: Mapping[str, Any], quote: Mapping[str, Any]
