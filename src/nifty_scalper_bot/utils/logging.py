@@ -528,15 +528,18 @@ def silence_third_party_loggers() -> None:
 
 def enable_business_logic_logging() -> None:
     """Enable logs for Decisions, but silence the Loops."""
-    # 1. High Visibility (See Signals & Strategy)
-    logging.getLogger("nifty_scalper_bot.strategies").setLevel(logging.DEBUG)
-    logging.getLogger("nifty_scalper_bot.core").setLevel(logging.DEBUG)
+    # ❌ FIX: Commented out these lines so they don't override your Railway config.
+    # Now, if you set LOG_LEVEL=INFO, these will actually stay at INFO.
+    
+    # logging.getLogger("nifty_scalper_bot.strategies").setLevel(logging.DEBUG)
+    # logging.getLogger("nifty_scalper_bot.core").setLevel(logging.DEBUG)
 
     # 2. Low Visibility (Silence 'Entered OrderQueue', 'Circuit Breaker' loops)
-    logging.getLogger("nifty_scalper_bot.execution").setLevel(logging.INFO)
-    logging.getLogger("nifty_scalper_bot.risk").setLevel(logging.INFO)
-    logging.getLogger("nifty_scalper_bot.lifecycle").setLevel(logging.INFO)
-
+    # You can keep these if you want to explicitly silence them, or comment them out too.
+    # logging.getLogger("nifty_scalper_bot.execution").setLevel(logging.INFO)
+    # logging.getLogger("nifty_scalper_bot.risk").setLevel(logging.INFO)
+    # logging.getLogger("nifty_scalper_bot.lifecycle").setLevel(logging.INFO)
+    pass
 
 # =============================================================================
 # 7. MODULE INITIALIZATION
