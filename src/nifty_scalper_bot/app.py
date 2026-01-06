@@ -2853,7 +2853,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         data_hub = DataHub(
             market_data_manager,
             instrument_resolver,
-            options_only=True,
+            options_only=False,
             store=hub_store,
             message_bus=message_bus,
         )
@@ -2888,7 +2888,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         data_hub = DataHub(
             market_data_manager,
             instrument_resolver,
-            options_only=True,
+            options_only=False,
             store=hub_store,
             message_bus=message_bus,
         )
