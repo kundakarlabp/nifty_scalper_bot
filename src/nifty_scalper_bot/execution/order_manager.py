@@ -1500,8 +1500,7 @@ class OrderManager:
 
     def _round_to_tick(self, price: float, tick_size: float = 0.05) -> float:
         """
-        ✅ CRITICAL FIX: Round price to nearest valid tick size.
-        Prevents '65.14' rejections on Nifty Options.
+        ✅ Round price to nearest valid tick size.
         """
         if price is None or price <= 0: 
             return 0.0
@@ -1527,6 +1526,12 @@ class OrderManager:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
         """
+        # ✅ FIX: Round Price/Trigger to 0.05 tick size BEFORE processing
+        # This fixes the "Invalid Tick Size" rejection (e.g. 65.14 -> 65.15)
+        if price is not None and price > 0:
+            price = self._round_to_tick(price)
+        if trigger_price is not None and trigger_price > 0:
+            trigger_price = self._round_to_tick(trigger_price)
         # ---------------------------------------------------------
         # 🛡️ CIRCUIT BREAKER CHECK
         # ---------------------------------------------------------
@@ -4119,6 +4124,10 @@ class OrderManager:
         SMART FIX: If modifying a 'Fake SL-M' (SL-Limit), auto-adjust the limit price.
         """
         try:
+            # ✅ FIX: Round Price/Trigger to 0.05 tick size
+            if price: price = self._round_to_tick(price)
+            if trigger_price: trigger_price = self._round_to_tick(trigger_price)
+                
             # 1. Fetch Order Context
             order = self.get_order(order_id)
             if not order:
