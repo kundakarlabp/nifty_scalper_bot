@@ -1574,14 +1574,14 @@ class StrategyRunner:
                         reason="vwap_crossover",
                         stop_loss=None, 
                         take_profit=None,
-                        price=price,
-                        tag="vwap_scalp",
+                        # ✅ FIX: Removed invalid 'price' and 'tag' arguments
                         metadata={
                             "strategy": "vwap_scalp",
                             "vwap": curr_vwap,
                             "cross_price": price,
                             "premium_stop_pct": 0.10,
-                            "premium_target_rr": 2.0
+                            "premium_target_rr": 2.0,
+                            "tag": "vwap_scalp"  # Moved 'tag' to metadata
                         }
                     )
 
