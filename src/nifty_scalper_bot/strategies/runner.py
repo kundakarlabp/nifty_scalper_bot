@@ -1401,8 +1401,16 @@ class StrategyRunner:
         if volume is None or volume <= 0:
             # Options/Futures often show zero volume initially - Allow processing but flag it
             if symbol.endswith(("FUT", "CE", "PE")):
-                self._logger.debug(f"⚠️ Zero volume for {symbol}, allowing indicator updates")
-                volume = 0 
+                # ✅ SILENCED: Only log once per minute per symbol
+                from nifty_scalper_bot.utils.logging import log_throttled
+                log_throttled(
+                    self._logger, 
+                    f"zero_vol_{symbol}", 
+                    f"⚠️ Zero volume for {symbol} (allowing updates)", 
+                    interval_sec=60.0,
+                    level="debug"
+                )
+                volume = 0
             else:
                 # Spot/Index: Require valid volume
                 log_throttled(
