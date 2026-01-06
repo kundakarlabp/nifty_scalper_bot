@@ -459,4 +459,30 @@ class DataHub:
         
         return result
 
+    # [INSERT THIS AT THE BOTTOM OF THE DataHub CLASS, BEFORE __all__]
+    
+    # ----------------------------------------------------------------
+    # Historical Data Proxy (CRITICAL FOR BACKFILL)
+    # ----------------------------------------------------------------
+    
+    async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
+        """
+        Proxies historical data requests to the MarketDataManager.
+        Essential for 'Cold Start' indicator priming.
+        """
+        # 1. Resolve the underlying manager
+        mdm = getattr(self, "_mdm", None) or getattr(self, "_market_data", None)
+        
+        # 2. Check capability
+        if mdm and hasattr(mdm, "fetch_history"):
+            try:
+                # 3. Await the result (MDM.fetch_history is async)
+                return await mdm.fetch_history(symbol, interval, days)
+            except Exception as e:
+                LOGGER.error(f"DataHub Proxy Error: fetch_history failed for {symbol}: {e}")
+                return []
+        
+        LOGGER.warning(f"DataHub: Underlying MDM missing 'fetch_history' for {symbol}")
+        return []
+
 __all__ = ["DataHub", "Tick", "OrderListener", "TickListener"]
