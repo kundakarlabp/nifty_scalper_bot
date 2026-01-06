@@ -744,6 +744,47 @@ class ZerodhaKiteClient(BaseBrokerClient):
         data = cast(dict[str, Any], response.get("data", {}))
         return cast(list[dict], data.get("candles", []))
 
+    def historical_data(
+        self, 
+        instrument_token: int, 
+        from_date: datetime | str, 
+        to_date: datetime | str, 
+        interval: str, 
+        continuous: bool = False, 
+        oi: bool = False
+    ) -> list[dict[str, Any]]:
+        """
+        KiteConnect-compatible historical data fetcher.
+        Required by MarketDataManager/Runner backfill logic.
+        """
+        # 1. Format Dates (Handle datetime objects vs strings)
+        if isinstance(from_date, datetime):
+            from_date = from_date.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(to_date, datetime):
+            to_date = to_date.strftime("%Y-%m-%d %H:%M:%S")
+
+        # 2. Build Parameters
+        params = {
+            "from": from_date,
+            "to": to_date,
+            "continuous": 1 if continuous else 0,
+            "oi": 1 if oi else 0
+        }
+
+        # 3. Execute Request (Using your native infrastructure)
+        self._acquire_bucket(self._HISTORICAL_BUCKET)
+        response = self._ensure_json(
+            self._make_request(
+                "GET",
+                f"/instruments/historical/{instrument_token}/{interval}",
+                params=params,
+            )
+        )
+        
+        # 4. Return standard list of candles
+        data = cast(dict[str, Any], response.get("data", {}))
+        return cast(list[dict], data.get("candles", []))
+
     def get_order_status(self, order_id: str) -> dict:
         """Get order status from broker."""
 
