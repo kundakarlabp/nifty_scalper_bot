@@ -9,7 +9,7 @@ import asyncio
 from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from random import uniform
 from typing import (
     TYPE_CHECKING,
@@ -3909,6 +3909,64 @@ def _coerce_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+    # -------------------------------------------------------------------------
+    # ✅ NEW: History Fetching Interface (Insert this INSIDE the class)
+    # -------------------------------------------------------------------------
+    async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
+        """
+        Fetch historical data, abstracting away broker-specific token logic.
+        Uses self._broker and self._resolver correctly.
+        """
+        # 1. Resolve Token (Try internal cache first, then resolver)
+        token = getattr(self, "_token_by_symbol", {}).get(symbol)
+        
+        resolver = getattr(self, "_resolver", None)
+        if not token and resolver:
+            try:
+                # Try .resolve() first
+                if hasattr(resolver, "resolve"):
+                    token = resolver.resolve(symbol)
+                # Fallback to .get_token()
+                if not token and hasattr(resolver, "get_token"):
+                    token = resolver.get_token(symbol)
+            except Exception:
+                pass
+        
+        if not token:
+            self._logger.warning(f"❌ Token resolution failed for {symbol}")
+            return []
+
+        # 2. Calculate Dates
+        to_date = datetime.now(timezone.utc)
+        from_date = to_date - timedelta(days=days)
+
+        # 3. Call Broker (Using your ACTUAL _broker attribute)
+        if not self._broker:
+            self._logger.warning("Broker instance not connected.")
+            return []
+
+        try:
+            # Detect method: kite.historical_data vs generic get_history
+            fetcher = getattr(self._broker, "historical_data", None)
+            
+            # If broker is a wrapper (e.g., has .kite or .client)
+            if not fetcher:
+                client = getattr(self._broker, "kite", getattr(self._broker, "client", None))
+                if client:
+                    fetcher = getattr(client, "historical_data", None)
+
+            if callable(fetcher):
+                # Run blocking I/O in a thread so the bot doesn't freeze
+                return await asyncio.to_thread(fetcher, token, from_date, to_date, interval)
+            
+            self._logger.warning("No 'historical_data' method found on broker instance")
+            return []
+
+        except Exception as e:
+            self._logger.error(f"History fetch failed for {symbol}: {e}")
+            return []
 
 
 def _parse_expiry(value: Any) -> datetime | None:
