@@ -1372,7 +1372,10 @@ class StrategyRunner:
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
-        """Fetch and ingest historical data. NEVER defaults to datetime.now()."""
+        """
+        Fetch and ingest historical data.
+        Robustly handles both DICT candles (Zerodha) and LIST candles (Fyers/Alice/others).
+        """
         self._logger.info("⏳ Starting historical data backfill...")
         await asyncio.sleep(2.0)
         
@@ -1382,13 +1385,10 @@ class StrategyRunner:
             self._logger.warning("⚠️ MarketData missing 'fetch_history'. Backfill skipped.")
             return
 
-        # 2. Helpers
-        def _get_val(d, *keys, default=0.0):
-            for k in keys:
-                if k in d: return float(d[k])
-                for variant in [k.lower(), k.title(), k.upper()]:
-                    if variant in d: return float(d[variant])
-            return default
+        # 2. Helper: Safe Float Extraction
+        def _to_float(val):
+            try: return float(val)
+            except (ValueError, TypeError): return 0.0
 
         symbols_to_load = []
         with self._lock:
@@ -1396,57 +1396,85 @@ class StrategyRunner:
 
         for symbol in symbols_to_load:
             try:
-                # Fetch 7 days to cover weekends
+                # 3. Fetch Data
                 candles = await source.fetch_history(symbol, "minute", days=7)
                 
                 if candles:
                     loaded = 0
+                    # Debug the structure of the first candle
+                    if len(candles) > 0:
+                        first = candles[0]
+                        # self._logger.info(f"🔍 DEBUG DATA STRUCTURE: {type(first)} -> {str(first)[:100]}")
+
                     for candle in candles:
-                        # 3. Extract OHLCV
-                        payload = {
-                            "open": _get_val(candle, "open", "o"),
-                            "high": _get_val(candle, "high", "h"),
-                            "low": _get_val(candle, "low", "l"),
-                            "close": _get_val(candle, "close", "c")
-                        }
-                        vol = int(_get_val(candle, "volume", "v", "vol"))
-                        
-                        # 4. Extract Timestamp (Robust Search)
+                        payload = {}
+                        raw_ts = None
+                        vol = 0
+
+                        # -------------------------------------------------
+                        # CASE A: Candle is a LIST (e.g. [time, o, h, l, c, v])
+                        # -------------------------------------------------
+                        if isinstance(candle, (list, tuple)):
+                            if len(candle) < 6: continue
+                            # Standard assumption: 0=Time, 1=Open, 2=High, 3=Low, 4=Close, 5=Vol
+                            raw_ts = candle[0]
+                            payload = {
+                                "open": _to_float(candle[1]),
+                                "high": _to_float(candle[2]),
+                                "low": _to_float(candle[3]),
+                                "close": _to_float(candle[4])
+                            }
+                            vol = int(_to_float(candle[5]))
+
+                        # -------------------------------------------------
+                        # CASE B: Candle is a DICT (e.g. {'date':..., 'open':...})
+                        # -------------------------------------------------
+                        elif isinstance(candle, dict):
+                            # Extract Prices
+                            o, h, l, c, v = 0.0, 0.0, 0.0, 0.0, 0
+                            for k, v_val in candle.items():
+                                k_lower = k.lower()
+                                val_float = _to_float(v_val)
+                                if k_lower in ['o', 'open']: o = val_float
+                                elif k_lower in ['h', 'high']: h = val_float
+                                elif k_lower in ['l', 'low']: l = val_float
+                                elif k_lower in ['c', 'close']: c = val_float
+                                elif k_lower in ['v', 'vol', 'volume']: v = int(val_float)
+                                elif k_lower in ['date', 'timestamp', 'time', 'datetime']: raw_ts = v_val
+                            
+                            payload = {"open": o, "high": h, "low": l, "close": c}
+                            vol = v
+
+                        # -------------------------------------------------
+                        # Common: Timestamp Parsing & Ingestion
+                        # -------------------------------------------------
                         ts = None
-                        for k in ["date", "Date", "timestamp", "Timestamp", "datetime"]:
-                            val = candle.get(k)
-                            if val:
-                                if isinstance(val, datetime):
-                                    ts = val
-                                elif isinstance(val, str):
-                                    try:
-                                        ts = datetime.fromisoformat(val.replace('Z', '+00:00'))
-                                    except ValueError:
-                                        continue
-                                if ts: break
+                        if isinstance(raw_ts, datetime):
+                            ts = raw_ts
+                        elif isinstance(raw_ts, str):
+                            try:
+                                # Clean 'Z' and parse ISO
+                                ts = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
+                            except ValueError:
+                                continue # Skip invalid time
                         
-                        # 💀 CRITICAL FIX: If no timestamp found, SKIP. Do NOT use now().
-                        if not ts:
-                            continue
+                        if ts:
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
 
-                        # Ensure UTC
-                        if ts.tzinfo is None:
-                            ts = ts.replace(tzinfo=timezone.utc)
-
-                        # 5. Ingest
-                        if payload["close"] > 0:
-                            self._indicator_engine.update_price(
-                                symbol, payload, volume=vol, timestamp=ts
-                            )
-                            loaded += 1
+                            if payload.get("close", 0) > 0:
+                                self._indicator_engine.update_price(
+                                    symbol, payload, volume=vol, timestamp=ts
+                                )
+                                loaded += 1
                     
                     if loaded > 0:
                         self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
                     else:
-                        self._logger.warning(f"⚠️ Fetched {len(candles)} but loaded 0. Check Keys: {list(candles[0].keys())}")
+                        self._logger.warning(f"⚠️ Fetched {len(candles)} candles but ingested 0. Format mismatch.")
             
             except Exception as e:
-                self._logger.error(f"❌ Backfill error {symbol}: {e}", exc_info=True)
+                self._logger.error(f"❌ Backfill failed for {symbol}: {e}", exc_info=True)
         
         self._logger.info("✅ Historical backfill process finished.")
         
