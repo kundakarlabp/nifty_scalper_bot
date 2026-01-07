@@ -330,9 +330,17 @@ class MarketDataManager:
                 self._latest_ticks[normalized_symbol] = payload
             
             # [FIX] CRITICAL: Emit to Strategy Runner!
+            # [FIX] CRITICAL: Emit to Strategy Runner!
             normalized_tick = self._normalize_tick(normalized_symbol, payload, previous)
-            if normalized_tick:
-                 self._emit_tick(normalized_symbol, normalized_tick, source="rest")
+            
+            # Fallback: If normalization is too strict but we successfully extracted an LTP 
+            # in the payload above, use the payload directly.
+            tick_to_emit = normalized_tick
+            if tick_to_emit is None and payload.get("ltp") is not None:
+                tick_to_emit = payload
+
+            if tick_to_emit:
+                 self._emit_tick(normalized_symbol, tick_to_emit, source="rest")
 
         except Exception as exc:
             self._logger.error(
