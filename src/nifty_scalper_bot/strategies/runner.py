@@ -1588,6 +1588,18 @@ class StrategyRunner:
             except Exception:
                 pass
 
+        # [FIX] CRITICAL: Fail-Fast Risk Check (The "Money Bleed" Fix)
+        # This prevents signal generation/spam when the Risk Breaker is tripped.
+        if not self._risk_manager.can_trade(symbol):
+             log_throttled(
+                 self._logger,
+                 f"risk_block_{symbol}", 
+                 f"⛔ Risk Block Active: {symbol}. Trading Halted.",
+                 interval_sec=30.0,
+                 level=logging.WARNING
+             )
+             return  # <--- STOPS EXECUTION HERE
+
         # 4. Strategy Execution Core
         with self._lock:
             if symbol not in self._active_symbols:
