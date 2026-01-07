@@ -174,7 +174,8 @@ class EliteStrategy(Strategy):
         metadata.update({
             "strategy": self.name,
             "mode": "Legacy" if self._is_legacy_signature else "Push",
-            "quantity": elite_signal.quantity
+            "quantity": elite_signal.quantity,
+            "price": elite_signal.entry_price
         })
 
         # Just instantiate the standard Signal. 
@@ -183,7 +184,6 @@ class EliteStrategy(Strategy):
             action=elite_signal.signal,
             symbol=elite_signal.symbol,
             confidence=elite_signal.confidence,
-            price=elite_signal.entry_price,
             tag=f"{self.name}",
             stop_loss=elite_signal.stop_loss,
             take_profit=elite_signal.target,
