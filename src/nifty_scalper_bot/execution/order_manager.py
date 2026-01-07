@@ -4041,23 +4041,20 @@ class OrderManager:
             self._register_order(details)
             
             # [FIX] CRITICAL: Sync with PositionManager
-            # This prevents "Attempted to update unknown order" errors during reconciliation
+            # We must pass the Enum object directly. Converting to string causes
+            # "AttributeError: 'str' object has no attribute 'value'" inside the manager.
             if hasattr(self._positions, "add_pending_order"):
-                # Safe Enum conversion for order_type
-                otype = details.order_type
-                otype_str = otype.name if hasattr(otype, "name") else str(otype).upper()
-                
                 self._positions.add_pending_order(
                     order_id=details.order_id,
                     symbol=details.symbol,
                     side=details.side,
                     qty=details.quantity,
                     price=details.price,
-                    order_type=otype_str
+                    order_type=details.order_type  # ✅ CORRECT: Pass Enum Object
                 )
             
             try:
-                # ✅ FIX: Safe Enum Access (Handle String vs Enum)
+                # Safe Enum Access for Status updates (Status is usually a string in PM)
                 status_val = details.status
                 status_str = status_val.name if hasattr(status_val, "name") else str(status_val)
                 
@@ -9231,7 +9228,9 @@ class OrderManager:
     def _adopt_orphan_position(self, symbol: str, data: dict) -> None:
         """
         Creates a synthetic filled order to register the position locally.
-        Fixes 'str object has no attribute value' by ensuring type safety.
+        
+        Fixes 'str object has no attribute value' by passing the Enum object 
+        directly to PositionManager, ensuring type safety.
         """
         import time
         from datetime import datetime, timezone
@@ -9254,10 +9253,8 @@ class OrderManager:
         order_id = f"sync_{int(time.time())}_{safe_sym}"
         
         # 3. Resolve OrderType (Handle Enum vs String definition)
-        # We ensure 'otype' is the ENUM if available, otherwise string.
-        otype = "MARKET"
-        if hasattr(OrderType, "MARKET"):
-            otype = OrderType.MARKET
+        # We ensure 'otype' is the ENUM object if available.
+        otype = OrderType.MARKET if hasattr(OrderType, "MARKET") else "MARKET"
 
         # 4. Create Local Record
         details = OrderDetails(
@@ -9279,27 +9276,21 @@ class OrderManager:
         self._register_order(details)
         
         # 6. Register in PositionManager (CRITICAL FIX)
-        # We prefer 'add_pending_order' using PRIMITIVES to avoid object-attribute crashes.
         pm = self._positions
         
         try:
             if hasattr(pm, "add_pending_order"):
-                # Determine safe string representation for PositionManager
-                # If PM expects a string, passing "MARKET" is safe.
-                # If PM expects Enum, we passed 'otype' above, but here we pass string
-                # because add_pending_order usually parses strings.
-                type_str = "MARKET"
-                if hasattr(otype, "name"): 
-                    type_str = otype.name # "MARKET" from Enum
-
+                # [FIX] Pass 'otype' (Enum) directly. 
+                # Do NOT convert to string, as PM likely calls .value on it.
                 pm.add_pending_order(
                     order_id=order_id,
                     symbol=symbol,
                     side=side,
                     qty=abs(qty),
                     price=price,
-                    order_type=type_str 
+                    order_type=otype 
                 )
+                
                 # Immediately confirm fill since it's an orphan
                 if hasattr(pm, "update_order_status"):
                     pm.update_order_status(order_id, "FILLED", price)
@@ -9319,9 +9310,7 @@ class OrderManager:
                 self._logger.error("PositionManager missing standard update methods.")
 
         except Exception as e:
-            # Catch the specific attribute error here to prevent crash
             self._logger.error(f"Orphan adoption failed for {symbol}: {e}")
-
     def guard_orphan_position(
         self, 
         symbol: str, 
