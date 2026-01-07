@@ -9229,50 +9229,98 @@ class OrderManager:
             self._logger.error(f"Reconciliation Failed: {e}", exc_info=True)
 
     def _adopt_orphan_position(self, symbol: str, data: dict) -> None:
-        """Creates a synthetic filled order to register the position locally."""
+        """
+        Creates a synthetic filled order to register the position locally.
+        Fixes 'str object has no attribute value' by ensuring type safety.
+        """
         import time
         from datetime import datetime, timezone
         
-        side = "BUY" if data['qty'] > 0 else "SELL"
-        # Unique ID to prevent overwrites
-        order_id = f"sync_{int(time.time())}_{symbol.split(':')[-1]}"
+        # 1. Safe Quantity Extraction
+        try:
+            qty = int(float(data.get('qty', 0)))
+            price = float(data.get('price', 0.0))
+        except (ValueError, TypeError):
+            self._logger.error(f"Cannot adopt orphan {symbol}: Invalid data {data}")
+            return
+
+        if qty == 0:
+            return
+
+        side = "BUY" if qty > 0 else "SELL"
         
+        # 2. Unique ID (Use simplified timestamp to avoid colons/special chars)
+        safe_sym = symbol.replace(":", "_")
+        order_id = f"sync_{int(time.time())}_{safe_sym}"
+        
+        # 3. Resolve OrderType (Handle Enum vs String definition)
+        # We ensure 'otype' is the ENUM if available, otherwise string.
+        otype = "MARKET"
+        if hasattr(OrderType, "MARKET"):
+            otype = OrderType.MARKET
+
+        # 4. Create Local Record
         details = OrderDetails(
             order_id=order_id,
             symbol=symbol,
             side=side,
-            quantity=abs(data['qty']),
-            order_type=OrderType.MARKET,
+            quantity=abs(qty),
+            order_type=otype, # Pass the Enum/Object here
             status=OrderStatus.FILLED,
             timestamp=datetime.now(timezone.utc),
-            price=float(data['price']),
-            average_price=float(data['price']),
-            filled_quantity=abs(data['qty']),
+            price=price,
+            average_price=price,
+            fill_price=price,
+            filled_quantity=abs(qty),
             tag="orphan_adoption"
         )
         
-        # 1. Register in OrderManager
+        # 5. Register in OrderManager
         self._register_order(details)
         
-        # 2. Register in PositionManager (Defensive Coding)
+        # 6. Register in PositionManager (CRITICAL FIX)
+        # We prefer 'add_pending_order' using PRIMITIVES to avoid object-attribute crashes.
         pm = self._positions
         
-        if hasattr(pm, "update_from_order"):
-            pm.update_from_order(details)
-        elif hasattr(pm, "update_position"):
-            # Fallback for standard PositionManager
-            pm.update_position(
-                symbol=details.symbol,
-                qty=details.quantity,
-                price=details.average_price,
-                side=details.side,
-                product="MIS" # Assume MIS for safety
-            )
-        elif hasattr(pm, "add_position"):
-             # Legacy fallback
-             pm.add_position(details)
-        else:
-            self._logger.error("CRITICAL: PositionManager has no known update method! Local state will be out of sync.")
+        try:
+            if hasattr(pm, "add_pending_order"):
+                # Determine safe string representation for PositionManager
+                # If PM expects a string, passing "MARKET" is safe.
+                # If PM expects Enum, we passed 'otype' above, but here we pass string
+                # because add_pending_order usually parses strings.
+                type_str = "MARKET"
+                if hasattr(otype, "name"): 
+                    type_str = otype.name # "MARKET" from Enum
+
+                pm.add_pending_order(
+                    order_id=order_id,
+                    symbol=symbol,
+                    side=side,
+                    qty=abs(qty),
+                    price=price,
+                    order_type=type_str 
+                )
+                # Immediately confirm fill since it's an orphan
+                if hasattr(pm, "update_order_status"):
+                    pm.update_order_status(order_id, "FILLED", price)
+
+            elif hasattr(pm, "update_from_order"):
+                pm.update_from_order(details)
+
+            elif hasattr(pm, "update_position"):
+                pm.update_position(
+                    symbol=details.symbol,
+                    qty=details.quantity,
+                    price=details.average_price,
+                    side=details.side,
+                    product="MIS" 
+                )
+            else:
+                self._logger.error("PositionManager missing standard update methods.")
+
+        except Exception as e:
+            # Catch the specific attribute error here to prevent crash
+            self._logger.error(f"Orphan adoption failed for {symbol}: {e}")
 
     def guard_orphan_position(
         self, 
@@ -9295,11 +9343,35 @@ class OrderManager:
         def round_tick(price: float) -> float:
             return round(price * 20) / 20
 
+        # [FIX 1] CRITICAL: Determine Valid Base Price
+        # If broker returns 0.0 for average_price, using it causes Negative SL crash.
+        # We MUST use current LTP in that case.
+        base_price = float(average_price)
+        current_ltp = base_price
+
+        # 1. Fetch fresh LTP to validate or replace base_price
+        if self._market_data:
+            quote = self._market_data.get_quote(symbol)
+            if quote:
+                # Extract LTP safely
+                extracted_ltp = float(quote.get("last_price") or quote.get("ltp") or 0.0)
+                if extracted_ltp > 0:
+                    current_ltp = extracted_ltp
+        
+        # 2. Switch to LTP if average_price is garbage (<= 0)
+        if base_price <= 0:
+            if current_ltp > 0:
+                base_price = current_ltp
+                self._logger.warning(f"⚠️ Avg Price is 0 for {symbol}. Using LTP {base_price} for guard calculations.")
+            else:
+                self._logger.error(f"❌ Cannot guard {symbol}: Price is Zero and no LTP available.")
+                return False
+
         # --- STEP 1: Fix Accounting ---
         # Only adopt accounting if we don't already have it (consume_existing=False)
         if not consume_existing:
             try:
-                orphan_data = {'qty': quantity, 'price': average_price}
+                orphan_data = {'qty': quantity, 'price': base_price}
                 self._adopt_orphan_position(symbol, orphan_data)
             except Exception as e:
                 self._logger.warning(f"Accounting adoption failed (non-critical): {e}")
@@ -9315,9 +9387,8 @@ class OrderManager:
             side = "BUY" if quantity > 0 else "SELL"
             abs_qty = abs(quantity)
             
-            # [FIX] Ensure OrderManager knows this Synthetic ID (Logic Linkage)
-            # Even if we skip PositionManager, we need this ID in self._orders 
-            # so the BracketManager can link child orders (SL/TP) to it.
+            # [FIX] Register local order so BracketManager can link child orders.
+            # Use base_price (valid) instead of potentially 0.0 average_price
             if consume_existing:
                 details = OrderDetails(
                     order_id=synthetic_id,
@@ -9327,22 +9398,15 @@ class OrderManager:
                     order_type=OrderType.MARKET,
                     status=OrderStatus.FILLED,
                     timestamp=datetime.now(timezone.utc),
-                    price=float(average_price),
-                    average_price=float(average_price),
-                    fill_price=float(average_price),
+                    price=base_price,
+                    average_price=base_price,
+                    fill_price=base_price,
                     filled_quantity=abs_qty,
                     tag="auto_guard_synthetic"
                 )
-                self._register_order(details) # Register locally ONLY
+                self._register_order(details) 
 
-            # 1. Get Current Market Price (Crucial for Safety)
-            current_ltp = average_price # Fallback
-            if self._market_data:
-                quote = self._market_data.get_quote(symbol)
-                if quote:
-                    current_ltp = float(quote.get("last_price") or quote.get("ltp") or average_price)
-
-            # 2. Determine ATR
+            # 3. Determine ATR for dynamic width
             atr_val = 0.0
             if hasattr(self, '_indicator_engine') and self._indicator_engine:
                 try:
@@ -9353,20 +9417,20 @@ class OrderManager:
                 except Exception:
                     pass
 
-            # 3. Calculate Target Levels
+            # 4. Calculate Target Levels
             if atr_val > 0:
                 sl_dist = atr_val * 2.0
                 tp_dist = atr_val * 3.0
                 strategy_tag = "auto_guard_atr"
             else:
                 # Fallback: 10% SL, 20% TP
-                sl_dist = average_price * 0.10
-                tp_dist = average_price * 0.20
+                sl_dist = base_price * 0.10
+                tp_dist = base_price * 0.20
                 strategy_tag = "auto_guard_fixed"
 
             if side == "BUY":
-                ideal_sl = round_tick(average_price - sl_dist)
-                tp_price = round_tick(average_price + tp_dist)
+                ideal_sl = round_tick(base_price - sl_dist)
+                tp_price = round_tick(base_price + tp_dist)
                 
                 # 🛑 SAFETY CHECK: Is LTP already below Ideal SL?
                 if current_ltp < ideal_sl:
@@ -9375,8 +9439,8 @@ class OrderManager:
                 else:
                     sl_price = ideal_sl
             else: # SELL
-                ideal_sl = round_tick(average_price + sl_dist)
-                tp_price = round_tick(average_price - tp_dist)
+                ideal_sl = round_tick(base_price + sl_dist)
+                tp_price = round_tick(base_price - tp_dist)
                 
                 if current_ltp > ideal_sl:
                     sl_price = round_tick(current_ltp * 1.01) # 1% above current agony
@@ -9384,9 +9448,13 @@ class OrderManager:
                 else:
                     sl_price = ideal_sl
 
+            # [FIX 2] Absolute Safety: Ensure SL/TP are never zero or negative
+            sl_price = max(0.05, sl_price)
+            tp_price = max(0.05, tp_price)
+
             self._logger.info(
                 f"🛡️ GUARDING ORPHAN: {symbol} | {side} {abs_qty} | "
-                f"LTP: {current_ltp} | SL: {sl_price} | TP: {tp_price}",
+                f"Base: {base_price} | SL: {sl_price} | TP: {tp_price}",
                 extra={"event": "orphan_guarding", "symbol": symbol}
             )
 
@@ -9396,31 +9464,39 @@ class OrderManager:
                 symbol=symbol,
                 side=side,
                 qty=abs_qty,
-                price=average_price,
+                price=base_price,
                 sl=sl_price,
                 tp=tp_price,
                 tag=strategy_tag,
                 activate_immediately=True
             )
             
-            # Persist to SQLite
+            # [FIX 3] DB Persistence: Explicitly include 'order_id'
             try:
                 bracket_dict = {
-                    "order_id": synthetic_id,
+                    "order_id": str(synthetic_id),   # ✅ Required by DB
+                    "id": str(synthetic_id),         # ✅ Fallback
                     "symbol": symbol,
                     "side": side,
                     "qty": abs_qty,
-                    "entry_price": average_price,
+                    "entry_price": base_price,
                     "current_sl": sl_price,
                     "tp1": tp_price,
                     "trailing_active": True,
-                    "tag": strategy_tag
+                    "tag": strategy_tag,
+                    "status": "ACTIVE",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
-                self._bracket_store.save_bracket(bracket_dict)
+                
+                if hasattr(self._bracket_store, "save_bracket"):
+                    self._bracket_store.save_bracket(bracket_dict)
+                elif hasattr(self._bracket_store, "add_bracket"):
+                    self._bracket_store.add_bracket(bracket_dict)
+
             except Exception as e:
                 self._logger.error(f"Failed to save guard bracket: {e}")
             
-            self._bracket_manager.confirm_entry_fill(synthetic_id, average_price)
+            self._bracket_manager.confirm_entry_fill(synthetic_id, base_price)
             
         except Exception as e:
             self._logger.error(f"Failed to create guard bracket: {e}")
