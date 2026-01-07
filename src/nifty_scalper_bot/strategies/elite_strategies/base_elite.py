@@ -170,23 +170,25 @@ class EliteStrategy(Strategy):
         self._last_signal = elite_signal
         self._signals_generated += 1
 
+        # 1. Consolidate all extra data into metadata
         metadata = elite_signal.metadata.copy()
         metadata.update({
             "strategy": self.name,
             "mode": "Legacy" if self._is_legacy_signature else "Push",
             "quantity": elite_signal.quantity,
-            "price": elite_signal.entry_price
+            "price": elite_signal.entry_price,        # Moved from argument
+            "stop_loss": elite_signal.stop_loss,      # Moved from argument
+            "take_profit": elite_signal.target,       # Moved from argument
+            "tag": f"{self.name}"                     # Moved from argument
         })
 
-        # Just instantiate the standard Signal. 
-        # No setattr, no subclassing needed anymore.
+        # 2. Create Signal using ONLY valid arguments
+        # Valid args are: action, symbol, confidence, reason, metadata
         return Signal(
             action=elite_signal.signal,
             symbol=elite_signal.symbol,
             confidence=elite_signal.confidence,
-            tag=f"{self.name}",
-            stop_loss=elite_signal.stop_loss,
-            take_profit=elite_signal.target,
+            reason=f"{self.name} Signal",  # Map 'tag' to mandatory 'reason' field
             metadata=metadata,
         )
 
