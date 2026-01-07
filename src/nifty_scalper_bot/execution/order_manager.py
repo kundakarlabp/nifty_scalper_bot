@@ -8137,10 +8137,12 @@ class OrderManager:
             "order_id": order.order_id,
             "symbol": order.symbol,
             "side": order.side,
-            "order_type": order.order_type.value,
+            # [FIX] Convert Enum to value (string)
+            "order_type": order.order_type.value if hasattr(order.order_type, "value") else str(order.order_type),
             "quantity": order.quantity,
             "price": order.price,
-            "status": order.status.value,
+            # [FIX] Convert Status Enum to value
+            "status": order.status.value if hasattr(order.status, "value") else str(order.status),
             "timestamp": order.timestamp.isoformat(),
             "filled_quantity": order.filled_quantity,
             "fill_price": order.fill_price,
@@ -8179,7 +8181,7 @@ class OrderManager:
             "entry_price": state.entry_price,
             "product": state.product,
             "tag": state.tag,
-            "stop_order_id": state.stop_order_id,
+            "stop_order_type": state.stop_order_type.value if hasattr(state.stop_order_type, "value") else str(state.stop_order_type),
             "stop_price": state.stop_price,
             "stop_order_type": state.stop_order_type.value,
             "stop_filled": state.stop_filled,
