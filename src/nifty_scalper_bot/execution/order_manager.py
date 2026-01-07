@@ -9177,7 +9177,7 @@ class OrderManager:
                         # Final Safety Net
                         self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
 
-            # 3. HANDLE GHOSTS (Local Exists, Broker Missing) -> Manual Exit Detected
+            # 3. HANDLE GHOSTS (Local Exists, Broker Missing)
             # ------------------------------------------------------
             for lsym, pos in local_map.items():
                 if lsym not in broker_map:
@@ -9185,9 +9185,7 @@ class OrderManager:
                         f"👻 Ghost Position Found: {lsym}. Clearing local state.",
                         extra={"event": "ghost_cleared", "symbol": lsym}
                     )
-                    # Cancel any stale pending orders for this symbol
                     self.cancel_orders_for_symbol(lsym)
-                    # Force local quantity to 0
                     self._generate_adjustment_order(lsym, -int(pos.quantity), 0.0)
 
                 elif broker_map[lsym]["qty"] != pos.quantity:
@@ -9198,6 +9196,31 @@ class OrderManager:
                         extra={"event": "qty_sync", "symbol": lsym}
                     )
                     self._generate_adjustment_order(lsym, diff, 0.0)
+                
+                # [FIX] NAKED POSITION DETECTION
+                # If quantities match, check if we have a bracket managing it.
+                elif broker_map[lsym]["qty"] == pos.quantity:
+                    # Check brackets by symbol logic
+                    is_managed = False
+                    with self._lock:
+                        # Iterate brackets to see if any cover this symbol with remaining exposure
+                        for b in self._brackets.values():
+                            if b.symbol == lsym and b.remaining_position() > 0:
+                                is_managed = True
+                                break
+                    
+                    if not is_managed:
+                        self._logger.warning(
+                            f"🛡️ Naked Position Detected during Sync: {lsym}. Auto-Guarding...",
+                            extra={"event": "naked_position_guard", "symbol": lsym}
+                        )
+                        # Call Guard with consume_existing=True to skip PositionManager update
+                        self.guard_orphan_position(
+                            lsym, 
+                            int(pos.quantity), 
+                            float(pos.entry_price or 0.0), 
+                            consume_existing=True
+                        )
 
         except Exception as e:
             self._logger.error(f"Reconciliation Failed: {e}", exc_info=True)
@@ -9248,36 +9271,67 @@ class OrderManager:
         else:
             self._logger.error("CRITICAL: PositionManager has no known update method! Local state will be out of sync.")
 
-    def guard_orphan_position(self, symbol: str, quantity: int, average_price: float) -> bool:
+    def guard_orphan_position(
+        self, 
+        symbol: str, 
+        quantity: int, 
+        average_price: float, 
+        consume_existing: bool = False
+    ) -> bool:
         """
         Master method to Adopt AND Protect a naked position.
-        1. Creates Order Record (Accounting)
-        2. Creates Virtual Bracket (Protection)
-        3. Subscribes to Ticks (Data)
+        
+        Args:
+            consume_existing: If True, skips PositionManager update to prevent 
+                              double-counting on already-synced positions.
         """
         if not self._bracket_manager or quantity == 0:
             return False
 
-        # --- Helper: Round to nearest 0.05 (Exchange Tick Size) ---
+        # --- Helper: Round to nearest 0.05 ---
         def round_tick(price: float) -> float:
             return round(price * 20) / 20
 
-        # --- STEP 1: Fix Accounting (Reuse existing code) ---
-        try:
-            orphan_data = {'qty': quantity, 'price': average_price}
-            self._adopt_orphan_position(symbol, orphan_data)
-        except Exception as e:
-            self._logger.warning(f"Accounting adoption failed (non-critical): {e}")
+        # --- STEP 1: Fix Accounting ---
+        # Only adopt accounting if we don't already have it (consume_existing=False)
+        if not consume_existing:
+            try:
+                orphan_data = {'qty': quantity, 'price': average_price}
+                self._adopt_orphan_position(symbol, orphan_data)
+            except Exception as e:
+                self._logger.warning(f"Accounting adoption failed (non-critical): {e}")
 
         # --- STEP 2: Fix Protection (Smart Recovery) ---
         try:
             import time
+            from datetime import datetime, timezone
+            
             safe_symbol = symbol.replace(':', '_')
             synthetic_id = f"guard_{int(time.time())}_{safe_symbol}"
             
             side = "BUY" if quantity > 0 else "SELL"
             abs_qty = abs(quantity)
             
+            # [FIX] Ensure OrderManager knows this Synthetic ID (Logic Linkage)
+            # Even if we skip PositionManager, we need this ID in self._orders 
+            # so the BracketManager can link child orders (SL/TP) to it.
+            if consume_existing:
+                details = OrderDetails(
+                    order_id=synthetic_id,
+                    symbol=symbol,
+                    side=side,
+                    quantity=abs_qty,
+                    order_type=OrderType.MARKET,
+                    status=OrderStatus.FILLED,
+                    timestamp=datetime.now(timezone.utc),
+                    price=float(average_price),
+                    average_price=float(average_price),
+                    fill_price=float(average_price),
+                    filled_quantity=abs_qty,
+                    tag="auto_guard_synthetic"
+                )
+                self._register_order(details) # Register locally ONLY
+
             # 1. Get Current Market Price (Crucial for Safety)
             current_ltp = average_price # Fallback
             if self._market_data:
@@ -9290,7 +9344,6 @@ class OrderManager:
             if hasattr(self, '_indicator_engine') and self._indicator_engine:
                 try:
                     raw_atr = self._indicator_engine.compute_atr(symbol)
-                    # Handle both float and ATRSnapshot object
                     if hasattr(raw_atr, 'value'): atr_val = float(raw_atr.value)
                     elif hasattr(raw_atr, 'atr'): atr_val = float(raw_atr.atr)
                     elif isinstance(raw_atr, (int, float)): atr_val = float(raw_atr)
@@ -9313,7 +9366,6 @@ class OrderManager:
                 tp_price = round_tick(average_price + tp_dist)
                 
                 # 🛑 SAFETY CHECK: Is LTP already below Ideal SL?
-                # If yes, set Emergency SL just below LTP to allow breathing room
                 if current_ltp < ideal_sl:
                     sl_price = round_tick(current_ltp * 0.99) # 1% below current agony
                     self._logger.warning(f"📉 Deep Loss Detected ({current_ltp} < {ideal_sl}). Setting Emergency SL at {sl_price}")
@@ -9347,9 +9399,9 @@ class OrderManager:
                 tag=strategy_tag,
                 activate_immediately=True
             )
-            # Persist to SQLite Immediately
+            
+            # Persist to SQLite
             try:
-                # Assuming BracketManager has a method to get dict, or construct it manually
                 bracket_dict = {
                     "order_id": synthetic_id,
                     "symbol": symbol,
@@ -9358,11 +9410,10 @@ class OrderManager:
                     "entry_price": average_price,
                     "current_sl": sl_price,
                     "tp1": tp_price,
-                    "trailing_active": True, # Enabled by guard logic
+                    "trailing_active": True,
                     "tag": strategy_tag
                 }
                 self._bracket_store.save_bracket(bracket_dict)
-                self._logger.info(f"💾 Guard Bracket Saved to SQLite: {symbol}")
             except Exception as e:
                 self._logger.error(f"Failed to save guard bracket: {e}")
             
@@ -9375,18 +9426,13 @@ class OrderManager:
         # --- STEP 3: Fix Data (Tick Subscription) ---
         try:
             if self._market_data:
-                # Lazy Init of Subscription Set
                 if not hasattr(self, '_bracket_tick_subscriptions'):
                     self._bracket_tick_subscriptions = set()
                 
-                # Subscribe only if needed
                 if symbol not in self._bracket_tick_subscriptions:
-                    
                     def bracket_tick_handler(tick_data: dict) -> None:
                         try:
-                            ltp = (tick_data.get('ltp') or 
-                                   tick_data.get('last_price') or 
-                                   tick_data.get('price'))
+                            ltp = (tick_data.get('ltp') or tick_data.get('last_price') or tick_data.get('price'))
                             if ltp and float(ltp) > 0:
                                 self._bracket_manager.on_tick(symbol, float(ltp))
                         except Exception:
@@ -9395,13 +9441,8 @@ class OrderManager:
                     if hasattr(self._market_data, 'subscribe'):
                         self._market_data.subscribe(symbol, bracket_tick_handler)
                         self._bracket_tick_subscriptions.add(symbol)
-                        self._logger.info(f"🔔 BracketManager subscribed to {symbol}")
-                    else:
-                        self._logger.warning("MarketDataManager missing 'subscribe' method.")
-
-        except Exception as e:
-            self._logger.error(f"Failed to subscribe bracket ticks: {e}")
-            # We don't return False here as bracket is already created
+        except Exception:
+            pass
 
         return True
 
