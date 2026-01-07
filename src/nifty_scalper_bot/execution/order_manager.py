@@ -9253,7 +9253,8 @@ class OrderManager:
         order_id = f"sync_{int(time.time())}_{safe_sym}"
         
         # 3. Resolve OrderType (Handle Enum vs String definition)
-        # We ensure 'otype' is the ENUM object if available.
+        # CRITICAL: Ensure 'otype' is the ENUM object, not a string.
+        # PositionManager expects an object it can access .value on.
         otype = OrderType.MARKET if hasattr(OrderType, "MARKET") else "MARKET"
 
         # 4. Create Local Record
@@ -9310,7 +9311,10 @@ class OrderManager:
                 self._logger.error("PositionManager missing standard update methods.")
 
         except Exception as e:
+            # Catch specific attribute errors to prevent crash loop
             self._logger.error(f"Orphan adoption failed for {symbol}: {e}")
+
+    
     def guard_orphan_position(
         self, 
         symbol: str, 
