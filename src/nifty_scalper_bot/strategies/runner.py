@@ -1372,89 +1372,73 @@ class StrategyRunner:
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
-        """
-        Aggressively fetches history to prime indicators immediately on startup.
-        """
-        self._logger.info("⏳ INITIATING HISTORICAL BACKFILL SEQUENCE...")
+        """Fetch and ingest historical data using the MarketDataManager."""
+        self._logger.info("⏳ Starting historical data backfill...")
         
-        # 1. Allow connections to stabilize (Broker/WS)
+        # 1. Wait for connections to stabilize
         await asyncio.sleep(2.0)
         
-        # 2. Determine Source
-        source = self._data_hub if self._data_hub else self._market_data
-        source_name = "DataHub" if self._data_hub else "MarketData"
+        # 2. ✅ FIX: Always use MarketDataManager directly. 
+        # DataHub is for live streaming and might not expose the history interface.
+        source = self._market_data
         
-        # 3. Verify Capability
+        # 3. Check for the interface
         if not hasattr(source, "fetch_history"):
-            self._logger.critical(f"❌ BACKFILL FAILED: {source_name} missing 'fetch_history' method.")
+            self._logger.warning("⚠️ MarketData missing 'fetch_history'. Backfill skipped.")
             return
+
+        # 4. Define Helper (Safe extraction logic)
+        def _get_val(d, *keys, default=0.0):
+            for k in keys:
+                if d.get(k) is not None: return float(d[k])
+            return default
 
         symbols_to_load = []
         with self._lock:
-            # We must load NIFTY + Options
             symbols_to_load = list(self._active_symbols)
-            # Ensure Underlying is loaded too for VWAP calculations if needed
-            if "NSE:NIFTY 50" not in symbols_to_load and "NIFTY 50" not in symbols_to_load:
-                symbols_to_load.append("NSE:NIFTY 50")
-
-        self._logger.info(f"📋 Backfilling targets: {symbols_to_load}")
-
-        # 4. Define Helper for Safe Extraction
-        def _get_val(d, *keys):
-            for k in keys:
-                if d.get(k) is not None: return float(d[k])
-            return 0.0
-
-        total_loaded = 0
 
         for symbol in symbols_to_load:
             try:
-                # Clean Symbol
-                clean_sym = symbol.strip().upper()
+                # ✅ Request 5 days (covers weekends)
+                candles = await source.fetch_history(symbol, "minute", days=7)
                 
-                # Fetch
-                candles = await source.fetch_history(clean_sym, "minute", days=3)
-                
-                if not candles:
-                    self._logger.warning(f"⚠️ No history returned for {clean_sym}")
-                    continue
+                if candles:
+                    loaded = 0
+                    for candle in candles:
+                        # Normalize Data
+                        payload = {
+                            "open": _get_val(candle, "open", "o"),
+                            "high": _get_val(candle, "high", "h"),
+                            "low": _get_val(candle, "low", "l"),
+                            "close": _get_val(candle, "close", "c")
+                        }
+                        vol = int(_get_val(candle, "volume", "v", "vol"))
+                        
+                        # Handle Timestamp
+                        raw_ts = candle.get("date") or candle.get("timestamp")
+                        ts = datetime.now(timezone.utc)
+                        if raw_ts:
+                            if isinstance(raw_ts, str):
+                                try:
+                                    ts = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00'))
+                                except ValueError:
+                                    pass
+                            elif isinstance(raw_ts, datetime):
+                                ts = raw_ts
 
-                count = 0
-                for candle in candles:
-                    # Normalize
-                    payload = {
-                        "open": _get_val(candle, "open", "o"),
-                        "high": _get_val(candle, "high", "h"),
-                        "low": _get_val(candle, "low", "l"),
-                        "close": _get_val(candle, "close", "c")
-                    }
-                    vol = int(_get_val(candle, "volume", "v", "vol"))
+                        if payload["close"] > 0:
+                            self._indicator_engine.update_price(
+                                symbol, payload, volume=vol, timestamp=ts
+                            )
+                            loaded += 1
                     
-                    # Timestamp Parsing
-                    raw_ts = candle.get("date") or candle.get("timestamp")
-                    ts = datetime.now(timezone.utc)
-                    if isinstance(raw_ts, str):
-                        try:
-                            ts = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00'))
-                        except: pass
-                    elif isinstance(raw_ts, datetime):
-                        ts = raw_ts
-                    
-                    # Ingest
-                    if payload["close"] > 0:
-                        self._indicator_engine.update_price(
-                            clean_sym, payload, volume=vol, timestamp=ts
-                        )
-                        count += 1
-                
-                if count > 0:
-                    self._logger.info(f"✅ PRIMED {clean_sym}: Ingested {count} historical bars.")
-                    total_loaded += count
+                    if loaded > 0:
+                        self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
             
             except Exception as e:
-                self._logger.error(f"Backfill error for {symbol}: {e}")
+                self._logger.debug(f"Backfill failed for {symbol}: {e}")
         
-        self._logger.info(f"🏁 BACKFILL COMPLETE. Total Bars: {total_loaded}")
+        self._logger.info("✅ Historical backfill process finished.")
         
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
