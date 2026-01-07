@@ -3710,11 +3710,17 @@ class OrderManager:
                 # B. ADOPT ACTIVE ORDERS (Manual Trades you are holding)
                 try:
                     # Create the order object so we track it from now on
+                    # [FIX] Robust Quantity Resolution
+                    qty = int(float(order_update.get("quantity", 0)))
+                    if qty == 0:
+                        qty = int(float(order_update.get("filled_quantity", 0)))
+                    
+                    # Create the order object so we track it from now on
                     order = OrderDetails(
                         order_id=order_id,
                         symbol=order_update.get("tradingsymbol") or order_update.get("symbol", "UNKNOWN"),
                         side=order_update.get("transaction_type", "BUY"),
-                        quantity=int(float(order_update.get("quantity", 0))),
+                        quantity=max(qty, 1), # Ensure we never adopt a 0-qty order
                         order_type=OrderType.MARKET, # Assume Market for manual entries
                         price=float(order_update.get("price", 0.0) or 0.0),
                         trigger_price=float(order_update.get("trigger_price", 0.0) or 0.0),
@@ -9377,14 +9383,18 @@ class OrderManager:
         FIX: Checks active BROKER orders, not internal brackets, to ensure redundancy.
         """
         # 1. Check if an ACTIVE SL order actually exists at the broker
+        # 1. Check if an ACTIVE SL order actually exists at the broker
         has_broker_protection = False
         with self._lock:
-            for order in self._orders.values():
-                # Check for Open/Pending Stop Loss orders for this symbol
-                if (order.symbol == symbol and 
-                    order.status in [OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.SUBMITTED] and
-                    # Check against likely Enum values or Strings for SL
-                    str(order.order_type).upper() in ["SL", "SL-M", "STOP_LOSS", "STOP_LOSS_MARKET"]):
+            # [FIX] optimization: Use active pending list if available, or quick check
+            # Instead of iterating ALL history, check pending subset
+            potential_protectors = [
+                o for o in self._orders.values() 
+                if o.status not in self.FINAL_STATUSES and o.symbol == symbol
+            ]
+            
+            for order in potential_protectors:
+                if (str(order.order_type).upper() in ["SL", "SL-M", "STOP_LOSS", "STOP_LOSS_MARKET"]):
                     has_broker_protection = True
                     break
         
