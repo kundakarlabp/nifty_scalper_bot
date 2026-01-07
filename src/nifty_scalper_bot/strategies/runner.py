@@ -1426,7 +1426,27 @@ class StrategyRunner:
                             elif isinstance(raw_ts, datetime):
                                 ts = raw_ts
 
-                        if payload["close"] > 0:
+                        # FIX: Handle Zerodha's specific dict format explicitly
+                        # Zerodha returns keys like 'open', 'high', etc. directly.
+                        if "close" in candle and candle["close"] > 0:
+                            payload = {
+                                "open": float(candle.get("open", 0)),
+                                "high": float(candle.get("high", 0)),
+                                "low": float(candle.get("low", 0)),
+                                "close": float(candle.get("close", 0))
+                            }
+                            vol = int(candle.get("volume", 0))
+                            
+                            # Handle Timestamp
+                            raw_ts = candle.get("date")
+                            ts = datetime.now(timezone.utc)
+                            if raw_ts:
+                                if isinstance(raw_ts, str):
+                                    # Handle "2023-01-01T09:15:00+0530"
+                                    ts = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00'))
+                                elif isinstance(raw_ts, datetime):
+                                    ts = raw_ts
+
                             self._indicator_engine.update_price(
                                 symbol, payload, volume=vol, timestamp=ts
                             )
