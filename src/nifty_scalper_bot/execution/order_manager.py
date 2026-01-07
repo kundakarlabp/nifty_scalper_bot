@@ -1849,10 +1849,12 @@ class OrderManager:
                     # ✅ RESET Kill Switch on success
                     self._consecutive_failures = 0
                     
-                    # A. Update Trade Store
-                    self.trade_store.update_status(trade_id, "FILLED", order_id)
-                    # A. Update Trade Store
-                    self.trade_store.update_status(trade_id, "FILLED", order_id)
+                    # [FIX] Non-Blocking DB Update
+                    # If this fails, we MUST NOT retry the order placement!
+                    try:
+                        self.trade_store.update_status(trade_id, "FILLED", order_id)
+                    except Exception as db_err:
+                        self._logger.error(f"⚠️ TradeStore update failed (Non-Critical): {db_err}")
 
                     # B. Register Order Locally
                     details = OrderDetails(
@@ -4451,11 +4453,11 @@ class OrderManager:
     # 💾 PERSISTENCE LAYER (Crash Recovery)
     # ----------------------------------------------------------------
     def save_orders(self) -> None:
-        """Persist active orders to disk (Crash-Proof Version)."""
+        """Persist active orders to disk (Thread-Safe & Crash-Proof)."""
+        import uuid
         try:
-            # [FIX] Lock MUST cover the entire I/O operation to prevent race conditions
+            data = {}
             with self._lock:
-                data = {}
                 for oid, order in self._orders.items():
                     # Skip completely dead orders to keep file size manageable
                     if order.status in [OrderStatus.CANCELLED, OrderStatus.REJECTED]:
@@ -4477,17 +4479,20 @@ class OrderManager:
 
                     data[oid] = record
 
-                # 3. Write to disk safely (NOW INSIDE LOCK)
-                path = Path("data/orders.json")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Atomic Write: Write to temp file first, then rename
-                tmp_path = path.with_suffix(".tmp")
-                with open(tmp_path, "w") as f:
-                    json.dump(data, f, indent=2, default=str)
-                
-                # Atomic replacement
-                os.replace(tmp_path, path)
+            # 3. Write to disk safely
+            path = Path("data/orders.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # [FIX] Unique Temp File prevents Thread Collision
+            tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
+            
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno()) # Force write to physical disk
+            
+            # Atomic replacement
+            os.replace(tmp_path, path)
 
         except Exception as e:
             self._logger.error(f"Failed to save orders: {e}")
