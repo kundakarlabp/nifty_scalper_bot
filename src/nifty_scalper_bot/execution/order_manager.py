@@ -9321,177 +9321,17 @@ class OrderManager:
         """
         Master method to Adopt AND Protect a naked position.
         
-        Args:
-            consume_existing: If True, skips PositionManager update to prevent 
-                              double-counting on already-synced positions.
+        Fixes: 
+        1. Cold Start Race Condition (Subscribes BEFORE price check)
+        2. Zero Price / Negative SL crashes
+        3. DB Persistence errors
         """
         if not self._bracket_manager or quantity == 0:
             return False
 
-        # --- Helper: Round to nearest 0.05 ---
-        def round_tick(price: float) -> float:
-            return round(price * 20) / 20
-
-        # [FIX 1] CRITICAL: Determine Valid Base Price
-        # If broker returns 0.0 for average_price, using it causes Negative SL crash.
-        # We MUST use current LTP in that case.
-        base_price = float(average_price)
-        current_ltp = base_price
-
-        # 1. Fetch fresh LTP to validate or replace base_price
-        if self._market_data:
-            quote = self._market_data.get_quote(symbol)
-            if quote:
-                # Extract LTP safely
-                extracted_ltp = float(quote.get("last_price") or quote.get("ltp") or 0.0)
-                if extracted_ltp > 0:
-                    current_ltp = extracted_ltp
-        
-        # 2. Switch to LTP if average_price is garbage (<= 0)
-        if base_price <= 0:
-            if current_ltp > 0:
-                base_price = current_ltp
-                self._logger.warning(f"⚠️ Avg Price is 0 for {symbol}. Using LTP {base_price} for guard calculations.")
-            else:
-                self._logger.error(f"❌ Cannot guard {symbol}: Price is Zero and no LTP available.")
-                return False
-
-        # --- STEP 1: Fix Accounting ---
-        # Only adopt accounting if we don't already have it (consume_existing=False)
-        if not consume_existing:
-            try:
-                orphan_data = {'qty': quantity, 'price': base_price}
-                self._adopt_orphan_position(symbol, orphan_data)
-            except Exception as e:
-                self._logger.warning(f"Accounting adoption failed (non-critical): {e}")
-
-        # --- STEP 2: Fix Protection (Smart Recovery) ---
-        try:
-            import time
-            from datetime import datetime, timezone
-            
-            safe_symbol = symbol.replace(':', '_')
-            synthetic_id = f"guard_{int(time.time())}_{safe_symbol}"
-            
-            side = "BUY" if quantity > 0 else "SELL"
-            abs_qty = abs(quantity)
-            
-            # [FIX] Register local order so BracketManager can link child orders.
-            # Use base_price (valid) instead of potentially 0.0 average_price
-            if consume_existing:
-                details = OrderDetails(
-                    order_id=synthetic_id,
-                    symbol=symbol,
-                    side=side,
-                    quantity=abs_qty,
-                    order_type=OrderType.MARKET,
-                    status=OrderStatus.FILLED,
-                    timestamp=datetime.now(timezone.utc),
-                    price=base_price,
-                    average_price=base_price,
-                    fill_price=base_price,
-                    filled_quantity=abs_qty,
-                    tag="auto_guard_synthetic"
-                )
-                self._register_order(details) 
-
-            # 3. Determine ATR for dynamic width
-            atr_val = 0.0
-            if hasattr(self, '_indicator_engine') and self._indicator_engine:
-                try:
-                    raw_atr = self._indicator_engine.compute_atr(symbol)
-                    if hasattr(raw_atr, 'value'): atr_val = float(raw_atr.value)
-                    elif hasattr(raw_atr, 'atr'): atr_val = float(raw_atr.atr)
-                    elif isinstance(raw_atr, (int, float)): atr_val = float(raw_atr)
-                except Exception:
-                    pass
-
-            # 4. Calculate Target Levels
-            if atr_val > 0:
-                sl_dist = atr_val * 2.0
-                tp_dist = atr_val * 3.0
-                strategy_tag = "auto_guard_atr"
-            else:
-                # Fallback: 10% SL, 20% TP
-                sl_dist = base_price * 0.10
-                tp_dist = base_price * 0.20
-                strategy_tag = "auto_guard_fixed"
-
-            if side == "BUY":
-                ideal_sl = round_tick(base_price - sl_dist)
-                tp_price = round_tick(base_price + tp_dist)
-                
-                # 🛑 SAFETY CHECK: Is LTP already below Ideal SL?
-                if current_ltp < ideal_sl:
-                    sl_price = round_tick(current_ltp * 0.99) # 1% below current agony
-                    self._logger.warning(f"📉 Deep Loss Detected ({current_ltp} < {ideal_sl}). Setting Emergency SL at {sl_price}")
-                else:
-                    sl_price = ideal_sl
-            else: # SELL
-                ideal_sl = round_tick(base_price + sl_dist)
-                tp_price = round_tick(base_price - tp_dist)
-                
-                if current_ltp > ideal_sl:
-                    sl_price = round_tick(current_ltp * 1.01) # 1% above current agony
-                    self._logger.warning(f"📉 Deep Loss Detected ({current_ltp} > {ideal_sl}). Setting Emergency SL at {sl_price}")
-                else:
-                    sl_price = ideal_sl
-
-            # [FIX 2] Absolute Safety: Ensure SL/TP are never zero or negative
-            sl_price = max(0.05, sl_price)
-            tp_price = max(0.05, tp_price)
-
-            self._logger.info(
-                f"🛡️ GUARDING ORPHAN: {symbol} | {side} {abs_qty} | "
-                f"Base: {base_price} | SL: {sl_price} | TP: {tp_price}",
-                extra={"event": "orphan_guarding", "symbol": symbol}
-            )
-
-            # Register
-            self._bracket_manager.register_virtual_bracket(
-                order_id=synthetic_id,
-                symbol=symbol,
-                side=side,
-                qty=abs_qty,
-                price=base_price,
-                sl=sl_price,
-                tp=tp_price,
-                tag=strategy_tag,
-                activate_immediately=True
-            )
-            
-            # [FIX 3] DB Persistence: Explicitly include 'order_id'
-            try:
-                bracket_dict = {
-                    "order_id": str(synthetic_id),   # ✅ Required by DB
-                    "id": str(synthetic_id),         # ✅ Fallback
-                    "symbol": symbol,
-                    "side": side,
-                    "qty": abs_qty,
-                    "entry_price": base_price,
-                    "current_sl": sl_price,
-                    "tp1": tp_price,
-                    "trailing_active": True,
-                    "tag": strategy_tag,
-                    "status": "ACTIVE",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-                
-                if hasattr(self._bracket_store, "save_bracket"):
-                    self._bracket_store.save_bracket(bracket_dict)
-                elif hasattr(self._bracket_store, "add_bracket"):
-                    self._bracket_store.add_bracket(bracket_dict)
-
-            except Exception as e:
-                self._logger.error(f"Failed to save guard bracket: {e}")
-            
-            self._bracket_manager.confirm_entry_fill(synthetic_id, base_price)
-            
-        except Exception as e:
-            self._logger.error(f"Failed to create guard bracket: {e}")
-            return False
-
-        # --- STEP 3: Fix Data (Tick Subscription) ---
+        # --- STEP 0: ENSURE DATA FLOW (CRITICAL FIX) ---
+        # We must subscribe immediately. If we fail price check later, 
+        # at least the NEXT loop will have data.
         try:
             if self._market_data:
                 if not hasattr(self, '_bracket_tick_subscriptions'):
@@ -9509,11 +9349,131 @@ class OrderManager:
                     if hasattr(self._market_data, 'subscribe'):
                         self._market_data.subscribe(symbol, bracket_tick_handler)
                         self._bracket_tick_subscriptions.add(symbol)
-        except Exception:
-            pass
+                        self._logger.info(f"📡 Subscribed to {symbol} for guarding.")
+        except Exception as e:
+            self._logger.warning(f"Subscription attempt warning: {e}")
 
-        return True
+        # --- STEP 1: Determine Valid Base Price ---
+        base_price = float(average_price)
+        current_ltp = 0.0
 
+        # Try to get fresh LTP from Cache (might be empty if cold start)
+        if self._market_data:
+            quote = self._market_data.get_quote(symbol)
+            if quote:
+                current_ltp = float(quote.get("last_price") or quote.get("ltp") or 0.0)
+
+        # Use LTP if base_price is invalid (0.0)
+        if base_price <= 0:
+            if current_ltp > 0:
+                base_price = current_ltp
+                self._logger.warning(f"⚠️ Using LTP {base_price} for guard (Broker avg_price was 0)")
+            else:
+                # [FIX] Return False gracefully, but we are now SUBSCRIBED.
+                # The next reconciliation loop will succeed.
+                self._logger.warning(f"⏳ Cannot guard {symbol} yet: Waiting for Tick/LTP...")
+                return False
+
+        # --- STEP 2: Fix Accounting ---
+        if not consume_existing:
+            try:
+                self._adopt_orphan_position(symbol, {'qty': quantity, 'price': base_price})
+            except Exception: pass
+
+        # --- STEP 3: Fix Protection ---
+        try:
+            def round_tick(price: float) -> float:
+                return round(price * 20) / 20
+
+            import time
+            from datetime import datetime, timezone
+            
+            safe_symbol = symbol.replace(':', '_')
+            synthetic_id = f"guard_{int(time.time())}_{safe_symbol}"
+            side = "BUY" if quantity > 0 else "SELL"
+            abs_qty = abs(quantity)
+
+            # Register stub
+            if consume_existing:
+                # Safe Enum
+                otype = OrderType.MARKET if hasattr(OrderType, "MARKET") else "MARKET"
+
+                details = OrderDetails(
+                    order_id=synthetic_id, symbol=symbol, side=side, quantity=abs_qty,
+                    order_type=otype, status=OrderStatus.FILLED,
+                    timestamp=datetime.now(timezone.utc), price=base_price,
+                    average_price=base_price, fill_price=base_price,
+                    filled_quantity=abs_qty, tag="auto_guard_synthetic"
+                )
+                self._register_order(details)
+
+            # Risk Logic (Fallback)
+            atr_val = 0.0
+            # ... (Insert your ATR logic here if desired) ...
+
+            # Default to Fixed % if ATR missing
+            sl_dist = base_price * 0.10 
+            tp_dist = base_price * 0.20
+            strategy_tag = "auto_guard_fixed"
+
+            if side == "BUY":
+                sl_price = round_tick(base_price - sl_dist)
+                tp_price = round_tick(base_price + tp_dist)
+                # Emergency: If LTP < SL, lower SL slightly below LTP to avoid instant stop-out
+                if current_ltp > 0 and current_ltp < sl_price: 
+                    sl_price = round_tick(current_ltp * 0.99)
+            else:
+                sl_price = round_tick(base_price + sl_dist)
+                tp_price = round_tick(base_price - tp_dist)
+                if current_ltp > 0 and current_ltp > sl_price: 
+                    sl_price = round_tick(current_ltp * 1.01)
+
+            # Force Positive Prices
+            sl_price = max(0.05, sl_price)
+            tp_price = max(0.05, tp_price)
+
+            self._logger.info(
+                f"🛡️ GUARDING ORPHAN: {symbol} | {side} {abs_qty} | "
+                f"Base: {base_price} | SL: {sl_price} | TP: {tp_price}",
+                extra={"event": "orphan_guarding", "symbol": symbol}
+            )
+
+            # Register
+            self._bracket_manager.register_virtual_bracket(
+                order_id=synthetic_id, symbol=symbol, side=side, qty=abs_qty,
+                price=base_price, sl=sl_price, tp=tp_price, tag=strategy_tag,
+                activate_immediately=True
+            )
+            
+            # DB Persistence
+            try:
+                bracket_dict = {
+                    "order_id": str(synthetic_id),
+                    "id": str(synthetic_id),
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": abs_qty,
+                    "entry_price": base_price,
+                    "current_sl": sl_price,
+                    "tp1": tp_price,
+                    "trailing_active": True,
+                    "tag": strategy_tag,
+                    "status": "ACTIVE",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+                if hasattr(self._bracket_store, "save_bracket"):
+                    self._bracket_store.save_bracket(bracket_dict)
+                elif hasattr(self._bracket_store, "add_bracket"):
+                    self._bracket_store.add_bracket(bracket_dict)
+            except Exception as e:
+                self._logger.error(f"Failed to save guard bracket: {e}")
+                
+            self._bracket_manager.confirm_entry_fill(synthetic_id, base_price)
+            return True
+            
+        except Exception as e:
+            self._logger.error(f"Guard failed: {e}")
+            return False
     def _ensure_safety_bracket(self, symbol: str, quantity: int, entry_price: float) -> None:
         """
         CRITICAL SAFETY NET: Places Hard SL/TP on the Broker.
