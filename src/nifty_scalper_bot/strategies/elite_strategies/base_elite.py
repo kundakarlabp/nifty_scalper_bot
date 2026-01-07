@@ -189,6 +189,9 @@ class EliteStrategy(Strategy):
             symbol=elite_signal.symbol,
             confidence=elite_signal.confidence,
             reason=f"{self.name} Signal",  # Map 'tag' to mandatory 'reason' field
+            quantity=elite_signal.quantity,       # <--- Added mandatory arg
+            stop_loss=elite_signal.stop_loss,     # <--- Added mandatory arg
+            take_profit=elite_signal.target,
             metadata=metadata,
         )
 
