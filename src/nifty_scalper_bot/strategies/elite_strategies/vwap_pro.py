@@ -184,12 +184,12 @@ class VWAPProStrategy(EliteStrategy):
                 symbol=symbol,
                 signal=side,
                 confidence=min(confidence, 99.0),
+                entry_price=current_price,
                 stop_loss=stop_loss,
                 target=tp1,
                 quantity=self._vwap_config.quantity or 1,
                 strategy_name="VWAP_Pro_Trend",
                 metadata={
-                    "price": current_price,
                     "type": "Trend_Pullback",
                     "vwap": vwap,
                     "ema_trend": "Bullish" if trend_bullish else "Bearish",
