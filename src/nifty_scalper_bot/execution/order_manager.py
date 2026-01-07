@@ -3698,7 +3698,7 @@ class OrderManager:
             order = self._orders.get(order_id)
 
             # -----------------------------------------------------
-            # 🛡️ UNKNOWN ORDER HANDLING (The Fix)
+            # 🛡️ UNKNOWN ORDER HANDLING (Ghost Orders)
             # -----------------------------------------------------
             if not order:
                 # A. STOP THE SPAM: Ignore Dead Orders
@@ -3709,7 +3709,6 @@ class OrderManager:
 
                 # B. ADOPT ACTIVE ORDERS (Manual Trades you are holding)
                 try:
-                    # Create the order object so we track it from now on
                     # [FIX] Robust Quantity Resolution
                     qty = int(float(order_update.get("quantity", 0)))
                     if qty == 0:
@@ -3733,6 +3732,19 @@ class OrderManager:
                     
                     # 1. Save to Memory (Stop "Unknown Order" warnings for future updates)
                     self._orders[order_id] = order
+                    
+                    # [FIX] CRITICAL: Sync with PositionManager immediately
+                    # This ensures the PositionManager knows this ID exists before we try to update it
+                    if hasattr(self._positions, "add_pending_order"):
+                         self._positions.add_pending_order(
+                            order_id=order.order_id,
+                            symbol=order.symbol,
+                            side=order.side,
+                            qty=order.quantity,
+                            price=order.price,
+                            order_type="MARKET" # Manual adoption defaults to Market
+                        )
+
                     self._logger.info(f"🆕 ADOPTED UNKNOWN ORDER: {order_id} [{order.symbol}]")
                     
                     # 2. Persist to Disk Immediately (Survive Restarts)
