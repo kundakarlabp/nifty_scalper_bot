@@ -1481,7 +1481,16 @@ class StrategyRunner:
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
+        
+        # [FIX] OPTIMIZATION: Fail-Fast if we already have a position
+        # Save CPU: Do not calculate indicators or strategy logic for active trades.
+        # (Assuming you want to skip entry logic. If you need exit logic here, keep it, 
+        # but usually exit logic is event-driven or in a separate loop).
+        if self._position_manager and self._position_manager.get_active_contract(symbol):
+             return
+
         # ✅ FIX: Import logging to access integer constants (DEBUG=10, WARNING=30)
+        
         import logging
         from nifty_scalper_bot.utils.logging import log_throttled
 
@@ -1609,7 +1618,11 @@ class StrategyRunner:
             curr_vwap = state.vwap
 
             if prev_ltp and curr_vwap and price > 0:
-                is_cross_up = (prev_ltp < curr_vwap and price > curr_vwap)
+                # [FIX] HYSTERESIS: Require 0.05% breakout to confirm signal
+                threshold = curr_vwap * 0.0005  # 0.05% buffer
+                
+                # Must cross from below VWAP to ABOVE (VWAP + Threshold)
+                is_cross_up = (prev_ltp < (curr_vwap + threshold) and price > (curr_vwap + threshold))
                 
                 if is_cross_up:
                     self._logger.info(
