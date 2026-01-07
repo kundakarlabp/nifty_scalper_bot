@@ -1388,9 +1388,15 @@ class StrategyRunner:
             return
 
         # 4. Define Helper (Safe extraction logic)
+        # 4. Define Helper (Safe extraction with Case-Insensitivity)
         def _get_val(d, *keys, default=0.0):
             for k in keys:
+                # 1. Exact match
                 if d.get(k) is not None: return float(d[k])
+                # 2. Case variations (Open vs open vs OPEN)
+                if isinstance(k, str):
+                    if d.get(k.title()) is not None: return float(d[k.title()])
+                    if d.get(k.upper()) is not None: return float(d[k.upper()])
             return default
 
         symbols_to_load = []
@@ -1399,13 +1405,17 @@ class StrategyRunner:
 
         for symbol in symbols_to_load:
             try:
-                # ✅ Request 5 days (covers weekends)
+                # Fetch 5 days to cover weekends
                 candles = await source.fetch_history(symbol, "minute", days=7)
                 
                 if candles:
+                    # ✅ DEBUG: See exactly what the broker is sending
+                    if len(candles) > 0:
+                        self._logger.info(f"🔍 KEYS DEBUG for {symbol}: {list(candles[0].keys())}")
+
                     loaded = 0
                     for candle in candles:
-                        # Normalize Data
+                        # Robust Extraction
                         payload = {
                             "open": _get_val(candle, "open", "o"),
                             "high": _get_val(candle, "high", "h"),
@@ -1414,8 +1424,11 @@ class StrategyRunner:
                         }
                         vol = int(_get_val(candle, "volume", "v", "vol"))
                         
-                        # Handle Timestamp
-                        raw_ts = candle.get("date") or candle.get("timestamp")
+                        # Handle Timestamp (Robust)
+                        raw_ts = (
+                            candle.get("date") or candle.get("timestamp") or 
+                            candle.get("Date") or candle.get("Timestamp")
+                        )
                         ts = datetime.now(timezone.utc)
                         if raw_ts:
                             if isinstance(raw_ts, str):
@@ -1426,27 +1439,8 @@ class StrategyRunner:
                             elif isinstance(raw_ts, datetime):
                                 ts = raw_ts
 
-                        # FIX: Handle Zerodha's specific dict format explicitly
-                        # Zerodha returns keys like 'open', 'high', etc. directly.
-                        if "close" in candle and candle["close"] > 0:
-                            payload = {
-                                "open": float(candle.get("open", 0)),
-                                "high": float(candle.get("high", 0)),
-                                "low": float(candle.get("low", 0)),
-                                "close": float(candle.get("close", 0))
-                            }
-                            vol = int(candle.get("volume", 0))
-                            
-                            # Handle Timestamp
-                            raw_ts = candle.get("date")
-                            ts = datetime.now(timezone.utc)
-                            if raw_ts:
-                                if isinstance(raw_ts, str):
-                                    # Handle "2023-01-01T09:15:00+0530"
-                                    ts = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00'))
-                                elif isinstance(raw_ts, datetime):
-                                    ts = raw_ts
-
+                        # Feed Indicator Engine
+                        if payload["close"] > 0:
                             self._indicator_engine.update_price(
                                 symbol, payload, volume=vol, timestamp=ts
                             )
@@ -1454,6 +1448,8 @@ class StrategyRunner:
                     
                     if loaded > 0:
                         self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
+                    else:
+                        self._logger.warning(f"⚠️ Fetched {len(candles)} bars but ingested 0. Check extraction logic."))
             
             except Exception as e:
                 self._logger.debug(f"Backfill failed for {symbol}: {e}")
