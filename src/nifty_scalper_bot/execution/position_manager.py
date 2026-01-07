@@ -123,7 +123,7 @@ def _now() -> datetime:
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    """Persist *payload* to *path* atomically to guard against corruption.
+    """Persist *payload* to *path* atomically with unique temp files (Thread-Safe).
 
     Args:
         path: Destination filesystem path for the JSON document.
@@ -135,14 +135,34 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     Raises:
         None.
     """
+    import json
+    import os
+    import uuid
+    from contextlib import suppress
+
+    # [FIX] Use unique temp identifier per write to prevent Thread Race Conditions.
+    # Appending UUID ensures no two threads/processes ever write to the same temp file.
+    # E.g., data.json -> data.json.tmp.3a1f8e...
+    temp_path = path.with_suffix(f"{path.suffix}.tmp.{uuid.uuid4().hex}")
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_suffix(path.suffix + ".tmp")
-        data = json.dumps(payload, indent=2, sort_keys=True)
-        temp_path.write_text(data, encoding="utf-8")
+
+        # Write to unique temp file
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())  # [FIX] Force flush to disk for durability
+
+        # Atomic Move (Overwrite destination)
         os.replace(temp_path, path)
-    except Exception as exc:  # noqa: BLE001 - commit caller context
+
+    except Exception as exc:  # noqa: BLE001
+        # Cleanup unique temp file on failure to avoid disk clutter
+        with suppress(OSError):
+            if temp_path.exists():
+                os.remove(temp_path)
+        
         get_logger(__name__).error("Failure in _atomic_write_json: %s", exc)
         raise
 
