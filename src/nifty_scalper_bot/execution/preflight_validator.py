@@ -904,10 +904,19 @@ class PreFlightValidator:
         try:
             regime = None
             confidence = None
-            if hasattr(self._regime_manager, "get_current_regime"):
+           if hasattr(self._regime_manager, "get_current_regime"):
                 regime = self._regime_manager.get_current_regime()
             if hasattr(self._regime_manager, "get_regime_confidence"):
                 confidence = float(self._regime_manager.get_regime_confidence())
+            
+            # [FIX] CRITICAL: Fail-Closed if Regime is Missing
+            if regime is None:
+                 return {
+                    "detail": "Regime data missing",
+                    "current_value": None,
+                    "limit": "valid_snapshot"
+                 }
+
             if str(regime).upper() != "VOLATILE":
                 return None
             threshold = self._settings.regime_block_volatile
