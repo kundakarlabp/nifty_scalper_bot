@@ -1372,31 +1372,22 @@ class StrategyRunner:
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
-        """Fetch and ingest historical data using the MarketDataManager."""
+        """Fetch and ingest historical data. NEVER defaults to datetime.now()."""
         self._logger.info("⏳ Starting historical data backfill...")
-        
-        # 1. Wait for connections to stabilize
         await asyncio.sleep(2.0)
         
-        # 2. ✅ FIX: Always use MarketDataManager directly. 
-        # DataHub is for live streaming and might not expose the history interface.
+        # 1. Determine Source
         source = self._market_data
-        
-        # 3. Check for the interface
         if not hasattr(source, "fetch_history"):
             self._logger.warning("⚠️ MarketData missing 'fetch_history'. Backfill skipped.")
             return
 
-        # 4. Define Helper (Safe extraction logic)
-        # 4. Define Helper (Safe extraction with Case-Insensitivity)
+        # 2. Helpers
         def _get_val(d, *keys, default=0.0):
             for k in keys:
-                # 1. Exact match
-                if d.get(k) is not None: return float(d[k])
-                # 2. Case variations (Open vs open vs OPEN)
-                if isinstance(k, str):
-                    if d.get(k.title()) is not None: return float(d[k.title()])
-                    if d.get(k.upper()) is not None: return float(d[k.upper()])
+                if k in d: return float(d[k])
+                for variant in [k.lower(), k.title(), k.upper()]:
+                    if variant in d: return float(d[variant])
             return default
 
         symbols_to_load = []
@@ -1405,17 +1396,13 @@ class StrategyRunner:
 
         for symbol in symbols_to_load:
             try:
-                # Fetch 5 days to cover weekends
+                # Fetch 7 days to cover weekends
                 candles = await source.fetch_history(symbol, "minute", days=7)
                 
                 if candles:
-                    # ✅ DEBUG: See exactly what the broker is sending
-                    if len(candles) > 0:
-                        self._logger.info(f"🔍 KEYS DEBUG for {symbol}: {list(candles[0].keys())}")
-
                     loaded = 0
                     for candle in candles:
-                        # Robust Extraction
+                        # 3. Extract OHLCV
                         payload = {
                             "open": _get_val(candle, "open", "o"),
                             "high": _get_val(candle, "high", "h"),
@@ -1424,22 +1411,29 @@ class StrategyRunner:
                         }
                         vol = int(_get_val(candle, "volume", "v", "vol"))
                         
-                        # Handle Timestamp (Robust)
-                        raw_ts = (
-                            candle.get("date") or candle.get("timestamp") or 
-                            candle.get("Date") or candle.get("Timestamp")
-                        )
-                        ts = datetime.now(timezone.utc)
-                        if raw_ts:
-                            if isinstance(raw_ts, str):
-                                try:
-                                    ts = datetime.fromisoformat(str(raw_ts).replace('Z', '+00:00'))
-                                except ValueError:
-                                    pass
-                            elif isinstance(raw_ts, datetime):
-                                ts = raw_ts
+                        # 4. Extract Timestamp (Robust Search)
+                        ts = None
+                        for k in ["date", "Date", "timestamp", "Timestamp", "datetime"]:
+                            val = candle.get(k)
+                            if val:
+                                if isinstance(val, datetime):
+                                    ts = val
+                                elif isinstance(val, str):
+                                    try:
+                                        ts = datetime.fromisoformat(val.replace('Z', '+00:00'))
+                                    except ValueError:
+                                        continue
+                                if ts: break
+                        
+                        # 💀 CRITICAL FIX: If no timestamp found, SKIP. Do NOT use now().
+                        if not ts:
+                            continue
 
-                        # Feed Indicator Engine
+                        # Ensure UTC
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+
+                        # 5. Ingest
                         if payload["close"] > 0:
                             self._indicator_engine.update_price(
                                 symbol, payload, volume=vol, timestamp=ts
@@ -1449,10 +1443,10 @@ class StrategyRunner:
                     if loaded > 0:
                         self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
                     else:
-                        self._logger.warning(f"⚠️ Fetched {len(candles)} bars but ingested 0. Check extraction logic.")
+                        self._logger.warning(f"⚠️ Fetched {len(candles)} but loaded 0. Check Keys: {list(candles[0].keys())}")
             
             except Exception as e:
-                self._logger.debug(f"Backfill failed for {symbol}: {e}")
+                self._logger.error(f"❌ Backfill error {symbol}: {e}", exc_info=True)
         
         self._logger.info("✅ Historical backfill process finished.")
         
