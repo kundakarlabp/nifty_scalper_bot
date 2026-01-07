@@ -1449,7 +1449,7 @@ class StrategyRunner:
                     if loaded > 0:
                         self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
                     else:
-                        self._logger.warning(f"⚠️ Fetched {len(candles)} bars but ingested 0. Check extraction logic."))
+                        self._logger.warning(f"⚠️ Fetched {len(candles)} bars but ingested 0. Check extraction logic.")
             
             except Exception as e:
                 self._logger.debug(f"Backfill failed for {symbol}: {e}")
