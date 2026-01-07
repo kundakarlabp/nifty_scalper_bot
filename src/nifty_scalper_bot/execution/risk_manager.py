@@ -259,6 +259,16 @@ class RiskManager:
 
         return True, ""
 
+    # [FIX] Added compatibility method for StrategyRunner
+    def can_trade(self, symbol: str) -> bool:
+        """
+        Check if trading is allowed for a specific symbol.
+        Used by StrategyRunner to fail-fast before signal generation.
+        """
+        # Check global risk parameters using existing logic
+        allowed, _ = self.can_trade_now()
+        return allowed
+
     def get_position_size(
         self,
         symbol: str,
