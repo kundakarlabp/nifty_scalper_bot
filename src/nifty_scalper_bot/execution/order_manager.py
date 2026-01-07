@@ -4026,9 +4026,24 @@ class OrderManager:
             
             self._register_order(details)
             
+            # [FIX] CRITICAL: Sync with PositionManager
+            # This prevents "Attempted to update unknown order" errors during reconciliation
+            if hasattr(self._positions, "add_pending_order"):
+                # Safe Enum conversion for order_type
+                otype = details.order_type
+                otype_str = otype.name if hasattr(otype, "name") else str(otype).upper()
+                
+                self._positions.add_pending_order(
+                    order_id=details.order_id,
+                    symbol=details.symbol,
+                    side=details.side,
+                    qty=details.quantity,
+                    price=details.price,
+                    order_type=otype_str
+                )
+            
             try:
                 # ✅ FIX: Safe Enum Access (Handle String vs Enum)
-                # This prevents 'str object has no attribute name' crashes
                 status_val = details.status
                 status_str = status_val.name if hasattr(status_val, "name") else str(status_val)
                 
@@ -4049,6 +4064,7 @@ class OrderManager:
                 "order_reconcile_complete",
                 extra={"event": "order_reconcile", "orders": reconciled},
             )
+            
     def exit_position(
         self, 
         symbol: str, 
