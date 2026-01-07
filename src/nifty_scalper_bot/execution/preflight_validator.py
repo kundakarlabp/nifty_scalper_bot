@@ -896,7 +896,6 @@ class PreFlightValidator:
         Raises:
             None.
         """
-
         self._logger.debug(
             "Entered PreFlightValidator._check_regime",
             extra={"event": "preflight_gate_regime", "symbol": symbol},
@@ -904,12 +903,19 @@ class PreFlightValidator:
         try:
             regime = None
             confidence = None
-           if hasattr(self._regime_manager, "get_current_regime"):
+
+            # 1. Fetch Regime Data
+            if hasattr(self._regime_manager, "get_current_regime"):
                 regime = self._regime_manager.get_current_regime()
+
             if hasattr(self._regime_manager, "get_regime_confidence"):
-                confidence = float(self._regime_manager.get_regime_confidence())
+                try:
+                    confidence = float(self._regime_manager.get_regime_confidence())
+                except (TypeError, ValueError):
+                    confidence = 0.0
             
             # [FIX] CRITICAL: Fail-Closed if Regime is Missing
+            # If the bot is "blind" (no regime data), we BLOCK trading.
             if regime is None:
                  return {
                     "detail": "Regime data missing",
@@ -917,16 +923,24 @@ class PreFlightValidator:
                     "limit": "valid_snapshot"
                  }
 
+            # 2. Volatility Logic
+            # If the market is NOT Volatile (e.g., TRENDING, RANGING), allow trade.
             if str(regime).upper() != "VOLATILE":
                 return None
+
+            # If Market IS Volatile, check if confidence is high enough to block.
             threshold = self._settings.regime_block_volatile
+            
+            # Block if confidence is high (or unknown/None default safe)
             if confidence is None or confidence >= threshold:
                 return {
                     "detail": "Volatile regime",
                     "current_value": confidence,
                     "limit": threshold,
                 }
+            
             return None
+
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in PreFlightValidator._check_regime: %s",
