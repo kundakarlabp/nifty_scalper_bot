@@ -9177,9 +9177,10 @@ class OrderManager:
                         # Final Safety Net
                         self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
 
-            # 3. HANDLE GHOSTS (Local Exists, Broker Missing)
+            # 3. HANDLE GHOSTS & NAKED POSITIONS
             # ------------------------------------------------------
             for lsym, pos in local_map.items():
+                # CASE A: Ghost (We think we have it, Broker says no)
                 if lsym not in broker_map:
                     self._logger.warning(
                         f"👻 Ghost Position Found: {lsym}. Clearing local state.",
@@ -9188,8 +9189,8 @@ class OrderManager:
                     self.cancel_orders_for_symbol(lsym)
                     self._generate_adjustment_order(lsym, -int(pos.quantity), 0.0)
 
+                # CASE B: Quantity Mismatch (Partial fills/Manual intervention)
                 elif broker_map[lsym]["qty"] != pos.quantity:
-                    # Quantity mismatch (Partial exit)
                     diff = broker_map[lsym]["qty"] - pos.quantity
                     self._logger.info(
                         f"⚖️ Syncing Qty for {lsym}: Local {pos.quantity} -> Broker {broker_map[lsym]['qty']}",
@@ -9197,24 +9198,26 @@ class OrderManager:
                     )
                     self._generate_adjustment_order(lsym, diff, 0.0)
                 
-                # [FIX] NAKED POSITION DETECTION
-                # If quantities match, check if we have a bracket managing it.
+                # CASE C: Perfect Match... BUT IS IT SAFE? (The Missing Link)
                 elif broker_map[lsym]["qty"] == pos.quantity:
-                    # Check brackets by symbol logic
+                    # 1. Check if a bracket is actually managing this symbol
                     is_managed = False
-                    with self._lock:
-                        # Iterate brackets to see if any cover this symbol with remaining exposure
-                        for b in self._brackets.values():
-                            if b.symbol == lsym and b.remaining_position() > 0:
-                                is_managed = True
-                                break
+                    if self._bracket_manager:
+                        # Fast check: Does bracket manager know this order ID or symbol?
+                        # We iterate because bracket ID != Position ID usually
+                        with self._lock:
+                            for b in self._brackets.values():
+                                if b.symbol == lsym and b.active:
+                                    is_managed = True
+                                    break
                     
+                    # 2. If not managed, WE MUST ADOPT IT NOW
                     if not is_managed:
                         self._logger.warning(
-                            f"🛡️ Naked Position Detected during Sync: {lsym}. Auto-Guarding...",
-                            extra={"event": "naked_position_guard", "symbol": lsym}
+                            f"🛡️ Naked Position Detected (Qty Match): {lsym}. Forcing Guard...",
+                            extra={"event": "naked_guard_trigger", "symbol": lsym}
                         )
-                        # Call Guard with consume_existing=True to skip PositionManager update
+                        # We pass consume_existing=True because accounting is already correct!
                         self.guard_orphan_position(
                             lsym, 
                             int(pos.quantity), 
