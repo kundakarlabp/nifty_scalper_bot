@@ -3744,7 +3744,7 @@ class OrderManager:
                             side=order.side,
                             qty=order.quantity,
                             price=order.price,
-                            order_type="MARKET" # Manual adoption defaults to Market
+                            order_type=details.order_type
                         )
 
                     self._logger.info(f"🆕 ADOPTED UNKNOWN ORDER: {order_id} [{order.symbol}]")
