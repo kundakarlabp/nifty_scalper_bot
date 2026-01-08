@@ -186,6 +186,10 @@ class RiskManager:
             float(get_float("RISK__BALANCE_JIT_REFRESH", default=1.0)),
         )
         self._last_log_time = 0.0
+        self._switches.reset_day()
+        self._breaker_tripped = False
+        self._breaker_reason = None
+        self._logger.warning("⚠️ MANUAL FIX APPLIED: Risk counters forced to 0.00")
 
     @property
     def risk_config(self) -> RiskSettings:
