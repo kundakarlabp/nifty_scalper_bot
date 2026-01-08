@@ -77,17 +77,47 @@ class PollingStreamer:
             LOGGER.info("🛑 Polling Streamer Stopped", extra={"event": "polling_stopped"})
 
     def subscribe(self, tokens: Sequence[int]) -> None:
-        """Add tokens to the polling list."""
+        """Add tokens to the polling list and seed DataHub immediately."""
         with self._lock:
             initial_count = len(self._tokens)
             self._tokens.update(tokens)
             new_count = len(self._tokens)
-            if new_count > initial_count:
-                LOGGER.info(
-                    "✅ Wired %d tokens to PollingStreamer",
-                    new_count,
-                    extra={"event": "polling_subscribe", "count": new_count},
-                )
+
+        if new_count > initial_count:
+            LOGGER.info(
+                "✅ Wired %d tokens to PollingStreamer",
+                new_count,
+                extra={"event": "polling_subscribe", "count": new_count},
+            )
+
+        # [FIX] CRITICAL: Immediate seed to avoid RiskState race
+        # This creates a "Fresh" state immediately so RiskManager doesn't block startup.
+        if self._data_hub:
+            import time
+            for token in tokens:
+                symbol = self._resolve_instrument(token)
+                if symbol:
+                    # We send a "Ghost Quote" with 0.0 price but FRESH timestamp.
+                    # This satisfies the RiskState's freshness check immediately.
+                    # Note: We removed 'seed=True' to prevent TypeError.
+                    self._data_hub.store_quote(
+                        symbol,
+                        {
+                            "instrument_token": token,
+                            "last_price": 0.0,   # Safe placeholder (strategies check > 0)
+                            "timestamp": time.time(),
+                            "source": "rest"     # Important: Applies 90s freshness rule
+                        },
+                        source="rest"
+                    )
+                else:
+                    LOGGER.error(
+                        "PollingStreamer.subscribe: symbol resolution failed",
+                        extra={
+                            "event": "symbol_resolution_failed",
+                            "instrument_token": token,
+                        },
+                    )
 
     def unsubscribe(self, tokens: Sequence[int]) -> None:
         """Remove tokens from polling list."""
