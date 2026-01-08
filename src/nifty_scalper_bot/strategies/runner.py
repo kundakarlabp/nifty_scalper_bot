@@ -861,42 +861,30 @@ class StrategyRunner:
             bar: The completed OneMinuteBar object.
             is_backfill: If True, bypasses timestamp monotonicity checks for historical data.
         """
-        if not bar.symbol:
+        if not hasattr(bar, "symbol") or bar.symbol is None:
             bar.symbol = symbol
-        # 1. SAFETY: Timestamp Monotonicity Guard
-        # Prevents processing "old" bars during live trading (Time Travel Protection).
-        # We skip this check ONLY if we are explicitly backfilling history.
+
         last_ts = self._last_bar_ts.get(symbol)
-        if not is_backfill:
-            if last_ts and bar.timestamp <= last_ts:
-                self._logger.debug(
-                    "Dropping out-of-order bar", 
-                    extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts}
-                )
-                return
+        
+        if not is_backfill and last_ts and bar.timestamp <= last_ts:
+            self._logger.debug(
+                "Dropping out-of-order bar", 
+                extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts}
+            )
+            return
 
         if not last_ts or bar.timestamp > last_ts:
             self._last_bar_ts[symbol] = bar.timestamp
 
         # 2. STATE: Update High-Water Mark
-        current_last = self._last_bar_ts.get(symbol)
-        if not current_last or bar.timestamp > current_last:
+        
+        if not last_ts or bar.timestamp > last_ts:
             self._last_bar_ts[symbol] = bar.timestamp
 
         try:
             # 3. INDICATORS: Feed the Engine
             # Feed IndicatorEngine using its real API
-            self._indicator_engine.update_price(
-                symbol=symbol,
-                price={
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                },
-                volume=bar.volume,
-                timestamp=bar.timestamp,
-            )
+            self._indicator_engine.update_bar(symbol, bar)
 
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
@@ -918,19 +906,20 @@ class StrategyRunner:
 
             # 5. EXECUTION: Trigger Strategies
             # CRITICAL: Do NOT run strategies during backfill (prevents phantom trades).
-            if not is_backfill:
-                with self._lock:
-                    # Update Symbol State for context
-                    state = self._symbol_state.get(symbol)
-                    if state:
-                        state.last_tick = {
-                            "last_price": bar.close,
-                            "timestamp": bar.timestamp.timestamp(),
-                            "volume": bar.volume
-                        }
+            if is_backfill:
+                return
+            with self._lock:
+                # Update Symbol State for context
+                state = self._symbol_state.get(symbol)
+                if state:
+                    state.last_tick = {
+                        "last_price": bar.close,
+                        "timestamp": bar.timestamp.timestamp(),
+                        "volume": bar.volume
+                    }
                     
-                    # 🔥 THE TRIGGER: Run Strategy Logic
-                    self._strategy_manager.on_bar(bar)
+                # 🔥 THE TRIGGER: Run Strategy Logic
+                self._strategy_manager.on_bar(bar)
 
         except Exception as exc:
             self._logger.error(
