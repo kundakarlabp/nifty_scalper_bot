@@ -180,6 +180,29 @@ class DataHub:
                             exc_info=True # Prints full traceback to help debug
                         )
 
+    def store_quote(
+        self, 
+        symbol: str, 
+        quote_data: dict[str, Any], 
+        source: str = "ws"
+    ) -> None:
+        """
+        Store a new quote with explicit source tagging.
+        Entry point for REST Polling / Scout to inject 'source=rest'.
+        """
+        # [FIX] Enforce source tagging
+        quote_data["source"] = source
+        
+        # Update Cache directly (Synchronous)
+        with self._lock:
+            self._quotes[symbol] = quote_data
+            
+            # Cross-reference token mapping if present (similar to ingest_tick)
+            token = quote_data.get("instrument_token") or quote_data.get("token")
+            if str(token) == "256265": 
+                self._quotes["NSE:NIFTY 50"] = quote_data
+                self._quotes["NIFTY 50"] = quote_data
+
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
         """Atomically replace the entire position snapshot."""
         new_map = {}
@@ -290,7 +313,7 @@ class DataHub:
         age = max(0.0, now - ts_ms)
 
         # 2. Source-Aware Threshold (The Magic Logic)
-        # We trust the 'source' tag set by the ingestion layer.
+        # We trust the 'source' tag set by store_quote. Default to 'ws' (strict).
         source = quote.get("source", "ws")
 
         if source == "rest":
@@ -309,7 +332,6 @@ class DataHub:
             "source": source,
             "reason": None if is_fresh else "stale",
         }
-
     # ----------------------------------------------------------------
     # Subscription Management
     # ----------------------------------------------------------------
