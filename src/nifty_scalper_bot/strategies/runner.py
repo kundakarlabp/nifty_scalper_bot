@@ -851,51 +851,76 @@ class StrategyRunner:
             self._market_data.subscribe(symbol, callback)
             self._logger.info(f"✅ SUBSCRIBED via MarketData: {symbol}")
 
-    def _ingest_bar(self, symbol: str, bar: OneMinuteBar) -> None:
-        """Persist the completed minute bar and UPDATE BRACKET MANAGER."""
-        self._logger.debug(
-            "Entered StrategyRunner._ingest_bar",
-            extra={"event": "ingest_bar", "symbol": symbol},
-        )
+    def _ingest_bar(self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False) -> None:
+        """
+        Ingest a completed minute bar.
+        Updates Indicators, Bracket Manager, and Triggers Strategies.
+        
+        Args:
+            symbol: Trading symbol.
+            bar: The completed OneMinuteBar object.
+            is_backfill: If True, bypasses timestamp monotonicity checks for historical data.
+        """
+        # 1. SAFETY: Timestamp Monotonicity Guard
+        # Prevents processing "old" bars during live trading (Time Travel Protection).
+        # We skip this check ONLY if we are explicitly backfilling history.
+        if not is_backfill:
+            last_ts = self._last_bar_ts.get(symbol)
+            if last_ts and bar.timestamp <= last_ts:
+                self._logger.debug(
+                    "Dropping out-of-order bar", 
+                    extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts}
+                )
+                return 
 
-        payload = {
-            "open": bar.open,
-            "high": bar.high,
-            "low": bar.low,
-            "close": bar.close,
-        }
+        # 2. STATE: Update High-Water Mark
+        current_last = self._last_bar_ts.get(symbol)
+        if not current_last or bar.timestamp > current_last:
+            self._last_bar_ts[symbol] = bar.timestamp
 
         try:
-            self._indicator_engine.update_price(
-                symbol,
-                payload,
-                volume=bar.volume,
-                timestamp=bar.end,
-            )
+            # 3. INDICATORS: Feed the Engine
+            # Use update_bar to commit to history (NOT update_price)
+            self._indicator_engine.update_bar(symbol, bar)
 
+            # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
-                # Get ATR (Returns ATRSnapshot object OR float)
+                # Compute ATR (Period 14 is standard)
                 raw_atr = self._indicator_engine.compute_atr(symbol, period=14)
                 
-                # Unwrap the value safely
+                # Robust Unwrapping (Handles Float, Snapshot, or Object)
                 atr_value = 0.0
-                if hasattr(raw_atr, 'value'):
-                    atr_value = float(raw_atr.value) # It's a Snapshot
+                if isinstance(raw_atr, (int, float)):
+                    atr_value = float(raw_atr)
+                elif hasattr(raw_atr, 'value'):
+                    atr_value = float(raw_atr.value)
                 elif hasattr(raw_atr, 'atr'):
-                    atr_value = float(raw_atr.atr)   # Alternate format
-                elif isinstance(raw_atr, (int, float)):
-                    atr_value = float(raw_atr)       # It's a raw number
+                    atr_value = float(raw_atr.atr)
 
-                if atr_value > 0:
-                     if hasattr(self._bracket_manager, "update_market_stats"):
-                         # Pass the simple float value to the manager
-                         self._bracket_manager.update_market_stats(symbol, atr=atr_value)
-                         self._logger.debug(f"💉 Injected ATR {atr_value:.2f} into BracketManager for {symbol}")
+                # Push to Bracket Manager for dynamic stop/target sizing
+                if atr_value > 0 and hasattr(self._bracket_manager, "update_market_stats"):
+                    self._bracket_manager.update_market_stats(symbol, atr=atr_value)
+
+            # 5. EXECUTION: Trigger Strategies
+            # CRITICAL: Do NOT run strategies during backfill (prevents phantom trades).
+            if not is_backfill:
+                with self._lock:
+                    # Update Symbol State for context
+                    state = self._symbol_state.get(symbol)
+                    if state:
+                        state.last_tick = {
+                            "last_price": bar.close,
+                            "timestamp": bar.timestamp.timestamp(),
+                            "volume": bar.volume
+                        }
+                    
+                    # 🔥 THE TRIGGER: Run Strategy Logic
+                    self._strategy_manager.on_bar(bar)
 
         except Exception as exc:
             self._logger.error(
-                "Failure in _ingest_bar: %s",
-                exc,
+                f"Failure in _ingest_bar: {exc}",
+                exc_info=True,
                 extra={"event": "ingest_bar_failed", "symbol": symbol},
             )
 
@@ -1504,7 +1529,7 @@ class StrategyRunner:
                                 )
                                 
                             if bar:
-                                self._ingest_bar(symbol, bar)
+                                self._ingest_bar(symbol, bar, is_backfill=True)
                                 loaded += 1
                 
                 except Exception:
