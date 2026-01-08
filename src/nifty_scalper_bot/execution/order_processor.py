@@ -32,8 +32,11 @@ class OrderProcessor:
         self._running = False
         
         # Anti-Whipsaw: Track last signal time per symbol
-        self._last_signal_time: dict[str, datetime] = {}
-        self._debounce_seconds = 5.0 
+        self._last_signal_time: dict[tuple[str, str], datetime] = {}
+        self._active_trades: dict[str, str] = {}
+
+        # Cooldown (seconds)
+        self._debounce_seconds = 60.0
 
         self.bus.subscribe(MessageType.SIGNAL, self.on_strategy_signal)
         LOGGER.info("OrderProcessor initialized with Smart Execution logic.")
@@ -49,17 +52,31 @@ class OrderProcessor:
         symbol = signal.get("symbol")
         side = signal.get("side")
         qty = signal.get("quantity")
+        key = (symbol, side)
+
+        # 🔒 Block duplicate direction trades
+        if self._active_trades.get(symbol) == side:
+            LOGGER.warning(
+                f"🚫 Duplicate execution blocked: {symbol} {side}"
+            )
+            return
+        
         
         if not all([symbol, side, qty]):
             return
 
         # --- 1. Debounce Check ---
         now = datetime.now(timezone.utc)
-        last_time = self._last_signal_time.get(symbol)
+        last_time = self._last_signal_time.get(key)
         if last_time and (now - last_time).total_seconds() < self._debounce_seconds:
-            LOGGER.info(f"Debounced signal for {symbol} (too fast)")
+            LOGGER.info(
+                f"⏳ Cooldown active: {symbol} {side} "
+                f"({int((now - last_time).total_seconds())}s)"
+            )
             return
-        self._last_signal_time[symbol] = now
+
+        self._last_signal_time[key] = now
+
 
         # --- 2. Smart Price Calculation (Slippage Protection) ---
         # Convert MARKET orders to LIMIT orders with a protection buffer
@@ -90,6 +107,8 @@ class OrderProcessor:
                     LOGGER.info(f"🛡️ Safety Limit Applied: {symbol} {side} | LTP: {ltp} | Limit Price: {price}")
 
         # --- 3. Execution ---
+        # Register active trade
+
         LOGGER.info(f"Executing: {side} {qty} {symbol} @ {price or 'MKT'}")
 
         try:
@@ -100,6 +119,8 @@ class OrderProcessor:
                 order_type=order_type,
                 price=price
             )
+            # 🔒 Register active trade ONLY after broker ACK
+            self._active_trades[symbol] = side
             
             # Publish Success
             await self.bus.publish(
@@ -118,6 +139,8 @@ class OrderProcessor:
 
         except Exception as exc:
             LOGGER.error(f"Order failed: {exc}")
+            # 🔓 Release lock on failure
+            self._active_trades.pop(symbol, None)
             # Publish Failure
             await self.bus.publish(
                 Message(
