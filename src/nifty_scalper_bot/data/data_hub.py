@@ -185,6 +185,7 @@ class DataHub:
         symbol: str, 
         quote_data: dict[str, Any], 
         source: str = "ws"
+        seed: bool = False,
     ) -> None:
         """
         Store a new quote with explicit source tagging.
@@ -192,6 +193,11 @@ class DataHub:
         """
         # [FIX] Enforce source tagging
         quote_data["source"] = source
+        quote_data["seed"] = bool(seed)
+
+        if "timestamp" not in quote_data:
+            quote_data["timestamp"] = time.time()       
+
         
         # Update Cache directly (Synchronous)
         with self._lock:
@@ -199,7 +205,7 @@ class DataHub:
             
             # Cross-reference token mapping if present (similar to ingest_tick)
             token = quote_data.get("instrument_token") or quote_data.get("token")
-            if str(token) == "256265": 
+            if token is not None and str(token) == "256265":
                 self._quotes["NSE:NIFTY 50"] = quote_data
                 self._quotes["NIFTY 50"] = quote_data
 
@@ -286,6 +292,16 @@ class DataHub:
         than WebSocket ticks, preventing false-positive 'STALE' blocks.
         """
         quote = self.get_quote(symbol)
+
+        if quote.get("seed"):
+            return True, {
+                "ok": True,
+                "reason": "seed_warmup",
+                "source": quote.get("source"),
+                "threshold_ms": threshold_ms,
+            }
+
+
         if not quote:
             return False, {
                 "ok": False,
