@@ -2871,6 +2871,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             broker_client=broker_client,
             on_tick=_on_poll_tick,
             instrument_resolver=instrument_resolver,
+            data_hub=self.data_hub,
             poll_interval_ms=int(poll_interval_sec * 1000),
             batch_size=poll_batch_size,
             require_depth=poll_require_depth,
