@@ -1375,13 +1375,19 @@ class StrategyRunner:
         """
         Fetch and ingest historical data.
         Robustly handles both DICT candles (Zerodha) and LIST candles (Fyers/Alice/others).
+        Optimized with asyncio.gather for parallel fetching and OneMinuteBar ingestion for correct indicator priming.
         """
         self._logger.info("⏳ Starting historical data backfill...")
         await asyncio.sleep(2.0)
         
-        # 1. Determine Source
-        source = self._market_data
-        if not hasattr(source, "fetch_history"):
+        # 1. Determine Source (Prioritize DataHub if available)
+        source = None
+        if hasattr(self, "_data_hub") and self._data_hub and hasattr(self._data_hub, "fetch_history"):
+            source = self._data_hub
+        elif self._market_data and hasattr(self._market_data, "fetch_history"):
+            source = self._market_data
+            
+        if not source:
             self._logger.warning("⚠️ MarketData missing 'fetch_history'. Backfill skipped.")
             return
 
@@ -1394,111 +1400,113 @@ class StrategyRunner:
         with self._lock:
             symbols_to_load = list(self._active_symbols)
 
-        for symbol in symbols_to_load:
-            try:
-                # 3. Fetch Data
-                candles = await source.fetch_history(symbol, "minute", days=7)
-                
-                if candles:
-                    loaded = 0
-                    # Debug the structure of the first candle
-                    if len(candles) > 0:
-                        first = candles[0]
-                        # self._logger.info(f"🔍 DEBUG DATA STRUCTURE: {type(first)} -> {str(first)[:100]}")
+        if not symbols_to_load:
+            return
 
-                    for candle in candles:
-                        payload = {}
-                        raw_ts = None
-                        vol = 0
-
-                        # -------------------------------------------------
-                        # CASE A: Candle is a LIST (e.g. [time, o, h, l, c, v])
-                        # -------------------------------------------------
-                        if isinstance(candle, (list, tuple)):
-                            if len(candle) < 6: continue
-                            # Standard assumption: 0=Time, 1=Open, 2=High, 3=Low, 4=Close, 5=Vol
-                            raw_ts = candle[0]
-                            payload = {
-                                "open": _to_float(candle[1]),
-                                "high": _to_float(candle[2]),
-                                "low": _to_float(candle[3]),
-                                "close": _to_float(candle[4])
-                            }
-                            vol = int(_to_float(candle[5]))
-
-                        # -------------------------------------------------
-                        # CASE B: Candle is a DICT (e.g. {'date':..., 'open':...})
-                        # -------------------------------------------------
-                        elif isinstance(candle, dict):
-                            # Extract Prices
-                            o, h, l, c, v = 0.0, 0.0, 0.0, 0.0, 0
-                            for k, v_val in candle.items():
-                                k_lower = k.lower()
-                                val_float = _to_float(v_val)
-                                if k_lower in ['o', 'open']: o = val_float
-                                elif k_lower in ['h', 'high']: h = val_float
-                                elif k_lower in ['l', 'low']: l = val_float
-                                elif k_lower in ['c', 'close']: c = val_float
-                                elif k_lower in ['v', 'vol', 'volume']: v = int(val_float)
-                                elif k_lower in ['date', 'timestamp', 'time', 'datetime']: raw_ts = v_val
-                            
-                            payload = {"open": o, "high": h, "low": l, "close": c}
-                            vol = v
-
-                        # -------------------------------------------------
-                        # Common: Timestamp Parsing & Ingestion
-                        # -------------------------------------------------
-                        ts = None
-                        if isinstance(raw_ts, datetime):
-                            ts = raw_ts
-                        elif isinstance(raw_ts, str):
-                            try:
-                                # Clean 'Z' and parse ISO
-                                ts = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
-                            except ValueError:
-                                continue # Skip invalid time
-                        
-                        if ts:
-                            if ts.tzinfo is None:
-                                ts = ts.replace(tzinfo=timezone.utc)
-
-                            if payload.get("close", 0) > 0:
-                                self._indicator_engine.update_price(
-                                    symbol, payload, volume=vol, timestamp=ts
-                                )
-                                loaded += 1
-                    
-                    if loaded > 0:
-                        self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
-                    else:
-                        self._logger.warning(f"⚠️ Fetched {len(candles)} candles but ingested 0. Format mismatch.")
-            
-            except Exception as e:
-                self._logger.error(f"❌ Backfill failed for {symbol}: {e}", exc_info=True)
+        # 3. Parallel Fetching (Optimization)
+        # Fetch 5 days of 1-minute data for all symbols concurrently
+        days = 5 
+        tasks = [source.fetch_history(sym, "minute", days=days) for sym in symbols_to_load]
         
-        self._logger.info("✅ Historical backfill process finished.")
-        # === FIX: Seed IndicatorEngine with historical bars ===
-        bars_snapshot = self._market_data.snapshot()
+        self._logger.info(f"⏳ Fetching history for {len(symbols_to_load)} symbols in parallel...")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for symbol, bars in bars_snapshot.items():
-            history = self._indicator_engine._histories.get(symbol)
-            if history is None:
+        total_bars = 0
+        
+        # 4. Process Results
+        for symbol, candles in zip(symbols_to_load, results):
+            if isinstance(candles, Exception):
+                self._logger.error(f"❌ Backfill fetch failed for {symbol}: {candles}")
+                continue
+            
+            if not candles:
                 continue
 
-            for bar in bars[-50:]:  # seed exactly what is required
+            # [FIX] Reset BarBuilder to prevent partial bar corruption from previous live ticks
+            if symbol in self._bar_builders:
+                self._bar_builders[symbol].reset()
+
+            loaded = 0
+            for candle in candles:
                 try:
-                    history.add_tick(
-                        price=(
-                            bar["open"],
-                            bar["high"],
-                            bar["low"],
-                            bar["close"],
-                        ),
-                        volume=int(bar.get("volume", 0)),
-                        timestamp=bar["timestamp"],
-                    )
+                    payload = {}
+                    raw_ts = None
+                    vol = 0
+
+                    # --- Robust Parsing (Handles both List/Tuple and Dict formats) ---
+                    # CASE A: LIST (e.g. [time, o, h, l, c, v])
+                    if isinstance(candle, (list, tuple)):
+                        if len(candle) < 6: continue
+                        raw_ts = candle[0]
+                        payload = {
+                            "open": _to_float(candle[1]),
+                            "high": _to_float(candle[2]),
+                            "low": _to_float(candle[3]),
+                            "close": _to_float(candle[4])
+                        }
+                        vol = int(_to_float(candle[5]))
+
+                    # CASE B: DICT (e.g. {'date':..., 'open':...})
+                    elif isinstance(candle, dict):
+                        o, h, l, c, v = 0.0, 0.0, 0.0, 0.0, 0
+                        for k, v_val in candle.items():
+                            k_lower = k.lower()
+                            val_float = _to_float(v_val)
+                            if k_lower in ['o', 'open']: o = val_float
+                            elif k_lower in ['h', 'high']: h = val_float
+                            elif k_lower in ['l', 'low']: l = val_float
+                            elif k_lower in ['c', 'close']: c = val_float
+                            elif k_lower in ['v', 'vol', 'volume']: v = int(val_float)
+                            elif k_lower in ['date', 'timestamp', 'time', 'datetime']: raw_ts = v_val
+                        
+                        payload = {"open": o, "high": h, "low": l, "close": c}
+                        vol = v
+
+                    # --- Timestamp Parsing ---
+                    ts = None
+                    if isinstance(raw_ts, datetime):
+                        ts = raw_ts
+                    elif isinstance(raw_ts, str):
+                        try:
+                            ts = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
+                        except ValueError:
+                            continue
+                    elif isinstance(raw_ts, (int, float)):
+                        ts = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+
+                    if ts:
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+
+                        if payload.get("close", 0) > 0:
+                            # [CRITICAL FIX] Use OneMinuteBar + _ingest_bar
+                            # This bypasses the partial update_price logic and commits directly to history
+                            bar = OneMinuteBar(
+                                symbol=symbol,
+                                open=payload["open"],
+                                high=payload["high"],
+                                low=payload["low"],
+                                close=payload["close"],
+                                volume=vol,
+                                timestamp=ts,
+                                completed=True # Mark as completed so it goes straight to history
+                            )
+                            self._ingest_bar(symbol, bar)
+                            loaded += 1
+                
                 except Exception:
                     continue
+
+            if loaded > 0:
+                total_bars += loaded
+                # Check readiness immediately for feedback
+                ready = self._indicator_engine.is_ready(symbol, 50) 
+                state_icon = "✅" if ready else "⏳"
+                self._logger.info(f"{state_icon} Backfilled {loaded} bars for {symbol} (Ready: {ready})")
+            else:
+                self._logger.warning(f"⚠️ Fetched {len(candles)} candles for {symbol} but ingested 0.")
+
+        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")
         
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
