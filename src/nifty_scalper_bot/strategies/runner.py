@@ -1588,24 +1588,32 @@ class StrategyRunner:
             except Exception:
                 pass
 
-        # [FIX] Universal Risk Check (Works with OLD and NEW RiskManagers)
+        # [FIX] Universal Risk Check (Updated for RiskManager v3 Support)
         try:
             is_allowed = False
+            rm = self._risk_manager
             
-            if self._risk_manager:
-                # 1. Try New Method (can_trade)
-                if hasattr(self._risk_manager, "can_trade"):
-                    is_allowed = self._risk_manager.can_trade(symbol)
+            if rm:
+                # 1. Newest Interface (File 10/Fixed)
+                if hasattr(rm, "can_trade"):
+                    is_allowed = rm.can_trade(symbol)
                 
-                # 2. Fallback to Old Method (can_trade_now)
-                elif hasattr(self._risk_manager, "can_trade_now"):
-                    # can_trade_now returns (bool, reason) tuple
-                    res = self._risk_manager.can_trade_now()
+                # 2. RiskManager v3 Interface (File 3) - CRITICAL ADDITION
+                # This is what your system is actually running.
+                elif hasattr(rm, "risk_gate_should_trade"):
+                    # Returns (bool, reasons_tuple)
+                    res = rm.risk_gate_should_trade()
+                    is_allowed = res[0] if isinstance(res, tuple) else bool(res)
+
+                # 3. Legacy Interface - can_trade_now
+                elif hasattr(rm, "can_trade_now"):
+                    res = rm.can_trade_now()
                     is_allowed = res[0] if isinstance(res, tuple) else bool(res)
                 
-                # 3. Unknown Interface -> Block Safety
+                # 4. Unknown Interface -> Block Safety
                 else:
-                    self._logger.error(f"RiskManager missing validation method for {symbol}")
+                    # If we can't find ANY method, we must block to prevent unchecked trading
+                    self._logger.error(f"RiskManager {type(rm).__name__} has no known validation method (can_trade/risk_gate_should_trade)")
                     is_allowed = False
 
             if not is_allowed:
