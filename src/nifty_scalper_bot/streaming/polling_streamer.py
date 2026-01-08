@@ -108,7 +108,7 @@ class PollingStreamer:
                             "timestamp": time.time(),
                             "source": "rest"     # Important: Applies 90s freshness rule
                         },
-                        source="rest"
+                        source="rest",
                         seed=True,
                     )
                 else:
