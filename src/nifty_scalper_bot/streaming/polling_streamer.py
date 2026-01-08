@@ -104,11 +104,12 @@ class PollingStreamer:
                         symbol,
                         {
                             "instrument_token": token,
-                            "last_price": 0.0,   # Safe placeholder (strategies check > 0)
+                            "last_price": None,   # Safe placeholder (strategies check > 0)
                             "timestamp": time.time(),
                             "source": "rest"     # Important: Applies 90s freshness rule
                         },
                         source="rest"
+                        seed=True,
                     )
                 else:
                     LOGGER.error(
@@ -163,7 +164,17 @@ class PollingStreamer:
                             ):
                                 LOGGER.error("[POLL-ERR] Invalid tick payload structure: %s", tick)
                                 continue
-                            
+
+                            lp = tick.get("last_price")
+                            if not isinstance(lp, (int, float)) or lp <= 0:
+                                LOGGER.warning(
+                                    "PollingStreamer: invalid price tick skipped",
+                                    extra={
+                                        "instrument_token": tick.get("instrument_token"),
+                                        "price": lp,
+                                    },
+                                )
+                                continue  
                             # [FIX] 2. Tag Source as REST
                             # Critical: Tells DataHub.is_fresh() to apply the relaxed 90s threshold.
                             tick["source"] = "rest"
