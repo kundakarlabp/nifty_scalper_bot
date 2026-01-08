@@ -1399,12 +1399,10 @@ class StrategyRunner:
             )
 
 
-    # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
         """
-        Fetch and ingest historical data.
-        Robustly handles both DICT candles (Zerodha) and LIST candles (Fyers/Alice/others).
-        Optimized with asyncio.gather and proper BarBuilder resetting.
+        Fetch and ingest historical data with Concurrency Throttling and Robust Bar Creation.
+        Fixed: Rate Limit Exceeded & Silent "Ingested 0" failures.
         """
         self._logger.info("⏳ Starting historical data backfill...")
         await asyncio.sleep(2.0)
@@ -1420,11 +1418,6 @@ class StrategyRunner:
             self._logger.warning("⚠️ MarketData missing 'fetch_history'. Backfill skipped.")
             return
 
-        # 2. Helper: Safe Float Extraction
-        def _to_float(val):
-            try: return float(val)
-            except (ValueError, TypeError): return 0.0
-
         symbols_to_load = []
         with self._lock:
             symbols_to_load = list(self._active_symbols)
@@ -1432,16 +1425,26 @@ class StrategyRunner:
         if not symbols_to_load:
             return
 
-        # 3. Parallel Fetching (5 days history)
-        days = 5 
-        tasks = [source.fetch_history(sym, "minute", days=days) for sym in symbols_to_load]
-        
-        self._logger.info(f"⏳ Fetching history for {len(symbols_to_load)} symbols in parallel...")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 2. [FIX] Throttled Parallel Fetching (Max 3 concurrent requests)
+        # Solves "Rate limit exceeded" errors.
+        semaphore = asyncio.Semaphore(3) 
+        days = 5
+
+        async def fetch_with_limit(sym: str):
+            async with semaphore:
+                try:
+                    # Add small jitter to prevent burst limit triggers
+                    await asyncio.sleep(0.1) 
+                    return await source.fetch_history(sym, "minute", days=days)
+                except Exception as e:
+                    return e
+
+        self._logger.info(f"⏳ Fetching history for {len(symbols_to_load)} symbols (Throttled)...")
+        results = await asyncio.gather(*[fetch_with_limit(s) for s in symbols_to_load], return_exceptions=True)
 
         total_bars = 0
         
-        # 4. Process Results
+        # 3. Process Results
         for symbol, candles in zip(symbols_to_load, results):
             if isinstance(candles, Exception):
                 self._logger.error(f"❌ Backfill fetch failed for {symbol}: {candles}")
@@ -1450,13 +1453,16 @@ class StrategyRunner:
             if not candles:
                 continue
 
-            # [FIX 1] HARD RESET BarBuilder (Re-instantiate)
-            # This clears any partial live bars and prevents "AttributeError: no attribute 'reset'"
+            # [FIX] HARD RESET BarBuilder
             self._bar_builders[symbol] = OneMinuteBarBuilder()
+            builder = self._bar_builders[symbol]
 
             loaded = 0
-            # Get the fresh builder instance
-            builder = self._bar_builders[symbol]
+            
+            # Helper for safe float conversion
+            def _to_float(val):
+                try: return float(val)
+                except (ValueError, TypeError): return 0.0
 
             for candle in candles:
                 try:
@@ -1464,86 +1470,85 @@ class StrategyRunner:
                     raw_ts = None
                     vol = 0
 
-                    # --- Parsing Logic (List vs Dict) ---
+                    # --- Robust Parsing (List vs Dict) ---
                     if isinstance(candle, (list, tuple)):
                         if len(candle) < 6: continue
                         raw_ts = candle[0]
                         payload = {
-                            "open": _to_float(candle[1]),
-                            "high": _to_float(candle[2]),
-                            "low": _to_float(candle[3]),
-                            "close": _to_float(candle[4])
+                            "open": _to_float(candle[1]), "high": _to_float(candle[2]),
+                            "low": _to_float(candle[3]), "close": _to_float(candle[4])
                         }
                         vol = int(_to_float(candle[5]))
 
                     elif isinstance(candle, dict):
-                        o, h, l, c, v = 0.0, 0.0, 0.0, 0.0, 0
-                        for k, v_val in candle.items():
-                            k_lower = k.lower()
-                            val_float = _to_float(v_val)
-                            if k_lower in ['o', 'open']: o = val_float
-                            elif k_lower in ['h', 'high']: h = val_float
-                            elif k_lower in ['l', 'low']: l = val_float
-                            elif k_lower in ['c', 'close']: c = val_float
-                            elif k_lower in ['v', 'vol', 'volume']: v = int(val_float)
-                            elif k_lower in ['date', 'timestamp', 'time', 'datetime']: raw_ts = v_val
-                        
+                        # Normalized extraction
+                        o = h = l = c = 0.0
+                        for k, v in candle.items():
+                            k = k.lower()
+                            if k in ('o', 'open'): o = _to_float(v)
+                            elif k in ('h', 'high'): h = _to_float(v)
+                            elif k in ('l', 'low'): l = _to_float(v)
+                            elif k in ('c', 'close'): c = _to_float(v)
+                            elif k in ('v', 'vol', 'volume'): vol = int(_to_float(v))
+                            elif k in ('date', 'timestamp', 'time'): raw_ts = v
                         payload = {"open": o, "high": h, "low": l, "close": c}
-                        vol = v
 
                     # --- Timestamp Logic ---
                     ts = None
                     if isinstance(raw_ts, datetime):
                         ts = raw_ts
                     elif isinstance(raw_ts, str):
-                        try:
-                            ts = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
-                        except ValueError:
-                            continue
+                        try: ts = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
+                        except ValueError: continue
                     elif isinstance(raw_ts, (int, float)):
                         ts = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
 
-                    if ts:
+                    if ts and payload.get("close", 0) > 0:
                         if ts.tzinfo is None:
                             ts = ts.replace(tzinfo=timezone.utc)
 
-                        if payload.get("close", 0) > 0:
-                            # [CRITICAL] Use Builder to prevent duplicates/overlaps
-                            # If force_complete exists, use it. Else manual create.
-                            if hasattr(builder, "force_complete"):
-                                bar = builder.force_complete(
-                                    open_price=payload["open"],
-                                    high=payload["high"],
-                                    low=payload["low"],
-                                    close=payload["close"],
-                                    volume=vol,
-                                    timestamp=ts,
-                                )
-                            else:
-                                # Fallback if bar_builder.py wasn't updated with force_complete
+                        # [FIX] Adaptive Bar Creation (Solves "Ingested 0")
+                        # Tries to use Builder first, then fallback to direct creation.
+                        # Handles cases where OneMinuteBar constructor differs.
+                        bar = None
+                        
+                        if hasattr(builder, "force_complete"):
+                            bar = builder.force_complete(
+                                open_price=payload["open"], high=payload["high"],
+                                low=payload["low"], close=payload["close"],
+                                volume=vol, timestamp=ts
+                            )
+                        else:
+                            # Fallback: Try with 'symbol' arg, if fails, set as attr
+                            try:
                                 bar = OneMinuteBar(
                                     symbol=symbol,
-                                    open=payload["open"],
-                                    high=payload["high"],
-                                    low=payload["low"],
-                                    close=payload["close"],
-                                    volume=vol,
-                                    timestamp=ts,
-                                    completed=True
+                                    open=payload["open"], high=payload["high"],
+                                    low=payload["low"], close=payload["close"],
+                                    volume=vol, timestamp=ts, completed=True
+                                )
+                            except TypeError:
+                                # Constructor doesn't accept symbol?
+                                bar = OneMinuteBar(
+                                    open=payload["open"], high=payload["high"],
+                                    low=payload["low"], close=payload["close"],
+                                    volume=vol, timestamp=ts, completed=True
                                 )
                                 bar.symbol = symbol
-                                
-                            if bar:
-                                self._ingest_bar(symbol, bar, is_backfill=True)
-                                loaded += 1
+
+                        if bar:
+                            # [CRITICAL] Pass is_backfill=True
+                            self._ingest_bar(symbol, bar, is_backfill=True)
+                            loaded += 1
                 
-                except Exception:
+                except Exception as e:
+                    # Log ONE error per symbol to debug "Ingested 0" issues without spamming
+                    if loaded == 0:
+                        self._logger.error(f"❌ Bar ingestion crash for {symbol}: {e}")
                     continue
 
             if loaded > 0:
                 total_bars += loaded
-                # [FIX 2] REMOVED "Indicators NOT READY" log
-                # We simply log success. Readiness is checked by strategies later.
                 self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
             else:
                 self._logger.warning(f"⚠️ Fetched {len(candles)} candles for {symbol} but ingested 0.")
