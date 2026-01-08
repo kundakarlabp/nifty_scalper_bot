@@ -4370,18 +4370,24 @@ class OrderManager:
 
     def _poll_pending_orders(self) -> None:
         """
-        OPTIMIZED: Polls ALL orders in one API call to detect fills efficiently.
+        OPTIMIZED: Polls orders efficiently with lock snapshots to prevent race conditions.
         """
-        # 1. Check if we have any pending orders to track
+        # 1. Snapshot pending IDs inside lock (Fast)
+        # We grab the set of IDs we care about immediately. This prevents race conditions
+        # where the list of orders might change while we are fetching from the broker.
         with self._lock:
-            has_pending = any(o.status == OrderStatus.PENDING for o in self._orders.values())
+            pending_ids = {
+                oid for oid, o in self._orders.items() 
+                if o.status == OrderStatus.PENDING
+            }
         
-        if not has_pending:
+        # Optimization: If nothing is pending, don't waste network calls
+        if not pending_ids:
             return
 
         try:
-            # 2. Bulk Fetch (Single API Call) -> 10x Faster
-            # Adapters usually expose .orders() or .get_orders() for the full book
+            # 2. Bulk Fetch (Network I/O - No Lock)
+            # Fetch the full order book from the broker
             if hasattr(self._broker, "orders"):
                 all_orders = self._broker.orders()
             elif hasattr(self._broker, "get_orders"):
@@ -4393,28 +4399,27 @@ class OrderManager:
                 return
 
             # 3. Process Updates
+            # Iterate through broker result and update ONLY orders we are tracking
             for remote in all_orders:
-                oid = remote.get("order_id")
-                # Normalize status
-                status = str(remote.get("status", "")).upper()
+                oid = str(remote.get("order_id") or "")
                 
-                # We only care about orders we are tracking locally
-                local_order = None
-                with self._lock:
-                    local_order = self._orders.get(oid)
-                
-                # Update if it was PENDING and now it's something else
-                if local_order and local_order.status == OrderStatus.PENDING:
+                # OPTIMIZATION: Only process orders that were pending in our snapshot
+                # This skips the hundreds of old/closed orders in the broker's book
+                if oid in pending_ids:
+                    # Normalize status
+                    status = str(remote.get("status", "")).upper()
+                    
+                    # Check against significant status updates
                     if status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED"]:
                          self._logger.info(
                              f"⚡ Bulk Update: {oid} -> {status}",
                              extra={"event": "bulk_poll_update", "order_id": oid, "status": status}
                          )
+                         # Call the central update handler (Handles its own locking safely)
                          self.on_order_update(remote)
 
         except Exception as e:
             self._logger.debug(f"Bulk poll failed: {e}")
-
     def _check_zombie_orders(self) -> None:
         """
         🛡️ SAFETY: Auto-cancel orders stuck in PENDING for too long (> 45s).
