@@ -855,16 +855,9 @@ class StrategyRunner:
 
     def _ingest_bar(self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False) -> None:
         """
-        Ingest a completed minute bar.
-        Args:
-            symbol: Trading symbol.
-            bar: The completed OneMinuteBar object.
-            is_backfill: If True, bypasses timestamp monotonicity checks.
+        Ingest a completed minute bar. 
+        Compatible with IndicatorEngine.update_price (since update_bar is missing).
         """
-        # [FIX] REMOVED the illegal 'bar.symbol = symbol' block.
-        # OneMinuteBar is frozen/slots-based; we cannot modify it. 
-        # We use the 'symbol' argument passed to this function instead.
-
         # 1. SAFETY: Timestamp Monotonicity Guard
         if not is_backfill:
             last_ts = self._last_bar_ts.get(symbol)
@@ -878,21 +871,28 @@ class StrategyRunner:
 
         try:
             # 3. INDICATORS: Feed the Engine
-            self._indicator_engine.update_bar(symbol, bar)
+            # [FIX] Use 'update_price' because 'update_bar' does not exist in your indicators.py
+            # We convert the Bar object to the dictionary format IndicatorEngine expects.
+            bar_payload = {
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close
+            }
+            self._indicator_engine.update_price(
+                symbol, 
+                bar_payload, 
+                volume=bar.volume, 
+                timestamp=bar.timestamp
+            )
 
             # 4. BRACKET MANAGER: Inject Volatility
             if self._bracket_manager:
-                # Compute ATR (Period 14 is standard)
                 raw_atr = self._indicator_engine.compute_atr(symbol, period=14)
-                
-                # Robust Unwrapping
                 atr_value = 0.0
-                if isinstance(raw_atr, (int, float)):
-                    atr_value = float(raw_atr)
-                elif hasattr(raw_atr, 'value'):
-                    atr_value = float(raw_atr.value)
-                elif hasattr(raw_atr, 'atr'):
-                    atr_value = float(raw_atr.atr)
+                if hasattr(raw_atr, 'value'): atr_value = float(raw_atr.value)
+                elif hasattr(raw_atr, 'atr'): atr_value = float(raw_atr.atr)
+                elif isinstance(raw_atr, (int, float)): atr_value = float(raw_atr)
 
                 if atr_value > 0 and hasattr(self._bracket_manager, "update_market_stats"):
                     self._bracket_manager.update_market_stats(symbol, atr=atr_value)
@@ -1390,7 +1390,7 @@ class StrategyRunner:
     async def _backfill_history(self) -> None:
         """
         Fetch and ingest historical data safely.
-        Uses OneMinuteBarBuilder to create bars, avoiding constructor crashes.
+        Uses OneMinuteBarBuilder to prevent constructor crashes.
         """
         self._logger.info("⏳ Starting historical data backfill...")
         await asyncio.sleep(2.0)
@@ -1413,7 +1413,7 @@ class StrategyRunner:
         if not symbols_to_load:
             return
 
-        # 2. Strict Throttling (Max 2 concurrent)
+        # 2. Strict Throttling
         semaphore = asyncio.Semaphore(2) 
         days = 5
 
@@ -1439,8 +1439,7 @@ class StrategyRunner:
             if not candles:
                 continue
 
-            # [FIX] Reset builder to clean state
-            # This ensures we don't mix old live ticks with history
+            # [FIX] Use Builder! No manual OneMinuteBar(...) calls.
             self._bar_builders[symbol] = OneMinuteBarBuilder()
             builder = self._bar_builders[symbol]
 
@@ -1448,7 +1447,7 @@ class StrategyRunner:
             
             for candle in candles:
                 try:
-                    # --- Robust Parsing ---
+                    # Robust Parsing
                     ts_raw, o, h, l, c, v = None, 0.0, 0.0, 0.0, 0.0, 0
 
                     if isinstance(candle, (list, tuple)):
@@ -1465,7 +1464,7 @@ class StrategyRunner:
                     if not ts_raw or c is None:
                         continue
 
-                    # --- Timestamp Normalize ---
+                    # Timestamp Normalize
                     ts = None
                     if isinstance(ts_raw, datetime):
                         ts = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=timezone.utc)
@@ -1476,12 +1475,8 @@ class StrategyRunner:
                         except ValueError: continue
 
                     if ts:
-                        # [CRITICAL FIX] Use builder.update()
-                        # We do NOT manually instantiate OneMinuteBar. 
-                        # We let the builder do it. This prevents all constructor errors.
-                        # Note: update() typically takes (price, volume, time).
-                        # Using 'close' as price creates a "flat" bar, which is sufficient for 
-                        # priming Close-based indicators (VWAP, EMA, RSI).
+                        # [CRITICAL] Use builder.update() to create the bar.
+                        # This works regardless of the OneMinuteBar internal structure.
                         completed_bar = builder.update(float(c), int(v), ts)
 
                         if completed_bar:
@@ -1499,7 +1494,7 @@ class StrategyRunner:
             else:
                 self._logger.warning(f"⚠️ Fetched {len(candles)} candles for {symbol} but ingested 0.")
 
-        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")      
+        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")    
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
