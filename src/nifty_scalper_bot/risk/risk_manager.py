@@ -601,24 +601,26 @@ class RiskManager:
             self._last_rejection = None
         return allowed, ordered
 
-    # [FIX] Added 'can_trade' to satisfy StrategyRunner interface
-    # [FIX] Enhanced can_trade: Explicitly checks Circuit Breaker
+
+    # [FIX] Enhanced can_trade with Override Support
     def can_trade(self, symbol: str) -> bool:
-        """
-        Check if trading is allowed for a specific symbol.
-        Used by StrategyRunner to fail-fast before signal generation.
-        """
-        # 1. CRITICAL: Check Main Circuit Breaker (Daily Loss / Kill Switch)
-        # Your previous code missed this!
+        # 0. Check Override (The "God Mode" check)
+        import os
+        if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
+            # If override is ON, we force trade (unless data is stale)
+            # We still check risk_gate_should_trade() because trading on 
+            # stale data is technically impossible/dangerous, not just risky.
+            stale_check, _ = self.risk_gate_should_trade()
+            return stale_check
+
+        # 1. Standard Checks
         if self._breaker_tripped:
             return False
 
-        # 2. Check Micro-Risk Gate (Stale Quotes, Spreads)
         allowed, _ = self.risk_gate_should_trade()
         if not allowed:
             return False
 
-        # 3. Check Symbol-Specific Cooldowns
         if self.cooldown_remaining() > 0:
             return False
 
