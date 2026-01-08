@@ -866,14 +866,17 @@ class StrategyRunner:
         # 1. SAFETY: Timestamp Monotonicity Guard
         # Prevents processing "old" bars during live trading (Time Travel Protection).
         # We skip this check ONLY if we are explicitly backfilling history.
+        last_ts = self._last_bar_ts.get(symbol)
         if not is_backfill:
-            last_ts = self._last_bar_ts.get(symbol)
             if last_ts and bar.timestamp <= last_ts:
                 self._logger.debug(
                     "Dropping out-of-order bar", 
                     extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts}
                 )
-                return 
+                return
+
+        if not last_ts or bar.timestamp > last_ts:
+            self._last_bar_ts[symbol] = bar.timestamp
 
         # 2. STATE: Update High-Water Mark
         current_last = self._last_bar_ts.get(symbol)
@@ -882,8 +885,18 @@ class StrategyRunner:
 
         try:
             # 3. INDICATORS: Feed the Engine
-            # Use update_bar to commit to history (NOT update_price)
-            self._indicator_engine.update_bar(symbol, bar)
+            # Feed IndicatorEngine using its real API
+            self._indicator_engine.update_price(
+                symbol=symbol,
+                price={
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                },
+                volume=bar.volume,
+                timestamp=bar.timestamp,
+            )
 
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
@@ -1529,9 +1542,9 @@ class StrategyRunner:
                                     timestamp=ts,
                                     completed=True
                                 )
+                                bar.symbol = symbol
                                 
                             if bar:
-                                bar.symbol = symbol
                                 self._ingest_bar(symbol, bar, is_backfill=True)
                                 loaded += 1
                 
