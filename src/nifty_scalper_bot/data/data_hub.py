@@ -251,30 +251,63 @@ class DataHub:
         with self._lock:
             return self._greeks_cache.get(symbol)
 
-    def is_fresh(self, symbol: str, threshold_ms: float = 5000.0) -> tuple[bool, Freshness]:
-        """Check if the quote for a symbol is fresh."""
+    def is_fresh(
+        self,
+        symbol: str,
+        threshold_ms: float = 5000.0,
+    ) -> tuple[bool, dict[str, Any]]:
+        """
+        Check if the quote for a symbol is fresh (WS-aware, REST-safe).
+        
+        Handles the "Railway Problem" where REST polling is naturally slower 
+        than WebSocket ticks, preventing false-positive 'STALE' blocks.
+        """
         quote = self.get_quote(symbol)
         if not quote:
-            return False, {"ok": False, "reason": "no_quote", "threshold_ms": threshold_ms}
+            return False, {
+                "ok": False,
+                "reason": "no_quote",
+                "threshold_ms": threshold_ms,
+            }
 
-        now = self._clock() * 1000.0
+        # 1. Calculate Age
+        # Use centralized clock if available, else system time
+        now = (self._clock() if hasattr(self, "_clock") else time.time()) * 1000.0
         ts = quote.get("timestamp")
-        
+
         if isinstance(ts, datetime):
             ts_ms = ts.timestamp() * 1000.0
         elif isinstance(ts, (int, float)):
+            # Auto-detect seconds vs ms
             ts_ms = float(ts) * (1000.0 if ts < 1e11 else 1.0)
         else:
-            return False, {"ok": False, "reason": "invalid_ts", "threshold_ms": threshold_ms}
+            return False, {
+                "ok": False,
+                "reason": "invalid_ts",
+                "threshold_ms": threshold_ms,
+            }
 
         age = max(0.0, now - ts_ms)
-        is_fresh = age <= threshold_ms
-        
+
+        # 2. Source-Aware Threshold (The Magic Logic)
+        # We trust the 'source' tag set by the ingestion layer.
+        source = quote.get("source", "ws")
+
+        if source == "rest":
+            # REST polling: Relax threshold to 90s (covers 60s poll interval + buffers)
+            effective_threshold = max(threshold_ms, 90_000.0)
+        else:
+            # WS (or unknown): Keep strict safety threshold (default 5s)
+            effective_threshold = threshold_ms
+
+        is_fresh = age <= effective_threshold
+
         return is_fresh, {
             "ok": is_fresh,
             "effective_ms": age,
-            "threshold_ms": threshold_ms,
-            "reason": None if is_fresh else "stale"
+            "threshold_ms": effective_threshold,
+            "source": source,
+            "reason": None if is_fresh else "stale",
         }
 
     # ----------------------------------------------------------------
