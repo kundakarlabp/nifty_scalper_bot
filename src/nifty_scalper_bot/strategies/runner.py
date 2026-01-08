@@ -1588,17 +1588,39 @@ class StrategyRunner:
             except Exception:
                 pass
 
-        # [FIX] CRITICAL: Fail-Fast Risk Check (The "Money Bleed" Fix)
-        # This prevents signal generation/spam when the Risk Breaker is tripped.
-        if not self._risk_manager.can_trade(symbol):
-             log_throttled(
-                 self._logger,
-                 f"risk_block_{symbol}", 
-                 f"⛔ Risk Block Active: {symbol}. Trading Halted.",
-                 interval_sec=30.0,
-                 level=logging.WARNING
-             )
-             return  # <--- STOPS EXECUTION HERE
+        # [FIX] Universal Risk Check (Works with OLD and NEW RiskManagers)
+        try:
+            is_allowed = False
+            
+            if self._risk_manager:
+                # 1. Try New Method (can_trade)
+                if hasattr(self._risk_manager, "can_trade"):
+                    is_allowed = self._risk_manager.can_trade(symbol)
+                
+                # 2. Fallback to Old Method (can_trade_now)
+                elif hasattr(self._risk_manager, "can_trade_now"):
+                    # can_trade_now returns (bool, reason) tuple
+                    res = self._risk_manager.can_trade_now()
+                    is_allowed = res[0] if isinstance(res, tuple) else bool(res)
+                
+                # 3. Unknown Interface -> Block Safety
+                else:
+                    self._logger.error(f"RiskManager missing validation method for {symbol}")
+                    is_allowed = False
+
+            if not is_allowed:
+                 log_throttled(
+                     self._logger,
+                     f"risk_block_{symbol}", 
+                     f"⛔ Risk Block Active: {symbol}. Trading Halted.",
+                     interval_sec=30.0,
+                     level=logging.WARNING
+                 )
+                 return  # <--- STOP EXECUTION
+
+        except Exception as e:
+            self._logger.error(f"Critical error in risk check for {symbol}: {e}")
+            return # Block on crash
 
         # 4. Strategy Execution Core
         with self._lock:
