@@ -68,7 +68,7 @@ class PersistentStateDB:
         RuntimeError: If the database cannot be initialised.
     """
 
-    ddef __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path) -> None:
         self._logger = get_logger(__name__)
         self._lock = RLock()
         
