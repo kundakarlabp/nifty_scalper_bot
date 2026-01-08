@@ -166,8 +166,6 @@ class RiskManager:
             reset_hour_utc=self.settings.trading_day_reset_hour_utc,
         )
         self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
-        if abs(self._last_pnl_snapshot) > 1e-6:
-            self._switches.record_pnl(self._last_pnl_snapshot)
         self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
         self._m_cooldown = Gauge(
             "risk_cooldown_seconds", "Seconds remaining on enforced cooldown"
