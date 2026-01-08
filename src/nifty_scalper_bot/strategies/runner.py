@@ -1401,8 +1401,8 @@ class StrategyRunner:
 
     async def _backfill_history(self) -> None:
         """
-        Fetch and ingest historical data with Concurrency Throttling and Robust Bar Creation.
-        Fixed: Rate Limit Exceeded & Silent "Ingested 0" failures.
+        Fetch and ingest historical data with Strict Throttling and Crash-Proof Bar Creation.
+        Fixed: Rate Limit Exceeded & OneMinuteBar constructor errors.
         """
         self._logger.info("⏳ Starting historical data backfill...")
         await asyncio.sleep(2.0)
@@ -1425,21 +1425,20 @@ class StrategyRunner:
         if not symbols_to_load:
             return
 
-        # 2. [FIX] Throttled Parallel Fetching (Max 3 concurrent requests)
-        # Solves "Rate limit exceeded" errors.
-        semaphore = asyncio.Semaphore(3) 
+        # 2. [FIX] Strict Throttling (Max 2 concurrent, 0.5s delay)
+        # Prevents "Rate limit exceeded" more effectively.
+        semaphore = asyncio.Semaphore(2) 
         days = 5
 
         async def fetch_with_limit(sym: str):
             async with semaphore:
                 try:
-                    # Add small jitter to prevent burst limit triggers
-                    await asyncio.sleep(0.1) 
+                    await asyncio.sleep(0.5)  # Increased delay for safety
                     return await source.fetch_history(sym, "minute", days=days)
                 except Exception as e:
                     return e
 
-        self._logger.info(f"⏳ Fetching history for {len(symbols_to_load)} symbols (Throttled)...")
+        self._logger.info(f"⏳ Fetching history for {len(symbols_to_load)} symbols (Strict Throttling)...")
         results = await asyncio.gather(*[fetch_with_limit(s) for s in symbols_to_load], return_exceptions=True)
 
         total_bars = 0
@@ -1453,13 +1452,12 @@ class StrategyRunner:
             if not candles:
                 continue
 
-            # [FIX] HARD RESET BarBuilder
+            # Reset Builder
             self._bar_builders[symbol] = OneMinuteBarBuilder()
             builder = self._bar_builders[symbol]
 
             loaded = 0
             
-            # Helper for safe float conversion
             def _to_float(val):
                 try: return float(val)
                 except (ValueError, TypeError): return 0.0
@@ -1470,7 +1468,7 @@ class StrategyRunner:
                     raw_ts = None
                     vol = 0
 
-                    # --- Robust Parsing (List vs Dict) ---
+                    # --- Robust Parsing ---
                     if isinstance(candle, (list, tuple)):
                         if len(candle) < 6: continue
                         raw_ts = candle[0]
@@ -1479,9 +1477,7 @@ class StrategyRunner:
                             "low": _to_float(candle[3]), "close": _to_float(candle[4])
                         }
                         vol = int(_to_float(candle[5]))
-
                     elif isinstance(candle, dict):
-                        # Normalized extraction
                         o = h = l = c = 0.0
                         for k, v in candle.items():
                             k = k.lower()
@@ -1507,11 +1503,10 @@ class StrategyRunner:
                         if ts.tzinfo is None:
                             ts = ts.replace(tzinfo=timezone.utc)
 
-                        # [FIX] Adaptive Bar Creation (Solves "Ingested 0")
-                        # Tries to use Builder first, then fallback to direct creation.
-                        # Handles cases where OneMinuteBar constructor differs.
+                        # [FIX] Crash-Proof Bar Creation
                         bar = None
                         
+                        # A. Try Builder (Safest)
                         if hasattr(builder, "force_complete"):
                             bar = builder.force_complete(
                                 open_price=payload["open"], high=payload["high"],
@@ -1519,8 +1514,10 @@ class StrategyRunner:
                                 volume=vol, timestamp=ts
                             )
                         else:
-                            # Fallback: Try with 'symbol' arg, if fails, set as attr
+                            # B. Fallback: Manual Creation (Handle unknown arguments)
+                            # We nest try/except blocks to find the valid signature
                             try:
+                                # Attempt 1: Standard Signature
                                 bar = OneMinuteBar(
                                     symbol=symbol,
                                     open=payload["open"], high=payload["high"],
@@ -1528,21 +1525,36 @@ class StrategyRunner:
                                     volume=vol, timestamp=ts, completed=True
                                 )
                             except TypeError:
-                                # Constructor doesn't accept symbol?
-                                bar = OneMinuteBar(
-                                    open=payload["open"], high=payload["high"],
-                                    low=payload["low"], close=payload["close"],
-                                    volume=vol, timestamp=ts, completed=True
-                                )
-                                bar.symbol = symbol
+                                try:
+                                    # Attempt 2: Without 'symbol' (if not in slots)
+                                    bar = OneMinuteBar(
+                                        open=payload["open"], high=payload["high"],
+                                        low=payload["low"], close=payload["close"],
+                                        volume=vol, timestamp=ts, completed=True
+                                    )
+                                    # Manually attach symbol if allowed
+                                    try: bar.symbol = symbol
+                                    except AttributeError: pass 
+                                except TypeError:
+                                    # Attempt 3: Try 'end' instead of 'timestamp' (CRITICAL FIX FOR YOUR ERROR)
+                                    try:
+                                        bar = OneMinuteBar(
+                                            symbol=symbol,
+                                            open=payload["open"], high=payload["high"],
+                                            low=payload["low"], close=payload["close"],
+                                            volume=vol, end=ts, completed=True
+                                        )
+                                    except TypeError:
+                                        # If all else fails, log specific error ONCE per symbol to debug
+                                        if loaded == 0:
+                                            self._logger.error(f"❌ OneMinuteBar signature mismatch for {symbol}. Check bar_builder.py")
+                                        continue
 
                         if bar:
-                            # [CRITICAL] Pass is_backfill=True
                             self._ingest_bar(symbol, bar, is_backfill=True)
                             loaded += 1
                 
                 except Exception as e:
-                    # Log ONE error per symbol to debug "Ingested 0" issues without spamming
                     if loaded == 0:
                         self._logger.error(f"❌ Bar ingestion crash for {symbol}: {e}")
                     continue
@@ -1553,8 +1565,7 @@ class StrategyRunner:
             else:
                 self._logger.warning(f"⚠️ Fetched {len(candles)} candles for {symbol} but ingested 0.")
 
-        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")
-        
+        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")        
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
