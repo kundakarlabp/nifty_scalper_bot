@@ -1477,6 +1477,28 @@ class StrategyRunner:
                 self._logger.error(f"❌ Backfill failed for {symbol}: {e}", exc_info=True)
         
         self._logger.info("✅ Historical backfill process finished.")
+        # === FIX: Seed IndicatorEngine with historical bars ===
+        bars_snapshot = self._market_data.snapshot()
+
+        for symbol, bars in bars_snapshot.items():
+            history = self._indicator_engine._histories.get(symbol)
+            if history is None:
+                continue
+
+            for bar in bars[-50:]:  # seed exactly what is required
+                try:
+                    history.add_tick(
+                        price=(
+                            bar["open"],
+                            bar["high"],
+                            bar["low"],
+                            bar["close"],
+                        ),
+                        volume=int(bar.get("volume", 0)),
+                        timestamp=bar["timestamp"],
+                    )
+                except Exception:
+                    continue
         
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
