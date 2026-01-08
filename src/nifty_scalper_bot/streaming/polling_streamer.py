@@ -34,6 +34,7 @@ class PollingStreamer:
         self._broker = broker_client
         self._on_tick = on_tick
         self._resolver = instrument_resolver
+        self._data_hub = data_hub
         self._interval_s = max(0.2, float(poll_interval_ms) / 1000.0)
         self._batch_size = max(1, int(batch_size))
         self._tokens: set[int] = set()
