@@ -185,7 +185,7 @@ class PollingStreamer:
                                 token = tick.get("instrument_token")
                                 symbol = self._resolve_instrument(token)
                                 if symbol:
-                                    self._data_hub.store_quote(symbol, tick, source="rest")
+                                    self._data_hub.store_quote(symbol, tick, source="rest", seed=False)
                             
                             # 4. Update Metrics
                             with suppress(Exception):
