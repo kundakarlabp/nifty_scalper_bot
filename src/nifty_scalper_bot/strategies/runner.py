@@ -1375,12 +1375,12 @@ class StrategyRunner:
         """
         Fetch and ingest historical data.
         Robustly handles both DICT candles (Zerodha) and LIST candles (Fyers/Alice/others).
-        Optimized with asyncio.gather for parallel fetching and OneMinuteBar ingestion for correct indicator priming.
+        Optimized with asyncio.gather and proper BarBuilder resetting.
         """
         self._logger.info("⏳ Starting historical data backfill...")
         await asyncio.sleep(2.0)
         
-        # 1. Determine Source (Prioritize DataHub if available)
+        # 1. Determine Source
         source = None
         if hasattr(self, "_data_hub") and self._data_hub and hasattr(self._data_hub, "fetch_history"):
             source = self._data_hub
@@ -1403,8 +1403,7 @@ class StrategyRunner:
         if not symbols_to_load:
             return
 
-        # 3. Parallel Fetching (Optimization)
-        # Fetch 5 days of 1-minute data for all symbols concurrently
+        # 3. Parallel Fetching (5 days history)
         days = 5 
         tasks = [source.fetch_history(sym, "minute", days=days) for sym in symbols_to_load]
         
@@ -1422,19 +1421,21 @@ class StrategyRunner:
             if not candles:
                 continue
 
-            # [FIX] Reset BarBuilder to prevent partial bar corruption from previous live ticks
-            if symbol in self._bar_builders:
-                self._bar_builders[symbol].reset()
+            # [FIX 1] HARD RESET BarBuilder (Re-instantiate)
+            # This clears any partial live bars and prevents "AttributeError: no attribute 'reset'"
+            self._bar_builders[symbol] = OneMinuteBarBuilder()
 
             loaded = 0
+            # Get the fresh builder instance
+            builder = self._bar_builders[symbol]
+
             for candle in candles:
                 try:
                     payload = {}
                     raw_ts = None
                     vol = 0
 
-                    # --- Robust Parsing (Handles both List/Tuple and Dict formats) ---
-                    # CASE A: LIST (e.g. [time, o, h, l, c, v])
+                    # --- Parsing Logic (List vs Dict) ---
                     if isinstance(candle, (list, tuple)):
                         if len(candle) < 6: continue
                         raw_ts = candle[0]
@@ -1446,7 +1447,6 @@ class StrategyRunner:
                         }
                         vol = int(_to_float(candle[5]))
 
-                    # CASE B: DICT (e.g. {'date':..., 'open':...})
                     elif isinstance(candle, dict):
                         o, h, l, c, v = 0.0, 0.0, 0.0, 0.0, 0
                         for k, v_val in candle.items():
@@ -1462,7 +1462,7 @@ class StrategyRunner:
                         payload = {"open": o, "high": h, "low": l, "close": c}
                         vol = v
 
-                    # --- Timestamp Parsing ---
+                    # --- Timestamp Logic ---
                     ts = None
                     if isinstance(raw_ts, datetime):
                         ts = raw_ts
@@ -1479,30 +1479,42 @@ class StrategyRunner:
                             ts = ts.replace(tzinfo=timezone.utc)
 
                         if payload.get("close", 0) > 0:
-                            # [CRITICAL FIX] Use OneMinuteBar + _ingest_bar
-                            # This bypasses the partial update_price logic and commits directly to history
-                            bar = OneMinuteBar(
-                                symbol=symbol,
-                                open=payload["open"],
-                                high=payload["high"],
-                                low=payload["low"],
-                                close=payload["close"],
-                                volume=vol,
-                                timestamp=ts,
-                                completed=True # Mark as completed so it goes straight to history
-                            )
-                            self._ingest_bar(symbol, bar)
-                            loaded += 1
+                            # [CRITICAL] Use Builder to prevent duplicates/overlaps
+                            # If force_complete exists, use it. Else manual create.
+                            if hasattr(builder, "force_complete"):
+                                bar = builder.force_complete(
+                                    open_price=payload["open"],
+                                    high=payload["high"],
+                                    low=payload["low"],
+                                    close=payload["close"],
+                                    volume=vol,
+                                    timestamp=ts,
+                                )
+                            else:
+                                # Fallback if bar_builder.py wasn't updated with force_complete
+                                bar = OneMinuteBar(
+                                    symbol=symbol,
+                                    open=payload["open"],
+                                    high=payload["high"],
+                                    low=payload["low"],
+                                    close=payload["close"],
+                                    volume=vol,
+                                    timestamp=ts,
+                                    completed=True
+                                )
+                                
+                            if bar:
+                                self._ingest_bar(symbol, bar)
+                                loaded += 1
                 
                 except Exception:
                     continue
 
             if loaded > 0:
                 total_bars += loaded
-                # Check readiness immediately for feedback
-                ready = self._indicator_engine.is_ready(symbol, 50) 
-                state_icon = "✅" if ready else "⏳"
-                self._logger.info(f"{state_icon} Backfilled {loaded} bars for {symbol} (Ready: {ready})")
+                # [FIX 2] REMOVED "Indicators NOT READY" log
+                # We simply log success. Readiness is checked by strategies later.
+                self._logger.info(f"✅ Backfilled {loaded} bars for {symbol}")
             else:
                 self._logger.warning(f"⚠️ Fetched {len(candles)} candles for {symbol} but ingested 0.")
 
