@@ -1499,7 +1499,7 @@ class StrategyRunner:
             else:
                 self._logger.warning(f"⚠️ Fetched {len(candles)} candles for {symbol} but ingested 0.")
 
-        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")       
+        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")      
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
