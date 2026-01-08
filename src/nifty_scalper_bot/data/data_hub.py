@@ -184,7 +184,7 @@ class DataHub:
         self, 
         symbol: str, 
         quote_data: dict[str, Any], 
-        source: str = "ws"
+        source: str = "ws",
         seed: bool = False,
     ) -> None:
         """
