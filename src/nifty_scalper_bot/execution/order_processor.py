@@ -51,18 +51,15 @@ class OrderProcessor:
         signal: dict[str, Any] = message.data
         symbol = signal.get("symbol")
         side = signal.get("side")
-        qty = signal.get("quantity")
-        key = (symbol, side)
-
-        # 🔒 Block duplicate direction trades
-        if self._active_trades.get(symbol) == side:
-            LOGGER.warning(
-                f"🚫 Duplicate execution blocked: {symbol} {side}"
-            )
-            return
-        
+        qty = signal.get("quantity")     
         
         if not all([symbol, side, qty]):
+            return
+
+        key = (symbol, side)
+        # 🔒 Intent lock (async-safe)
+        if self._active_trades.get(key):
+            LOGGER.warning(f"🚫 Intent already active: {symbol} {side}")
             return
 
         # --- 1. Debounce Check ---
@@ -76,6 +73,7 @@ class OrderProcessor:
             return
 
         self._last_signal_time[key] = now
+        self._active_trades[key] = "INTENT"
 
 
         # --- 2. Smart Price Calculation (Slippage Protection) ---
@@ -120,7 +118,7 @@ class OrderProcessor:
                 price=price
             )
             # 🔒 Register active trade ONLY after broker ACK
-            self._active_trades[symbol] = side
+            self._active_trades[key] = side
             
             # Publish Success
             await self.bus.publish(
@@ -140,7 +138,7 @@ class OrderProcessor:
         except Exception as exc:
             LOGGER.error(f"Order failed: {exc}")
             # 🔓 Release lock on failure
-            self._active_trades.pop(symbol, None)
+            self._active_trades.pop(key, None)
             # Publish Failure
             await self.bus.publish(
                 Message(
