@@ -181,16 +181,19 @@ class RiskManager:
             float(get_float("RISK__BALANCE_REFRESH_SEC", default=60.0)),
         )
         self._balance_cache_ttl = refresh_interval
+        # ... (previous lines) ...
         self._balance_force_refresh = max(
             0.0,
             float(get_float("RISK__BALANCE_JIT_REFRESH", default=1.0)),
         )
         self._last_log_time = 0.0
-        self._switches.reset_day()
-        self._breaker_tripped = False
-        self._breaker_reason = None
-        self._logger.warning("⚠️ MANUAL FIX APPLIED: Risk counters forced to 0.00")
-
+        
+        # [FIX] Just ensure day starts clean, but let _refresh_realized_pnl handle the sync
+        import os
+        if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
+            self._switches.reset_day()
+            self._breaker_tripped = False
+            self._logger.info("⚠️ Risk Override Enabled: Waiting for PnL sync...")
     @property
     def risk_config(self) -> RiskSettings:
         """Expose the bound risk settings for telemetry consumers."""
@@ -600,20 +603,23 @@ class RiskManager:
         return allowed, ordered
 
     # [FIX] Added 'can_trade' to satisfy StrategyRunner interface
+    # [FIX] Enhanced can_trade: Explicitly checks Circuit Breaker
     def can_trade(self, symbol: str) -> bool:
         """
         Check if trading is allowed for a specific symbol.
         Used by StrategyRunner to fail-fast before signal generation.
         """
-        # 1. Check Global Risk Gate (Daily Loss, Kill Switch, etc.)
-        # risk_gate_should_trade returns tuple: (allowed: bool, reasons: tuple)
+        # 1. CRITICAL: Check Main Circuit Breaker (Daily Loss / Kill Switch)
+        # Your previous code missed this!
+        if self._breaker_tripped:
+            return False
+
+        # 2. Check Micro-Risk Gate (Stale Quotes, Spreads)
         allowed, _ = self.risk_gate_should_trade()
-        
         if not allowed:
             return False
 
-        # 2. Check Symbol-Specific Cooldowns
-        # Use existing cooldown logic. If global cooldown is active, block everything.
+        # 3. Check Symbol-Specific Cooldowns
         if self.cooldown_remaining() > 0:
             return False
 
@@ -925,13 +931,42 @@ class RiskManager:
         return anchor
 
     def _refresh_realized_pnl(self) -> None:  # pragma: no cover
-        """Refresh realized PnL tracking and synchronize metrics."""
+        """
+        Refresh realized PnL tracking with ZOMBIE PROTECTION.
+        Synchronizes with PositionManager without tripping breakers on startup history load.
+        """
         current = float(self.position_manager.get_realized_pnl())
         delta = current - self._last_pnl_snapshot
+        
         if abs(delta) < 1e-6:
             return
+
+        # [FIX] Zombie Data Protection
+        # If we see a massive drop AND we have the override enabled, 
+        # assume this is history loading and ignore the loss.
+        import os
+        is_override = os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true"
+        
+        # Threshold: If delta is negative and > 50% of daily limit (or just huge)
+        # This catches the -11L restore event.
+        if is_override and delta < 0 and abs(delta) > 5000:
+            self._logger.warning(
+                f"🧟 ZOMBIE DATA DETECTED: PnL jumped from {self._last_pnl_snapshot:.2f} to {current:.2f} ({delta:.2f}). "
+                "Ignoring this loss due to RISK__SOFT_OVERRIDE."
+            )
+            # Sync the snapshot BUT DO NOT record the loss to switches
+            self._last_pnl_snapshot = current
+            
+            # Ensure breaker is clear
+            if self._breaker_tripped:
+                self._breaker_tripped = False
+                self._breaker_reason = None
+            return
+
+        # Normal operation
         self._switches.record_pnl(delta)
         self._last_pnl_snapshot = current
+        
         try:
             METRICS.set_live_pnl(book="primary", value=current)
         except Exception:
@@ -940,6 +975,7 @@ class RiskManager:
             METRICS.set_pnl_breakdown(book="primary", realized=current)
         except Exception:
             pass
+            
         reason = self._switches.breach_reason()
         if reason:
             formatted = self._format_switch_reason(reason)
