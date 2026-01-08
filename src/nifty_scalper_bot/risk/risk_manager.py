@@ -165,6 +165,7 @@ class RiskManager:
             cooldown_minutes=self.settings.loss_cooldown_seconds / 60.0,
             reset_hour_utc=self.settings.trading_day_reset_hour_utc,
         )
+        self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
         if abs(self._last_pnl_snapshot) > 1e-6:
             self._switches.record_pnl(self._last_pnl_snapshot)
         self._m_blocks = Counter("risk_blocks_total", "Orders blocked by risk manager")
@@ -982,6 +983,14 @@ class RiskManager:
             self._trip_breaker(formatted)
 
     def _trip_breaker(self, reason: str) -> None:  # pragma: no cover
+        # [FIX] Nuclear Override: Physically prevent breaker activation
+        import os
+        if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
+            if not getattr(self, "_override_log_sent", False):
+                self._logger.warning(f"🛡️ BREAKER TRIED TO TRIP BUT WAS BLOCKED BY OVERRIDE. Reason: {reason}")
+                self._override_log_sent = True
+            return
+
         if self._breaker_tripped:
             return
         self._breaker_tripped = True
