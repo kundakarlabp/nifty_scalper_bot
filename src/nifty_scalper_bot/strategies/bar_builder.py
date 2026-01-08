@@ -23,6 +23,14 @@ class OneMinuteBar:
     start: datetime
     end: datetime
 
+    @property
+    def timestamp(self) -> datetime:
+        """
+        Canonical candle timestamp.
+        Contract: all consumers must use candle.timestamp
+        """
+        return self.start
+
     def as_mapping(self) -> dict[str, Any]:
         """Return a mapping compatible with :class:`PriceHistory.add_tick`.
 
