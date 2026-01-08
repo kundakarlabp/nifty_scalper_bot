@@ -861,6 +861,8 @@ class StrategyRunner:
             bar: The completed OneMinuteBar object.
             is_backfill: If True, bypasses timestamp monotonicity checks for historical data.
         """
+        if not bar.symbol:
+            bar.symbol = symbol
         # 1. SAFETY: Timestamp Monotonicity Guard
         # Prevents processing "old" bars during live trading (Time Travel Protection).
         # We skip this check ONLY if we are explicitly backfilling history.
@@ -1529,6 +1531,7 @@ class StrategyRunner:
                                 )
                                 
                             if bar:
+                                bar.symbol = symbol
                                 self._ingest_bar(symbol, bar, is_backfill=True)
                                 loaded += 1
                 
