@@ -68,11 +68,11 @@ class PersistentStateDB:
         RuntimeError: If the database cannot be initialised.
     """
 
-    def __init__(self, db_path: Path) -> None:
+    ddef __init__(self, db_path: Path) -> None:
         self._logger = get_logger(__name__)
         self._lock = RLock()
         
-        # ✅ FIX 1: Auto-create directory (Prevents [Errno 2] crash)
+        # ✅ FIX 1: Auto-create directory
         self._path = Path(db_path).resolve()
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,12 +84,34 @@ class PersistentStateDB:
             raise RuntimeError("SQLite unavailable for persistent storage")
 
         try:
-            # ✅ FIX 2: Add timeout to prevent "Database Locked" in threads
-            self._conn = sqlite3.connect(
-                str(self._path), 
-                check_same_thread=False, 
-                timeout=30.0
-            )
+            # ✅ FIX 2: Connection with Crash Recovery (Auto-Unlock)
+            try:
+                self._conn = sqlite3.connect(
+                    str(self._path), 
+                    check_same_thread=False, 
+                    timeout=30.0
+                )
+            except sqlite3.OperationalError as e:
+                # If DB is locked from a previous crash, nuke the WAL files and retry
+                if "locked" in str(e).lower():
+                    self._logger.warning(f"⚠️ DB locked on startup (stale WAL?), forcing cleanup: {e}")
+                    
+                    # Force delete temporary journal files
+                    with suppress(Exception):
+                        wal_path = self._path.with_name(self._path.name + "-wal")
+                        shm_path = self._path.with_name(self._path.name + "-shm")
+                        # Use unlink(missing_ok=True) if on Python 3.8+, or try/except
+                        if wal_path.exists(): wal_path.unlink()
+                        if shm_path.exists(): shm_path.unlink()
+                    
+                    # Retry connection
+                    self._conn = sqlite3.connect(
+                        str(self._path), 
+                        check_same_thread=False, 
+                        timeout=30.0
+                    )
+                else:
+                    raise e
             
             # ✅ FIX 3: Performance Tuning for Scalping
             self._conn.execute("PRAGMA journal_mode=WAL")
