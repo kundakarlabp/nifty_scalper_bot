@@ -25,6 +25,7 @@ class PollingStreamer:
         broker_client: Any,
         on_tick: Callable[[dict[str, Any]], None],
         instrument_resolver: Any,
+        data_hub: Any = None,
         poll_interval_ms: int = 700,
         batch_size: int = 200,
         require_depth: bool = False,
@@ -93,7 +94,12 @@ class PollingStreamer:
             self._tokens.difference_update(tokens)
 
     def _run(self) -> None:
+        """
+        Main polling loop with immediate cache seeding and adaptive backoff.
+        Executed in a background thread.
+        """
         backoff = self._interval_s
+        
         while not self._stop.is_set():
             started = time.monotonic()
             try:
@@ -102,12 +108,12 @@ class PollingStreamer:
                     tokens = list(self._tokens)
                 
                 if tokens:
-                    # Yield chunks to avoid massive requests
+                    # Yield chunks to avoid massive requests (Batch Size limit)
                     for batch in self._chunks(tokens, self._batch_size):
-                        # ✅ CRITICAL FIX: Safe Fetch with Timeout
+                        # ✅ CRITICAL FIX: Safe Fetch with Timeout logic (prevents zombie threads)
                         ticks = self._fetch_ticks(batch)
                         
-                        # Alert if persistent empty polling batch (only if we expected data)
+                        # Trace logging for empty batches
                         if not ticks:
                              log_throttled(
                                 LOGGER,
@@ -118,7 +124,7 @@ class PollingStreamer:
                             )
                         
                         for tick in ticks:
-                            # Validate tick shape
+                            # 1. Validate Payload
                             if (
                                 "instrument_token" not in tick
                                 or "last_price" not in tick
@@ -127,23 +133,37 @@ class PollingStreamer:
                                 LOGGER.error("[POLL-ERR] Invalid tick payload structure: %s", tick)
                                 continue
                             
+                            # [FIX] 2. Tag Source as REST
+                            # Critical: Tells DataHub.is_fresh() to apply the relaxed 90s threshold.
+                            tick["source"] = "rest"
+
+                            # [FIX] 3. Seed Cache Immediately (Synchronous)
+                            # Eliminates race condition: RiskManager sees data BEFORE _on_tick queue runs.
+                            if self._data_hub:
+                                token = tick.get("instrument_token")
+                                symbol = self._resolve_instrument(token)
+                                if symbol:
+                                    self._data_hub.store_quote(symbol, tick, source="rest")
+                            
+                            # 4. Update Metrics
                             with suppress(Exception):
                                 self._m_last_tick.set(int(time.time() * 1000))
                             
+                            # 5. Async Handoff (Strategy Pipeline)
                             with suppress(Exception):
                                 self._on_tick(tick)
                                 self._m_ticks_ingested.inc()
 
+                # Success: Update health metrics & reset backoff
                 with suppress(Exception):
                     self._m_poll_ok.inc()
                 with suppress(Exception):
                     self._m_last_success.set(int(time.time() * 1000))
                 
-                # reset backoff to normal when successful
                 backoff = self._interval_s
 
             except Exception as exc:  # noqa: BLE001
-                # Increase backoff on failure to avoid hammering
+                # Failure: Adaptive Backoff to prevent API hammering
                 with suppress(Exception):
                     self._m_poll_fail.inc()
                 
@@ -156,11 +176,11 @@ class PollingStreamer:
                     interval_sec=10.0
                 )
 
-            # Smart Sleep: Adjust for time taken by network call
+            # Smart Sleep: Adjust for network latency to maintain consistent cadence
             elapsed = time.monotonic() - started
             sleep_time = max(0.1, backoff - elapsed)
             time.sleep(sleep_time)
-
+            
     # ----------------------------------------------------------------
     # ✅ FIX: Thread-Safe Fetch with Timeout (Prevents Zombie Hangs)
     # ----------------------------------------------------------------
