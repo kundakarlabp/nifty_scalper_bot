@@ -201,6 +201,7 @@ class SymbolState:
     last_signal_at: datetime | None = None
     last_trade_at: datetime | None = None
     cooldown_until: datetime | None = None
+    executing: bool = False
     strategy_data: dict[str, Any] = field(default_factory=dict)
     vwap: float | None = None
     _last_strategy_eval: datetime | None = None # [FIX] For Throttling strategy calls
@@ -1761,8 +1762,22 @@ class StrategyRunner:
                         "timestamp": now.isoformat()
                     }
 
+            with self._lock:
+                state = self._symbol_state.get(symbol)
+                if not state or state.executing:
+                    return
+                state.executing = True
+
             self._logger.info(f"🚀 SIGNAL EXECUTING: {symbol} ...")
-            self._handle_signal(signal, price, now)
+
+            try:
+                self._handle_signal(signal, price, now)
+            finally:
+                with self._lock:
+                    state = self._symbol_state.get(symbol)
+                    if state:
+                    state.executing = False
+
             
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
         """Handle signal execution with comprehensive error handling."""
@@ -1957,7 +1972,11 @@ class StrategyRunner:
 
         if confidence < 0.6:
             self._logger.info(f"🚫 Low Confidence Signal: {confidence:.2f}")
+            with self._lock:
+                if state:
+                    state.last_signal_at = timestamp  # PREVENT RETRY
             return
+
         action = signal.action
 
         # ===========================================================
@@ -2063,6 +2082,17 @@ class StrategyRunner:
             if not selection:
                 self._logger.warning(f"🔴 No Contract Selected for {base_symbol}.")
                 return
+
+            # -----------------------------------------------------------
+            # 🛑 HARD CE / PE MUTUAL EXCLUSIVITY (CRITICAL FIX)
+            # -----------------------------------------------------------
+            if self._position_manager:
+                active = self._position_manager.get_active_contract(base_symbol)
+                if active and active.option_type != selection.option_type:
+                    self._logger.warning(
+                        f"🛑 CE/PE CONFLICT BLOCKED: active={active.symbol} new={selection.symbol}"
+                    )
+                    return
 
             # Monthly Lockout Check
             lockout, _ = self._monthly_lockout_active(selection.expiry, timestamp)
