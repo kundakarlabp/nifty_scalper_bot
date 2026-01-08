@@ -595,6 +595,26 @@ class RiskManager:
             self._last_rejection = None
         return allowed, ordered
 
+    # [FIX] Added 'can_trade' to satisfy StrategyRunner interface
+    def can_trade(self, symbol: str) -> bool:
+        """
+        Check if trading is allowed for a specific symbol.
+        Used by StrategyRunner to fail-fast before signal generation.
+        """
+        # 1. Check Global Risk Gate (Daily Loss, Kill Switch, etc.)
+        # risk_gate_should_trade returns tuple: (allowed: bool, reasons: tuple)
+        allowed, _ = self.risk_gate_should_trade()
+        
+        if not allowed:
+            return False
+
+        # 2. Check Symbol-Specific Cooldowns
+        # Use existing cooldown logic. If global cooldown is active, block everything.
+        if self.cooldown_remaining() > 0:
+            return False
+
+        return True
+
     # Compatibility shim for StrategyRunner
     def validate_new_position(
         self,
