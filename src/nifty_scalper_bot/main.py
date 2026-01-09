@@ -55,10 +55,8 @@ sentry_sdk.init(
 )
 
 # ASGI hook for platforms expecting ``app`` at import time (e.g. Railway).
-if _HTTP_APP is None:
-    app = get_http_app()  # Create when needed
-else:
-    app = _HTTP_APP
+app = get_http_app()  # Create when needed
+
 
 def _sync_signal_handler(
     loop: asyncio.AbstractEventLoop, handler: Callable[[int], None]
