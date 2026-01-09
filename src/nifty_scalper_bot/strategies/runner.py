@@ -1976,9 +1976,6 @@ class StrategyRunner:
 
         if confidence < 0.6:
             self._logger.info(f"🚫 Low Confidence Signal: {confidence:.2f}")
-            with self._lock:
-                if state:
-                    state.last_signal_at = timestamp  # PREVENT RETRY
             return
 
         action = signal.action
