@@ -1,9 +1,10 @@
-"""Async entry point that wires the core trading stack with Telegram notifications."""
+from __future__ import annotations
 
 import os, sys
+from dotenv import load_dotenv
 
 print("PYTHON STARTED", flush=True)
-
+load_dotenv(override=True)
 REQUIRED_VARS = [
     "KITE_API_KEY",
     "KITE_API_SECRET",
@@ -16,15 +17,15 @@ if missing:
     sys.exit(1)
 
 
-from __future__ import annotations
+
 
 import asyncio
 import logging
-import os
-from dotenv import load_dotenv
-# Force load the .env file from the current directory
-# override=True ensures this file overwrites anything else
-load_dotenv(override=True)
+
+from nifty_scalper_bot.core.app import get_http_app
+
+app = get_http_app()
+
 import signal
 from functools import partial
 from typing import Any, Callable
@@ -183,7 +184,7 @@ async def _run() -> None:
         await _shutdown("fatal error")
         LOG.error("Startup failed, entering idle mode instead of exiting.")
         await asyncio.sleep(3600)
-            return
+        return
     finally:
         await _shutdown("finalize")
 
