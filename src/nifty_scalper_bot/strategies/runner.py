@@ -2084,17 +2084,6 @@ class StrategyRunner:
                 self._logger.warning(f"🔴 No Contract Selected for {base_symbol}.")
                 return
 
-            # -----------------------------------------------------------
-            # 🛑 HARD CE / PE MUTUAL EXCLUSIVITY (CRITICAL FIX)
-            # -----------------------------------------------------------
-            if self._position_manager:
-                active = self._position_manager.get_active_contract(base_symbol)
-                if active and active.option_type != selection.option_type:
-                    self._logger.warning(
-                        f"🛑 CE/PE CONFLICT BLOCKED: active={active.symbol} new={selection.symbol}"
-                    )
-                    return
-
             # Monthly Lockout Check
             lockout, _ = self._monthly_lockout_active(selection.expiry, timestamp)
             if lockout:
