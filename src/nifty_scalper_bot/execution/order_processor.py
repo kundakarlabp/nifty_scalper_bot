@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import suppress
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Tuple
+from typing import Any, dict, tuple
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
@@ -37,8 +37,8 @@ class OrderProcessor:
         self._running = False
         
         # Anti-Whipsaw: Track last signal time per symbol
-        self._last_signal_time: Dict[tuple[str, str], datetime] = {}
-        self._active_trades: Dict[tuple[str, str], str] = {}
+        self._last_signal_time: dict[tuple[str, str], datetime] = {}
+        self._active_trades: dict[tuple[str, str], str] = {}
 
         # Cooldown (seconds)
         self._debounce_seconds = 60.0
