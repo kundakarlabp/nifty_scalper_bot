@@ -163,7 +163,9 @@ async def _run() -> None:
     except Exception as exc:  # noqa: BLE001
         LOG.exception("Fatal error: %s", exc)
         await _shutdown("fatal error")
-        raise SystemExit(1) from exc
+        LOG.error("Startup failed, entering idle mode instead of exiting.")
+        await asyncio.sleep(3600)
+            return
     finally:
         await _shutdown("finalize")
 
@@ -171,7 +173,12 @@ async def _run() -> None:
 def main() -> None:
     """Entry point used by scripts and ``python -m`` invocations."""
 
-    asyncio.run(_run())
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_run())
+    else:
+        loop.create_task(_run())
 
 
 if __name__ == "__main__":
