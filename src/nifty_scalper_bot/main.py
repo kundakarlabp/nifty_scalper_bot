@@ -1,12 +1,11 @@
 """
 nifty_scalper_bot.main
-
 Railway-compatible production entrypoint.
-Uses FastAPI lifespan for clean startup/shutdown.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -15,26 +14,20 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from dotenv import load_dotenv
 
-# =============================================================================
-# SAFE BOOTSTRAP (IMPORT-TIME SAFE — BUILD WILL NOT FAIL)
-# =============================================================================
+# -----------------------------------------------------------------------------
+# SAFE BOOTSTRAP
+# -----------------------------------------------------------------------------
 
-print("🚀 nifty-scalper-bot module imported", flush=True)
+print("🚀 nifty-scalper-bot imported", flush=True)
 
 load_dotenv(override=True)
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
 LOG = logging.getLogger("nifty_scalper_bot.main")
-
-# =============================================================================
-# RUNTIME ENV VALIDATION (NOT AT IMPORT TIME)
-# =============================================================================
 
 REQUIRED_ENV_VARS = [
     "KITE_API_KEY",
@@ -46,58 +39,52 @@ REQUIRED_ENV_VARS = [
 def validate_runtime_env() -> None:
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
     if missing:
-        raise RuntimeError(f"Missing required environment variables: {missing}")
+        raise RuntimeError(f"Missing required env vars: {missing}")
 
 
-# =============================================================================
-# FASTAPI LIFESPAN — THIS IS THE KEY FIX
-# =============================================================================
+# -----------------------------------------------------------------------------
+# FASTAPI LIFESPAN (NON-BLOCKING — CRITICAL)
+# -----------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Railway-safe lifecycle:
-    - Runs only at container runtime
-    - No threads
-    - No manual event loop ownership
+    DO NOT BLOCK STARTUP.
+    Railway requires port to bind quickly.
     """
-    bot = None
+    validate_runtime_env()
+
+    from nifty_scalper_bot.core.app import NiftyScalperApp
+
+    bot = NiftyScalperApp()
+    app.state.bot_ready = False
+    app.state.bot_error = None
+
+    async def start_bot():
+        try:
+            LOG.info("🤖 Starting trading engine (background)")
+            await bot.start()
+            app.state.bot_ready = True
+            LOG.info("✅ Trading engine running")
+        except Exception as exc:
+            app.state.bot_error = str(exc)
+            LOG.exception("❌ Bot crashed")
+
+    # 🔑 START BOT IN BACKGROUND — DO NOT AWAIT
+    asyncio.create_task(start_bot())
+
+    yield  # 🚦 SERVER IS LIVE, PORT IS OPEN
+
+    LOG.info("🛑 Shutting down trading engine")
     try:
-        LOG.info("🔍 Validating runtime environment")
-        validate_runtime_env()
-
-        LOG.info("📦 Importing trading engine")
-        from nifty_scalper_bot.core.app import NiftyScalperApp
-
-        LOG.info("🤖 Initializing trading engine")
-        bot = NiftyScalperApp()
-
-        LOG.info("▶️ Starting trading engine")
-        await bot.start()
-
-        app.state.bot_ready = True
-        LOG.info("✅ Bot is live")
-
-        yield  # 🚦 Application is now RUNNING
-
-    except Exception as exc:
-        app.state.bot_error = str(exc)
-        LOG.exception("❌ Fatal startup error")
-        raise
-
-    finally:
-        if bot is not None:
-            try:
-                LOG.info("🛑 Stopping trading engine")
-                await bot.stop()
-                LOG.info("✅ Bot stopped cleanly")
-            except Exception:
-                LOG.exception("⚠️ Error during shutdown")
+        await bot.stop()
+    except Exception:
+        LOG.exception("⚠️ Error during shutdown")
 
 
-# =============================================================================
-# FASTAPI APP (RAILWAY EXPECTS THIS)
-# =============================================================================
+# -----------------------------------------------------------------------------
+# FASTAPI APP
+# -----------------------------------------------------------------------------
 
 app = FastAPI(
     title="nifty-scalper-bot",
@@ -105,9 +92,6 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
-
-app.state.bot_ready = False
-app.state.bot_error: str | None = None
 
 
 @app.get("/")
