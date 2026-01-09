@@ -36,7 +36,6 @@ FROM python:3.11-alpine
 
 # Runtime environment variables
 ENV APP_MODULE="nifty_scalper_bot.main" \
-    PYTHONPATH=/app:/usr/local/lib/python3.11/site-packages \
     TZ=Asia/Kolkata
 
 # Install runtime dependencies only
@@ -54,6 +53,8 @@ COPY --from=builder /install/deps /usr/local/lib/python3.11/site-packages
 
 # Copy application code
 COPY . /app
+
+RUN pip install --no-cache-dir -e .
 
 # Download Zerodha instruments CSV with retry logic
 RUN for i in 1 2 3; do \
