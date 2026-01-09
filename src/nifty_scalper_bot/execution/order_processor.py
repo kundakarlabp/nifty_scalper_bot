@@ -1,7 +1,6 @@
 """Order Processor: Dedicated Asynchronous State Machine for Order Lifecycle."""
 
 import asyncio
-from nifty_scalper_bot.utils.logging import logger
 from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 from typing import Any
