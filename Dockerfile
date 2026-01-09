@@ -50,7 +50,7 @@ COPY . /app
 RUN pip install --upgrade pip setuptools wheel
 
 # 🔴 CRITICAL: install YOUR package
-RUN pip install --no-cache-dir
+RUN pip install --no-cache-dir .
 
 # Optional: download instruments
 RUN for i in 1 2 3; do \
