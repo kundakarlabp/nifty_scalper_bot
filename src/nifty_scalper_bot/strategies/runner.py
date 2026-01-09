@@ -908,7 +908,24 @@ class StrategyRunner:
                             "timestamp": bar.timestamp.timestamp(),
                             "volume": bar.volume
                         }
-                    self._strategy_manager.on_bar(bar)
+                    # ---- STRATEGY EVALUATION (BAR-BASED) ----
+                    is_ready = self._indicator_engine.is_ready(
+                        symbol,
+                        self._config.min_indicator_bars
+                    )
+                    if not is_ready:
+                        return
+                    price = bar.close
+                    signal = self._strategy_manager.generate_signal(
+                        symbol,
+                        price
+                    )
+                    if signal is None:
+                        self._logger.debug(
+                            f"No signal generated for {symbol} on bar close"
+                        )
+                        return
+                    self._handle_signal(signal)
 
         except Exception as exc:
             self._logger.error(
