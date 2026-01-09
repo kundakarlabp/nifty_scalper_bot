@@ -1,6 +1,7 @@
 """Order Processor: Dedicated Asynchronous State Machine for Order Lifecycle."""
 
 import asyncio
+import logging
 from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 from typing import Any
