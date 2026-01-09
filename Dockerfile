@@ -29,8 +29,7 @@ RUN pip install --upgrade pip setuptools wheel && \
 # ========================================================================
 FROM python:3.11-alpine
 
-ENV APP_MODULE="nifty_scalper_bot.main" \
-    TZ=Asia/Kolkata
+ENV TZ=Asia/Kolkata
 
 RUN apk update && apk add --no-cache \
     curl \
@@ -41,19 +40,19 @@ RUN apk update && apk add --no-cache \
 
 WORKDIR /app
 
-# Copy installed dependencies
+# Copy Python dependencies
 COPY --from=builder /install/deps /usr/local/lib/python3.11/site-packages
 
-# Copy application code
+# Copy source code
 COPY . /app
 
-# ✅ REQUIRED FOR editable install WITH pyproject.toml
+# 🔴 CRITICAL: install build tooling for pyproject.toml
 RUN pip install --upgrade pip setuptools wheel
 
-# ✅ INSTALL YOUR PACKAGE (NOW IT ACTUALLY INSTALLS)
+# 🔴 CRITICAL: install YOUR package
 RUN pip install --no-cache-dir -e .
 
-# Download Zerodha instruments CSV
+# Optional: download instruments
 RUN for i in 1 2 3; do \
         curl -fsSL -o /app/instruments.csv https://api.kite.trade/instruments && break || sleep 5; \
     done || true
