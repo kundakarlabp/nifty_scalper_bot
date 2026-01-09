@@ -201,7 +201,6 @@ class SymbolState:
     last_signal_at: datetime | None = None
     last_trade_at: datetime | None = None
     cooldown_until: datetime | None = None
-    executing: bool = False
     strategy_data: dict[str, Any] = field(default_factory=dict)
     vwap: float | None = None
     _last_strategy_eval: datetime | None = None # [FIX] For Throttling strategy calls
@@ -1779,21 +1778,9 @@ class StrategyRunner:
                         "timestamp": now.isoformat()
                     }
 
-            with self._lock:
-                state = self._symbol_state.get(symbol)
-                if not state or state.executing:
-                    return
-                state.executing = True
-
             self._logger.info(f"🚀 SIGNAL EXECUTING: {symbol} ...")
+            self._handle_signal(signal, price, now)
 
-            try:
-                self._handle_signal(signal, price, now)
-            finally:
-                with self._lock:
-                    state = self._symbol_state.get(symbol)
-                    if state:
-                    state.executing = False
 
             
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
