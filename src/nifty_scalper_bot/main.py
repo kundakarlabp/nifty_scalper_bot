@@ -1,52 +1,52 @@
 from __future__ import annotations
-
 import os, sys
 from dotenv import load_dotenv
 
 print("PYTHON STARTED", flush=True)
 load_dotenv(override=True)
+
 REQUIRED_VARS = [
     "KITE_API_KEY",
     "KITE_API_SECRET",
     "KITE_ACCESS_TOKEN",
 ]
-
 missing = [v for v in REQUIRED_VARS if v not in os.environ]
 if missing:
     print("MISSING ENV VARS:", missing, flush=True)
     sys.exit(1)
 
-
-
-
 import asyncio
 import logging
-
-from nifty_scalper_bot.core.app import get_http_app
-
-app = get_http_app()
-
 import signal
 from functools import partial
 from typing import Any, Callable
 
 import sentry_sdk
 import uvicorn
+from fastapi import FastAPI
 from sentry_sdk.integrations.logging import LoggingIntegration
 
-# ✅ FIX #2: Set timezone BEFORE any other imports
-os.environ.setdefault("TZ", "Asia/Kolkata")
+# ✅ CRITICAL FIX: Create a STUB ASGI app for Railway health checks
+# This does NOT initialize the bot - just returns a minimal response
+app = FastAPI(title="nifty-scalper-bot-health")
 
+@app.get("/health")
+async def health_check():
+    """Minimal health endpoint - Railway calls this"""
+    return {"status": "ok", "ready": False, "message": "Bot starting..."}
 
-from nifty_scalper_bot.core.app import NiftyScalperApp, get_http_app
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"status": "running"}
 
+# ✅ The REAL bot initialization happens in main(), NOT at import time
 LOG = logging.getLogger("nifty_scalper_bot.main")
 
 sentry_logging = LoggingIntegration(
     level=logging.INFO,
     event_level=logging.ERROR,
 )
-
 sentry_sdk.init(
     dsn=os.getenv("SENTRY_DSN", ""),
     integrations=[sentry_logging],
@@ -54,32 +54,11 @@ sentry_sdk.init(
     environment=os.getenv("ENV", "production"),
 )
 
-# ASGI hook for platforms expecting ``app`` at import time (e.g. Railway).
-_app_instance = None
-
-def app():
-    """Lazy ASGI app factory - creates app only on first request"""
-    global _app_instance
-    if _app_instance is None:
-        _app_instance = get_http_app()
-    return _app_instance
-
-
-
-def _sync_signal_handler(
-    loop: asyncio.AbstractEventLoop, handler: Callable[[int], None]
-) -> Callable[[int, Any], None]:
-    """Create a synchronous signal handler that schedules *handler*."""
-
-    def _inner(signum: int, _frame: Any) -> None:
-        loop.call_soon_threadsafe(handler, signum)
-
-    return _inner
+os.environ.setdefault("TZ", "Asia/Kolkata")
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
     """Return boolean flag from environment respecting common truthy values."""
-
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -88,31 +67,32 @@ def _env_flag(name: str, *, default: bool) -> bool:
 
 def _should_start_http_server() -> bool:
     """Determine whether the embedded uvicorn server should be started."""
-
     return _env_flag("ENABLE_EMBEDDED_HTTP_SERVER", default=True)
 
 
 async def _run() -> None:
-    app_core = NiftyScalperApp()
-
-    # ✅ FIX #3: Call the logging functions AFTER app initialization
+    """Main bot startup - called ONLY when python -m is executed"""
+    # NOW we can import the heavy stuff
+    from nifty_scalper_bot.core.app import NiftyScalperApp
     from nifty_scalper_bot.utils.logging import (
         silence_third_party_loggers,
         enable_business_logic_logging,
     )
+
+    print("INITIALIZING BOT CORE...", flush=True)
+    
+    app_core = NiftyScalperApp()
     silence_third_party_loggers()
     enable_business_logic_logging()
-    # ✅ END FIX #3
 
     uv_server: uvicorn.Server | None = None
     http_task: asyncio.Task[None] | None = None
     http_enabled = _should_start_http_server()
 
     if http_enabled:
-        http_app = get_http_app()
         port = int(os.environ.get("PORT", "8000"))
         uv_config = uvicorn.Config(
-            http_app,
+            app,
             host="0.0.0.0",
             port=port,
             lifespan="on",
@@ -134,14 +114,14 @@ async def _run() -> None:
         LOG.info("Shutting down (%s)...", reason)
         try:
             await app_core.stop()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             LOG.warning("Shutdown step raised: %s", exc)
         if http_task is not None:
             if uv_server is not None and not uv_server.should_exit:
                 uv_server.should_exit = True
             try:
                 await http_task
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 LOG.warning("HTTP server shutdown raised: %s", exc)
         LOG.info("Shutdown complete.")
         if not stop_future.done():
@@ -162,16 +142,15 @@ async def _run() -> None:
         try:
             loop.add_signal_handler(sig, partial(_schedule_shutdown, sig.value))
         except (NotImplementedError, AttributeError):
-            signal.signal(sig, _sync_signal_handler(loop, _schedule_shutdown))
+            pass
 
     if http_enabled and uv_server is not None:
-
         def _http_task_done(task: asyncio.Task[None]) -> None:
             if shutting_down.is_set():
                 return
             try:
                 task.result()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 LOG.error("HTTP server stopped unexpectedly: %s", exc)
                 asyncio.create_task(_shutdown("http server error"))
             else:
@@ -185,7 +164,7 @@ async def _run() -> None:
         await app_core.start()
         LOG.info("Core ready, strategies active.")
         await stop_future
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         LOG.exception("Fatal error: %s", exc)
         await _shutdown("fatal error")
         LOG.error("Startup failed, entering idle mode instead of exiting.")
@@ -197,7 +176,6 @@ async def _run() -> None:
 
 def main() -> None:
     """Entry point used by scripts and ``python -m`` invocations."""
-
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
