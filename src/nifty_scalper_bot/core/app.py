@@ -1010,9 +1010,6 @@ def get_http_app() -> FastAPI:
     # Thread-safe singleton pattern
     if _HTTP_APP is not None:
         return _HTTP_APP
-    
-    if _HTTP_APP is not None:
-            return _HTTP_APP
         
     settings = get_settings()
 
