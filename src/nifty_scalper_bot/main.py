@@ -1,5 +1,21 @@
 """Async entry point that wires the core trading stack with Telegram notifications."""
 
+import os, sys
+
+print("PYTHON STARTED", flush=True)
+
+REQUIRED_VARS = [
+    "KITE_API_KEY",
+    "KITE_API_SECRET",
+    "KITE_ACCESS_TOKEN",
+]
+
+missing = [v for v in REQUIRED_VARS if v not in os.environ]
+if missing:
+    print("MISSING ENV VARS:", missing, flush=True)
+    sys.exit(1)
+
+
 from __future__ import annotations
 
 import asyncio
