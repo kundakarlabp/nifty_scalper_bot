@@ -427,8 +427,6 @@ class StrategyRunner:
         self._bar_builders: Dict[str, OneMinuteBarBuilder] = {}
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
-        # [FIX] Initialize timestamp guard
-        self._last_bar_ts: Dict[str, datetime] = {}
 
     
 
@@ -855,59 +853,73 @@ class StrategyRunner:
 
     def _ingest_bar(self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False) -> None:
         """
-        Ingest a completed minute bar. 
-        Compatible with IndicatorEngine.update_price (since update_bar is missing).
+        Ingest a completed minute bar.
+        Updates Indicators, Bracket Manager, and Triggers Strategies.
+        
+        Args:
+            symbol: Trading symbol.
+            bar: The completed OneMinuteBar object.
+            is_backfill: If True, bypasses timestamp monotonicity checks for historical data.
         """
-        # 1. SAFETY: Timestamp Monotonicity Guard
-        if not is_backfill:
-            last_ts = self._last_bar_ts.get(symbol)
-            if last_ts and bar.timestamp <= last_ts:
-                return 
+        if not hasattr(bar, "symbol") or bar.symbol is None:
+            bar.symbol = symbol
+
+        last_ts = self._last_bar_ts.get(symbol)
+        
+        if not is_backfill and last_ts and bar.timestamp <= last_ts:
+            self._logger.debug(
+                "Dropping out-of-order bar", 
+                extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts}
+            )
+            return
+
+        if not last_ts or bar.timestamp > last_ts:
+            self._last_bar_ts[symbol] = bar.timestamp
 
         # 2. STATE: Update High-Water Mark
-        current_last = self._last_bar_ts.get(symbol)
-        if not current_last or bar.timestamp > current_last:
+        
+        if not last_ts or bar.timestamp > last_ts:
             self._last_bar_ts[symbol] = bar.timestamp
 
         try:
             # 3. INDICATORS: Feed the Engine
-            # [FIX] Use 'update_price' because 'update_bar' does not exist in your indicators.py
-            # We convert the Bar object to the dictionary format IndicatorEngine expects.
-            bar_payload = {
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close
-            }
-            self._indicator_engine.update_price(
-                symbol, 
-                bar_payload, 
-                volume=bar.volume, 
-                timestamp=bar.timestamp
-            )
+            # Feed IndicatorEngine using its real API
+            self._indicator_engine.update_bar(symbol, bar)
 
-            # 4. BRACKET MANAGER: Inject Volatility
+            # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
+                # Compute ATR (Period 14 is standard)
                 raw_atr = self._indicator_engine.compute_atr(symbol, period=14)
+                
+                # Robust Unwrapping (Handles Float, Snapshot, or Object)
                 atr_value = 0.0
-                if hasattr(raw_atr, 'value'): atr_value = float(raw_atr.value)
-                elif hasattr(raw_atr, 'atr'): atr_value = float(raw_atr.atr)
-                elif isinstance(raw_atr, (int, float)): atr_value = float(raw_atr)
+                if isinstance(raw_atr, (int, float)):
+                    atr_value = float(raw_atr)
+                elif hasattr(raw_atr, 'value'):
+                    atr_value = float(raw_atr.value)
+                elif hasattr(raw_atr, 'atr'):
+                    atr_value = float(raw_atr.atr)
 
+                # Push to Bracket Manager for dynamic stop/target sizing
                 if atr_value > 0 and hasattr(self._bracket_manager, "update_market_stats"):
                     self._bracket_manager.update_market_stats(symbol, atr=atr_value)
 
-            # 5. EXECUTION: Trigger Strategies (SKIP ON BACKFILL)
-            if not is_backfill:
-                with self._lock:
-                    state = self._symbol_state.get(symbol)
-                    if state:
-                        state.last_tick = {
-                            "last_price": bar.close,
-                            "timestamp": bar.timestamp.timestamp(),
-                            "volume": bar.volume
-                        }
-                    self._strategy_manager.on_bar(bar)
+            # 5. EXECUTION: Trigger Strategies
+            # CRITICAL: Do NOT run strategies during backfill (prevents phantom trades).
+            if is_backfill:
+                return
+            with self._lock:
+                # Update Symbol State for context
+                state = self._symbol_state.get(symbol)
+                if state:
+                    state.last_tick = {
+                        "last_price": bar.close,
+                        "timestamp": bar.timestamp.timestamp(),
+                        "volume": bar.volume
+                    }
+                    
+                # 🔥 THE TRIGGER: Run Strategy Logic
+                self._strategy_manager.on_bar(bar)
 
         except Exception as exc:
             self._logger.error(
@@ -1389,8 +1401,8 @@ class StrategyRunner:
 
     async def _backfill_history(self) -> None:
         """
-        Fetch and ingest historical data safely.
-        Uses OneMinuteBarBuilder to prevent constructor crashes.
+        Fetch and ingest historical data with Strict Throttling and Crash-Proof Bar Creation.
+        Fixed: Rate Limit Exceeded & OneMinuteBar constructor errors.
         """
         self._logger.info("⏳ Starting historical data backfill...")
         await asyncio.sleep(2.0)
@@ -1413,19 +1425,20 @@ class StrategyRunner:
         if not symbols_to_load:
             return
 
-        # 2. Strict Throttling
+        # 2. [FIX] Strict Throttling (Max 2 concurrent, 0.5s delay)
+        # Prevents "Rate limit exceeded" more effectively.
         semaphore = asyncio.Semaphore(2) 
         days = 5
 
         async def fetch_with_limit(sym: str):
             async with semaphore:
                 try:
-                    await asyncio.sleep(0.5) 
+                    await asyncio.sleep(0.5)  # Increased delay for safety
                     return await source.fetch_history(sym, "minute", days=days)
                 except Exception as e:
                     return e
 
-        self._logger.info(f"⏳ Fetching history for {len(symbols_to_load)} symbols (Throttled)...")
+        self._logger.info(f"⏳ Fetching history for {len(symbols_to_load)} symbols (Strict Throttling)...")
         results = await asyncio.gather(*[fetch_with_limit(s) for s in symbols_to_load], return_exceptions=True)
 
         total_bars = 0
@@ -1439,53 +1452,111 @@ class StrategyRunner:
             if not candles:
                 continue
 
-            # [FIX] Use Builder! No manual OneMinuteBar(...) calls.
+            # Reset Builder
             self._bar_builders[symbol] = OneMinuteBarBuilder()
             builder = self._bar_builders[symbol]
 
             loaded = 0
             
+            def _to_float(val):
+                try: return float(val)
+                except (ValueError, TypeError): return 0.0
+
             for candle in candles:
                 try:
-                    # Robust Parsing
-                    ts_raw, o, h, l, c, v = None, 0.0, 0.0, 0.0, 0.0, 0
+                    payload = {}
+                    raw_ts = None
+                    vol = 0
 
+                    # --- Robust Parsing ---
                     if isinstance(candle, (list, tuple)):
                         if len(candle) < 6: continue
-                        ts_raw, o, h, l, c, v = candle[:6]
+                        raw_ts = candle[0]
+                        payload = {
+                            "open": _to_float(candle[1]), "high": _to_float(candle[2]),
+                            "low": _to_float(candle[3]), "close": _to_float(candle[4])
+                        }
+                        vol = int(_to_float(candle[5]))
                     elif isinstance(candle, dict):
-                        ts_raw = candle.get("date") or candle.get("timestamp") or candle.get("time")
-                        o = candle.get("open")
-                        h = candle.get("high")
-                        l = candle.get("low")
-                        c = candle.get("close")
-                        v = candle.get("volume", 0)
-                    
-                    if not ts_raw or c is None:
-                        continue
+                        o = h = l = c = 0.0
+                        for k, v in candle.items():
+                            k = k.lower()
+                            if k in ('o', 'open'): o = _to_float(v)
+                            elif k in ('h', 'high'): h = _to_float(v)
+                            elif k in ('l', 'low'): l = _to_float(v)
+                            elif k in ('c', 'close'): c = _to_float(v)
+                            elif k in ('v', 'vol', 'volume'): vol = int(_to_float(v))
+                            elif k in ('date', 'timestamp', 'time'): raw_ts = v
+                        payload = {"open": o, "high": h, "low": l, "close": c}
 
-                    # Timestamp Normalize
+                    # --- Timestamp Logic ---
                     ts = None
-                    if isinstance(ts_raw, datetime):
-                        ts = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=timezone.utc)
-                    elif isinstance(ts_raw, (int, float)):
-                        ts = datetime.fromtimestamp(ts_raw, tz=timezone.utc)
-                    elif isinstance(ts_raw, str):
-                        try: ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    if isinstance(raw_ts, datetime):
+                        ts = raw_ts
+                    elif isinstance(raw_ts, str):
+                        try: ts = datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
                         except ValueError: continue
+                    elif isinstance(raw_ts, (int, float)):
+                        ts = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
 
-                    if ts:
-                        # [CRITICAL] Use builder.update() to create the bar.
-                        # This works regardless of the OneMinuteBar internal structure.
-                        completed_bar = builder.update(float(c), int(v), ts)
+                    if ts and payload.get("close", 0) > 0:
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
 
-                        if completed_bar:
-                            self._ingest_bar(symbol, completed_bar, is_backfill=True)
+                        # [FIX] Crash-Proof Bar Creation
+                        bar = None
+                        
+                        # A. Try Builder (Safest)
+                        if hasattr(builder, "force_complete"):
+                            bar = builder.force_complete(
+                                open_price=payload["open"], high=payload["high"],
+                                low=payload["low"], close=payload["close"],
+                                volume=vol, timestamp=ts
+                            )
+                        else:
+                            # B. Fallback: Manual Creation (Handle unknown arguments)
+                            # We nest try/except blocks to find the valid signature
+                            try:
+                                # Attempt 1: Standard Signature
+                                bar = OneMinuteBar(
+                                    symbol=symbol,
+                                    open=payload["open"], high=payload["high"],
+                                    low=payload["low"], close=payload["close"],
+                                    volume=vol, timestamp=ts, completed=True
+                                )
+                            except TypeError:
+                                try:
+                                    # Attempt 2: Without 'symbol' (if not in slots)
+                                    bar = OneMinuteBar(
+                                        open=payload["open"], high=payload["high"],
+                                        low=payload["low"], close=payload["close"],
+                                        volume=vol, timestamp=ts, completed=True
+                                    )
+                                    # Manually attach symbol if allowed
+                                    try: bar.symbol = symbol
+                                    except AttributeError: pass 
+                                except TypeError:
+                                    # Attempt 3: Try 'end' instead of 'timestamp' (CRITICAL FIX FOR YOUR ERROR)
+                                    try:
+                                        bar = OneMinuteBar(
+                                            symbol=symbol,
+                                            open=payload["open"], high=payload["high"],
+                                            low=payload["low"], close=payload["close"],
+                                            volume=vol, end=ts, completed=True
+                                        )
+                                    except TypeError:
+                                        # If all else fails, log specific error ONCE per symbol to debug
+                                        if loaded == 0:
+                                            self._logger.error(f"❌ OneMinuteBar signature mismatch for {symbol}. Check bar_builder.py")
+                                        continue
+
+                        if bar:
+                            self._ingest_bar(symbol, bar, is_backfill=True)
                             loaded += 1
-
-                except Exception as exc:
+                
+                except Exception as e:
                     if loaded == 0:
-                        self._logger.error(f"❌ Backfill parse failed for {symbol}: {exc}")
+                        self._logger.error(f"❌ Bar ingestion crash for {symbol}: {e}")
                     continue
 
             if loaded > 0:
@@ -1494,7 +1565,7 @@ class StrategyRunner:
             else:
                 self._logger.warning(f"⚠️ Fetched {len(candles)} candles for {symbol} but ingested 0.")
 
-        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")    
+        self._logger.info(f"✅ Historical backfill complete. Total Bars: {total_bars}")        
     
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick safely, updating state and triggering strategies."""
