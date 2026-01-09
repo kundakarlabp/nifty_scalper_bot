@@ -1,6 +1,6 @@
 """
 nifty_scalper_bot.main
-Railway-compatible production entrypoint.
+Railway-safe entrypoint.
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from dotenv import load_dotenv
 
-# -----------------------------------------------------------------------------
-# SAFE BOOTSTRAP
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# BOOTSTRAP (FAST, SAFE)
+# ---------------------------------------------------------------------
 
 print("🚀 nifty-scalper-bot imported", flush=True)
 
@@ -35,56 +35,59 @@ REQUIRED_ENV_VARS = [
     "KITE_ACCESS_TOKEN",
 ]
 
-
-def validate_runtime_env() -> None:
-    missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
-    if missing:
-        raise RuntimeError(f"Missing required env vars: {missing}")
-
-
-# -----------------------------------------------------------------------------
-# FASTAPI LIFESPAN (NON-BLOCKING — CRITICAL)
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# FASTAPI LIFESPAN — ZERO BLOCKING
+# ---------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    DO NOT BLOCK STARTUP.
-    Railway requires port to bind quickly.
+    MUST yield immediately.
+    Railway will kill the container otherwise.
     """
-    validate_runtime_env()
-
-    from nifty_scalper_bot.core.app import NiftyScalperApp
-
-    bot = NiftyScalperApp()
     app.state.bot_ready = False
     app.state.bot_error = None
 
-    async def start_bot():
+    async def boot_bot():
         try:
-            LOG.info("🤖 Starting trading engine (background)")
+            # EVERYTHING HEAVY HAPPENS HERE (AFTER PORT IS OPEN)
+            missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
+            if missing:
+                raise RuntimeError(f"Missing env vars: {missing}")
+
+            LOG.info("📦 Importing trading engine")
+            from nifty_scalper_bot.core.app import NiftyScalperApp
+
+            bot = NiftyScalperApp()
+            app.state.bot = bot
+
+            LOG.info("▶️ Starting trading engine")
             await bot.start()
+
             app.state.bot_ready = True
-            LOG.info("✅ Trading engine running")
+            LOG.info("✅ Bot is live")
+
         except Exception as exc:
             app.state.bot_error = str(exc)
-            LOG.exception("❌ Bot crashed")
+            LOG.exception("❌ Bot startup failed")
 
-    # 🔑 START BOT IN BACKGROUND — DO NOT AWAIT
-    asyncio.create_task(start_bot())
+    # 🔑 START IN BACKGROUND
+    asyncio.create_task(boot_bot())
 
-    yield  # 🚦 SERVER IS LIVE, PORT IS OPEN
+    # 🔑 IMMEDIATELY RELEASE UVICORN
+    yield
 
-    LOG.info("🛑 Shutting down trading engine")
-    try:
-        await bot.stop()
-    except Exception:
-        LOG.exception("⚠️ Error during shutdown")
+    LOG.info("🛑 Shutdown initiated")
+    bot = getattr(app.state, "bot", None)
+    if bot:
+        try:
+            await bot.stop()
+        except Exception:
+            LOG.exception("⚠️ Error during shutdown")
 
-
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # FASTAPI APP
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 app = FastAPI(
     title="nifty-scalper-bot",
@@ -93,16 +96,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
 @app.get("/")
 async def root() -> dict[str, str]:
     return {"status": "running"}
 
-
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
-        "status": "ok" if app.state.bot_error is None else "error",
         "ready": app.state.bot_ready,
         "error": app.state.bot_error,
     }
