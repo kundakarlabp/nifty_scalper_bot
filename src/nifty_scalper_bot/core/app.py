@@ -91,7 +91,6 @@ from nifty_scalper_bot.execution.post_fill_monitor import PostFillMonitor
 from nifty_scalper_bot.execution.preflight_validator import PreFlightValidator
 from nifty_scalper_bot.execution.safe_order_manager import SafeOrderManager
 from nifty_scalper_bot.execution.state_tracker import StateTracker
-from nifty_scalper_bot.execution.order_processor import OrderProcessor
 from nifty_scalper_bot.infra.cron_refresh import schedule_instrument_refresh
 from nifty_scalper_bot.infra.health import HealthState, create_health_app
 from nifty_scalper_bot.infra.metrics import METRICS
