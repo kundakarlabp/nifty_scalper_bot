@@ -1,66 +1,71 @@
-# Multi-stage build for production - optimized for Railway.app
-FROM python:3.11-alpine AS builder
+# ============================================================================
+# STAGE 1 — BUILDER
+# ============================================================================
+FROM python:3.11-slim AS builder
 
-# ===== STAGE 1: Build Stage =====
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    TZ=Asia/Kolkata \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PYTHONDONTWRITEBYTECODE=1
 
-# Install build dependencies only in builder stage
-RUN apk add --no-cache --virtual .build-deps \
-    build-base \
+# System deps needed to build wheels
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
     python3-dev \
     libffi-dev \
-    openssl-dev \
-    musl-dev \
-    linux-headers \
-    gcc
+    libssl-dev \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy dependency files first (better layer caching)
+# Copy only dependency metadata first (for Docker cache efficiency)
 COPY requirements.txt pyproject.toml setup.py* ./
+
+# Install dependencies into a virtual location
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Copy source code
 COPY src ./src
 
-# Install Python dependencies with strict error checking
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install -r requirements.txt && \
-    pip install -e . && \
-    pip check
+# Install YOUR package (NON-editable — critical)
+RUN pip install --no-cache-dir .
 
-# Verify critical imports at build time
-RUN python -c "import nifty_scalper_bot; print('✅ nifty_scalper_bot imported')" && \
-    python -c "from nifty_scalper_bot.main import app; print('✅ app imported')"
+# Sanity check: ensure imports work (Railway does this too)
+RUN python -c "import nifty_scalper_bot; print('✅ nifty_scalper_bot imported')" \
+ && python -c "from nifty_scalper_bot.main import app; print('✅ app imported')"
 
-# ===== STAGE 2: Runtime Stage =====
-FROM python:3.11-alpine
+# ============================================================================
+# STAGE 2 — RUNTIME
+# ============================================================================
+FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    TZ=Asia/Kolkata \
-    PYTHONPATH=/app/src:$PYTHONPATH
+    TZ=Asia/Kolkata
 
-# Install only runtime dependencies (smaller image)
-RUN apk add --no-cache \
+# Runtime OS deps only
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     curl \
-    ca-certificates
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy Python packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+# Copy installed Python packages
+COPY --from=builder /usr/local/lib/python3.11/site-packages \
+                    /usr/local/lib/python3.11/site-packages
 
-# Copy application code from builder
+# Copy application source
 COPY --from=builder /app/src ./src
-COPY --from=builder /app/pyproject.toml .
+COPY pyproject.toml .
 
-# Health check - Railway uses this to verify readiness
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+# Expose port (Railway injects $PORT)
+EXPOSE 8000
 
-# Use exec form to properly handle signals (SIGTERM)
-ENTRYPOINT ["/usr/local/bin/python"]
-CMD ["-m", "nifty_scalper_bot.main"]
+# IMPORTANT:
+# DO NOT use python -m ...
+# Railway must run uvicorn directly
+CMD ["uvicorn", "nifty_scalper_bot.main:app", "--host", "0.0.0.0", "--port", "${PORT}"]
