@@ -339,7 +339,7 @@ async def _run() -> None:
             # Attempt graceful degradation - stay alive for health checks
             LOG.error("⚠️  Entering idle mode instead of exiting")
             await asyncio.sleep(3600)
-        
+            return
         finally:
             await _shutdown("finalize")
     
