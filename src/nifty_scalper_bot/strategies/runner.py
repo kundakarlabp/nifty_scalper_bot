@@ -1763,8 +1763,6 @@ class StrategyRunner:
 
             self._logger.info(f"🚀 SIGNAL EXECUTING: {symbol} ...")
             self._handle_signal(signal, price, now)
-
-
             
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
         """Handle signal execution with comprehensive error handling."""
@@ -1960,7 +1958,6 @@ class StrategyRunner:
         if confidence < 0.6:
             self._logger.info(f"🚫 Low Confidence Signal: {confidence:.2f}")
             return
-
         action = signal.action
 
         # ===========================================================
