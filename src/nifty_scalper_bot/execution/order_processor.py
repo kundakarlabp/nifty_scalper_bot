@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import suppress
 from datetime import datetime, timezone, timedelta
-from typing import Any, dict, tuple
+from typing import Any
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
