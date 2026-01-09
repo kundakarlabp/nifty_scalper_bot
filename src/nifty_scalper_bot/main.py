@@ -55,7 +55,15 @@ sentry_sdk.init(
 )
 
 # ASGI hook for platforms expecting ``app`` at import time (e.g. Railway).
-app = get_http_app()  # Create when needed
+_app_instance = None
+
+def app():
+    """Lazy ASGI app factory - creates app only on first request"""
+    global _app_instance
+    if _app_instance is None:
+        _app_instance = get_http_app()
+    return _app_instance
+
 
 
 def _sync_signal_handler(
