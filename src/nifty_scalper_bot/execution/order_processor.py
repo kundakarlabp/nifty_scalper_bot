@@ -121,10 +121,11 @@ class OrderProcessor:
                 order_type=order_type,
                 price=price
             )
-            # 🔒 Register active trade ONLY after broker ACK
-            self._active_trades[key] = ACTIVE
             
-            # Publish Success
+            # [FIX] Do NOT lock forever. Release immediately so we can trade again.
+            # (We set it to ACTIVE, then clear it because the order is submitted)
+            self._active_trades.pop(key, None) 
+            
             await self.bus.publish(
                 Message(
                     type=MessageType.ORDER_UPDATE,
@@ -141,7 +142,9 @@ class OrderProcessor:
 
         except Exception as exc:
             LOGGER.error(f"Order failed: {exc}")
-            # Publish Failure
+            # Release lock on failure
+            self._active_trades.pop(key, None)
+            
             await self.bus.publish(
                 Message(
                     type=MessageType.ORDER_UPDATE,
