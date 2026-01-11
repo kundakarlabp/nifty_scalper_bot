@@ -1,26 +1,26 @@
-"""Order Processor: Dedicated Asynchronous State Machine for Order Lifecycle."""
+"""
+Order Processor: Dedicated Asynchronous State Machine for Order Lifecycle.
+Production-Grade: Handles Risk Checks, Thread Safety, and Non-Blocking Execution.
+"""
 
 import asyncio
 import logging
 from contextlib import suppress
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Dict
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
-from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
-from nifty_scalper_bot.risk import RiskManager
+from nifty_scalper_bot.execution.order_manager import OrderManager
+from nifty_scalper_bot.risk.manager import RiskManager
 
 # --- Order Execution States ---
 INTENT = "INTENT"   # Signal accepted, execution pending
-ACTIVE = "ACTIVE"   # Order successfully submitted
-
 
 LOGGER = logging.getLogger(__name__)
 
 class OrderProcessor:
     """
-    Smart asynchronous processor that handles signal debouncing 
-    and slippage protection (Market -> Limit conversion).
+    Orchestrates order execution with strict Risk Management and Concurrency Control.
     """
 
     def __init__(
@@ -28,7 +28,7 @@ class OrderProcessor:
         message_bus: MessageBus,
         safe_order_manager: OrderManager,
         risk_manager: RiskManager,
-        data_hub: Any, # Now accepts DataHub
+        data_hub: Any, 
     ):
         self.bus = message_bus
         self.executor = safe_order_manager
@@ -36,96 +36,100 @@ class OrderProcessor:
         self.data_hub = data_hub
         self._running = False
         
-        # Anti-Whipsaw: Track last signal time per symbol
-        self._last_signal_time: dict[tuple[str, str], datetime] = {}
-        self._active_trades: dict[tuple[str, str], str] = {}
-
-        # Cooldown (seconds)
+        # 1. Thread Safety Lock (Mandatory for async execution)
+        self._lock = asyncio.Lock()
+        
+        # 2. State Tracking
+        # Key = Symbol (NOT symbol+side). Prevents simultaneous Buy/Sell wars.
+        self._active_trades: Dict[str, str] = {}
+        self._last_signal_time: Dict[str, datetime] = {}
+        
+        # 3. Settings
         self._debounce_seconds = 60.0
 
         self.bus.subscribe(MessageType.SIGNAL, self.on_strategy_signal)
-        LOGGER.info("OrderProcessor initialized with Smart Execution logic.")
+        LOGGER.info("✅ OrderProcessor initialized with Risk-Gated Execution.")
 
     async def on_strategy_signal(self, message: Message) -> None:
         """
-        Smart Signal Handler:
-        1. Checks Debounce (prevents spam)
-        2. Calculates Protection Price (prevents bad fills)
-        3. Executes
+        Process signal -> Check Risk -> Execute Order (Non-Blocking).
         """
         signal: dict[str, Any] = message.data
         symbol = signal.get("symbol")
-        side = signal.get("side")
-        qty = signal.get("quantity")     
+        side = signal.get("side")      # "BUY" / "SELL"
+        qty = signal.get("quantity")
         
+        # Basic Validation
         if not all([symbol, side, qty]):
             return
 
-        key = (symbol, side)
-        # 🔒 Intent lock (async-safe)
-        if self._active_trades.get(key):
-            LOGGER.warning(f"🚫 Intent already active: {symbol} {side}")
-            return
+        # --- PHASE 1: ATOMIC CHECKS (Must be fast) ---
+        async with self._lock:
+            # 1. Conflict Prevention: One operation per symbol at a time
+            key = symbol 
+            if self._active_trades.get(key):
+                LOGGER.warning(f"🚫 Execution busy for {symbol}")
+                return
 
-        # --- 1. Debounce Check ---
-        now = datetime.now(timezone.utc)
-        last_time = self._last_signal_time.get(key)
-        if last_time and (now - last_time).total_seconds() < self._debounce_seconds:
-            LOGGER.info(
-                f"⏳ Cooldown active: {symbol} {side} "
-                f"({int((now - last_time).total_seconds())}s)"
-            )
-            return
+            # 2. Debounce: Prevent double-tap signals
+            now = datetime.now(timezone.utc)
+            last_time = self._last_signal_time.get(key)
+            if last_time and (now - last_time).total_seconds() < self._debounce_seconds:
+                LOGGER.info(f"⏳ Cooldown active: {symbol}")
+                return
 
-        self._last_signal_time[key] = now
-        self._active_trades[key] = INTENT
+            # 3. Risk Management Gate (The Critical Safety Check)
+            if self.risk_manager:
+                # can_trade returns (allowed, reason)
+                allowed, reason = self.risk_manager.can_trade(
+                    symbol=symbol, 
+                    side=side, 
+                    quantity=qty
+                )
+                if not allowed:
+                    LOGGER.error(f"🛡️ Risk Rejection for {symbol}: {reason}")
+                    return
 
-        # --- 2. Smart Price Calculation (Slippage Protection) ---
-        # Convert MARKET orders to LIMIT orders with a protection buffer
-        order_type = signal.get("order_type", OrderType.MARKET)
-        price = signal.get("price")
+            # 4. Lock Resources
+            self._last_signal_time[key] = now
+            self._active_trades[key] = INTENT
 
-        # Force Limit protection for all Options orders
-        if self.data_hub:
+        # --- PHASE 2: EXECUTION (Can be slow/blocking) ---
+        
+        # Price Logic (Simple Slippage Protection)
+        order_type = signal.get("order_type", "MARKET")
+        price = signal.get("price", 0.0)
+        
+        # If Limit order requested but no price, get LTP from DataHub
+        if order_type == "LIMIT" and price == 0.0 and self.data_hub:
             tick = self.data_hub.get_quote(symbol)
-            if tick:
-                ltp = tick.get("ltp") or tick.get("last_price") or 0.0
-                
-                # If user asked for MARKET, or we are in LIVE mode, convert to SAFE LIMIT
-                if ltp > 0:
-                    order_type = OrderType.LIMIT
-                    
-                    # 2% buffer is standard for Nifty scalping
-                    buffer_pct = 1.02 
-                    
-                    if side == "BUY":
-                        # Buy at LTP + 2% (Aggressive Limit)
-                        raw_price = ltp * buffer_pct
-                        price = round(raw_price / 0.05) * 0.05
-                    else:
-                        # Sell at LTP - 2%
-                        price = round(ltp * (2 - buffer_pct), 1)
-                        
-                    LOGGER.info(f"🛡️ Safety Limit Applied: {symbol} {side} | LTP: {ltp} | Limit Price: {price}")
+            if tick and tick.get("ltp"):
+                ltp = float(tick["ltp"])
+                # Apply buffer (Buyer pays more, Seller asks less to ensure fill)
+                # 1% buffer helps in fast Nifty moves
+                buffer = 1.01 if side == "BUY" else 0.99
+                price = round((ltp * buffer) / 0.05) * 0.05
 
-        # --- 3. Execution ---
-        # Register active trade
-
-        LOGGER.info(f"Executing: {side} {qty} {symbol} @ {price or 'MKT'}")
+        LOGGER.info(f"🚀 Executing: {side} {qty} {symbol} @ {price or 'MKT'}")
 
         try:
-            broker_order_id = self.executor.place_order(
+            # 5. Non-Blocking Execution
+            # place_order is blocking, so we await it in a thread to keep the bot responsive.
+            broker_order_id = await asyncio.to_thread(
+                self.executor.place_order,
                 symbol=symbol,
                 side=side,
                 quantity=qty,
                 order_type=order_type,
-                price=price
+                price=price,
+                tag="strategy_auto"
             )
             
-            # [FIX] Do NOT lock forever. Release immediately so we can trade again.
-            # (We set it to ACTIVE, then clear it because the order is submitted)
-            self._active_trades.pop(key, None) 
+            # Release lock immediately on success.
+            # (Position tracking is handled by PositionManager, not here)
+            self._active_trades.pop(key, None)
             
+            # 6. Publish Success
             await self.bus.publish(
                 Message(
                     type=MessageType.ORDER_UPDATE,
@@ -134,33 +138,40 @@ class OrderProcessor:
                         "order_id": broker_order_id,
                         "symbol": symbol,
                         "status": "SUBMITTED",
-                        "price": price
+                        "price": price,
+                        "side": side
                     },
                     source="order_processor"
                 )
             )
 
         except Exception as exc:
-            LOGGER.error(f"Order failed: {exc}")
-            # Release lock on failure
+            LOGGER.error(f"❌ Order Execution Failed: {exc}", exc_info=True)
+            
+            # Release lock on failure so we can try again later
             self._active_trades.pop(key, None)
             
             await self.bus.publish(
                 Message(
                     type=MessageType.ORDER_UPDATE,
                     timestamp=now,
-                    data={"status": "REJECTED", "symbol": symbol, "error": str(exc)},
+                    data={
+                        "status": "REJECTED", 
+                        "symbol": symbol, 
+                        "error": str(exc)
+                    },
                     source="order_processor"
                 )
             )
-            self._active_trades.pop(key, None)
 
     def start(self) -> None:
+        """Start monitoring loop (delegated to executor)."""
         with suppress(Exception):
             self.executor.start_monitoring()
         self._running = True
         
     async def stop(self) -> None:
+        """Stop processing."""
         self._running = False
         with suppress(Exception):
             self.executor.stop_monitoring()
