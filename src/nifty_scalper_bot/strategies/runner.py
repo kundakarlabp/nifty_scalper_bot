@@ -886,21 +886,16 @@ class StrategyRunner:
         """
         Ingest a completed minute bar.
         Updates Indicators, Bracket Manager, and Triggers Strategies.
-        Optimized to handle OneMinuteBar(slots=True) safety.
+        
+        World-Class Design:
+        - Respects OneMinuteBar immutability (slots=True).
+        - Uses canonical .timestamp property (Contract).
+        - Fail-fast on ordering.
         """
-        # [FIX] Safely attempt to set symbol, but ignore if slots=True forbids it.
-        # This prevents the "AttributeError: 'OneMinuteBar' object has no attribute 'symbol'" crash.
-        try:
-            if not hasattr(bar, "symbol") or bar.symbol is None:
-                bar.symbol = symbol
-        except AttributeError:
-            # Slots prevent setting attribute; continue safely as 'symbol' is passed separately
-            # to indicator engine and strategy manager anyway.
-            pass 
-
+        # 1. Monotonicity Check (Prevent out-of-order processing)
         last_ts = self._last_bar_ts.get(symbol)
         
-        # 1. Monotonicity Check (Prevent out-of-order processing)
+        # Use the public .timestamp property (wraps .start) as per bar_builder contract
         if not is_backfill and last_ts and bar.timestamp <= last_ts:
             self._logger.debug(
                 "Dropping out-of-order bar", 
@@ -914,14 +909,15 @@ class StrategyRunner:
 
         try:
             # 3. INDICATORS: Feed the Engine
-            # Note: We pass 'symbol' explicitly here, so it doesn't matter if bar.symbol failed above.
+            # We pass 'symbol' explicitly because 'bar' does not carry it.
             self._indicator_engine.update_bar(symbol, bar)
 
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
+                # Compute ATR (Period 14 is standard)
                 raw_atr = self._indicator_engine.compute_atr(symbol, period=14)
                 
-                # Robust Unwrapping (Handles Float, Snapshot, or Object)
+                # Robust Unwrapping: Handles floats, ATRSnapshot objects, or NumPy scalars
                 atr_value = 0.0
                 if isinstance(raw_atr, (int, float)):
                     atr_value = float(raw_atr)
