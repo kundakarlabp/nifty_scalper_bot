@@ -851,6 +851,36 @@ class StrategyRunner:
             self._market_data.subscribe(symbol, callback)
             self._logger.info(f"✅ SUBSCRIBED via MarketData: {symbol}")
 
+    # [ADD THIS METHOD TO StrategyRunner CLASS]
+    def ingest_historical_bar(self, data: dict) -> None:
+        """
+        Public API for Startup Hydration.
+        Accepts raw OHLCV dicts from the Orchestrator (app.py) to warm up 
+        indicators without triggering strategies or external API calls.
+        """
+        try:
+            # 1. Strict Type Conversion
+            # We enforce the contract here so _ingest_bar doesn't have to guess.
+            bar = OneMinuteBar(
+                symbol=data["symbol"],
+                open=float(data["open"]),
+                high=float(data["high"]),
+                low=float(data["low"]),
+                close=float(data["close"]),
+                volume=int(data["volume"]),
+                timestamp=data["timestamp"],
+                completed=True
+            )
+
+            # 2. The Safety Guard
+            # is_backfill=True is the 'Safety Pin' that prevents the gun 
+            # (Strategy Logic) from firing while we load the magazine.
+            self._ingest_bar(data["symbol"], bar, is_backfill=True)
+
+        except Exception as exc:
+            # We log but do not crash the runner; a single bad bar shouldn't kill the bot.
+            self._logger.error(f"❌ Hydration Ingest Failed for {data.get('symbol')}: {exc}")
+
     def _ingest_bar(self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False) -> None:
         """
         Ingest a completed minute bar.
