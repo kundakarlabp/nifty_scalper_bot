@@ -878,6 +878,12 @@ class StrategyRunner:
             
             # 3. Ingest
             self._ingest_bar(data["symbol"], bar, is_backfill=True)
+            # [FIX] Force Registration: Ensure this symbol is marked as 'Active'
+            # This fixes the "Strategy runner started with symbols: []" issue.
+            with self._lock:
+                self._active_symbols.add(data["symbol"])
+                if data["symbol"] not in self._symbol_state:
+                    self._symbol_state[data["symbol"]] = SymbolState(symbol=data["symbol"])
 
         except Exception as exc:
             self._logger.error(f"❌ Hydration Ingest Failed for {data.get('symbol')}: {exc}")
