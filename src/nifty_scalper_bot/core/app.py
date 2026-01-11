@@ -3585,6 +3585,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         message_bus=message_bus,
         safe_order_manager=safe_order_manager,
         risk_manager=risk_manager,
+        position_manager=position_manager,
         data_hub=data_hub,
     )
 
