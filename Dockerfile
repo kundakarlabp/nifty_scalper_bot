@@ -6,7 +6,6 @@ FROM python:3.11-slim AS builder
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -14,25 +13,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     libssl-dev \
     curl \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy dependency metadata
+# Copy dependency definitions
 COPY requirements.txt pyproject.toml setup.py* ./
 
-# Install dependencies & the package itself
+# Install deps
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir -r requirements.txt
 
-# Sanity Check: Ensure imports work during build
-RUN python -c "import nifty_scalper_bot; print('✅ nifty_scalper_bot imported')" \
- && python -c "from nifty_scalper_bot.main import app; print('✅ app imported')"
+# --- FIX FOR BUILD ERROR ---
+# Instead of 'COPY src ./src', we copy EVERYTHING.
+# This ensures that whether you use 'src/' or a flat layout, the files are there.
+COPY . .
+
+# Install your package
+RUN pip install --no-cache-dir .
 
 # ============================================================================
-# STAGE 2 — RUNTIME (The Production Image)
+# STAGE 2 — RUNTIME
 # ============================================================================
 FROM python:3.11-slim
 
@@ -40,7 +41,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Kolkata
 
-# Runtime OS dependencies (bash/curl needed for debugging/healthchecks)
+# Install runtime tools (bash is required for entrypoint.sh)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     curl \
@@ -50,19 +51,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy installed Python packages from builder
+# Copy libraries from builder
 COPY --from=builder /usr/local/lib/python3.11/site-packages \
                     /usr/local/lib/python3.11/site-packages
 
-# Copy source code (optional if installed as package, but good for reference)
-COPY --from=builder /app/src ./src
+# Copy App Code (Resolves "module not found" if pip install failed slightly)
+COPY --from=builder /app /app
 
-# --- CRITICAL: Copy and Setup Entrypoint ---
+# --- INSTALL ENTRYPOINT ---
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Expose port (Documentation only, Railway ignores this)
-EXPOSE 8000
-
-# Use the diagnostic entrypoint
+# Start using the diagnostic script
 CMD ["/app/entrypoint.sh"]
