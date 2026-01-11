@@ -1,7 +1,6 @@
 """
 nifty_scalper_bot.main
-Railway-compatible production entrypoint.
-Handles non-blocking startup and graceful shutdown.
+Railway-compatible entrypoint with Startup Delay.
 """
 
 from __future__ import annotations
@@ -17,134 +16,97 @@ from fastapi import FastAPI
 from dotenv import load_dotenv
 
 # -----------------------------------------------------------------------------
-# 1. BOOTSTRAP: FAST & SAFE
+# 1. SETUP LOGGING (UNBUFFERED)
 # -----------------------------------------------------------------------------
-
-# Immediate feedback for logs
-print("🚀 nifty-scalper-bot initializing...", flush=True)
+# Ensure logs flush immediately so you can see them in Railway
+print("🚀 SYSTEM BOOT: Initializing...", flush=True)
 
 load_dotenv(override=True)
 
-# Configure logging to stdout
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-
 LOG = logging.getLogger("nifty_scalper_bot.main")
 
-REQUIRED_ENV_VARS = [
-    "KITE_API_KEY",
-    "KITE_API_SECRET",
-    "KITE_ACCESS_TOKEN",
-]
-
 # -----------------------------------------------------------------------------
-# 2. LIFESPAN MANAGER (NON-BLOCKING)
+# 2. LIFESPAN (WITH SAFETY DELAY)
 # -----------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Manages the application lifecycle.
-    CRITICAL: Yields immediately to allow Uvicorn to bind the port.
-    The trading bot starts in a background task.
-    """
-    # Initialize state
     app.state.bot_ready = False
     app.state.bot_error = None
     app.state.bot = None
 
-    async def boot_trading_engine():
-        """Internal task to boot the heavy trading logic."""
+    async def boot_sequence():
+        """
+        Delayed boot to ensure Uvicorn binds the port first.
+        """
         try:
-            LOG.info("🔒 Validating environment...")
-            missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
+            # 🛑 CRITICAL DELAY: Lets Railway mark the deploy 'Healthy' first
+            LOG.info("⏳ Waiting 10s for Server Port Binding...")
+            await asyncio.sleep(10) 
+
+            LOG.info("🏁 Initiating Bot Startup Sequence...")
+            
+            # Check Env Vars
+            required_vars = ["KITE_API_KEY", "KITE_API_SECRET", "KITE_ACCESS_TOKEN"]
+            missing = [v for v in required_vars if not os.getenv(v)]
             if missing:
-                raise RuntimeError(f"Missing required env vars: {missing}")
+                raise RuntimeError(f"Missing env vars: {missing}")
 
-            LOG.info("📦 Importing trading core...")
-            # Import inside function to avoid module-level import errors blocking startup
+            # Import Core (Heavy Operation)
+            LOG.info("📦 Importing NiftyScalperApp...")
             from nifty_scalper_bot.core.app import NiftyScalperApp
-
-            LOG.info("🤖 Initializing NiftyScalperApp...")
+            
+            # Initialize (Heavy Operation)
+            LOG.info("🤖 Instantiating Bot...")
             bot = NiftyScalperApp()
-            app.state.bot = bot  # Store ref for shutdown
+            app.state.bot = bot
 
-            LOG.info("▶️ Starting trading loop (Background)...")
-            # This will run forever until stop() is called
+            # Start Loop
+            LOG.info("▶️ Starting Trading Engine...")
             await bot.start()
             
-            # If we get here (unlikely for infinite loop), mark ready
-            app.state.bot_ready = True 
+            app.state.bot_ready = True
+            LOG.info("✅ Bot is Live and Trading")
 
         except asyncio.CancelledError:
-            LOG.info("🛑 Boot task cancelled")
+            LOG.info("🛑 Boot sequence cancelled")
         except Exception as exc:
+            # This catches the crash and prints it, keeping the server alive!
             app.state.bot_error = str(exc)
-            LOG.critical(f"❌ FATAL: Bot startup failed: {exc}", exc_info=True)
-            # We do NOT exit here, so the web server stays alive to serve logs/health
+            LOG.critical(f"❌ FATAL BOT CRASH: {exc}", exc_info=True)
 
-    # --- STARTUP PHASE ---
-    # Create the background task
-    boot_task = asyncio.create_task(boot_trading_engine())
+    # Launch in background
+    task = asyncio.create_task(boot_sequence())
     
-    # ⚡ YIELD IMMEDIATELY: This tells Railway "We are live!"
-    yield
+    # ⚡ YIELD INSTANTLY -> Railway sees open port -> Deployment turns Green
+    yield 
 
-    # --- SHUTDOWN PHASE ---
-    LOG.info("🛑 Shutdown signal received. Cleaning up...")
-    
-    # Cancel boot task if it's still stuck starting
-    if not boot_task.done():
-        boot_task.cancel()
-        try:
-            await boot_task
-        except asyncio.CancelledError:
-            pass
-
-    # Stop the bot gracefully
+    # Cleanup
+    if not task.done():
+        task.cancel()
     if app.state.bot:
-        try:
+        with asyncio.suppress(Exception):
             await app.state.bot.stop()
-            LOG.info("✅ Bot shutdown complete.")
-        except Exception as exc:
-            LOG.error(f"⚠️ Error during bot shutdown: {exc}", exc_info=True)
 
 # -----------------------------------------------------------------------------
-# 3. FASTAPI APP DEFINITION
+# 3. API
 # -----------------------------------------------------------------------------
 
-app = FastAPI(
-    title="Nifty Scalper Bot",
-    description="Algorithmic Trading Bot for Nifty Options",
-    version="2.0.0",
-    docs_url=None,   # Disable docs for security in prod
-    redoc_url=None,
-    lifespan=lifespan,
-)
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
-async def root() -> dict[str, str]:
-    """Simple liveness probe."""
-    return {"status": "running", "service": "nifty-scalper-bot"}
+async def root():
+    return {"status": "online", "message": "Check /health for bot status"}
 
 @app.get("/health")
-async def health() -> dict[str, Any]:
-    """
-    Health check endpoint.
-    Railway can poll this to check if the TRADING LOGIC is actually running.
-    """
-    # If the background task crashed, expose the error here
-    status = "healthy"
-    if app.state.bot_error:
-        status = "crashed"
-    elif not app.state.bot:
-        status = "initializing"
-        
+async def health():
     return {
-        "status": status,
-        "bot_ready": app.state.bot_ready,
-        "last_error": app.state.bot_error,
+        "status": "crashed" if app.state.bot_error else "running",
+        "ready": app.state.bot_ready,
+        "last_error": app.state.bot_error
     }
