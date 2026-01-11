@@ -1,6 +1,8 @@
 """
 nifty_scalper_bot.main
 Production Entrypoint: Decouples Server Startup from Trading Logic.
+This file ensures Railway sees the app as 'Healthy' immediately, 
+preventing the 6-minute timeout crash.
 """
 from __future__ import annotations
 
@@ -9,6 +11,8 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from typing import Any
+
 from fastapi import FastAPI
 from dotenv import load_dotenv
 
@@ -30,7 +34,7 @@ LOG = logging.getLogger("nifty_scalper_bot.main")
 async def run_trading_bot(app: FastAPI):
     """
     Runs the trading bot in the background. 
-    Catches errors so the web server doesn't crash.
+    Catches errors so the web server doesn't crash the container.
     """
     try:
         # Artificial delay to ensure Uvicorn binds the port FIRST
@@ -38,21 +42,22 @@ async def run_trading_bot(app: FastAPI):
         await asyncio.sleep(5) 
         
         LOG.info("📦 Importing Trading Engine...")
-        # Lazy import: Prevents import-time crashes from killing the server
+        # Lazy import: Prevents import-time crashes from killing the server before startup
         from nifty_scalper_bot.core.app import NiftyScalperApp
         
-        LOG.info("🤖 initializing Bot...")
+        LOG.info("🤖 Initializing Bot...")
         bot = NiftyScalperApp()
-        app.state.bot = bot # Save ref for shutdown
+        app.state.bot = bot # Save reference for shutdown
 
         LOG.info("▶️ Starting Trading Loop...")
-        # This will run forever
+        # This will run forever until stop() is called
         await bot.start()
         
     except asyncio.CancelledError:
         LOG.info("🛑 Bot task cancelled.")
     except Exception as exc:
         # CRITICAL: Capture the crash reason but keep server alive!
+        # This allows you to see the error in Railway logs.
         app.state.bot_error = str(exc)
         LOG.critical(f"❌ FATAL BOT CRASH: {exc}", exc_info=True)
 
@@ -79,7 +84,10 @@ async def lifespan(app: FastAPI):
             pass
 
 # --- 4. Web Application ---
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title="Nifty Scalper Bot",
+    lifespan=lifespan
+)
 
 @app.get("/")
 async def root():
@@ -92,5 +100,6 @@ async def health():
     """
     return {
         "status": "crashed" if app.state.bot_error else "running",
-        "error": app.state.bot_error
+        "error": app.state.bot_error,
+        "bot_loaded": app.state.bot is not None
     }
