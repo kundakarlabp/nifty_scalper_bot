@@ -10,6 +10,11 @@ from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.risk import RiskManager
 
+# --- Order Execution States ---
+INTENT = "INTENT"   # Signal accepted, execution pending
+ACTIVE = "ACTIVE"   # Order successfully submitted
+
+
 LOGGER = logging.getLogger(__name__)
 
 class OrderProcessor:
@@ -33,7 +38,7 @@ class OrderProcessor:
         
         # Anti-Whipsaw: Track last signal time per symbol
         self._last_signal_time: dict[tuple[str, str], datetime] = {}
-        self._active_trades: dict[str, str] = {}
+        self._active_trades: dict[tuple[str, str], str] = {}
 
         # Cooldown (seconds)
         self._debounce_seconds = 60.0
@@ -73,8 +78,7 @@ class OrderProcessor:
             return
 
         self._last_signal_time[key] = now
-        self._active_trades[key] = "INTENT"
-
+        self._active_trades[key] = INTENT
 
         # --- 2. Smart Price Calculation (Slippage Protection) ---
         # Convert MARKET orders to LIMIT orders with a protection buffer
@@ -118,7 +122,7 @@ class OrderProcessor:
                 price=price
             )
             # 🔒 Register active trade ONLY after broker ACK
-            self._active_trades[key] = side
+            self._active_trades[key] = ACTIVE
             
             # Publish Success
             await self.bus.publish(
@@ -148,6 +152,7 @@ class OrderProcessor:
                     source="order_processor"
                 )
             )
+            self._active_trades.pop(key, None)
 
     def start(self) -> None:
         with suppress(Exception):
