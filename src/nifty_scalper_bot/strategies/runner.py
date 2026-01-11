@@ -855,32 +855,27 @@ class StrategyRunner:
     def ingest_historical_bar(self, data: dict) -> None:
         """
         Public API for Startup Hydration.
-        Strictly conforms to OneMinuteBar(open, high, low, close, volume, start, end).
+        Strictly conforms to OneMinuteBar(slots=True) - No attribute injection.
         """
         try:
-            # 1. Extract the single timestamp we have (Open Time)
+            # 1. Extract timestamps
             ts = data["timestamp"]
-            
-            # 2. Derive 'end' time (Mandatory for your class)
-            # Since we only have the open time from history, we assume 1-minute duration.
-            # This satisfies the contract safely.
             end_ts = ts + timedelta(minutes=1)
 
-            # 3. Construct EXACTLY matching the signature in bar_builder.py
+            # 2. Construct EXACTLY matching the signature
             bar = OneMinuteBar(
                 open=float(data["open"]),
                 high=float(data["high"]),
                 low=float(data["low"]),
                 close=float(data["close"]),
                 volume=int(data["volume"]),
-                start=ts,      # <--- Matches 'start' field
-                end=end_ts     # <--- Matches 'end' field
+                start=ts,
+                end=end_ts
             )
             
-            # 4. Attach metadata that isn't in __init__
-            #bar.symbol = data["symbol"]
+            # [FIX] REMOVED: bar.symbol = data["symbol"] (Causes AttributeError)
             
-            # 5. Ingest
+            # 3. Ingest
             self._ingest_bar(data["symbol"], bar, is_backfill=True)
 
         except Exception as exc:
@@ -891,17 +886,21 @@ class StrategyRunner:
         """
         Ingest a completed minute bar.
         Updates Indicators, Bracket Manager, and Triggers Strategies.
-        
-        Args:
-            symbol: Trading symbol.
-            bar: The completed OneMinuteBar object.
-            is_backfill: If True, bypasses timestamp monotonicity checks for historical data.
+        Optimized to handle OneMinuteBar(slots=True) safety.
         """
-        if not hasattr(bar, "symbol") or bar.symbol is None:
-            bar.symbol = symbol
+        # [FIX] Safely attempt to set symbol, but ignore if slots=True forbids it.
+        # This prevents the "AttributeError: 'OneMinuteBar' object has no attribute 'symbol'" crash.
+        try:
+            if not hasattr(bar, "symbol") or bar.symbol is None:
+                bar.symbol = symbol
+        except AttributeError:
+            # Slots prevent setting attribute; continue safely as 'symbol' is passed separately
+            # to indicator engine and strategy manager anyway.
+            pass 
 
         last_ts = self._last_bar_ts.get(symbol)
         
+        # 1. Monotonicity Check (Prevent out-of-order processing)
         if not is_backfill and last_ts and bar.timestamp <= last_ts:
             self._logger.debug(
                 "Dropping out-of-order bar", 
@@ -909,22 +908,17 @@ class StrategyRunner:
             )
             return
 
-        if not last_ts or bar.timestamp > last_ts:
-            self._last_bar_ts[symbol] = bar.timestamp
-
         # 2. STATE: Update High-Water Mark
-        
         if not last_ts or bar.timestamp > last_ts:
             self._last_bar_ts[symbol] = bar.timestamp
 
         try:
             # 3. INDICATORS: Feed the Engine
-            # Feed IndicatorEngine using its real API
+            # Note: We pass 'symbol' explicitly here, so it doesn't matter if bar.symbol failed above.
             self._indicator_engine.update_bar(symbol, bar)
 
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
-                # Compute ATR (Period 14 is standard)
                 raw_atr = self._indicator_engine.compute_atr(symbol, period=14)
                 
                 # Robust Unwrapping (Handles Float, Snapshot, or Object)
@@ -944,8 +938,8 @@ class StrategyRunner:
             # CRITICAL: Do NOT run strategies during backfill (prevents phantom trades).
             if is_backfill:
                 return
+            
             with self._lock:
-                # Update Symbol State for context
                 state = self._symbol_state.get(symbol)
                 if state:
                     state.last_tick = {
