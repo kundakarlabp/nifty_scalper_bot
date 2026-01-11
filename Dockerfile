@@ -6,7 +6,7 @@ FROM python:3.11-slim AS builder
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# System deps needed to build wheels
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -19,25 +19,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy only dependency metadata first (for Docker cache efficiency)
+# Copy dependency metadata
 COPY requirements.txt pyproject.toml setup.py* ./
 
-# Install dependencies into a virtual location
+# Install dependencies & the package itself
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir .
 
-# Copy source code
-COPY src ./src
-
-# Install YOUR package (NON-editable — critical)
-RUN pip install --no-cache-dir .
-
-# Sanity check: ensure imports work (Railway does this too)
+# Sanity Check: Ensure imports work during build
 RUN python -c "import nifty_scalper_bot; print('✅ nifty_scalper_bot imported')" \
  && python -c "from nifty_scalper_bot.main import app; print('✅ app imported')"
 
 # ============================================================================
-# STAGE 2 — RUNTIME
+# STAGE 2 — RUNTIME (The Production Image)
 # ============================================================================
 FROM python:3.11-slim
 
@@ -45,27 +40,29 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=Asia/Kolkata
 
-# Runtime OS deps only
+# Runtime OS dependencies (bash/curl needed for debugging/healthchecks)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     curl \
+    bash \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy installed Python packages
+# Copy installed Python packages from builder
 COPY --from=builder /usr/local/lib/python3.11/site-packages \
                     /usr/local/lib/python3.11/site-packages
 
-# Copy application source
+# Copy source code (optional if installed as package, but good for reference)
 COPY --from=builder /app/src ./src
-COPY pyproject.toml .
 
-# Expose port (Railway injects $PORT)
+# --- CRITICAL: Copy and Setup Entrypoint ---
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Expose port (Documentation only, Railway ignores this)
 EXPOSE 8000
 
-# IMPORTANT:
-# DO NOT use python -m ...
-# Railway must run uvicorn directly
-CMD ["uvicorn", "nifty_scalper_bot.main:app", "--host", "0.0.0.0", "--port", "${PORT}"]
+# Use the diagnostic entrypoint
+CMD ["/app/entrypoint.sh"]
