@@ -1432,14 +1432,17 @@ class StrategyRunner:
         if not symbols_to_load:
             return
 
-        # 3. Parallel Fetching (5 days history)
-        days = 5 
-        tasks = [source.fetch_history(sym, "minute", days=days) for sym in symbols_to_load]
-        
-        self._logger.info(f"⏳ Fetching history for {len(symbols_to_load)} symbols in parallel...")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 3. Historical backfill DISABLED
+        # History is already hydrated during startup_sequence.
+        # Parallel fetch here causes Zerodha rate-limit violations.
 
-        total_bars = 0
+        self._logger.info(
+            "⏭️ Skipping StrategyRunner historical backfill "
+            "(startup hydration already completed)"
+        )
+
+        results = []
+
         
         # 4. Process Results
         for symbol, candles in zip(symbols_to_load, results):
