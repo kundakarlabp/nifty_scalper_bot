@@ -4934,6 +4934,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                     await asyncio.sleep(HYDRATION_DELAY_SEC)
 
             await ctx.market_regime_manager.refresh_from_indicators()
+            # -------------------------------------------------
+            # MARK INDICATORS AS WARM / READY
+            # -------------------------------------------------
+            ctx.market_regime_manager.indicators_ready = True
+            LOGGER.info("🧠 Indicators fully hydrated and READY at startup")
+
 
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
