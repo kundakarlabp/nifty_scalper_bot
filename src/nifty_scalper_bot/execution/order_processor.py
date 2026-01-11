@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.execution.order_manager import OrderManager
-from nifty_scalper_bot.risk.manager import RiskManager
+from nifty_scalper_bot.risk.risk_manager import RiskManager
 
 # --- Order Execution States ---
 INTENT = "INTENT"   # Signal accepted, execution pending
