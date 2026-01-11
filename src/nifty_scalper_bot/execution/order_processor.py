@@ -141,8 +141,6 @@ class OrderProcessor:
 
         except Exception as exc:
             LOGGER.error(f"Order failed: {exc}")
-            # 🔓 Release lock on failure
-            self._active_trades.pop(key, None)
             # Publish Failure
             await self.bus.publish(
                 Message(
