@@ -425,6 +425,7 @@ class StrategyRunner:
         self._symbol_state: Dict[str, SymbolState] = {}
         self._callbacks: MutableMapping[str, Callable[[dict], None]] = {}
         self._bar_builders: Dict[str, OneMinuteBarBuilder] = {}
+        self._last_bar_ts: dict[str, datetime] = {}
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
 
