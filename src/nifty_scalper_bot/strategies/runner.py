@@ -856,8 +856,11 @@ class StrategyRunner:
     def ingest_historical_bar(self, data: dict) -> None:
         """
         Public API for Startup Hydration.
-        Strictly conforms to OneMinuteBar(slots=True) - No attribute injection.
+        Strictly conforms to OneMinuteBar(slots=True).
         """
+        # [FIX] Mark as hydrated so _backfill_history knows to skip
+        self._startup_hydrated = True
+
         try:
             # 1. Extract timestamps
             ts = data["timestamp"]
@@ -874,18 +877,16 @@ class StrategyRunner:
                 end=end_ts
             )
             
-            # [FIX] REMOVED: bar.symbol = data["symbol"] (Causes AttributeError)
-            
             # 3. Ingest
             self._ingest_bar(data["symbol"], bar, is_backfill=True)
-            # [FIX] Force Registration with correct SymbolState signature
+
+            # 4. Force Registration
             with self._lock:
                 self._active_symbols.add(data["symbol"])
                 if data["symbol"] not in self._symbol_state:
-                    # Fix: Provide the required history_limit argument (defaulting to 2000)
                     self._symbol_state[data["symbol"]] = SymbolState(
                         symbol=data["symbol"],
-                        history_limit=2000  # <--- Added this required argument
+                        history_limit=2000
                     )
 
         except Exception as exc:
@@ -1448,32 +1449,24 @@ class StrategyRunner:
     async def _backfill_history(self) -> None:
         """
         Download historical data to warm up indicators.
-        
-        Logic:
-        1. Checks if hydration (from app.py) already populated the bars.
-        2. If hydrated: Skips safely (Efficiency).
-        3. If empty (Failover): Fetches history sequentially with throttling (Safety).
+        Skips if startup hydration was already performed by App.py.
         """
-        # [FIX] Initialize variable safely at the top scope to prevent UnboundLocalError
         total_bars = 0
 
         try:
-            # 1. OPTIMIZATION: Check if hydration already happened via App.py
-            # If we have bars in memory, we skip the redundant API calls.
-            # This is the "Happy Path" that runs 99% of the time.
-            has_data = self._bar_builders and any(len(b._bars) > 0 for b in self._bar_builders.values())
-            
-            # Also check the explicit flag if you set it during ingest
+            # 1. Check Hydration Flag (Set by ingest_historical_bar)
             is_hydrated = getattr(self, "_startup_hydrated", False)
+            
+            # Also check memory just in case
+            has_data = self._bar_builders and any(len(b._bars) > 0 for b in self._bar_builders.values())
 
-            if has_data or is_hydrated:
+            if is_hydrated or has_data:
                 self._logger.info("⏭️ Skipping StrategyRunner historical backfill (startup hydration already completed)")
                 return
 
-            # 2. FALLBACK LOGIC: Only runs if App.py hydration FAILED (Resilience)
+            # 2. FALLBACK: Only runs if App.py failed
             self._logger.warning("⚠️ StrategyRunner memory is empty! Triggering fallback backfill...")
             
-            # Get targets from the active list
             with self._lock:
                 targets = list(self._active_symbols)
             
@@ -1481,7 +1474,7 @@ class StrategyRunner:
                 self._logger.warning("⚠️ Backfill skipped: No active symbols found.")
                 return
 
-            # Determine Data Source (Prefer DataHub, fall back to Orchestrator)
+            # Determine Data Source
             source = None
             if hasattr(self, "_data_hub") and self._data_hub and hasattr(self._data_hub, "fetch_history"):
                 source = self._data_hub
@@ -1489,25 +1482,20 @@ class StrategyRunner:
                 source = self._orchestrator
 
             if not source:
-                self._logger.error("❌ No history source available for fallback backfill.")
                 return
 
-            # 3. SEQUENTIAL FETCH (Throttled)
-            # We fetch 1-by-1 with a sleep to prevent 429 Rate Limit crashes in this emergency path.
+            # 3. SEQUENTIAL FETCH
             for symbol in targets:
                 try:
-                    # Fetch 5 days of history
-                    history = await source.fetch_history(symbol, days=5)
+                    # [FIX] Added interval="minute" to fix TypeError
+                    history = await source.fetch_history(symbol, interval="minute", days=5)
                     
                     if history:
                         for bar_data in history:
-                            # Re-use the robust ingest method we just fixed
                             self.ingest_historical_bar(bar_data)
                             total_bars += 1
-                        
                         self._logger.info(f"✅ Fallback backfill: Ingested {len(history)} bars for {symbol}")
                     
-                    # CRITICAL: Throttle to protect Broker limits
                     await asyncio.sleep(0.5) 
 
                 except Exception as e:
@@ -1516,7 +1504,6 @@ class StrategyRunner:
         except Exception as exc:
              self._logger.error(f"❌ History backfill crashed: {exc}", exc_info=True)
         
-        # Final log (Safe because total_bars is initialized)
         if total_bars > 0:
             self._logger.info(f"✅ Emergency Backfill complete. Ingested {total_bars} bars.")
 
