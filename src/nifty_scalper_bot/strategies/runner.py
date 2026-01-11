@@ -855,30 +855,66 @@ class StrategyRunner:
     def ingest_historical_bar(self, data: dict) -> None:
         """
         Public API for Startup Hydration.
-        Corrected to use 'ts' instead of 'timestamp'.
+        Robustly attempts to construct OneMinuteBar by trying valid field names.
         """
         try:
-            # [FIX] Use 'ts' instead of 'timestamp'
-            # [FIX] Do not pass 'symbol' to constructor
-            bar = OneMinuteBar(
-                open=float(data["open"]),
-                high=float(data["high"]),
-                low=float(data["low"]),
-                close=float(data["close"]),
-                volume=int(data["volume"]),
-                ts=data["timestamp"],  # <--- CHANGED THIS LINE
-                completed=True
-            )
+            # Common arguments
+            common_args = {
+                "open": float(data["open"]),
+                "high": float(data["high"]),
+                "low": float(data["low"]),
+                "close": float(data["close"]),
+                "volume": int(data["volume"]),
+                "completed": True
+            }
+            ts_val = data["timestamp"]
             
-            # Manually set symbol after creation
-            bar.symbol = data["symbol"]
+            bar = None
+            
+            # ATTEMPT 1: Try 'datetime' (Standard Dataclass field)
+            try:
+                bar = OneMinuteBar(**common_args, datetime=ts_val)
+            except TypeError:
+                pass
 
-            # Pass to internal logic
-            self._ingest_bar(data["symbol"], bar, is_backfill=True)
+            # ATTEMPT 2: Try 'time' (Alternative)
+            if bar is None:
+                try:
+                    bar = OneMinuteBar(**common_args, time=ts_val)
+                except TypeError:
+                    pass
+            
+            # ATTEMPT 3: Try 'timestamp' (Retry in case of previous noise)
+            if bar is None:
+                try:
+                    bar = OneMinuteBar(**common_args, timestamp=ts_val)
+                except TypeError:
+                    pass
+
+            # FAILURE TRAP: If all failed, try Positional (O, H, L, C, V, T, Completed)
+            if bar is None:
+                try:
+                    bar = OneMinuteBar(
+                        common_args["open"], common_args["high"], common_args["low"], 
+                        common_args["close"], common_args["volume"], ts_val, True
+                    )
+                except Exception as exc:
+                    self._logger.error(f"❌ All OneMinuteBar constructors failed. Fields: {dir(OneMinuteBar)}")
+                    raise exc
+
+            # Manually set symbol (as it's definitely not in __init__)
+            if bar:
+                bar.symbol = data["symbol"]
+                # Ensure .timestamp attribute exists for downstream logic
+                if not hasattr(bar, "timestamp"):
+                    bar.timestamp = ts_val
+
+                # Pass to internal logic
+                self._ingest_bar(data["symbol"], bar, is_backfill=True)
 
         except Exception as exc:
-            # Fallback: If 'ts' also fails, try without 'completed' or log the structure
             self._logger.error(f"❌ Hydration Ingest Failed for {data.get('symbol')}: {exc}")
+            
             
     def _ingest_bar(self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False) -> None:
         """
