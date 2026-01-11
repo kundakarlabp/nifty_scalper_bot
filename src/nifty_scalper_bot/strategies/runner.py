@@ -855,28 +855,29 @@ class StrategyRunner:
     def ingest_historical_bar(self, data: dict) -> None:
         """
         Public API for Startup Hydration.
-        Corrected to match OneMinuteBar signature.
+        Corrected to use 'ts' instead of 'timestamp'.
         """
         try:
-            # [FIX] Do not pass 'symbol' to constructor.
+            # [FIX] Use 'ts' instead of 'timestamp'
+            # [FIX] Do not pass 'symbol' to constructor
             bar = OneMinuteBar(
                 open=float(data["open"]),
                 high=float(data["high"]),
                 low=float(data["low"]),
                 close=float(data["close"]),
                 volume=int(data["volume"]),
-                timestamp=data["timestamp"],
+                ts=data["timestamp"],  # <--- CHANGED THIS LINE
                 completed=True
             )
             
-            # [FIX] Set symbol manually after creation (if supported)
-            # The _ingest_bar method will also ensure it's set.
+            # Manually set symbol after creation
             bar.symbol = data["symbol"]
 
             # Pass to internal logic
             self._ingest_bar(data["symbol"], bar, is_backfill=True)
 
         except Exception as exc:
+            # Fallback: If 'ts' also fails, try without 'completed' or log the structure
             self._logger.error(f"❌ Hydration Ingest Failed for {data.get('symbol')}: {exc}")
             
     def _ingest_bar(self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False) -> None:
