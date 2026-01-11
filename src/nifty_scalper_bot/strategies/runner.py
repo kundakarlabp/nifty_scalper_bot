@@ -878,7 +878,7 @@ class StrategyRunner:
             )
             
             # 4. Attach metadata that isn't in __init__
-            bar.symbol = data["symbol"]
+            #bar.symbol = data["symbol"]
             
             # 5. Ingest
             self._ingest_bar(data["symbol"], bar, is_backfill=True)
