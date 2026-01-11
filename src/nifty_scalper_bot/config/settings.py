@@ -79,27 +79,33 @@ def _sanitize_token(raw: str) -> str:
     return token
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name, str(default)).lower()
+def _env_bool(name: str, _pos_default: bool | None = None, default: bool = False) -> bool:
+    # Handle double-argument calls (The specific cause of your crash)
+    effective_default = _pos_default if _pos_default is not None else default
+
+    raw = os.getenv(name, str(effective_default)).lower()
     val = raw in ("true", "1", "yes", "on")
     
     LOGGER.info(
         f"Condition met: settings_env_bool_default {name}={val}",
         extra={
             "event": "settings_env_bool_default",
-            "setting_name": name,  # ✅ FIXED
+            "setting_name": name,
             "value": val
         },
     )
     return val
 
 
-def _env_float(name: str, default: float = 0.0, minimum: float | None = None) -> float:
-    raw = os.getenv(name, str(default))
+def _env_float(name: str, _pos_default: float | None = None, default: float = 0.0, minimum: float | None = None) -> float:
+    # Handle double-argument calls
+    effective_default = _pos_default if _pos_default is not None else default
+
+    raw = os.getenv(name, str(effective_default))
     try:
         val = float(raw)
     except ValueError:
-        val = default
+        val = effective_default
 
     if minimum is not None and val < minimum:
         val = minimum
@@ -108,18 +114,21 @@ def _env_float(name: str, default: float = 0.0, minimum: float | None = None) ->
         f"Condition met: settings_env_float_resolved {name}={val}",
         extra={
             "event": "settings_env_float_resolved",
-            "setting_name": name,  # ✅ FIXED
+            "setting_name": name,
             "value": val
         },
     )
     return val
 
-def _env_int(name: str, default: int = 0, minimum: int | None = None) -> int:
-    raw = os.getenv(name, str(default))
+def _env_int(name: str, _pos_default: int | None = None, default: int = 0, minimum: int | None = None) -> int:
+    # Handle double-argument calls
+    effective_default = _pos_default if _pos_default is not None else default
+
+    raw = os.getenv(name, str(effective_default))
     try:
         val = int(raw)
     except ValueError:
-        val = default
+        val = effective_default
     
     if minimum is not None and val < minimum:
         val = minimum
@@ -128,25 +137,25 @@ def _env_int(name: str, default: int = 0, minimum: int | None = None) -> int:
         f"Condition met: settings_env_int_resolved {name}={val}",
         extra={
             "event": "settings_env_int_resolved",
-            "setting_name": name,  # ✅ FIXED
+            "setting_name": name,
             "value": val
         },
     )
     return val
 
 
-def _env_str(name: str, default: str = "", secret: bool = False) -> str:
-    val = os.getenv(name, default)
-    if secret and val:
-        log_val = "***"
-    else:
-        log_val = val
+def _env_str(name: str, _pos_default: str | None = None, default: str = "", secret: bool = False) -> str:
+    # Handle cases where default is passed both positionally and via keyword
+    effective_default = _pos_default if _pos_default is not None else default
+    
+    val = os.getenv(name, effective_default)
+    log_val = "***" if secret and val else val
     
     LOGGER.info(
         f"Condition met: settings_env_str_resolved {name}={log_val}",
         extra={
             "event": "settings_env_str_resolved",
-            "setting_name": name,  # ✅ FIXED: changed from "name"
+            "setting_name": name,
             "value": log_val
         },
     )
@@ -266,8 +275,11 @@ def _env_csv_ints(*names: str) -> Set[int]:
         return values
 
 
-def _env_csv_strs(name: str, default: str = "") -> set[str]:
-    raw = os.getenv(name, default)
+def _env_csv_strs(name: str, _pos_default: str | None = None, default: str = "") -> set[str]:
+    # Handle double-argument calls
+    effective_default = _pos_default if _pos_default is not None else default
+
+    raw = os.getenv(name, effective_default)
     if not raw.strip():
         val = set()
     else:
@@ -277,7 +289,7 @@ def _env_csv_strs(name: str, default: str = "") -> set[str]:
         f"Condition met: settings_env_csv_strs_resolved {name}",
         extra={
             "event": "settings_env_csv_strs_resolved",
-            "setting_name": name,  # ✅ FIXED
+            "setting_name": name,
             "count": len(val)
         },
     )
