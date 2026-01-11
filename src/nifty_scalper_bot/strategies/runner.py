@@ -894,31 +894,30 @@ class StrategyRunner:
 
     def mark_ready(self, symbols: list[str]) -> None:
         """
-        Finalizes startup hydration. Initializes BarBuilders for live trading.
-        CRITICAL: Prevents KeyError in on_tick when live market opens.
+        Public API to finalize startup hydration.
+        Explicitly registers symbols and sets readiness flags.
         """
         with self._lock:
             for sym in symbols:
-                # 1. Register Active
+                # 1. Register Active (Critical for main loop)
                 self._active_symbols.add(sym)
 
-                # 2. Ensure SymbolState exists
+                # 2. Ensure SymbolState exists (Critical for Strategy Context)
                 if sym not in self._symbol_state:
                     self._symbol_state[sym] = SymbolState(
                         symbol=sym, 
                         history_limit=2000
                     )
 
-                # 3. Initialize BarBuilder (THE MISSING LINK)
-                # Without this, on_tick crashes.
+                # 3. Initialize BarBuilder (Prevent KeyErrors in internal checks)
                 if sym not in self._bar_builders:
                     self._bar_builders[sym] = OneMinuteBarBuilder()
 
-                # 4. Set High-Water Mark 
+                # 4. Set High-Water Mark (Prevent dropping first live tick)
                 if sym not in self._last_bar_ts:
                     self._last_bar_ts[sym] = datetime.now(timezone.utc)
 
-        # 5. Set Global Flags
+        # 5. THE KILL SWITCH: Prevents fallback backfill logic from running
         self._startup_hydrated = True
         
         self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
@@ -1489,7 +1488,7 @@ class StrategyRunner:
             is_hydrated = getattr(self, "_startup_hydrated", False)
             
             # Also check memory just in case
-            has_data = self._bar_builders and any(len(b._bars) > 0 for b in self._bar_builders.values())
+            has_data = bool(self._last_bar_ts)    
 
             if is_hydrated or has_data:
                 self._logger.info("⏭️ Skipping StrategyRunner historical backfill (startup hydration already completed)")
