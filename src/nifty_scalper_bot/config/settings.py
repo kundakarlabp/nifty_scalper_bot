@@ -79,87 +79,260 @@ def _sanitize_token(raw: str) -> str:
     return token
 
 
-def _env_bool(name: str, _pos_default: bool | None = None, default: bool = False) -> bool:
-    # Handle double-argument calls (The specific cause of your crash)
-    effective_default = _pos_default if _pos_default is not None else default
+def _env_bool(*names: str, default: bool = False) -> bool:
+    """Return boolean environment value honouring canonical aliases.
 
-    raw = os.getenv(name, str(effective_default)).lower()
-    val = raw in ("true", "1", "yes", "on")
-    
-    LOGGER.info(
-        f"Condition met: settings_env_bool_default {name}={val}",
-        extra={
-            "event": "settings_env_bool_default",
-            "setting_name": name,
-            "value": val
-        },
+    Args:
+        *names: Candidate environment variable names to evaluate.
+        default: Value returned when none of the names resolve.
+
+    Returns:
+        bool: Parsed boolean value.
+
+    Raises:
+        ConfigurationError: When a provided environment value is invalid.
+    """
+
+    LOGGER.debug(
+        "Entered _env_bool",
+        extra={"event": "settings_env_bool_enter", "names": list(names)},
     )
-    return val
-
-
-def _env_float(name: str, _pos_default: float | None = None, default: float = 0.0, minimum: float | None = None) -> float:
-    # Handle double-argument calls
-    effective_default = _pos_default if _pos_default is not None else default
-
-    raw = os.getenv(name, str(effective_default))
     try:
-        val = float(raw)
-    except ValueError:
-        val = effective_default
+        candidates = names or ("",)
+        for name in candidates:
+            if not name:
+                continue
+            raw_value = resolve_env(name)
+            if raw_value is None:
+                continue
+            token = _sanitize_token(str(raw_value))
+            if not token:
+                continue
+            normalized = token.lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                LOGGER.info(
+                    "Condition met: settings_env_bool_true",
+                    extra={"event": "settings_env_bool_true", "name": name},
+                )
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                LOGGER.info(
+                    "Condition met: settings_env_bool_false",
+                    extra={"event": "settings_env_bool_false", "name": name},
+                )
+                return False
+            raise ConfigurationError(f"Invalid boolean for {name!s}: {raw_value!r}")
+        LOGGER.info(
+            "Condition met: settings_env_bool_default",
+            extra={"event": "settings_env_bool_default", "default": bool(default)},
+        )
+        return bool(default)
+    except ConfigurationError:
+        LOGGER.error(
+            "Failure in _env_bool: invalid value",
+            extra={"event": "settings_env_bool_invalid", "names": list(names)},
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in _env_bool: %s",
+            exc,
+            extra={"event": "settings_env_bool_error", "names": list(names)},
+            exc_info=exc,
+        )
+        return bool(default)
 
-    if minimum is not None and val < minimum:
-        val = minimum
 
-    LOGGER.info(
-        f"Condition met: settings_env_float_resolved {name}={val}",
+def _env_float(*names: str, default: float, minimum: float | None = None) -> float:
+    """Return float environment value enforcing optional minimum bound.
+
+    Args:
+        *names: Candidate environment variable names to evaluate.
+        default: Default value when no environment overrides are set.
+        minimum: Optional lower bound applied to the resolved value.
+
+    Returns:
+        float: Parsed float value obeying the optional minimum.
+
+    Raises:
+        ConfigurationError: When the resolved value violates constraints.
+    """
+
+    LOGGER.debug(
+        "Entered _env_float",
         extra={
-            "event": "settings_env_float_resolved",
-            "setting_name": name,
-            "value": val
+            "event": "settings_env_float_enter",
+            "names": list(names),
+            "minimum": minimum,
         },
     )
-    return val
-
-def _env_int(name: str, _pos_default: int | None = None, default: int = 0, minimum: int | None = None) -> int:
-    # Handle double-argument calls
-    effective_default = _pos_default if _pos_default is not None else default
-
-    raw = os.getenv(name, str(effective_default))
     try:
-        val = int(raw)
-    except ValueError:
-        val = effective_default
-    
-    if minimum is not None and val < minimum:
-        val = minimum
+        source_name = names[0] if names else "value"
+        value = float(default)
+        for name in names or ("",):
+            if not name:
+                continue
+            raw_value = resolve_env(name)
+            if raw_value is None:
+                continue
+            candidate = str(raw_value).strip()
+            if not candidate:
+                continue
+            try:
+                value = float(candidate)
+            except ValueError as exc:  # pragma: no cover - defensive
+                raise ConfigurationError(
+                    f"Invalid float for {name!s}: {raw_value!r}"
+                ) from exc
+            source_name = name
+            break
+        if minimum is not None and value < minimum:
+            raise ConfigurationError(
+                f"Invalid float for {source_name!s}: {value!r} < minimum {minimum!r}"
+            )
+        LOGGER.info(
+            "Condition met: settings_env_float_resolved",
+            extra={
+                "event": "settings_env_float_resolved",
+                "source": source_name,
+                "value": value,
+            },
+        )
+        return value
+    except ConfigurationError:
+        LOGGER.error(
+            "Failure in _env_float: invalid configuration",
+            extra={"event": "settings_env_float_invalid", "names": list(names)},
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in _env_float: %s",
+            exc,
+            extra={"event": "settings_env_float_error", "names": list(names)},
+            exc_info=exc,
+        )
+        return float(default)
 
-    LOGGER.info(
-        f"Condition met: settings_env_int_resolved {name}={val}",
+
+def _env_int(*names: str, default: int, minimum: int | None = None) -> int:
+    """Return integer environment value enforcing optional minimum bound.
+
+    Args:
+        *names: Candidate environment variable names to evaluate.
+        default: Default value when no environment overrides are set.
+        minimum: Optional lower bound applied to the resolved value.
+
+    Returns:
+        int: Parsed integer value obeying the optional minimum.
+
+    Raises:
+        ConfigurationError: When the resolved value violates constraints.
+    """
+
+    LOGGER.debug(
+        "Entered _env_int",
         extra={
-            "event": "settings_env_int_resolved",
-            "setting_name": name,
-            "value": val
+            "event": "settings_env_int_enter",
+            "names": list(names),
+            "minimum": minimum,
         },
     )
-    return val
+    try:
+        source_name = names[0] if names else "value"
+        value = int(default)
+        for name in names or ("",):
+            if not name:
+                continue
+            raw_value = resolve_env(name)
+            if raw_value is None:
+                continue
+            candidate = str(raw_value).strip()
+            if not candidate:
+                continue
+            try:
+                value = int(candidate)
+            except ValueError as exc:  # pragma: no cover - defensive
+                raise ConfigurationError(
+                    f"Invalid integer for {name!s}: {raw_value!r}"
+                ) from exc
+            source_name = name
+            break
+        if minimum is not None and value < minimum:
+            raise ConfigurationError(
+                f"Invalid integer for {source_name!s}: {value!r} < minimum {minimum!r}"
+            )
+        LOGGER.info(
+            "Condition met: settings_env_int_resolved",
+            extra={
+                "event": "settings_env_int_resolved",
+                "source": source_name,
+                "value": value,
+            },
+        )
+        return value
+    except ConfigurationError:
+        LOGGER.error(
+            "Failure in _env_int: invalid configuration",
+            extra={"event": "settings_env_int_invalid", "names": list(names)},
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in _env_int: %s",
+            exc,
+            extra={"event": "settings_env_int_error", "names": list(names)},
+            exc_info=exc,
+        )
+        return int(default)
 
 
-def _env_str(name: str, _pos_default: str | None = None, default: str = "", secret: bool = False) -> str:
-    # Handle cases where default is passed both positionally and via keyword
-    effective_default = _pos_default if _pos_default is not None else default
-    
-    val = os.getenv(name, effective_default)
-    log_val = "***" if secret and val else val
-    
-    LOGGER.info(
-        f"Condition met: settings_env_str_resolved {name}={log_val}",
-        extra={
-            "event": "settings_env_str_resolved",
-            "setting_name": name,
-            "value": log_val
-        },
+def _env_str(*names: str, default: str = "") -> str:
+    """Return string environment value honouring canonical aliases.
+
+    Args:
+        *names: Candidate environment variable names to evaluate.
+        default: Fallback value when none of the names resolve.
+
+    Returns:
+        str: Parsed string value or default.
+
+    Raises:
+        None.
+    """
+
+    LOGGER.debug(
+        "Entered _env_str",
+        extra={"event": "settings_env_str_enter", "names": list(names)},
     )
-    return val
+    try:
+        for name in names or ("",):
+            if not name:
+                continue
+            raw_value = resolve_env(name)
+            if raw_value is None:
+                continue
+            value = str(raw_value).strip()
+            if value:
+                LOGGER.info(
+                    "Condition met: settings_env_str_resolved",
+                    extra={"event": "settings_env_str_resolved", "name": name},
+                )
+                return value
+        LOGGER.info(
+            "Condition met: settings_env_str_default",
+            extra={"event": "settings_env_str_default", "default": default},
+        )
+        return default
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in _env_str: %s",
+            exc,
+            extra={"event": "settings_env_str_error", "names": list(names)},
+            exc_info=exc,
+        )
+        return default
+
 
 def _env_csv(*names: str) -> list[str]:
     """Return list of CSV tokens from environment with alias support.
@@ -275,25 +448,52 @@ def _env_csv_ints(*names: str) -> Set[int]:
         return values
 
 
-def _env_csv_strs(name: str, _pos_default: str | None = None, default: str = "") -> set[str]:
-    # Handle double-argument calls
-    effective_default = _pos_default if _pos_default is not None else default
+def _env_csv_strs(*names: str) -> Set[str]:
+    """Return set of strings parsed from CSV environment variables.
 
-    raw = os.getenv(name, effective_default)
-    if not raw.strip():
-        val = set()
-    else:
-        val = {x.strip() for x in raw.split(",") if x.strip()}
-    
-    LOGGER.info(
-        f"Condition met: settings_env_csv_strs_resolved {name}",
-        extra={
-            "event": "settings_env_csv_strs_resolved",
-            "setting_name": name,
-            "count": len(val)
-        },
+    Args:
+        *names: Candidate environment variable names to evaluate.
+
+    Returns:
+        Set[str]: Parsed set of strings.
+
+    Raises:
+        None.
+    """
+
+    LOGGER.debug(
+        "Entered _env_csv_strs",
+        extra={"event": "settings_env_csv_strs_enter", "names": list(names)},
     )
-    return val
+    values: set[str] = set()
+    try:
+        for name in names or ("",):
+            if not name:
+                continue
+            raw_values = _env_csv(name)
+            if not raw_values:
+                continue
+            for item in raw_values:
+                token = item.strip()
+                if token:
+                    values.add(token)
+        LOGGER.info(
+            "Condition met: settings_env_csv_strs_resolved",
+            extra={
+                "event": "settings_env_csv_strs_resolved",
+                "names": list(names),
+                "count": len(values),
+            },
+        )
+        return values
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in _env_csv_strs: %s",
+            exc,
+            extra={"event": "settings_env_csv_strs_error", "names": list(names)},
+            exc_info=exc,
+        )
+        return values
 
 
 def _parse_time_token(source: str, token: str) -> time:
