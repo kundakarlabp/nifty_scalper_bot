@@ -4945,6 +4945,20 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                     await asyncio.sleep(HYDRATION_DELAY_SEC)
 
+            # =========================================================
+            # ✅ WORLD CLASS FIX: FINALIZE RUNNER STATE
+            # =========================================================
+            # This commits the hydration so Runner doesn't trigger fallback backfill.
+            runner = ctx.strategy_runner
+            if runner:
+                # 1. Collect symbols we attempted to hydrate
+                hydrated_symbols = list(targets)
+                
+                # 2. Commit the state
+                if hasattr(runner, "mark_ready"):
+                    runner.mark_ready(hydrated_symbols)
+            # =========================================================
+
             await ctx.market_regime_manager.refresh_from_indicators()
             # -------------------------------------------------
             # MARK INDICATORS AS WARM / READY
