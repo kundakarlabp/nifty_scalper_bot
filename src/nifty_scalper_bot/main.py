@@ -1,74 +1,84 @@
+"""
+nifty_scalper_bot.main
+Production Entrypoint: Non-blocking startup with Crash Capture.
+"""
 import sys
 import os
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from dotenv import load_dotenv
 
-# 1. PRE-IMPORT LOGGING
-print("🐍 PYTHON START: main.py loaded", flush=True)
+# Force logs to flush immediately
+sys.stdout.reconfigure(line_buffering=True)
 
-try:
-    print("⏳ Importing asyncio...", flush=True)
-    import asyncio
-    
-    print("⏳ Importing logging...", flush=True)
-    import logging
-    
-    print("⏳ Importing FastAPI...", flush=True)
-    from fastapi import FastAPI
-    from contextlib import asynccontextmanager
-    
-    print("⏳ Importing DotEnv...", flush=True)
-    from dotenv import load_dotenv
-    
-    # 🛑 TRAP: Heavy imports often freeze deployments
-    print("⏳ Importing Core App (Lazy Load check)...", flush=True)
-    # We do NOT import NiftyScalperApp here. We import it inside lifespan.
-    # If we import it here, and it has top-level blocking code, we die.
-    print("✅ Imports Complete.", flush=True)
-
-except Exception as e:
-    print(f"❌ CRITICAL IMPORT ERROR: {e}", flush=True)
-    sys.exit(1)
-
-# --- SETUP ---
+# 1. SETUP
 load_dotenv(override=True)
 logging.basicConfig(level="INFO", stream=sys.stdout)
 LOG = logging.getLogger("nifty_scalper_bot.main")
 
-# --- LIFESPAN ---
+print("🚀 PYTHON START: Initializing...", flush=True)
+
+# 2. LIFESPAN MANAGER
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🟢 LIFESPAN: Startup Event Triggered", flush=True)
-    
-    # Background Task
-    async def start_bot():
-        print("🤖 BACKGROUND TASK: Waking up...", flush=True)
+    app.state.bot = None
+    app.state.bot_error = None
+
+    async def run_bot_background():
+        """Boot the bot safely in the background."""
         try:
-            print("⏳ BACKGROUND TASK: Sleeping 5s to allow port bind...", flush=True)
+            print("⏳ BACKGROUND: Waiting 5s for Server Port Bind...", flush=True)
             await asyncio.sleep(5)
             
-            print("📦 BACKGROUND TASK: Importing NiftyScalperApp...", flush=True)
+            print("📦 BACKGROUND: Importing Trading Engine...", flush=True)
+            # Lazy import avoids top-level crashes
             from nifty_scalper_bot.core.app import NiftyScalperApp
             
-            print("🚀 BACKGROUND TASK: Initializing Bot...", flush=True)
+            print("🤖 BACKGROUND: Initializing Bot...", flush=True)
             bot = NiftyScalperApp()
             app.state.bot = bot
             
-            print("▶️ BACKGROUND TASK: Calling bot.start()...", flush=True)
+            print("▶️ BACKGROUND: Starting Trading Loop...", flush=True)
             await bot.start()
             
+        except asyncio.CancelledError:
+            print("🛑 BACKGROUND: Task Cancelled", flush=True)
         except Exception as exc:
-            print(f"❌ BACKGROUND TASK DIED: {exc}", flush=True)
-            LOG.error(f"Bot Crash: {exc}", exc_info=True)
+            # CRITICAL: Capture crash, don't kill container
+            app.state.bot_error = str(exc)
+            print(f"❌ FATAL BOT CRASH: {exc}", flush=True)
+            LOG.critical(f"Bot Crash: {exc}", exc_info=True)
 
-    task = asyncio.create_task(start_bot())
-    print("⚡ LIFESPAN: Yielding to Server...", flush=True)
+    # Start Task
+    task = asyncio.create_task(run_bot_background())
     
+    # ⚡ YIELD INSTANTLY -> RAILWAY SEES GREEN DEPLOY
     yield 
     
-    print("🔴 LIFESPAN: Shutdown Triggered", flush=True)
+    # Cleanup
+    if not task.done():
+        task.cancel()
+    if app.state.bot:
+        try:
+            await app.state.bot.stop()
+        except Exception:
+            pass
 
+# 3. APP DEFINITION
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def root():
-    print("📡 HTTP REQUEST: / root accessed", flush=True)
-    return {"status": "ok"}
+    return {"status": "online", "service": "Nifty Scalper Bot"}
+
+@app.get("/health")
+def health():
+    """Check if the background bot is alive or crashed."""
+    status = "crashed" if app.state.bot_error else "running"
+    return {
+        "status": status,
+        "error": app.state.bot_error,
+        "bot_loaded": app.state.bot is not None
+    }
