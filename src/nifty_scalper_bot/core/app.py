@@ -4775,7 +4775,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     LOGGER.info("Starting Nifty Scalper Bot...")
 
     # =========================================================
-    # ✅ FIX: Create Data Directory Logic
+    # Create Data Directory
     # =========================================================
     import os
     try:
@@ -4783,13 +4783,14 @@ async def startup_sequence(ctx: BotContext) -> None:
         LOGGER.info("✅ Verified/Created 'data/' directory.")
     except Exception as e:
         LOGGER.critical(f"❌ Failed to create data directory: {e}")
-    # =========================================================
-    
+
     _validate_config(ctx.config)
     broker_ready = True
     guard = ctx.session_guard
 
-    # [FIX 1] Define _notify helper locally
+    # ---------------------------------------------------------
+    # Telegram notifier helper
+    # ---------------------------------------------------------
     async def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
         notifier = ctx.telegram_notifier
         if notifier is None:
@@ -4799,225 +4800,253 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception:
             LOGGER.debug("Startup notifier failed", exc_info=True)
 
-    # 1. Validate Broker & Session
+    # ---------------------------------------------------------
+    # 1. Broker validation
+    # ---------------------------------------------------------
     try:
-        broker_proxy = getattr(ctx.broker_client, "_broker", getattr(ctx.broker_client, "broker", ctx.broker_client))
-        get_profile_fn = getattr(broker_proxy, 'get_profile', None)
+        broker_proxy = getattr(
+            ctx.broker_client,
+            "_broker",
+            getattr(ctx.broker_client, "broker", ctx.broker_client),
+        )
+        get_profile_fn = getattr(broker_proxy, "get_profile", None)
         if callable(get_profile_fn):
             profile = await asyncio.to_thread(get_profile_fn)
             LOGGER.info(f"Connected to broker: {profile.get('user_name') or 'User'}")
-            if guard: guard.mark_session_valid()
+            if guard:
+                guard.mark_session_valid()
     except Exception as e:
         LOGGER.error(f"Broker connection failed: {e}")
         broker_ready = False
 
-    # 2. Load Instruments
+    # ---------------------------------------------------------
+    # 2. Load instruments
+    # ---------------------------------------------------------
     if broker_ready:
         try:
-            inner = getattr(ctx.broker_client, "broker", getattr(ctx.broker_client, "_broker", ctx.broker_client))
+            inner = getattr(
+                ctx.broker_client,
+                "broker",
+                getattr(ctx.broker_client, "_broker", ctx.broker_client),
+            )
             await asyncio.to_thread(inner.load_instruments, "NSE")
             await asyncio.to_thread(inner.load_instruments, "NFO")
         except Exception as e:
             LOGGER.error(f"Instrument load failed: {e}")
 
-    # 3. Calculate Targets (Options + Index + FUTURES)
+    # ---------------------------------------------------------
+    # 3. Symbol resolution + HYDRATION (FIXED)
+    # ---------------------------------------------------------
     if broker_ready:
         try:
-            # A. Get ATM Options & Index
-            targets = _get_symbols(ctx.config, ctx.instrument_resolver, ctx.broker_client)
-            
-            # B. Calculate Current Month Futures (Vital for Orchestrator Data)
+            targets = _get_symbols(
+                ctx.config,
+                ctx.instrument_resolver,
+                ctx.broker_client,
+            )
+
+            # ---------- Futures rollover logic (unchanged) ----------
             from datetime import datetime, timedelta
             import calendar
-            
+
             now = datetime.now()
-            
-            # --- START ROLLOVER FIX (TUESDAY) ---
-            year = now.year
-            month = now.month
+            year, month = now.year, now.month
             last_day = calendar.monthrange(year, month)[1]
             expiry_date = datetime(year, month, last_day)
-            
-            # 1 = Tuesday
-            while expiry_date.weekday() != 1: 
+
+            while expiry_date.weekday() != 1:  # Tuesday
                 expiry_date -= timedelta(days=1)
-                
-            if now.date() > expiry_date.date():
-                target_date = expiry_date + timedelta(days=7)
-            else:
-                target_date = now
-                
+
+            target_date = expiry_date + timedelta(days=7) if now.date() > expiry_date.date() else now
             y_str = target_date.strftime("%y")
             m_str = target_date.strftime("%b").upper()
-            # --- END ROLLOVER FIX ---
-            
             future_symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
-            
-            # Resolve Future Token
-            fut_token = None
+
             if ctx.instrument_resolver:
                 fut_token = ctx.instrument_resolver.resolve(future_symbol)
-                
-            if fut_token:
-                LOGGER.info(f"✅ Resolved Futures (Data Only): {future_symbol} -> {fut_token}")
-                targets.append(future_symbol)
-                # Ensure Orchestrator knows this is the reference symbol
-                if ctx.strategy_manager and hasattr(ctx.strategy_manager, "orchestrator"):
-                    ctx.strategy_manager.orchestrator.futures_symbol = future_symbol
-            else:
-                LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
+                if fut_token:
+                    LOGGER.info(f"✅ Resolved Futures (Data Only): {future_symbol} -> {fut_token}")
+                    targets.append(future_symbol)
+                    if ctx.strategy_manager and hasattr(ctx.strategy_manager, "orchestrator"):
+                        ctx.strategy_manager.orchestrator.futures_symbol = future_symbol
+                else:
+                    LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
 
-            # Ensure NIFTY 50 is present (Data Only)
             targets.append("NSE:NIFTY 50")
-            
-            # Deduplicate
             targets = list(dict.fromkeys(targets))
-            
+
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
-            
-            # Fetch 5 days history (Hydration)
-            from datetime import datetime, timedelta
+
+            # ---------- HISTORICAL HYDRATION (RATE-LIMIT SAFE FIX) ----------
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(days=5)
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-            
+
             engine = ctx.market_regime_manager.indicators
-            
-            for sym in targets:
+            HYDRATION_DELAY_SEC = 1.3  # Zerodha-safe pacing
+
+            for idx, sym in enumerate(targets, start=1):
                 try:
-                    records = await asyncio.to_thread(ctx.broker_client.get_ohlc, sym, "minute", from_str, to_str)
+                    LOGGER.info(f"📥 Hydration {idx}/{len(targets)}: {sym}")
+
+                    records = await asyncio.to_thread(
+                        ctx.broker_client.get_ohlc,
+                        sym,
+                        "minute",
+                        from_str,
+                        to_str,
+                    )
+
                     if records:
                         count = 0
                         for c in records:
-                            # Parse Kite format
-                            if isinstance(c, dict): ts, ohlc, v = c.get("date"), c, c.get("volume",0)
-                            elif isinstance(c, list): ts, ohlc, v = c[0], {"open":c[1], "high":c[2], "low":c[3], "close":c[4]}, c[5]
-                            else: continue
-                            
+                            if isinstance(c, dict):
+                                ts, ohlc, v = c.get("date"), c, c.get("volume", 0)
+                            elif isinstance(c, list):
+                                ts, ohlc, v = (
+                                    c[0],
+                                    {"open": c[1], "high": c[2], "low": c[3], "close": c[4]},
+                                    c[5],
+                                )
+                            else:
+                                continue
+
                             if isinstance(ts, str):
-                                try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                                except: pass
-                            
+                                try:
+                                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                                except Exception:
+                                    continue
+
                             engine.update_price(sym, ohlc, volume=v, timestamp=ts)
                             count += 1
-                        LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
-                except Exception as e:
-                    LOGGER.warning(f"Failed to hydrate {sym}: {e}")
 
-            # Force Regime Refresh
+                        LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
+
+                    await asyncio.sleep(HYDRATION_DELAY_SEC)
+
+                except Exception as e:
+                    if "rate limit" in str(e).lower():
+                        LOGGER.warning(f"⚠️ Rate limit hit for {sym}, skipping hydration")
+                    else:
+                        LOGGER.warning(f"❌ Failed to hydrate {sym}: {e}")
+
+                    await asyncio.sleep(HYDRATION_DELAY_SEC)
+
             await ctx.market_regime_manager.refresh_from_indicators()
-            
-            # [FIX 2] Explicitly WIRE symbols (Data vs Execution Separation)
+
+            # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
             streamer = ctx.streamer
             tokens_to_poll = []
 
             for sym in targets:
-                # A. Force Track in MDM (Scout Poller) - EVERYONE gets Data
-                if mdm: mdm.ensure_tracking(sym)
-                
-                # B. Collect tokens for Main Streamer - EVERYONE gets Data
+                if mdm:
+                    mdm.ensure_tracking(sym)
+
                 if ctx.instrument_resolver:
                     tok = ctx.instrument_resolver.resolve(sym)
-                    if tok: tokens_to_poll.append(tok)
+                    if tok:
+                        tokens_to_poll.append(tok)
 
-                # C. [CRITICAL CHANGE] Register with Runner (EXECUTION) - ONLY OPTIONS
-                # We filter for symbols ending in CE or PE to prevent Futures Trading
                 if sym.endswith("CE") or sym.endswith("PE"):
                     ctx.strategy_runner.add_symbol(sym)
                 else:
                     LOGGER.info(f"🔭 Monitoring (No Trade): {sym}")
 
-            # Bulk Subscribe to PollingStreamer (Data Feed)
             if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
                 streamer.subscribe(tokens_to_poll)
                 LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
-            
-            # Manually trigger one poll immediately to prime the cache
+
             if mdm:
                 asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
-                
-        except Exception as e:
-            LOGGER.error(f"Hydration/Tracking failed: {e}", exc_info=True)
 
-    # 4. Start Subsystems
+        except Exception as e:
+            LOGGER.error("Hydration/Tracking failed", exc_info=True)
+
+    # ---------------------------------------------------------
+    # 4. Start subsystems (UNCHANGED)
+    # ---------------------------------------------------------
     if broker_ready:
         try:
-            if ctx.order_manager: ctx.order_manager.start_monitoring()
-            if ctx.strategy_runner: ctx.strategy_runner.start()
-            if ctx.stream_supervisor: ctx.stream_supervisor.start()
-            elif hasattr(ctx.streamer, "start"): 
+            if ctx.order_manager:
+                ctx.order_manager.start_monitoring()
+            if ctx.strategy_runner:
+                ctx.strategy_runner.start()
+            if ctx.stream_supervisor:
+                ctx.stream_supervisor.start()
+            elif hasattr(ctx.streamer, "start"):
                 res = ctx.streamer.start()
-                if inspect.isawaitable(res): await res
-            # ✅ FIX: Explicitly start Telegram Bot
+                if inspect.isawaitable(res):
+                    await res
+
             if ctx.telegram_bot:
                 LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
                 await ctx.telegram_bot.start()
-            
-                
+
             LOGGER.info("✅ All subsystems started.")
         except Exception as e:
             LOGGER.critical(f"Subsystem start failed: {e}")
 
-    # 5. Start Kill Switch & Sync Loop
+    # ---------------------------------------------------------
+    # 5. Kill switch + reconciliation (UNCHANGED)
+    # ---------------------------------------------------------
     if broker_ready:
         try:
             orders = await asyncio.to_thread(ctx.broker_client.get_orders)
             for o in orders:
                 if o.get("status") == "OPEN":
-                    await asyncio.to_thread(ctx.broker_client.cancel_order, o.get("order_id"))
+                    await asyncio.to_thread(
+                        ctx.broker_client.cancel_order, o.get("order_id")
+                    )
             LOGGER.info("✅ Zombie orders cleared.")
-            
+
             async def _sync_loop():
                 while True:
                     try:
                         await _reconcile_state(ctx)
-                    except: pass
+                    except Exception:
+                        pass
                     await asyncio.sleep(15)
-            
+
             asyncio.create_task(_sync_loop())
-            
+
         except Exception as e:
             LOGGER.error(f"Post-start tasks failed: {e}")
 
-    # ===== GREEKS MONITORING (FIXED) =====
-    # Logs portfolio Greeks every 5 minutes to track Delta/Theta exposure
-    if ctx.strategy_runner and hasattr(ctx.strategy_runner, 'calculate_portfolio_greeks'):
-        # ✅ FIX: Use ctx.strategy_runner, NOT strategy_runner_ref
+    # ---------------------------------------------------------
+    # 6. Greeks monitoring (UNCHANGED, SAFE)
+    # ---------------------------------------------------------
+    if ctx.strategy_runner and hasattr(ctx.strategy_runner, "calculate_portfolio_greeks"):
+        import threading, time as time_module
+
         runner = ctx.strategy_runner
-        
+
         def _log_greeks_periodically():
-            """Background thread to monitor portfolio Greeks"""
-            # Wait for main loop to be active
-            time_module.sleep(60) 
-            
+            time_module.sleep(60)
             stop_event = getattr(ctx, "shutdown_event", None)
+
             while True:
-                if stop_event and stop_event.is_set(): break
-                if not threading.main_thread().is_alive(): break
+                if stop_event and stop_event.is_set():
+                    break
+                if not threading.main_thread().is_alive():
+                    break
                 try:
                     greeks = runner.calculate_portfolio_greeks()
-                    
-                    # Only log if there is significant exposure
                     if abs(greeks.get("net_delta", 0)) > 1.0 or greeks.get("net_theta", 0) < -1.0:
                         LOGGER.info(
-                            f"📊 Greeks: Delta={greeks['net_delta']:.1f} Theta={greeks['net_theta']:.1f}/day", 
-                            extra={"event": "greeks_monitor"}
+                            f"📊 Greeks: Delta={greeks['net_delta']:.1f} "
+                            f"Theta={greeks['net_theta']:.1f}/day",
+                            extra={"event": "greeks_monitor"},
                         )
-                    
-                    # Sleep for 5 minutes (300s)
                     for _ in range(300):
-                        # ✅ FIX: Use the safe 'stop_event' local variable
-                        if stop_event and stop_event.is_set(): break
+                        if stop_event and stop_event.is_set():
+                            break
                         time_module.sleep(1)
-                        
                 except Exception as exc:
                     LOGGER.debug(f"Greeks monitor error: {exc}")
                     time_module.sleep(60)
-        
-        # Start background thread
-        import threading
+
         threading.Thread(target=_log_greeks_periodically, daemon=True).start()
         LOGGER.info("✅ Portfolio Greeks monitoring enabled")
 
