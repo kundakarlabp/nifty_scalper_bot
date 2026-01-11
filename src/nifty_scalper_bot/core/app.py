@@ -4900,25 +4900,37 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                     if records:
                         count = 0
+                        # 1. Get Reference to Runner
+                        runner = ctx.strategy_runner
+
                         for c in records:
-                            if isinstance(c, dict):
-                                ts, ohlc, v = c.get("date"), c, c.get("volume", 0)
-                            elif isinstance(c, list):
-                                ts, ohlc, v = (
-                                    c[0],
-                                    {"open": c[1], "high": c[2], "low": c[3], "close": c[4]},
-                                    c[5],
-                                )
-                            else:
+                            # 2. Robust Parsing
+                            if isinstance(c, dict): 
+                                ts = c.get("date")
+                                o, h, l, c_p, v = c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume", 0)
+                            elif isinstance(c, list): 
+                                ts, o, h, l, c_p, v = c[0], c[1], c[2], c[3], c[4], c[5]
+                            else: 
                                 continue
-
+                            
+                            # 3. Timestamp Normalization
                             if isinstance(ts, str):
-                                try:
-                                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                                except Exception:
-                                    continue
+                                try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                                except: pass
 
-                            engine.update_price(sym, ohlc, volume=v, timestamp=ts)
+                            # 4. Feed The Runner (The Missing Link)
+                            if runner and hasattr(runner, "ingest_historical_bar"):
+                                bar_data = {
+                                    "symbol": sym,
+                                    "open": float(o),
+                                    "high": float(h),
+                                    "low": float(l),
+                                    "close": float(c_p),
+                                    "volume": float(v),
+                                    "timestamp": ts
+                                }
+                                runner.ingest_historical_bar(bar_data)
+                            
                             count += 1
 
                         LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
