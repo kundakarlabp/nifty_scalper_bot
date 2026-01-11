@@ -24,9 +24,7 @@ COPY requirements.txt pyproject.toml setup.py* ./
 RUN pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r requirements.txt
 
-# --- FIX FOR BUILD ERROR ---
-# Instead of 'COPY src ./src', we copy EVERYTHING.
-# This ensures that whether you use 'src/' or a flat layout, the files are there.
+# Copy ALL code (Fixes the 'src' error)
 COPY . .
 
 # Install your package
@@ -55,11 +53,15 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.11/site-packages \
                     /usr/local/lib/python3.11/site-packages
 
-# Copy App Code (Resolves "module not found" if pip install failed slightly)
+# Copy App Code
 COPY --from=builder /app /app
 
-# --- INSTALL ENTRYPOINT ---
+# --- INSTALL ENTRYPOINT (WITH WINDOWS FIX) ---
 COPY entrypoint.sh /app/entrypoint.sh
+
+# 🪄 MAGIC LINE: Removes Windows \r characters so script runs on Linux
+RUN sed -i 's/\r$//' /app/entrypoint.sh
+
 RUN chmod +x /app/entrypoint.sh
 
 # Start using the diagnostic script
