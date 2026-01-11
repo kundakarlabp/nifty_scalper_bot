@@ -891,12 +891,12 @@ class StrategyRunner:
         World-Class Design:
         - Respects OneMinuteBar immutability (slots=True).
         - Uses canonical .timestamp property (Contract).
-        - Fail-fast on ordering.
+        - Maps Bar object to IndicatorEngine.update_price API.
         """
         # 1. Monotonicity Check (Prevent out-of-order processing)
         last_ts = self._last_bar_ts.get(symbol)
         
-        # Use the public .timestamp property (wraps .start) as per bar_builder contract
+        # Use the public .timestamp property (wraps .start)
         if not is_backfill and last_ts and bar.timestamp <= last_ts:
             self._logger.debug(
                 "Dropping out-of-order bar", 
@@ -910,15 +910,25 @@ class StrategyRunner:
 
         try:
             # 3. INDICATORS: Feed the Engine
-            # We pass 'symbol' explicitly because 'bar' does not carry it.
-            self._indicator_engine.update_bar(symbol, bar)
+            # [FIX] Use update_price() instead of update_bar()
+            # We convert the bar to a dict using .as_mapping() as expected by the engine.
+            if hasattr(self._indicator_engine, "update_bar"):
+                self._indicator_engine.update_bar(symbol, bar)
+            else:
+                # Fallback to update_price (Standard API seen in app.py)
+                self._indicator_engine.update_price(
+                    symbol, 
+                    bar.as_mapping(), 
+                    volume=bar.volume, 
+                    timestamp=bar.timestamp
+                )
 
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
                 # Compute ATR (Period 14 is standard)
                 raw_atr = self._indicator_engine.compute_atr(symbol, period=14)
                 
-                # Robust Unwrapping: Handles floats, ATRSnapshot objects, or NumPy scalars
+                # Robust Unwrapping
                 atr_value = 0.0
                 if isinstance(raw_atr, (int, float)):
                     atr_value = float(raw_atr)
@@ -927,12 +937,11 @@ class StrategyRunner:
                 elif hasattr(raw_atr, 'atr'):
                     atr_value = float(raw_atr.atr)
 
-                # Push to Bracket Manager for dynamic stop/target sizing
                 if atr_value > 0 and hasattr(self._bracket_manager, "update_market_stats"):
                     self._bracket_manager.update_market_stats(symbol, atr=atr_value)
 
             # 5. EXECUTION: Trigger Strategies
-            # CRITICAL: Do NOT run strategies during backfill (prevents phantom trades).
+            # CRITICAL: Do NOT run strategies during backfill
             if is_backfill:
                 return
             
