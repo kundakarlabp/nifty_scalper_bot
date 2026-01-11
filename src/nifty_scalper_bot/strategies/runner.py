@@ -891,6 +891,37 @@ class StrategyRunner:
 
         except Exception as exc:
             self._logger.error(f"❌ Hydration Ingest Failed for {data.get('symbol')}: {exc}")
+
+    def mark_ready(self, symbols: list[str]) -> None:
+        """
+        Finalizes startup hydration. Initializes BarBuilders for live trading.
+        CRITICAL: Prevents KeyError in on_tick when live market opens.
+        """
+        with self._lock:
+            for sym in symbols:
+                # 1. Register Active
+                self._active_symbols.add(sym)
+
+                # 2. Ensure SymbolState exists
+                if sym not in self._symbol_state:
+                    self._symbol_state[sym] = SymbolState(
+                        symbol=sym, 
+                        history_limit=2000
+                    )
+
+                # 3. Initialize BarBuilder (THE MISSING LINK)
+                # Without this, on_tick crashes.
+                if sym not in self._bar_builders:
+                    self._bar_builders[sym] = OneMinuteBarBuilder()
+
+                # 4. Set High-Water Mark 
+                if sym not in self._last_bar_ts:
+                    self._last_bar_ts[sym] = datetime.now(timezone.utc)
+
+        # 5. Set Global Flags
+        self._startup_hydrated = True
+        
+        self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
             
             
     def _ingest_bar(self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False) -> None:
