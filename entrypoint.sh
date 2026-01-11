@@ -1,29 +1,25 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
-# 1. Immediate Life Sign
+# --- 1. LIFE SIGNS ---
 echo "================================================="
-echo "🔵 CONTAINER BOOT SEQUENCE INITIATED"
-echo "🔵 Timestamp: $(date)"
-echo "================================================="
-
-# 2. Environment Check (Crucial for "Immediate Crash")
-echo "🔍 Checking Critical Environment Variables..."
-if [ -z "$KITE_API_KEY" ]; then echo "❌ KITE_API_KEY is MISSING"; else echo "✅ KITE_API_KEY is set"; fi
-if [ -z "$KITE_API_SECRET" ]; then echo "❌ KITE_API_SECRET is MISSING"; else echo "✅ KITE_API_SECRET is set"; fi
-if [ -z "$KITE_ACCESS_TOKEN" ]; then echo "❌ KITE_ACCESS_TOKEN is MISSING"; else echo "✅ KITE_ACCESS_TOKEN is set"; fi
-
-# 3. Directory Check
-echo "🔍 Current Directory: $(pwd)"
-echo "🔍 Files in root:"
-ls -la
-
-# 4. Start Python
-echo "🚀 LAUNCHING UVICORN..."
+echo "🔵 CONTAINER BOOT: $(date)"
 echo "================================================="
 
-# Force Unbuffered output so logs appear instantly
-export PYTHONUNBUFFERED=1
+# --- 2. DIAGNOSTICS ---
+echo "🔍 DIAGNOSTIC: Checking File Structure..."
+ls -la /app
 
-# Execute the app
-exec uvicorn nifty_scalper_bot.main:app --host 0.0.0.0 --port $PORT --log-level info
+echo "🔍 DIAGNOSTIC: Checking Environment..."
+if [ -z "$KITE_API_KEY" ]; then echo "❌ KITE_API_KEY: MISSING"; else echo "✅ KITE_API_KEY: FOUND"; fi
+if [ -z "$PORT" ]; then 
+    echo "⚠️ PORT var missing. Defaulting to 8000"
+    export PORT=8000
+else
+    echo "✅ PORT: $PORT"
+fi
+
+# --- 3. LAUNCH ---
+echo "🚀 STARTING UVICORN..."
+# 'exec' ensures the app receives shutdown signals correctly
+exec uvicorn nifty_scalper_bot.main:app --host 0.0.0.0 --port "$PORT" --log-level info
