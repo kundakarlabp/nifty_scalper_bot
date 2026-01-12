@@ -142,6 +142,16 @@ class MarketRegimeManager:
         self._register_listener()
         self._bootstrap_state()
 
+        # [FIX] Start the heartbeat loop to actively refresh regime from indicators
+        if self.indicators is not None and self._indicator_update_interval > 0.0:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._run_indicator_refresh_loop())
+                logger.info("✅ MarketRegimeManager: Refresh loop started.")
+            except RuntimeError:
+                # Loop not running yet; app should handle scheduling or this will run on first tick
+                logger.warning("⚠️ MarketRegimeManager: Loop not running, refresh deferred.")
+
     # ------------------------------------------------------------------
     def _register_listener(self) -> None:
         """Attach the manager as a listener to the detector.
@@ -480,6 +490,25 @@ class MarketRegimeManager:
             
         except Exception as exc:
             logger.error(f"Regime refresh error: {exc}", exc_info=True)
+
+    async def _run_indicator_refresh_loop(self) -> None:
+        """
+        Background task to actively pull regime snapshots from indicators.
+        """
+        while True:
+            try:
+                # Wait for the update interval
+                await asyncio.sleep(self._indicator_update_interval)
+
+                # Force a refresh
+                await self.refresh_from_indicators()
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error(f"❌ Regime refresh failed: {exc}")
+                await asyncio.sleep(5.0)
+                
     def can_trade(
         self,
         *,
