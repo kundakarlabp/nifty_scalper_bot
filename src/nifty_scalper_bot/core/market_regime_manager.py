@@ -449,55 +449,88 @@ class MarketRegimeManager:
         if not callable(getter):
             return
 
-        # We need these specific keys for the sophisticated Detector logic
         required_keys = [
-            "ema_fast", "ema_slow", "adx", "atr", "volume_spike_ratio", 
-            "iv_rank", "price", "close"
+            "ema_fast", "ema_slow", "adx", "atr",
+            "volume_spike_ratio", "iv_rank",
+            "price", "close",
         ]
-        
+
         try:
-            # Fetch all indicators in one go for the symbol
+            # 2. Fetch indicators
             data = getter(self._indicator_symbol, required_keys)
             if not data:
+                logger.debug(
+                    "No indicator data returned",
+                    extra={"event": "regime_indicators_empty"},
+                )
                 return
 
-            # 2. Map them to the expected schema for the Detector
-            # The detector expects 'trend_score' (usually ADX) and 'volume_ratio'
+            # 3. Map to detector schema
             enrichment = {
                 "trend_score": data.get("adx"),
                 "volume_ratio": data.get("volume_spike_ratio"),
                 "price": data.get("close"),
-                # Pass through others
-                **{k: v for k, v in data.items() if v is not None}
+                **{k: v for k, v in data.items() if v is not None},
             }
 
-            # 3. Ask Detector to Evaluate
-            # This uses the full logic (Trend vs Range vs Event) defined in MarketRegimeDetector
+            # 4. Evaluate regime
             snapshot = self.detector.evaluate(self._indicator_symbol, enrichment)
-            
-            # 4. Update State
+
+            # 🔴 CRITICAL VALIDATION (The Missing Piece)
+            if snapshot is None:
+                logger.warning(
+                    "Regime detector returned no snapshot",
+                    extra={
+                        "event": "regime_snapshot_none",
+                        "symbol": self._indicator_symbol,
+                    },
+                )
+                return
+
+            # ✅ PROOF OF LIFE LOG
+            logger.info(
+                "Regime snapshot refreshed from indicators",
+                extra={
+                    "event": "regime_snapshot_refreshed",
+                    "symbol": self._indicator_symbol,
+                    "regime": str(snapshot.regime), # Ensure string for logging
+                    "confidence": snapshot.confidence,
+                    "updated_at": str(snapshot.updated_at),
+                },
+            )
+
+            # 5. Update state
             self.ingest_snapshot(snapshot)
             self._last_indicator_refresh = time.time()
-            
+
         except Exception as exc:
-            logger.error(f"Regime refresh error: {exc}", exc_info=True)
+            logger.error(
+                "Regime refresh error",
+                extra={
+                    "event": "regime_refresh_error",
+                    "symbol": self._indicator_symbol,
+                },
+                exc_info=True,
+            )
 
     async def _run_indicator_refresh_loop(self) -> None:
         """
         Background task to actively pull regime snapshots from indicators.
         """
+        try:
+            await self.refresh_from_indicators()
+        except Exception as exc:
+            logger.error("❌ Initial regime refresh failed", exc_info=True)
+
         while True:
             try:
-                # Wait for the update interval
                 await asyncio.sleep(self._indicator_update_interval)
-
-                # Force a refresh
                 await self.refresh_from_indicators()
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error(f"❌ Regime refresh failed: {exc}")
+                logger.error(f"❌ Regime refresh failed: {exc}", exc_info=True)
                 await asyncio.sleep(5.0)
                 
     def can_trade(
