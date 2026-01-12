@@ -90,6 +90,7 @@ class MarketRegimeDetector:
         self._listeners: set[RegimeListener] = set()
         self._queues: weakref.WeakSet[RegimeQueue] = weakref.WeakSet()
         self._lock = threading.RLock()
+        self._state: dict[str, RegimeSnapshot] = {}
 
     def subscribe(self, listener: RegimeListener) -> None:
         """Register *listener* to receive regime change notifications.
