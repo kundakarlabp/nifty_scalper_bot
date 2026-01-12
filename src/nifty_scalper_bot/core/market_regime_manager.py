@@ -162,7 +162,7 @@ class MarketRegimeManager:
             return {}
 
 
-__all__ = ["MarketRegimeManager", "RegimeDecision"]qa: BLE001 - defensive
+__all__ = ["MarketRegimeManager", "RegimeDecision"]:  # noqa: BLE001 - defensive
             logger.error(
                 "Failure in MarketRegimeManager.__post_init__ settings: %s",
                 exc,
@@ -567,7 +567,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]qa: BLE001 - defensive
                 extra={
                     "event": "regime_snapshot_refreshed",
                     "symbol": self._indicator_symbol,
-                    "regime": str(snapshot.regime), # Ensure string for logging
+                    "regime": str(snapshot.regime),
                     "confidence": snapshot.confidence,
                     "updated_at": str(snapshot.updated_at),
                 },
@@ -588,9 +588,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]qa: BLE001 - defensive
             )
 
     async def _run_indicator_refresh_loop(self) -> None:
-        """
-        Background task to actively pull regime snapshots from indicators.
-        """
+        """Background task to actively pull regime snapshots from indicators."""
         try:
             await self.refresh_from_indicators()
         except Exception as exc:
@@ -1018,4 +1016,4 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]qa: BLE001 - defensive
         try:
             with self._lock:
                 return list(self._decisions)[-limit:]
-        except Exception as exc:  # no
+        except Exception as exc
