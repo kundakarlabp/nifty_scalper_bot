@@ -66,8 +66,14 @@ def log_throttled(logger: Any, key: str, msg: str, interval_sec: float = 60.0, l
             return
         _THROTTLE_CACHE[key] = now
 
-    log_method = getattr(logger, level.lower(), logger.info)
-    log_method(msg)
+    # Normalize log level (accept str or logging.* int)
+    if isinstance(level, int):
+        log_method = logger.log
+        log_method(level, msg)
+    else:
+        log_method = getattr(logger, str(level).lower(), logger.info)
+        log_method(msg)
+
     
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
