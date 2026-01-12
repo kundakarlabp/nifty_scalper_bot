@@ -162,7 +162,7 @@ class MarketRegimeManager:
             return {}
 
 
-__all__ = ["MarketRegimeManager", "RegimeDecision"]:  # noqa: BLE001 - defensive
+__all__ = ["MarketRegimeManager", "RegimeDecision"]
             logger.error(
                 "Failure in MarketRegimeManager.__post_init__ settings: %s",
                 exc,
