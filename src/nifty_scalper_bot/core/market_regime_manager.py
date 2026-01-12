@@ -74,45 +74,91 @@ class MarketRegimeManager:
     _indicator_symbol: str = field(init=False, repr=False, default="NIFTY")
     _last_indicator_refresh: float = field(init=False, repr=False, default=0.0)
 
+    # ✅ FIXED: Missing field that caused the crash
+    _refresh_task_started: bool = field(init=False, default=False, repr=False)
+
     def __post_init__(self) -> None:
-        """Initialise shared state and subscribe to detector updates.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Initialise shared state and subscribe to detector updates."""
         settings: dict[str, Any] = {}
         try:
             if self.regime_settings is not None:
                 settings = dict(self.regime_settings)
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "Failure in MarketRegimeManager.get_decision_history: %s",
+                "Failure in MarketRegimeManager.__post_init__ settings: %s",
                 exc,
-                extra={"event": "regime_manager_decision_history_error"},
+                extra={"event": "regime_manager_settings_error"},
             )
-            return []
+            settings = {}
+
+        self._indicator_settings = settings
+        history_override = settings.get("history_length")
+        if history_override is not None:
+            try:
+                self.history_limit = max(5, int(history_override))
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Failure in MarketRegimeManager.__post_init__ history override: %s",
+                    exc,
+                    extra={"event": "regime_manager_history_override_error"},
+                )
+
+        self._lock = threading.RLock()
+        
+        # ✅ FIXED: Ensure this is initialized
+        self._refresh_task_started = False
+        
+        self._history: Deque[RegimeSnapshot] = deque(maxlen=max(5, self.history_limit))
+        self._decisions: Deque[RegimeDecision] = deque(maxlen=200)
+        self._current: RegimeSnapshot | None = None
+        self._last_filter_reasons: tuple[str, ...] = tuple()
+        self._bypass = False
+        self._listener_registered = False
+        self._stats: MutableMapping[str, int] = {"pass": 0, "block": 0, "bypass": 0}
+        self._last_logged_decision = None
+        self._last_logged_at = 0.0
+
+        self._apply_env_overrides()
+
+        self._indicator_lock = asyncio.Lock()
+        self._last_indicator_refresh = 0.0
+        try:
+            interval_setting = settings.get("update_interval_sec")
+            self._indicator_update_interval = (
+                float(interval_setting) if interval_setting is not None else 0.0
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failure in MarketRegimeManager.__post_init__ interval: %s",
+                exc,
+                extra={"event": "regime_manager_interval_error"},
+            )
+            self._indicator_update_interval = 0.0
+
+        symbol_setting = settings.get("symbol") or "NIFTY"
+        try:
+            self._indicator_symbol = str(symbol_setting)
+        except Exception:  # pragma: no cover - defensive cast
+            self._indicator_symbol = "NIFTY"
+
+        self._register_listener()
+        self._bootstrap_state()
+
+        # ✅ FIXED: Start the refresh loop if indicators are available
+        if self.indicators is not None and self._indicator_update_interval > 0.0:
+            try:
+                # Attempt to get running loop (may fail if called outside async context)
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._run_indicator_refresh_loop())
+                self._refresh_task_started = True
+                logger.info("✅ MarketRegimeManager: Refresh loop started in __post_init__.")
+            except RuntimeError:
+                # Loop not running yet; will be started lazily in can_trade
+                pass
 
     # ------------------------------------------------------------------
     def build_diagnostics(self) -> dict[str, object]:
-        """Return structured diagnostics for operators.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, object]: Diagnostic payload for telemetry.
-
-        Raises:
-            None.
-        """
-
+        """Return structured diagnostics for operators."""
         logger.debug(
             "Entered MarketRegimeManager.build_diagnostics",
             extra={"event": "regime_manager_build_diag"},
@@ -161,76 +207,9 @@ class MarketRegimeManager:
             )
             return {}
 
-
-__all__ = ["MarketRegimeManager", "RegimeDecision"]
-            logger.error(
-                "Failure in MarketRegimeManager.__post_init__ settings: %s",
-                exc,
-                extra={"event": "regime_manager_settings_error"},
-            )
-            settings = {}
-        self._indicator_settings = settings
-        history_override = settings.get("history_length")
-        if history_override is not None:
-            try:
-                self.history_limit = max(5, int(history_override))
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Failure in MarketRegimeManager.__post_init__ history override: %s",
-                    exc,
-                    extra={"event": "regime_manager_history_override_error"},
-                )
-        self._lock = threading.RLock()
-        
-        # ✅ CRITICAL FIX: Initialize _refresh_task_started
-        self._refresh_task_started = False
-        
-        self._history: Deque[RegimeSnapshot] = deque(maxlen=max(5, self.history_limit))
-        self._decisions: Deque[RegimeDecision] = deque(maxlen=200)
-        self._current: RegimeSnapshot | None = None
-        self._last_filter_reasons: tuple[str, ...] = tuple()
-        self._bypass = False
-        self._listener_registered = False
-        self._stats: MutableMapping[str, int] = {"pass": 0, "block": 0, "bypass": 0}
-        self._last_logged_decision = None
-        self._last_logged_at = 0.0
-        self._apply_env_overrides()
-        self._indicator_lock = asyncio.Lock()
-        self._last_indicator_refresh = 0.0
-        try:
-            interval_setting = settings.get("update_interval_sec")
-            self._indicator_update_interval = (
-                float(interval_setting) if interval_setting is not None else 0.0
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Failure in MarketRegimeManager.__post_init__ interval: %s",
-                exc,
-                extra={"event": "regime_manager_interval_error"},
-            )
-            self._indicator_update_interval = 0.0
-        symbol_setting = settings.get("symbol") or "NIFTY"
-        try:
-            self._indicator_symbol = str(symbol_setting)
-        except Exception:  # pragma: no cover - defensive cast
-            self._indicator_symbol = "NIFTY"
-        self._register_listener()
-        self._bootstrap_state()
-
     # ------------------------------------------------------------------
     def _register_listener(self) -> None:
-        """Attach the manager as a listener to the detector.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Attach the manager as a listener to the detector."""
         logger.debug(
             "Entered MarketRegimeManager._register_listener",
             extra={"event": "regime_manager_register_listener"},
@@ -247,18 +226,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             self._listener_registered = False
 
     def _bootstrap_state(self) -> None:
-        """Prime the cache with detector history when available.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Prime the cache with detector history when available."""
         logger.debug(
             "Entered MarketRegimeManager._bootstrap_state",
             extra={"event": "regime_manager_bootstrap"},
@@ -277,7 +245,6 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
 
     def _apply_env_overrides(self) -> None:
         """Apply environment variable overrides for gating thresholds."""
-
         logger.debug(
             "Entered MarketRegimeManager._apply_env_overrides",
             extra={"event": "regime_manager_env_overrides"},
@@ -323,18 +290,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             )
 
     def ingest_snapshot(self, snapshot: RegimeSnapshot) -> None:
-        """Record incoming *snapshot* from the detector.
-
-        Args:
-            snapshot: Latest regime snapshot broadcast by the detector.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Record incoming *snapshot* from the detector."""
         logger.debug(
             "Entered MarketRegimeManager.ingest_snapshot",
             extra={
@@ -376,18 +332,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             )
 
     def _store_snapshot(self, snapshot: RegimeSnapshot) -> RegimeSnapshot | None:
-        """Persist *snapshot* into caches and return previous entry.
-
-        Args:
-            snapshot: Snapshot to persist.
-
-        Returns:
-            Optional previously stored snapshot for the symbol.
-
-        Raises:
-            None.
-        """
-
+        """Persist *snapshot* into caches and return previous entry."""
         with self._lock:
             previous = self._current
             self._current = snapshot
@@ -396,18 +341,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
 
     # ------------------------------------------------------------------
     def get_current_regime(self) -> str | None:
-        """Return the latest regime label when available.
-
-        Args:
-            None.
-
-        Returns:
-            str | None: Regime label or ``None`` when unavailable.
-
-        Raises:
-            None.
-        """
-
+        """Return the latest regime label when available."""
         logger.debug(
             "Entered MarketRegimeManager.get_current_regime",
             extra={"event": "regime_manager_current_regime"},
@@ -425,18 +359,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return None
 
     def get_regime_confidence(self) -> float:
-        """Return the latest regime confidence score.
-
-        Args:
-            None.
-
-        Returns:
-            float: Confidence bounded between ``0`` and ``1``.
-
-        Raises:
-            None.
-        """
-
+        """Return the latest regime confidence score."""
         logger.debug(
             "Entered MarketRegimeManager.get_regime_confidence",
             extra={"event": "regime_manager_regime_confidence"},
@@ -456,18 +379,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return 0.0
 
     def get_latest_snapshot(self) -> RegimeSnapshot | None:
-        """Return the most recent snapshot without modifying state.
-
-        Args:
-            None.
-
-        Returns:
-            RegimeSnapshot | None: Cached snapshot when present.
-
-        Raises:
-            None.
-        """
-
+        """Return the most recent snapshot without modifying state."""
         logger.debug(
             "Entered MarketRegimeManager.get_latest_snapshot",
             extra={"event": "regime_manager_latest_snapshot"},
@@ -484,18 +396,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return None
 
     def get_history(self, limit: int = 10) -> list[RegimeSnapshot]:
-        """Return a list of recent regime snapshots up to *limit*.
-
-        Args:
-            limit: Maximum number of entries to return.
-
-        Returns:
-            list[RegimeSnapshot]: Ordered history oldest to newest.
-
-        Raises:
-            None.
-        """
-
+        """Return a list of recent regime snapshots up to *limit*."""
         logger.debug(
             "Entered MarketRegimeManager.get_history",
             extra={"event": "regime_manager_history", "limit": limit},
@@ -550,7 +451,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             # 4. Evaluate regime
             snapshot = self.detector.evaluate(self._indicator_symbol, enrichment)
 
-            # 🔴 CRITICAL VALIDATION (The Missing Piece)
+            # 🔴 CRITICAL VALIDATION
             if snapshot is None:
                 logger.warning(
                     "Regime detector returned no snapshot",
@@ -587,6 +488,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
                 exc_info=True,
             )
 
+    # ✅ FIXED: New Background Loop Method
     async def _run_indicator_refresh_loop(self) -> None:
         """Background task to actively pull regime snapshots from indicators."""
         try:
@@ -604,26 +506,14 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             except Exception as exc:
                 logger.error(f"❌ Regime refresh failed: {exc}", exc_info=True)
                 await asyncio.sleep(5.0)
-                
+
     def can_trade(
         self,
         *,
         context: Mapping[str, object] | None = None,
         record_decision: bool = True,
     ) -> bool:
-        """Return ``True`` when trades are allowed under the current regime.
-
-        Args:
-            context: Optional decision context metadata.
-            record_decision: Whether to store the decision in history.
-
-        Returns:
-            bool: ``True`` when trading should proceed.
-
-        Raises:
-            None.
-        """
-
+        """Return ``True`` when trades are allowed under the current regime."""
         logger.debug(
             "Entered MarketRegimeManager.can_trade",
             extra={"event": "regime_manager_can_trade"},
@@ -637,16 +527,18 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
         ):
             try:
                 loop = asyncio.get_running_loop()
+                loop.create_task(self._run_indicator_refresh_loop())
+                self._refresh_task_started = True
+                logger.info(
+                    "MarketRegimeManager indicator refresh loop started (lazy)",
+                    extra={"event": "regime_refresh_loop_started"},
+                )
             except RuntimeError:
-                return False if self.fail_closed else True
-            loop.create_task(self._run_indicator_refresh_loop())
-            self._refresh_task_started = True
-            logger.info(
-                "MarketRegimeManager indicator refresh loop started (lazy)",
-                extra={"event": "regime_refresh_loop_started"},
-            )
+                # No loop running, fail or bypass
+                if self.fail_closed:
+                    return False
+                return True
 
-        
         try:
             snapshot: RegimeSnapshot | None
             bypass: bool
@@ -741,19 +633,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return True
 
     def _record_decision(self, decision: RegimeDecision, record: bool) -> None:
-        """Persist decision and update last reasons when *record* is true.
-
-        Args:
-            decision: Decision entry recorded for diagnostics.
-            record: Whether to append the decision to history.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Persist decision and update last reasons when *record* is true."""
         with self._lock:
             self._last_filter_reasons = decision.reasons
             if record:
@@ -769,21 +649,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
         reasons: tuple[str, ...],
         snapshot: RegimeSnapshot | None,
     ) -> None:
-        """Emit deduplicated decision logs to avoid per-tick noise.
-
-        Args:
-            allowed: ``True`` when the trade was permitted.
-            bypassed: ``True`` when bypass forced the allow decision.
-            reasons: Tuple of textual reasons associated with the decision.
-            snapshot: Latest snapshot associated with the decision.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
+        """Emit deduplicated decision logs to avoid per-tick noise."""
         logger.debug(
             "Entered MarketRegimeManager._emit_decision_log",
             extra={"event": "regime_manager_emit_log"},
@@ -819,18 +685,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
 
     # ------------------------------------------------------------------
     def get_filter_reasons(self) -> tuple[str, ...]:
-        """Return reasons for the last gating decision.
-
-        Args:
-            None.
-
-        Returns:
-            tuple[str, ...]: Ordered reasons captured during gating.
-
-        Raises:
-            None.
-        """
-
+        """Return reasons for the last gating decision."""
         logger.debug(
             "Entered MarketRegimeManager.get_filter_reasons",
             extra={"event": "regime_manager_filter_reasons"},
@@ -847,18 +702,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return tuple()
 
     def set_regime_filter_bypass(self, enabled: bool) -> bool:
-        """Enable or disable the regime bypass flag.
-
-        Args:
-            enabled: Desired bypass state.
-
-        Returns:
-            bool: Updated bypass state.
-
-        Raises:
-            None.
-        """
-
+        """Enable or disable the regime bypass flag."""
         logger.debug(
             "Entered MarketRegimeManager.set_regime_filter_bypass",
             extra={"event": "regime_manager_set_bypass", "enabled": bool(enabled)},
@@ -883,18 +727,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return self._bypass
 
     def toggle_regime_filter_bypass(self) -> bool:
-        """Invert the bypass flag and return the new state.
-
-        Args:
-            None.
-
-        Returns:
-            bool: New bypass state after toggling.
-
-        Raises:
-            None.
-        """
-
+        """Invert the bypass flag and return the new state."""
         logger.debug(
             "Entered MarketRegimeManager.toggle_regime_filter_bypass",
             extra={"event": "regime_manager_toggle_bypass"},
@@ -912,18 +745,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return self._bypass
 
     def toggle_bypass(self) -> bool:
-        """Alias for :meth:`toggle_regime_filter_bypass` for compatibility.
-
-        Args:
-            None.
-
-        Returns:
-            bool: Updated bypass state after toggling.
-
-        Raises:
-            None.
-        """
-
+        """Alias for :meth:`toggle_regime_filter_bypass` for compatibility."""
         logger.debug(
             "Entered MarketRegimeManager.toggle_bypass",
             extra={"event": "regime_manager_toggle_bypass_alias"},
@@ -939,18 +761,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return self.get_regime_filter_bypass()
 
     def get_regime_filter_bypass(self) -> bool:
-        """Return ``True`` when bypass is currently enabled.
-
-        Args:
-            None.
-
-        Returns:
-            bool: Current bypass state.
-
-        Raises:
-            None.
-        """
-
+        """Return ``True`` when bypass is currently enabled."""
         logger.debug(
             "Entered MarketRegimeManager.get_regime_filter_bypass",
             extra={"event": "regime_manager_get_bypass"},
@@ -967,18 +778,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return False
 
     def get_regime_filter_stats(self) -> dict[str, int]:
-        """Return pass, block, and bypass counters.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, int]: Copy of decision counters.
-
-        Raises:
-            None.
-        """
-
+        """Return pass, block, and bypass counters."""
         logger.debug(
             "Entered MarketRegimeManager.get_regime_filter_stats",
             extra={"event": "regime_manager_filter_stats"},
@@ -995,18 +795,7 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
             return {}
 
     def get_decision_history(self, limit: int = 25) -> list[RegimeDecision]:
-        """Return the most recent gating decisions up to *limit*.
-
-        Args:
-            limit: Maximum number of decision records to return.
-
-        Returns:
-            list[RegimeDecision]: Ordered decision snapshots.
-
-        Raises:
-            None.
-        """
-
+        """Return the most recent gating decisions up to *limit*."""
         logger.debug(
             "Entered MarketRegimeManager.get_decision_history",
             extra={"event": "regime_manager_decision_history", "limit": limit},
@@ -1016,4 +805,13 @@ __all__ = ["MarketRegimeManager", "RegimeDecision"]
         try:
             with self._lock:
                 return list(self._decisions)[-limit:]
-        except Exception as exc
+        except Exception as exc:
+            logger.error(
+                "Failure in MarketRegimeManager.get_decision_history: %s",
+                exc,
+                extra={"event": "regime_manager_decision_history_error"},
+            )
+            return []
+
+
+__all__ = ["MarketRegimeManager", "RegimeDecision"]
