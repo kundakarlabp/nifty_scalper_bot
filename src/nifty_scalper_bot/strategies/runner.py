@@ -994,8 +994,9 @@ class StrategyRunner:
                         "volume": bar.volume
                     }
                     
-                # 🔥 THE TRIGGER: Run Strategy Logic
-                self._strategy_manager.on_bar(bar)
+            # 🔥 THE TRIGGER: Run Strategy Logic
+            # [FIX] Removed .on_bar() call as StrategyManager is signal-driven (via ticks), not bar-driven.
+            return
 
         except Exception as exc:
             self._logger.error(
@@ -1551,7 +1552,6 @@ class StrategyRunner:
         # ✅ FIX: Import logging to access integer constants (DEBUG=10, WARNING=30)
         
         import logging
-        from nifty_scalper_bot.utils.logging import log_throttled
 
         # DEBUG: Confirm tick received (Throttled to 60s)
         log_throttled(
@@ -1621,8 +1621,7 @@ class StrategyRunner:
                 )
                 return
             else:
-                # NSE index symbols (e.g. NSE:NIFTY 50) legitimately have zero volume
-                volume = 0
+                pass
         # 2. Update Bar Builder
         builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
         try:
