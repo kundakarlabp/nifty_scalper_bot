@@ -110,6 +110,7 @@ class MarketRegimeManager:
                     extra={"event": "regime_manager_history_override_error"},
                 )
         self._lock = threading.RLock()
+        self._refresh_task_started = False
         self._history: Deque[RegimeSnapshot] = deque(maxlen=max(5, self.history_limit))
         self._decisions: Deque[RegimeDecision] = deque(maxlen=200)
         self._current: RegimeSnapshot | None = None
@@ -141,16 +142,6 @@ class MarketRegimeManager:
             self._indicator_symbol = "NIFTY"
         self._register_listener()
         self._bootstrap_state()
-
-        # [FIX] Start the heartbeat loop to actively refresh regime from indicators
-        if self.indicators is not None and self._indicator_update_interval > 0.0:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._run_indicator_refresh_loop())
-                logger.info("✅ MarketRegimeManager: Refresh loop started.")
-            except RuntimeError:
-                # Loop not running yet; app should handle scheduling or this will run on first tick
-                logger.warning("⚠️ MarketRegimeManager: Loop not running, refresh deferred.")
 
     # ------------------------------------------------------------------
     def _register_listener(self) -> None:
@@ -532,6 +523,26 @@ class MarketRegimeManager:
             "Entered MarketRegimeManager.can_trade",
             extra={"event": "regime_manager_can_trade"},
         )
+
+        # --- Ensure regime refresh loop is running (lazy start) ---
+        if (
+            self.indicators is not None
+            and self._indicator_update_interval > 0.0
+            and not self._refresh_task_started
+        ):
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._run_indicator_refresh_loop())
+                self._refresh_task_started = True
+                logger.info(
+                    "MarketRegimeManager indicator refresh loop started",
+                    extra={"event": "regime_refresh_loop_started"},
+                )
+            except RuntimeError:
+                # Event loop not ready yet; retry on next can_trade call
+                pass
+
+        
         try:
             snapshot: RegimeSnapshot | None
             bypass: bool
