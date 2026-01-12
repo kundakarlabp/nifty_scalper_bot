@@ -105,7 +105,7 @@ class PollingStreamer:
                         {
                             "instrument_token": token,
                             "last_price": None,   # Safe placeholder (strategies check > 0)
-                            "timestamp": time.time(),
+                            "timestamp": int(time.time() * 1000),
                             "source": "rest"     # Important: Applies 90s freshness rule
                         },
                         source="rest",
