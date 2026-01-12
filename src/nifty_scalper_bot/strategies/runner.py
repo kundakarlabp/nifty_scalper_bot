@@ -1608,27 +1608,27 @@ class StrategyRunner:
         # [FIX] Data Integrity Guard
         if price <= 0:
             return
-            
-        # [FIX] Log Warning but ALLOW processing (so strategies can at least try)
-        if volume <= 0:
-            if symbol.endswith(("FUT", "CE", "PE")):
-                # ✅ FIX: Use Integer Constant for Debug (10)
-                log_throttled(
-                    self._logger, f"zero_vol_{symbol}", 
-                    f"⚠️ Zero volume for {symbol} (allowing updates)", 
-                    interval_sec=60.0, 
-                    level=logging.DEBUG
-                )
-                volume = 0 
-            else:
-                log_throttled(
-                    self._logger, f"no_vol_{symbol}",
-                    f"❌ No volume for {symbol}, skipping",
-                    interval_sec=60.0, 
-                    level=logging.WARNING # ✅ FIX: Use Integer Constant
-                )
-                return
 
+        # [FIX] Volume validation: Derivatives (NFO) require volume; Indices (NSE) do not.
+            if volume <= 0:
+                # NFO symbols (Futures/Options) MUST have volume
+                if symbol.startswith("NFO:"):
+                    log_throttled(
+                        self._logger, f"no_vol_{symbol}",
+                        f"❌ No volume for {symbol}, skipping",
+                        interval_sec=60.0, 
+                        level=logging.WARNING
+                    )
+                    return
+                else:
+                    # NSE Index symbols (e.g. NIFTY 50) have 0 volume -> ALLOW
+                    log_throttled(
+                        self._logger, f"zero_vol_{symbol}", 
+                        f"⚠️ Zero volume for {symbol} (index allowed)", 
+                        interval_sec=60.0, 
+                        level=logging.DEBUG
+                    )
+                    volume = 0
         # 2. Update Bar Builder
         builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
         try:
