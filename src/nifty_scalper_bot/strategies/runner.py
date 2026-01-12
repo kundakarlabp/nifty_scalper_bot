@@ -986,6 +986,17 @@ class StrategyRunner:
                 if atr_value > 0 and hasattr(self._bracket_manager, "update_market_stats"):
                     self._bracket_manager.update_market_stats(symbol, atr=atr_value)
 
+            # [FIX] Force Regime Refresh: Ensure Detector sees the new bar immediately
+            if hasattr(self, "_strategy_manager"):
+                regime_mgr = getattr(self._strategy_manager, "regime_manager", None)
+                if regime_mgr and hasattr(regime_mgr, "refresh_from_indicators"):
+                    # Use the captured main loop to run the async refresh safely from this thread
+                    if self._main_loop and self._main_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            regime_mgr.refresh_from_indicators(),
+                            self._main_loop
+                        )
+
             # 5. EXECUTION: Trigger Strategies
             # CRITICAL: Do NOT run strategies during backfill
             if is_backfill:
