@@ -3460,7 +3460,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             None.
         """
 
-        snapshot = market_regime_detector.get_snapshot("NIFTY")
+        snapshot = market_regime_manager.get_current_regime()
         if snapshot is None:
             return None
         return {
@@ -4935,6 +4935,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                             count += 1
 
                         LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
+                        # ===================== REGIME HANDOFF FIX =====================
+                        try:
+                            snapshot = market_regime_detector.get_snapshot(regime_symbol)
+                            if snapshot is not None:
+                                market_regime_manager.ingest_snapshot(snapshot)
+                        except Exception as exc:  # defensive, non-fatal
+                            LOGGER.error(
+                                "Regime snapshot ingest failed after hydration",
+                                extra={
+                                    "event": "regime_snapshot_ingest_failed",
+                                    "symbol": regime_symbol,
+                                    "error": str(exc),
+                                },
+                                exc_info=exc,
+                            )
+                    # ==============================================================
 
                     await asyncio.sleep(HYDRATION_DELAY_SEC)
 
