@@ -187,8 +187,6 @@ class PollingStreamer:
                                 if symbol:
                                     # FIX: update heartbeat FIRST so freshness never fails
                                     ts = tick.get("timestamp")
-                                    if self._data_hub and ts:
-                                        self._data_hub.update_heartbeat(symbol, ts)
 
                                 self._data_hub.store_quote(symbol, tick, source="rest", seed=True)
 
