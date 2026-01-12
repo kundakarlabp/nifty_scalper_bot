@@ -91,7 +91,78 @@ class MarketRegimeManager:
         try:
             if self.regime_settings is not None:
                 settings = dict(self.regime_settings)
-        except Exception as exc:  # noqa: BLE001 - defensive
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failure in MarketRegimeManager.get_decision_history: %s",
+                exc,
+                extra={"event": "regime_manager_decision_history_error"},
+            )
+            return []
+
+    # ------------------------------------------------------------------
+    def build_diagnostics(self) -> dict[str, object]:
+        """Return structured diagnostics for operators.
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, object]: Diagnostic payload for telemetry.
+
+        Raises:
+            None.
+        """
+
+        logger.debug(
+            "Entered MarketRegimeManager.build_diagnostics",
+            extra={"event": "regime_manager_build_diag"},
+        )
+        try:
+            snapshot = self.get_latest_snapshot()
+            history = self.get_history(limit=10)
+            decisions = self.get_decision_history(limit=20)
+            history_payload = [
+                {
+                    "regime": snap.regime,
+                    "confidence": snap.confidence,
+                    "reason": snap.reason,
+                    "updated_at": snap.updated_at,
+                }
+                for snap in history
+            ]
+            decisions_payload = [
+                {
+                    "allowed": entry.allowed,
+                    "reasons": entry.reasons,
+                    "bypassed": entry.bypassed,
+                    "regime": entry.regime,
+                    "confidence": entry.confidence,
+                    "decided_at": entry.decided_at,
+                }
+                for entry in decisions
+            ]
+            return {
+                "current": {
+                    "regime": getattr(snapshot, "regime", None),
+                    "confidence": getattr(snapshot, "confidence", None),
+                    "updated_at": getattr(snapshot, "updated_at", None),
+                    "reason": getattr(snapshot, "reason", None),
+                },
+                "bypass": self.get_regime_filter_bypass(),
+                "stats": self.get_regime_filter_stats(),
+                "history": history_payload,
+                "decisions": decisions_payload,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failure in MarketRegimeManager.build_diagnostics: %s",
+                exc,
+                extra={"event": "regime_manager_build_diag_error"},
+            )
+            return {}
+
+
+__all__ = ["MarketRegimeManager", "RegimeDecision"]qa: BLE001 - defensive
             logger.error(
                 "Failure in MarketRegimeManager.__post_init__ settings: %s",
                 exc,
@@ -110,7 +181,10 @@ class MarketRegimeManager:
                     extra={"event": "regime_manager_history_override_error"},
                 )
         self._lock = threading.RLock()
+        
+        # ✅ CRITICAL FIX: Initialize _refresh_task_started
         self._refresh_task_started = False
+        
         self._history: Deque[RegimeSnapshot] = deque(maxlen=max(5, self.history_limit))
         self._decisions: Deque[RegimeDecision] = deque(maxlen=200)
         self._current: RegimeSnapshot | None = None
@@ -944,75 +1018,4 @@ class MarketRegimeManager:
         try:
             with self._lock:
                 return list(self._decisions)[-limit:]
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Failure in MarketRegimeManager.get_decision_history: %s",
-                exc,
-                extra={"event": "regime_manager_decision_history_error"},
-            )
-            return []
-
-    # ------------------------------------------------------------------
-    def build_diagnostics(self) -> dict[str, object]:
-        """Return structured diagnostics for operators.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, object]: Diagnostic payload for telemetry.
-
-        Raises:
-            None.
-        """
-
-        logger.debug(
-            "Entered MarketRegimeManager.build_diagnostics",
-            extra={"event": "regime_manager_build_diag"},
-        )
-        try:
-            snapshot = self.get_latest_snapshot()
-            history = self.get_history(limit=10)
-            decisions = self.get_decision_history(limit=20)
-            history_payload = [
-                {
-                    "regime": snap.regime,
-                    "confidence": snap.confidence,
-                    "reason": snap.reason,
-                    "updated_at": snap.updated_at,
-                }
-                for snap in history
-            ]
-            decisions_payload = [
-                {
-                    "allowed": entry.allowed,
-                    "reasons": entry.reasons,
-                    "bypassed": entry.bypassed,
-                    "regime": entry.regime,
-                    "confidence": entry.confidence,
-                    "decided_at": entry.decided_at,
-                }
-                for entry in decisions
-            ]
-            return {
-                "current": {
-                    "regime": getattr(snapshot, "regime", None),
-                    "confidence": getattr(snapshot, "confidence", None),
-                    "updated_at": getattr(snapshot, "updated_at", None),
-                    "reason": getattr(snapshot, "reason", None),
-                },
-                "bypass": self.get_regime_filter_bypass(),
-                "stats": self.get_regime_filter_stats(),
-                "history": history_payload,
-                "decisions": decisions_payload,
-            }
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Failure in MarketRegimeManager.build_diagnostics: %s",
-                exc,
-                extra={"event": "regime_manager_build_diag_error"},
-            )
-            return {}
-
-
-__all__ = ["MarketRegimeManager", "RegimeDecision"]
+        except Exception as exc:  # no
