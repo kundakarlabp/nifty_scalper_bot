@@ -565,14 +565,14 @@ class MarketRegimeManager:
         ):
             try:
                 loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        return False if self.fail_closed else True
-                    loop.create_task(self._run_indicator_refresh_loop())
-                    self._refresh_task_started = True
-                    logger.info(
-                        "MarketRegimeManager indicator refresh loop started (lazy)",
-                        extra={"event": "regime_refresh_loop_started"},
-                    )
+            except RuntimeError:
+                return False if self.fail_closed else True
+            loop.create_task(self._run_indicator_refresh_loop())
+            self._refresh_task_started = True
+            logger.info(
+                "MarketRegimeManager indicator refresh loop started (lazy)",
+                extra={"event": "regime_refresh_loop_started"},
+            )
 
         
         try:
