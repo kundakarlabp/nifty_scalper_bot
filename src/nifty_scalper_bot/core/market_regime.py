@@ -87,7 +87,6 @@ class MarketRegimeDetector:
         self._logger = LOGGER
         self._params = parameters or RegimeParameters()
         self._history: Deque[RegimeSnapshot] = deque(maxlen=max(10, history_limit))
-        self._state: Dict[str, RegimeSnapshot] = {}
         self._listeners: set[RegimeListener] = set()
         self._queues: weakref.WeakSet[RegimeQueue] = weakref.WeakSet()
         self._lock = threading.RLock()
@@ -261,48 +260,7 @@ class MarketRegimeDetector:
             )
             raise
 
-    def get_snapshot(self, symbol: str) -> RegimeSnapshot | None:
-        """Return the most recent snapshot for *symbol*.
 
-        Args:
-            symbol: Instrument identifier used for lookup.
-
-        Returns:
-            Latest :class:`RegimeSnapshot` or ``None`` if unavailable.
-
-        Raises:
-            Exception: Propagated if retrieval fails.
-        """
-
-        self._logger.debug(
-            "Entered MarketRegimeDetector.get_snapshot",
-            extra={"event": "regime_get_snapshot", "symbol": symbol},
-        )
-        try:
-            with self._lock:
-                snapshot = self._state.get(symbol)
-            if snapshot is None:
-                self._logger.info(
-                    "Condition met: regime_snapshot_missing",
-                    extra={"event": "regime_snapshot_missing", "symbol": symbol},
-                )
-            else:
-                self._logger.debug(
-                    "Condition met: regime_snapshot_found",
-                    extra={
-                        "event": "regime_snapshot_found",
-                        "symbol": symbol,
-                        "regime": snapshot.regime,
-                    },
-                )
-            return snapshot
-        except Exception as exc:  # noqa: BLE001 - defensive
-            self._logger.error(
-                "Failure in MarketRegimeDetector.get_snapshot: %s",
-                exc,
-                extra={"event": "regime_get_snapshot_error", "symbol": symbol},
-            )
-            raise
 
     def evaluate(
         self,
