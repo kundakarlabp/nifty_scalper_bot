@@ -1491,28 +1491,38 @@ class StrategyManager(_BaseStrategyManager):
                 exc_info=exc,
             )
             return self._regime_state
+        
         if snapshot is None:
             return self._regime_state
 
-        # [FIX] Handle Object, Dict, or String formats safely
+        # [FIX] Robust Normalization: Handle Dict, Object, or String inputs
         regime_raw = None
         confidence_raw = 0.0
 
+        # Case 1: It's a Dictionary (e.g. from JSON/API)
         if isinstance(snapshot, dict):
             regime_raw = snapshot.get("regime")
             confidence_raw = snapshot.get("confidence", 0.0)
+        
+        # Case 2: It's a Raw String (e.g. "TRENDING")
         elif isinstance(snapshot, str):
             regime_raw = snapshot
-            confidence_raw = 0.0
-        else:
-            # Assume object (RegimeSnapshot)
-            regime_raw = getattr(snapshot, "regime", None)
+            confidence_raw = 0.0 # Strings carry no confidence data
+            
+        # Case 3: It's an Object (RegimeSnapshot)
+        elif hasattr(snapshot, "regime"):
+            regime_raw = snapshot.regime
             confidence_raw = getattr(snapshot, "confidence", 0.0)
+            
+        # Case 4: Fallback
+        else:
+            regime_raw = str(snapshot)
 
-        # Extract value if Enum
+        # Handle Enum objects if present
         if hasattr(regime_raw, "value"):
             regime_raw = regime_raw.value
 
+        # Final Cleaning
         regime = str(regime_raw or "").strip().lower()
         try:
             confidence = float(confidence_raw or 0.0)
@@ -1524,6 +1534,8 @@ class StrategyManager(_BaseStrategyManager):
             confidence=max(0.0, min(confidence, 1.0)),
             updated_at=datetime.now(timezone.utc),
         )
+        
+        # Logging & Metrics (Kept from your original code)
         payload = {
             'event': 'regime_state_refreshed',
             'regime': self._regime_state.regime,
@@ -1558,7 +1570,7 @@ class StrategyManager(_BaseStrategyManager):
                 extra={"event": "strategy_regime_metric_error"},
             )
         return self._regime_state
-
+        
     def generate_signal(self, symbol: str, current_price: float) -> Signal | None:
         """Generate signal with confidence adjusted by strategy scores.
 
