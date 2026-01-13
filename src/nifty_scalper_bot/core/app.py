@@ -26,19 +26,6 @@ import random
 import pytz
 import sqlite3
 import time as time_module
-
-
-import inspect
-from nifty_scalper_bot.data.assess_data import assess_datahub_fresh
-
-sig = inspect.signature(assess_datahub_fresh)
-if "adaptive_ms" not in sig.parameters:
-    raise RuntimeError(
-        f"FATAL: Wrong assess_datahub_fresh loaded from "
-        f"{inspect.getsourcefile(assess_datahub_fresh)}"
-    )
-
-
 from typing import (
     TYPE_CHECKING,
     Any,
