@@ -29,6 +29,7 @@ import time as time_module
 
 
 import inspect
+from nifty_scalper_bot.data.assess_data import assess_datahub_fresh
 
 sig = inspect.signature(assess_datahub_fresh)
 if "adaptive_ms" not in sig.parameters:
