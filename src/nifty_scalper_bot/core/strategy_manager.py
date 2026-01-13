@@ -1493,8 +1493,32 @@ class StrategyManager(_BaseStrategyManager):
             return self._regime_state
         if snapshot is None:
             return self._regime_state
-        regime = str(snapshot.get("regime", "")).strip().lower()
-        confidence = float(snapshot.get("confidence", 0.0) or 0.0)
+
+        # [FIX] Handle Object, Dict, or String formats safely
+        regime_raw = None
+        confidence_raw = 0.0
+
+        if isinstance(snapshot, dict):
+            regime_raw = snapshot.get("regime")
+            confidence_raw = snapshot.get("confidence", 0.0)
+        elif isinstance(snapshot, str):
+            regime_raw = snapshot
+            confidence_raw = 0.0
+        else:
+            # Assume object (RegimeSnapshot)
+            regime_raw = getattr(snapshot, "regime", None)
+            confidence_raw = getattr(snapshot, "confidence", 0.0)
+
+        # Extract value if Enum
+        if hasattr(regime_raw, "value"):
+            regime_raw = regime_raw.value
+
+        regime = str(regime_raw or "").strip().lower()
+        try:
+            confidence = float(confidence_raw or 0.0)
+        except (ValueError, TypeError):
+            confidence = 0.0
+
         self._regime_state = RegimeState(
             regime=regime or None,
             confidence=max(0.0, min(confidence, 1.0)),
