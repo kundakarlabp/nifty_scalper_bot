@@ -4937,7 +4937,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
                         # ===================== REGIME HANDOFF FIX =====================
                         try:
-                            snapshot = market_regime_detector.get_snapshot(regime_symbol)
+                            snapshot = market_regime_detector.get_snapshot(sym)
                             if snapshot is not None:
                                 market_regime_manager.ingest_snapshot(snapshot)
                         except Exception as exc:  # defensive, non-fatal
@@ -4945,7 +4945,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 "Regime snapshot ingest failed after hydration",
                                 extra={
                                     "event": "regime_snapshot_ingest_failed",
-                                    "symbol": regime_symbol,
+                                    "symbol": sym,
                                     "error": str(exc),
                                 },
                                 exc_info=exc,
