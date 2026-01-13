@@ -1134,25 +1134,13 @@ class StrategyManager:
             diff = abs(buy_conf - sell_conf)
 
             if diff < 0.15:
-                # 🔴 CRITICAL FIX: do NOT collapse to None
+                # 🔴 CRITICAL FIX: Return None (SKIP) instead of crashing on self.symbol
+                # StrategyManager does not have self.symbol/self.name attributes.
                 logger.debug(
-                    f"Consensus WEAK -> HOLD "
+                    f"Consensus WEAK -> SKIP "
                     f"(Buy:{buy_conf:.2f} Sell:{sell_conf:.2f} Diff:{diff:.2f})"
                 )
-
-                return Signal(
-                    symbol=self.symbol,
-                    action="HOLD",
-                    quantity=0,
-                    confidence=max(buy_conf, sell_conf),
-                    reason="Weak BUY/SELL consensus",
-                    metadata={
-                        "buy_conf": buy_conf,
-                        "sell_conf": sell_conf,
-                        "diff": diff,
-                        "source": self.name,
-                    },
-                )
+                return None
 
         # 3️⃣ Select best action by average confidence
         best_action, selected_list = max(
@@ -1175,11 +1163,15 @@ class StrategyManager:
 
         reasons = ", ".join(s.reason for s in selected_list if s.reason)
         meta = dict(best_signal.metadata or {})
-        meta["confirming_strategies"] = [
-            s.metadata.get("strategy")
-            for s in selected_list
-            if s.metadata and s.metadata.get("strategy")
-        ]
+        
+        # Safely extract confirming strategies
+        confirming = []
+        for s in selected_list:
+            if s.metadata and "strategy" in s.metadata:
+                confirming.append(s.metadata["strategy"])
+        
+        if confirming:
+            meta["confirming_strategies"] = confirming
 
         logger.debug(
             f"Consensus signal: {best_signal.action} "
@@ -1193,7 +1185,6 @@ class StrategyManager:
             reason=f"Consensus: {reasons}" if reasons else "Consensus signal",
             metadata=meta,
         )
-
     def _filter_signal(self, signal: Signal) -> bool:
         if signal.confidence < self._min_confidence:
             logger.debug(f"Filter REJECT {signal.symbol}: Low Confidence ({signal.confidence:.2f} < {self._min_confidence})")
