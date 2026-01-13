@@ -1736,24 +1736,41 @@ class StrategyManager(_BaseStrategyManager):
 
         Returns:
             None.
-
-        Raises:
-            None.
         """
 
         log.debug(
             "Entered StrategyManager._log_regime_gate_decision",
             extra={"event": "strategy_regime_gate_log", "symbol": symbol},
         )
+
         now = time.time()
         gate_key = (allowed, reasons)
+
         if (
             self._last_regime_gate == gate_key
             and (now - self._last_regime_gate_at) < self._regime_gate_cooldown
         ):
             return
+
         self._last_regime_gate = gate_key
         self._last_regime_gate_at = now
+
+        # ---------- SAFE NORMALIZATION (NO ASSUMPTIONS) ----------
+        regime_val: str | None = None
+        confidence_val: float | None = None
+
+        if isinstance(snapshot, RegimeSnapshot):
+            regime_val = snapshot.regime
+            confidence_val = snapshot.confidence
+        elif isinstance(snapshot, dict):
+            regime_val = snapshot.get("regime")
+            confidence_val = snapshot.get("confidence")
+        elif isinstance(snapshot, str):
+            regime_val = snapshot
+            confidence_val = None
+        # snapshot may also be None -> leave as None
+        # ---------------------------------------------------------
+
         extras = {
             "event": (
                 "strategy_regime_gate_allow"
@@ -1761,10 +1778,11 @@ class StrategyManager(_BaseStrategyManager):
                 else "strategy_regime_gate_block"
             ),
             "symbol": symbol,
-            "regime": getattr(snapshot, "regime", None),
-            "confidence": getattr(snapshot, "confidence", None),
+            "regime": regime_val,
+            "confidence": confidence_val,
             "reasons": list(reasons),
         }
+
         if allowed:
             log.info("Condition met: strategy_regime_gate_allow", extra=extras)
         else:
