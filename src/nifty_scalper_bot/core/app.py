@@ -3460,7 +3460,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             None.
         """
 
-        snapshot = market_regime_manager.get_current_regime()
+        snapshot = market_regime_manager.get_latest_snapshot()
         if snapshot is None:
             return None
         return {
