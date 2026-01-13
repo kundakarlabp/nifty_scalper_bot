@@ -1106,40 +1106,92 @@ class StrategyManager:
 
     def _combine_signals(self, signals: list[Signal]) -> Signal | None:
         by_action = defaultdict(list)
+
+        # Collect actionable signals only
         for sig in signals:
-            if sig.action != "HOLD": by_action[sig.action].append(sig)
+            if sig.action != "HOLD":
+                by_action[sig.action].append(sig)
 
-        if not by_action: return None
+        # Nothing actionable at all
+        if not by_action:
+            logger.debug("No actionable signals after filtering HOLD")
+            return None
 
+        # 1️⃣ Hard priority: exit signals always win
         for exit_act in ("CLOSE_LONG", "CLOSE_SHORT"):
             if exit_act in by_action:
-                return max(by_action[exit_act], key=lambda s: s.confidence)
+                chosen = max(by_action[exit_act], key=lambda s: s.confidence)
+                logger.debug(f"Exit signal selected: {exit_act} @ {chosen.confidence:.2f}")
+                return chosen
 
-        if len(by_action) > 1 and {"BUY", "SELL"}.issubset(by_action.keys()):
-            buy_conf = sum(s.confidence for s in by_action["BUY"]) / len(by_action["BUY"])
-            sell_conf = sum(s.confidence for s in by_action["SELL"]) / len(by_action["SELL"])
-            if abs(buy_conf - sell_conf) < 0.15:
-                logger.debug(f"Consensus REJECTED: Indecision (Buy:{buy_conf:.2f} Sell:{sell_conf:.2f} Diff<0.15)")
-                return None
+        # 2️⃣ BUY vs SELL conflict resolution
+        if {"BUY", "SELL"}.issubset(by_action.keys()):
+            buy_list = by_action["BUY"]
+            sell_list = by_action["SELL"]
 
-        best_action = max(by_action.items(), key=lambda i: sum(s.confidence for s in i[1])/len(i[1]))
-        selected_list = best_action[1]
+            buy_conf = sum(s.confidence for s in buy_list) / len(buy_list)
+            sell_conf = sum(s.confidence for s in sell_list) / len(sell_list)
+            diff = abs(buy_conf - sell_conf)
+
+            if diff < 0.15:
+                # 🔴 CRITICAL FIX: do NOT collapse to None
+                logger.debug(
+                    f"Consensus WEAK -> HOLD "
+                    f"(Buy:{buy_conf:.2f} Sell:{sell_conf:.2f} Diff:{diff:.2f})"
+                )
+
+                return Signal(
+                    symbol=self.symbol,
+                    action="HOLD",
+                    quantity=0,
+                    confidence=max(buy_conf, sell_conf),
+                    reason="Weak BUY/SELL consensus",
+                    metadata={
+                        "buy_conf": buy_conf,
+                        "sell_conf": sell_conf,
+                        "diff": diff,
+                        "source": self.name,
+                    },
+                )
+
+        # 3️⃣ Select best action by average confidence
+        best_action, selected_list = max(
+            by_action.items(),
+            key=lambda i: sum(s.confidence for s in i[1]) / len(i[1]),
+        )
+
         best_signal = max(selected_list, key=lambda s: s.confidence)
 
-        if len(selected_list) == 1: return best_signal
+        # Single strategy -> return as-is
+        if len(selected_list) == 1:
+            logger.debug(
+                f"Single signal selected: {best_signal.action} @ {best_signal.confidence:.2f}"
+            )
+            return best_signal
 
+        # 4️⃣ Multi-strategy consensus boost (bounded)
         avg_conf = sum(s.confidence for s in selected_list) / len(selected_list)
         final_conf = min(1.0, max(0.0, avg_conf + 0.05))
-        
+
         reasons = ", ".join(s.reason for s in selected_list if s.reason)
-        meta = dict(best_signal.metadata)
-        meta["confirming_strategies"] = [s.metadata.get("strategy") for s in selected_list if s.metadata.get("strategy")]
-        
+        meta = dict(best_signal.metadata or {})
+        meta["confirming_strategies"] = [
+            s.metadata.get("strategy")
+            for s in selected_list
+            if s.metadata and s.metadata.get("strategy")
+        ]
+
+        logger.debug(
+            f"Consensus signal: {best_signal.action} "
+            f"Avg:{avg_conf:.2f} Final:{final_conf:.2f} "
+            f"Strategies:{len(selected_list)}"
+        )
+
         return dataclasses.replace(
             best_signal,
             confidence=final_conf,
-            reason=f"Consensus: {reasons}",
-            metadata=meta
+            reason=f"Consensus: {reasons}" if reasons else "Consensus signal",
+            metadata=meta,
         )
 
     def _filter_signal(self, signal: Signal) -> bool:
