@@ -19,10 +19,13 @@ def _to_epoch_seconds(ts: Any) -> Union[float, None]:
         return None
 
 
+# ============================================================
+# BACKWARD-COMPATIBILITY SHIM (CRITICAL)
+# ============================================================
 def assess_datahub_fresh(
     hub: Any,
     symbols: Union[str, Iterable[str]],
-    *,
+    *args,
     symbol_roles: Dict[str, str] | None = None,
     freshness_ms: int | None = None,
     grace_ms: int = 2_000,
@@ -30,14 +33,33 @@ def assess_datahub_fresh(
     """
     Assess market data freshness.
 
-    Backward compatible:
-    - Old mode: assess_datahub_fresh(hub, symbol, freshness_ms)
-    - New mode: role-aware multi-symbol assessment
+    Supported call patterns:
+    1) OLD (RuntimeSelfChecker):
+       assess_datahub_fresh(hub, symbol, freshness_ms)
+
+    2) NEW (role-aware):
+       assess_datahub_fresh(
+           hub,
+           symbols,
+           symbol_roles=...,
+           freshness_ms=...,
+           grace_ms=...
+       )
     """
 
-    # -------------------------------
-    # Backward compatibility layer
-    # -------------------------------
+    # --------------------------------------------------------
+    # TRUE backward compatibility for positional 3-arg calls
+    # --------------------------------------------------------
+    if isinstance(symbols, str) and args:
+        if len(args) != 1:
+            raise TypeError(
+                "assess_datahub_fresh(hub, symbol, freshness_ms) expected"
+            )
+        freshness_ms = args[0]
+
+    # --------------------------------------------------------
+    # Single-symbol (legacy) path
+    # --------------------------------------------------------
     if isinstance(symbols, str):
         if freshness_ms is None:
             raise TypeError("freshness_ms is required for single-symbol mode")
@@ -54,9 +76,11 @@ def assess_datahub_fresh(
         now = getattr(hub, "_now", time.time)()
         age_ms = max(0.0, (now - server_ts) * 1000.0)
 
+        ok = age_ms <= freshness_ms
+
         return (
-            age_ms <= freshness_ms,
-            "ok" if age_ms <= freshness_ms else "stale",
+            ok,
+            "ok" if ok else "stale",
             {
                 "symbol": symbols,
                 "age_ms": age_ms,
@@ -65,9 +89,10 @@ def assess_datahub_fresh(
             },
         )
 
-    # -------------------------------
-    # New multi-symbol role-aware path
-    # -------------------------------
+    # --------------------------------------------------------
+    # Multi-symbol role-aware path
+    # --------------------------------------------------------
+    symbols = list(symbols)
     if not symbols:
         raise ValueError("symbols cannot be empty")
 
@@ -152,7 +177,7 @@ def assess_datahub_fresh(
         "ok",
         {
             "now": now,
-            "symbols": list(symbols),
+            "symbols": symbols,
             "mode": getattr(hub, "mode", "unknown"),
         },
     )
