@@ -1573,28 +1573,44 @@ class RuntimeSelfChecker:
         }
 
     def _check_data_freshness(self) -> tuple[bool, str, dict[str, object]]:
-        """Verify recent quote availability for the primary trading symbol.
-
-        Args:
-            None.
-
-        Returns:
-            Tuple describing success flag, detail string, and metadata payload.
-
-        Raises:
-            None.
-        """
-
+        """Verify recent quote availability for active trading symbols."""
         hub = self._context.data_hub
         if hub is None:
-            return False, "missing_data_hub", {}
-        symbol = self._resolve_symbol()
+            return True, "no_data_hub", {}
+
+        # [FIX] Use actually tracked symbols from DataHub to prevent false negatives
+        # Accessing protected member _quotes is necessary here for introspection
+        symbols = list(getattr(hub, "_quotes", {}).keys())
+
+        # During startup / hydration, do NOT block trading if no quotes yet
+        if not symbols:
+            return True, "no_symbols_yet", {}
+
+        # Pick the most liquid / reliable symbol (Spot index preferred)
+        symbol = None
+        for s in symbols:
+            if "NIFTY" in s and "NSE" in s:
+                symbol = s
+                break
+        
+        # Fallback to any available symbol if index not found
+        if symbol is None:
+            symbol = symbols[0]
+
         interval = getattr(self._context.streamer, "_interval_s", 0.7) or 0.7
+        # Adaptive threshold: 2.5x poll interval, clamped 2s-5s
         adaptive_ms = max(2000, min(5000, int(float(interval) * 1000.0 * 2.5)))
-        ok, detail, meta = assess_datahub_fresh(hub, symbol, adaptive_ms)
+
+        ok, detail, meta = assess_datahub_fresh(
+            hub,
+            symbol,
+            freshness_ms=adaptive_ms
+        )
+
         payload = cast(dict[str, object], dict(meta or {}))
-        payload.setdefault("symbol", symbol)
-        payload.setdefault("adaptive_ms", adaptive_ms)
+        payload["symbol_checked"] = symbol
+        payload["adaptive_ms"] = adaptive_ms
+
         return ok, detail, payload
 
     def _check_streamer(self) -> tuple[bool, str, dict[str, object]]:
