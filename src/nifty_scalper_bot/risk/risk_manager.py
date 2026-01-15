@@ -587,6 +587,12 @@ class RiskManager:
         """Attach the live :class:`RiskState` instance used for gating."""
         self.risk_state = risk_state
         self._risk_state = risk_state
+        # ✅ CRITICAL FIX: clear stale state on (re)bind
+        if risk_state is not None:
+            try:
+                risk_state.reset_staleness()
+            except Exception:
+                pass
 
     def risk_gate_should_trade(self) -> tuple[bool, tuple[str, ...]]:
         """Return whether the micro risk state permits new trades."""
