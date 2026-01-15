@@ -1233,7 +1233,15 @@ class RiskState:
             except Exception:
                 fresh = True
             if not fresh:
-                stale_reason = "STALE"
+                # 🔧 Adaptive tolerance for polling / throttled feeds
+                poll_s = getattr(self, "_poll_interval_s", None)
+                if poll_s is not None and self._last_tick_ns > 0:
+                    age_ms = (now_ns - self._last_tick_ns) / 1_000_000
+                    # Allow up to 3× poll interval before declaring STALE
+                    if age_ms > max(self.quote_stale_ms_threshold, poll_s * 3000):
+                        stale_reason = "STALE"
+                else:
+                    stale_reason = "STALE"
         else:
             if self._last_tick_ns < 0:
                 # [FIX] Do not block before first tick — allow system to bootstrap
