@@ -73,19 +73,62 @@ class RateLimiter:
         self._lock = Lock()
 
     def configure_bucket(
-        self, name: str, capacity: int, refill_rate_per_sec: float
+        self,
+        name: str,
+        capacity: int,
+        refill_rate_per_sec: float,
+        *,
+        overwrite: bool = False,
     ) -> None:
+        """
+        Configure or update a named rate-limit bucket.
+
+        overwrite=False (default):
+            - preserves existing bucket if already configured
+            - prevents accidental token reset during live trading
+
+        overwrite=True:
+            - replaces bucket explicitly (use only during startup / reset)
+        """
         if capacity <= 0 or refill_rate_per_sec <= 0:
             raise RateLimitError("Capacity and refill rate must be positive")
-        bucket = LeakyBucket(capacity=capacity, refill_rate_per_sec=refill_rate_per_sec)
-        with self._lock:
-            self._buckets[name] = bucket
 
-    def acquire(self, name: str, timeout: float = 2.0) -> None:
-        bucket = self._buckets.get(name)
+        with self._lock:
+            existing = self._buckets.get(name)
+
+            if existing and not overwrite:
+                # Idempotent safety: do NOT reset live bucket
+                return
+
+            self._buckets[name] = LeakyBucket(
+                capacity=capacity,
+                refill_rate_per_sec=refill_rate_per_sec,
+            )
+
+    def acquire(self, name: str, timeout: float | None = None) -> None:
+        """
+        Acquire a token from the named rate-limit bucket.
+
+        timeout:
+            - None  → derive safe timeout from bucket refill rate
+            - float → explicit timeout (seconds)
+        """
+        with self._lock:
+            bucket = self._buckets.get(name)
+
         if bucket is None:
             raise RateLimitError(f"Rate limit bucket not configured: {name}")
-        bucket.acquire(timeout=timeout)
+        if timeout is None:
+            # Worst-case wait = time to get 1 token
+            timeout = max(2.0, 1.5 / bucket.refill_rate_per_sec)
+        try:
+            bucket.acquire(timeout=timeout)
+        except RateLimitError as e:
+            snapshot = bucket.snapshot()
+            raise RateLimitError(
+                f"Rate limit exceeded for bucket '{name}' | "
+                f"state={snapshot} | timeout={timeout}"
+            ) from e
 
     def snapshot(self) -> dict[str, dict[str, float]]:
         """Return shallow copy of all bucket states for telemetry."""
