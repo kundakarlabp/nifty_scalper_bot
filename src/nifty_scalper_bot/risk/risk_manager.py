@@ -617,9 +617,17 @@ class RiskManager:
         if self._breaker_tripped:
             return False
 
-        allowed, _ = self.risk_gate_should_trade()
+        allowed, reasons = self.risk_gate_should_trade()
+
+        # [FIX] Do NOT hard-block on transient STALE alone
         if not allowed:
-            return False
+            if reasons == ("STALE",):
+                self._logger.warning(
+                    "Soft STALE detected — allowing trade with caution",
+                    extra={"symbol": symbol, "event": "soft_stale_override"},
+                )
+            else:
+                return False
 
         if self.cooldown_remaining() > 0:
             return False
@@ -1110,14 +1118,17 @@ class RiskManager:
             self._m_blocks.inc()
         except Exception:
             pass
-        self._logger.info(
-            "Risk block",
+        self._logger.warning(
+            "RISK GATE BLOCK (soft)",
             extra={
                 "reason": code,
-                "reason_code": self._last_rejection,
-                "reason_text": reason,
+                "breaker": self._breaker_tripped,
+                "cooldown": self.cooldown_remaining(),
+                "symbol": getattr(self, "_lot_size_symbol", None),
+                "event": "risk_gate_block",
             },
         )
+
 
     def _set_cooldown_metric(self, value: float) -> None:  # pragma: no cover
         try:
@@ -1219,7 +1230,9 @@ class RiskState:
                 stale_reason = "STALE"
         else:
             if self._last_tick_ns < 0:
-                stale_reason = "STALE"
+                # [FIX] Do not block before first tick — allow system to bootstrap
+                return True, frozenset()
+
             else:
                 age_ms = (now_ns - self._last_tick_ns) / 1_000_000
                 if age_ms > self.quote_stale_ms_threshold:
@@ -1231,6 +1244,17 @@ class RiskState:
             self._reasons.discard("STALE")
         allowed = not self._reasons
         return allowed, frozenset(self._reasons)
+
+    def reset_staleness(self) -> None:
+        """
+        Reset transient staleness state.
+
+        Called after stream restart / rehydration to avoid
+        permanent STALE risk blocks.
+        """
+        self._last_tick_ns = -1
+        self._reasons.discard("STALE")
+ 
 
     def _evaluate_spread(self, spread: float) -> None:
         if self._median_spread <= 0:
