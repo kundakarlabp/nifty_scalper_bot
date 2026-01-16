@@ -824,20 +824,26 @@ class TradingSessionGuard:
         risk_ok = True
         risk_snapshot: RiskSnapshot | None = None
         risk_fail_reason: str | None = None
-        try:
-            risk_ok = self._risk_manager.is_green()
-            # [FIX] Detailed logging for risk blocks
-            if not risk_ok:
-                snap = self._risk_manager.snapshot()
-                if snap:
-                    LOGGER.warning(
-                        f"⛔ RISK BLOCK: Breaker={snap.breaker_tripped} | "
-                        f"Loss={snap.day_loss:.2f}/{snap.max_day_loss:.2f} | "
-                        f"Cooldown={snap.cooldown_remaining:.1f}s"
-                    )
-        except Exception:
-            risk_ok = False
-            reasons.append("Risk manager unavailable")
+
+        
+        if os.getenv("SKIP_APP_RISK", "").lower() == "true":
+            risk_ok = True
+            LOGGER.warning("⚠️ APP-LEVEL RISK CHECK BYPASSED via SKIP_APP_RISK")
+        else:
+            try:
+                risk_ok = self._risk_manager.is_green()
+                if not risk_ok:
+                    snap = self._risk_manager.snapshot()
+                    if snap:
+                        LOGGER.warning(
+                            f"⛔ RISK BLOCK: Breaker={snap.breaker_tripped} | "
+                            f"Loss={snap.day_loss:.2f}/{snap.max_day_loss:.2f} | "
+                            f"Cooldown={snap.cooldown_remaining:.1f}s"
+                        )
+            except Exception:
+                risk_ok = False
+                reasons.append("Risk manager unavailable")
+                
         if not risk_ok and "Risk manager unavailable" not in reasons:
             try:
                 risk_snapshot = self._risk_manager.snapshot()
