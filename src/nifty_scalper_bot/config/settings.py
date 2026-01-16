@@ -118,7 +118,7 @@ def _env_bool(*names: str, default: bool = False) -> bool:
             if normalized in {"0", "false", "no", "off"}:
                 LOGGER.info(
                     "Condition met: settings_env_bool_false",
-                    extra={"event": "settings_env_bool_false", "name": name},
+                    extra={"event": "settings_env_bool_false", "env_name": name},
                 )
                 return False
             raise ConfigurationError(f"Invalid boolean for {name!s}: {raw_value!r}")
@@ -316,7 +316,7 @@ def _env_str(*names: str, default: str = "") -> str:
             if value:
                 LOGGER.info(
                     "Condition met: settings_env_str_resolved",
-                    extra={"event": "settings_env_str_resolved", "name": name},
+                    extra={"event": "settings_env_str_resolved", "env_name": name},
                 )
                 return value
         LOGGER.info(
@@ -420,7 +420,7 @@ def _env_csv_ints(*names: str) -> Set[int]:
                         "Failure in _env_csv_ints: invalid integer token",
                         extra={
                             "event": "settings_env_csv_ints_invalid",
-                            "name": name,
+                            "env_name": name,
                             "token": item,
                         },
                     )
