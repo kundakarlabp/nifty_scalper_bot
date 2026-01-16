@@ -1926,7 +1926,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         """Configure default rate limit buckets."""
 
         self._limiter.configure_bucket(
-            self._QUOTE_BUCKET, capacity=3, refill_rate_per_sec=3.0
+            self._QUOTE_BUCKET, capacity=6, refill_rate_per_sec=2.0
         )
         self._limiter.configure_bucket(
             self._ORDER_BUCKET, capacity=10, refill_rate_per_sec=10.0
@@ -1940,9 +1940,18 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
     def _acquire_bucket(self, bucket: str) -> None:
         try:
-            self._limiter.acquire(bucket)
+            # Quotes need a longer timeout to avoid false starvation
+            if bucket == self._QUOTE_BUCKET:
+                self._limiter.acquire(bucket, timeout=5.0)
+            else:
+                self._limiter.acquire(bucket, timeout=2.0)
+
         except RateLimitError as exc:
-            raise BrokerError("Rate limit exceeded") from exc
+            snapshot = self._limiter.snapshot()
+            raise BrokerError(
+                f"Rate limit exceeded for bucket={bucket} | snapshot={snapshot}"
+            ) from exc
+
 
     def _format_symbol(self, symbol: str) -> str:
         if ":" in symbol:
@@ -2041,7 +2050,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             LOGGER.error(
                 "Failure in ZerodhaKiteClient._execute_with_retry: %s",
                 exc,
-                extra={"event": "zerodha_execute_with_retry_error", "label": label},
+                extra={"event": "zerodha_execute_with_retry_start", "label": label, "note": "rate_limit_must_be_acquired_outside",},
             )
             raise BrokerError(error_message) from (exc.context.error or exc)
 
