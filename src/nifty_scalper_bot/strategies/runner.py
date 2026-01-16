@@ -1725,6 +1725,7 @@ class StrategyRunner:
             # D. VWAP Crossover Strategy Logic
             generated_signal = None
 
+            import os
             if os.getenv("FORCE_SIGNAL", "").lower() == "true":
                 generated_signal = Signal(
                     action="BUY",
