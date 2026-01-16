@@ -13,9 +13,9 @@ class BaseStrategy(ABC):
         self.logger = logging.getLogger(self.__class__.__name__)
         
         # ⚙️ PRODUCTION SETTINGS: Use safe defaults with strict types
-        self.min_oi = int(self.config.get("MIN_OPEN_INTEREST", 50000))
-        self.max_spread_pct = float(self.config.get("MAX_BID_ASK_SPREAD", 5.0))
-        self.min_delta = float(self.config.get("MIN_OPTION_DELTA", 0.30))
+        self.min_oi = int(self.config.get("MIN_OPEN_INTEREST", 10000))
+        self.max_spread_pct = float(self.config.get("MAX_BID_ASK_SPREAD", 12.0))
+        self.min_delta = float(self.config.get("MIN_OPTION_DELTA", 0.20))
         self.max_iv_percentile = float(self.config.get("MAX_IV_PERCENTILE", 80.0))
 
     @abstractmethod
