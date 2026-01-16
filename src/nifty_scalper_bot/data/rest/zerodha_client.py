@@ -1926,7 +1926,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         """Configure default rate limit buckets."""
 
         self._limiter.configure_bucket(
-            self._QUOTE_BUCKET, capacity=6, refill_rate_per_sec=2.0
+            self._QUOTE_BUCKET, capacity=6, refill_rate_per_sec=0.2
         )
         self._limiter.configure_bucket(
             self._ORDER_BUCKET, capacity=10, refill_rate_per_sec=10.0
