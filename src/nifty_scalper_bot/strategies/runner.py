@@ -1724,6 +1724,23 @@ class StrategyRunner:
 
             # D. VWAP Crossover Strategy Logic
             generated_signal = None
+
+            if os.getenv("FORCE_SIGNAL", "").lower() == "true":
+                generated_signal = Signal(
+                    action="BUY",
+                    symbol=symbol,
+                    quantity=1,
+                    confidence=1.0,
+                    reason="forced_signal_validation",
+                    stop_loss=None,
+                    take_profit=None,
+                    metadata={"source": "forced"}
+                )
+                self._logger.warning(
+                    f"⚠️ FORCED SIGNAL EMITTED (early) for {symbol}"
+                )
+
+    
             prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
             curr_vwap = state.vwap
 
