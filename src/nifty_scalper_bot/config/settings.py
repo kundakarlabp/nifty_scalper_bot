@@ -112,7 +112,7 @@ def _env_bool(*names: str, default: bool = False) -> bool:
             if normalized in {"1", "true", "yes", "on"}:
                 LOGGER.info(
                     "Condition met: settings_env_bool_true",
-                    extra={"event": "settings_env_bool_true", "name": name},
+                    extra={"event": "settings_env_bool_true", "env_name": name},
                 )
                 return True
             if normalized in {"0", "false", "no", "off"}:
