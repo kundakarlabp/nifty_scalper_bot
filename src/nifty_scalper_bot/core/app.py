@@ -2062,13 +2062,13 @@ def _get_symbols(
     return final_symbols
 
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
-    \"\"\"Build strategy runner configuration with environment overrides.
+    """Build strategy runner configuration with environment overrides.
     
     Environment Variables:
         MIN_INDICATOR_BARS: Number of bars required before signal generation (default: 10)
         SIGNAL_COOLDOWN_SECONDS: Cooldown between signals (default: 3.0)
         TRADE_COOLDOWN_SECONDS: Cooldown between trades (default: 10.0)
-    \"\"\"
+    """
     cfg = getattr(config, "strategy_config", None)
     if isinstance(cfg, StrategyRunnerConfig):
         return cfg
