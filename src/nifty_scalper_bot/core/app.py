@@ -2060,19 +2060,41 @@ def _get_symbols(
         
         LOGGER.info(f"Generated fallback symbols: {final_symbols}")
     return final_symbols
-    
+
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
+    \"\"\"Build strategy runner configuration with environment overrides.
+    
+    Environment Variables:
+        MIN_INDICATOR_BARS: Number of bars required before signal generation (default: 10)
+        SIGNAL_COOLDOWN_SECONDS: Cooldown between signals (default: 3.0)
+        TRADE_COOLDOWN_SECONDS: Cooldown between trades (default: 10.0)
+    \"\"\"
     cfg = getattr(config, "strategy_config", None)
     if isinstance(cfg, StrategyRunnerConfig):
         return cfg
+    
+    # Allow environment override for warmup bars (CRITICAL for faster startup)
+    warmup_bars_default = 10  # Changed from 50 to 10 for faster signal generation
+    warmup_bars = int(os.getenv("MIN_INDICATOR_BARS", str(warmup_bars_default)))
+    
+    signal_cooldown = float(os.getenv("SIGNAL_COOLDOWN_SECONDS", "3.0"))
+    trade_cooldown = float(os.getenv("TRADE_COOLDOWN_SECONDS", "10.0"))
+    
+    LOGGER.info(
+        f"Strategy config: warmup_bars={warmup_bars}, signal_cooldown={signal_cooldown}s, "
+        f"trade_cooldown={trade_cooldown}s"
+    )
+    
     return StrategyRunnerConfig(
         signal_cooldown_seconds=float(
-            getattr(cfg, "signal_cooldown_seconds", 3.0) or 3.0
+            getattr(cfg, "signal_cooldown_seconds", signal_cooldown) or signal_cooldown
         ),
         trade_cooldown_seconds=float(
-            getattr(cfg, "trade_cooldown_seconds", 10.0) or 10.0
+            getattr(cfg, "trade_cooldown_seconds", trade_cooldown) or trade_cooldown
         ),
-        min_indicator_bars=int(getattr(cfg, "min_indicator_bars", 50) or 50),
+        min_indicator_bars=int(
+            getattr(cfg, "min_indicator_bars", warmup_bars) or warmup_bars
+        ),
         max_trade_history=int(getattr(cfg, "max_trade_history", 100) or 100),
     )
 
