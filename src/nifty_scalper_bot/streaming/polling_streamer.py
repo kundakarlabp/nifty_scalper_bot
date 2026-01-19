@@ -310,45 +310,98 @@ class PollingStreamer:
     # ✅ HELPERS (Inlined to ensure stability)
     # ----------------------------------------------------------------
     def _try_quote_bulk(self, batch: list[int], timestamp_ms: int) -> list[dict[str, Any]]:
-        """Helper: Fetch full quotes (price + volume) safely."""
+        """Helper: Fetch full quotes (price + volume) safely.
+        
+        ✅ WORLD CLASS FIX: Use exchange:tradingsymbol format for reliable API calls.
+        """
         try:
-            # Convert tokens to strings for KiteConnect
-            str_tokens = [str(t) for t in batch]
+            if not batch:
+                return []
+            
+            # ✅ FIX: Convert tokens to exchange:tradingsymbol format
+            # Zerodha API works more reliably with this format
+            symbols_to_fetch = []
+            token_to_symbol_map = {}
+            
+            for token in batch:
+                symbol = self._resolve_instrument(token)
+                if symbol:
+                    symbols_to_fetch.append(symbol)
+                    token_to_symbol_map[symbol] = token
+                else:
+                    # Fallback: try numeric token as string
+                    symbols_to_fetch.append(str(token))
+                    token_to_symbol_map[str(token)] = token
+            
+            if not symbols_to_fetch:
+                LOGGER.warning("[POLL] No symbols resolved from tokens")
+                return []
+            
+            # ✅ FIX: Log what we're fetching (throttled)
+            log_throttled(
+                LOGGER,
+                "quote_fetch_attempt",
+                f"📡 Fetching quotes for {len(symbols_to_fetch)} symbols: {symbols_to_fetch[:3]}...",
+                interval_sec=60.0
+            )
             
             # The Broker call (Standard Zerodha API)
-            quote_map = self._broker.quote(str_tokens)
+            quote_map = self._broker.quote(symbols_to_fetch)
             
             if not quote_map:
+                LOGGER.warning("[POLL] Empty quote_map returned from broker")
                 return []
 
             ticks = []
-            for token_str, quote in quote_map.items():
+            for key, quote in quote_map.items():
                 try:
                     lp = float(quote.get("last_price") or 0.0)
-                    if lp <= 0: continue
+                    if lp <= 0:
+                        continue
                     
-                    # Use broker timestamp if available, else fallback to passed ts
+                    # Get instrument token from quote or map
+                    token = quote.get("instrument_token")
+                    if not token and key in token_to_symbol_map:
+                        token = token_to_symbol_map[key]
+                    if not token:
+                        # Try to extract from key if it's numeric
+                        try:
+                            token = int(key)
+                        except (ValueError, TypeError):
+                            token = None
+                    
+                    if not token:
+                        LOGGER.debug(f"[POLL] Skipping quote without token: {key}")
+                        continue
+                    
+                    # Use broker timestamp if available
                     q_ts = quote.get("timestamp")
                     if q_ts and hasattr(q_ts, "timestamp"):
                         ts = int(q_ts.timestamp() * 1000)
                     else:
                         ts = timestamp_ms
 
-                    ticks.append({
-                        "instrument_token": int(token_str),
+                    tick = {
+                        "instrument_token": int(token),
                         "last_price": lp,
                         "timestamp": ts,
                         "volume": quote.get("volume", 0),
                         "average_price": quote.get("average_price", 0.0),
                         "oi": quote.get("oi", 0),
-                        "depth": quote.get("depth")
-                    })
-                except Exception:
+                        "depth": quote.get("depth"),
+                        # ✅ FIX: Add symbol directly from key
+                        "symbol": key if ":" in str(key) else None
+                    }
+                    ticks.append(tick)
+                    
+                except Exception as e:
+                    LOGGER.debug(f"[POLL] Error processing quote {key}: {e}")
                     continue
+            
             return ticks
+            
         except Exception as e:
-            # Log debug only to avoid spamming main log
-            LOGGER.debug(f"[POLL-QUOTE-FAIL] {e}")
+            LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}")
             return []
 
     def _try_ltp_bulk(self, batch: list[int], timestamp_ms: int) -> list[dict[str, Any]]:
@@ -391,8 +444,30 @@ class PollingStreamer:
             yield lst[i : i + n]
 
     def _resolve_instrument(self, token: int) -> str | None:
-        """Resolve instrument token to tradingsymbol."""
-        if hasattr(self._resolver, "get_instrument_by_token"):
-             inst = self._resolver.get_instrument_by_token(token)
-             return inst.tradingsymbol if inst else None
-        return str(token)
+        """Resolve instrument token to tradingsymbol with exchange prefix.
+        
+        ✅ WORLD CLASS FIX: Return full exchange:tradingsymbol format.
+        """
+        if not token:
+            return None
+            
+        try:
+            if hasattr(self._resolver, "get_instrument_by_token"):
+                inst = self._resolver.get_instrument_by_token(token)
+                if inst:
+                    # ✅ FIX: Return full symbol with exchange prefix
+                    exchange = getattr(inst, "exchange", "NFO")
+                    tradingsymbol = getattr(inst, "tradingsymbol", None)
+                    if tradingsymbol:
+                        return f"{exchange}:{tradingsymbol}"
+            
+            # Fallback: check if resolver has symbol_by_token cache
+            if hasattr(self._resolver, "_symbol_by_token"):
+                symbol = self._resolver._symbol_by_token.get(token)
+                if symbol:
+                    return symbol
+                    
+        except Exception as e:
+            LOGGER.debug(f"[POLL] Symbol resolution error for token {token}: {e}")
+        
+        return None
