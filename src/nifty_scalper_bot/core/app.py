@@ -2735,20 +2735,50 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         token_value = t.get("instrument_token")
         if token_value and "symbol" not in t:
             try:
-                mapped = market_data_manager._symbol_by_token.get(int(token_value))
+                mapped = None
+                
+                # Try multiple sources
+                if market_data_manager:
+                    mapped = market_data_manager._symbol_by_token.get(int(token_value))
+                
+                if not mapped and instrument_resolver:
+                    inst = instrument_resolver.get_instrument_by_token(int(token_value))
+                    if inst:
+                        exchange = getattr(inst, 'exchange', 'NFO')
+                        tradingsymbol = getattr(inst, 'tradingsymbol', None)
+                        if tradingsymbol:
+                            mapped = f"{exchange}:{tradingsymbol}"
+                
                 if mapped:
                     t["symbol"] = mapped
-            except Exception:
-                pass
-        # ✅ DIAGNOSTIC: Log tick reception (throttled)
+                    # ✅ DIAGNOSTIC: Log successful mapping
+                    log_throttled(
+                        LOGGER,
+                        f"symbol_mapped_{token_value}",
+                        f"✅ Mapped token {token_value} -> {mapped}",
+                        interval_sec=120.0
+                    )
+                else:
+                    # ✅ DIAGNOSTIC: Log failed mapping
+                    log_throttled(
+                        LOGGER,
+                        f"symbol_unmapped_{token_value}",
+                        f"⚠️ UNMAPPED TOKEN: {token_value}",
+                        interval_sec=60.0
+                    )
+            except Exception as e:
+                LOGGER.debug(f"Symbol mapping error: {e}")
+
+        # ✅ DIAGNOSTIC: Log tick reception at INFO level
         sym = t.get("symbol")
-        ltp = t.get("ltp")
-        log_throttled(
-            LOGGER,
-            f"poll_tick_{sym or token_value}",
-            f"📡 POLL TICK: {sym or f'token:{token_value}'} | LTP: {ltp}",
-            interval_sec=30.0
-        )
+        ltp = t.get("ltp") or t.get("last_price")
+        if sym:
+            log_throttled(
+                LOGGER,
+                f"tick_received_{sym}",
+                f"📡 TICK: {sym} | LTP: {ltp}",
+                interval_sec=30.0
+            )
 
         # 4. LTP Normalization
         if "ltp" not in t:
