@@ -2740,6 +2740,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     t["symbol"] = mapped
             except Exception:
                 pass
+        # ✅ DIAGNOSTIC: Log tick reception (throttled)
+        sym = t.get("symbol")
+        ltp = t.get("ltp")
+        log_throttled(
+            LOGGER,
+            f"poll_tick_{sym or token_value}",
+            f"📡 POLL TICK: {sym or f'token:{token_value}'} | LTP: {ltp}",
+            interval_sec=30.0
+        )
 
         # 4. LTP Normalization
         if "ltp" not in t:
