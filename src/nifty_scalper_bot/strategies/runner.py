@@ -1896,48 +1896,56 @@ class StrategyRunner:
     def _calculate_signal_score(self, symbol: str, side: str, price: float) -> float:
         """
         Calculate confidence using INSTANT metrics (No history required).
-        Prevents 'Cold Start' rejection while still filtering bad trades.
         
-        ✅ FIX: Added off-hours bypass for testing and improved scoring logic.
+        ✅ WORLD CLASS FIX: Better handling of market hours and volume.
         """
         import os
         from datetime import datetime
         from zoneinfo import ZoneInfo
         
-        # ✅ FIX: Check if we're in testing mode (off-hours allowed)
+        # Check session override for testing
         allow_off_hours = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
         ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-        is_market_hours = 9 <= ist_now.hour < 16  # Roughly 9:15 AM to 3:30 PM
+        is_market_hours = 9 <= ist_now.hour < 16
         
-        # If testing outside market hours with permission, use higher base confidence
-        if allow_off_hours and not is_market_hours:
-            self._logger.debug(f"⚙️ Off-hours testing mode: boosted confidence for {symbol}")
-            return 0.75  # Allow signals through during testing
-        
-        score = 0.5  # Base score for a valid VWAP cross
+        # Base score
+        score = 0.5
         
         with self._lock:
             state = self._symbol_state.get(symbol)
             if not state:
-                return 1.0  # Fail-open if state missing (trust the signal)
+                return 0.75  # Trust signal if no state
             
-            # 1. VWAP Proximity (Don't chase!)
-            if state.vwap and state.vwap > 0:
+            # 1. VWAP Proximity
+            if state.vwap and state.vwap > 0 and price > 0:
                 dist_pct = abs(price - state.vwap) / state.vwap
-                if dist_pct < 0.005:  # Super tight entry (<0.5%)
+                if dist_pct < 0.005:  # <0.5%
                     score += 0.3
-                elif dist_pct < 0.01:  # Decent entry (<1.0%)
+                elif dist_pct < 0.01:  # <1.0%
+                    score += 0.2
+                elif dist_pct < 0.02:  # <2.0%
                     score += 0.1
-                elif dist_pct > 0.03:  # Too far extended (>3%)
-                    score -= 0.3  # Penalty for chasing
+                elif dist_pct > 0.03:  # >3%
+                    score -= 0.2
 
-            # 2. Volume Check (Liquidity) - Relaxed for off-hours
+            # 2. Volume Check - Relaxed for off-hours
             if state.last_tick:
                 vol = float(state.last_tick.get('volume', 0))
-                if vol > 50000:  # Healthy volume
+                if vol > 100000:
                     score += 0.2
-                elif vol > 0:  # Some volume
+                elif vol > 50000:
+                    score += 0.15
+                elif vol > 10000:
                     score += 0.1
+                elif vol > 0:
+                    score += 0.05
+                elif allow_off_hours and not is_market_hours:
+                    # Off-hours: don't penalize zero volume
+                    score += 0.1
+        
+        # 3. Boost for testing mode
+        if allow_off_hours and not is_market_hours:
+            score = max(score, 0.6)  # Ensure signals pass during testing
         
         return min(1.0, max(0.0, score))
 
@@ -2058,9 +2066,9 @@ class StrategyRunner:
         side = "LONG" if signal.action == "BUY" else "SHORT"
         confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
 
-        # ✅ FIX: Use GLOBAL_MIN_SIGNAL_CONFIDENCE env var instead of hardcoded 0.6
+        # ✅ WORLD CLASS FIX: Use environment variable for confidence threshold
         import os
-        min_confidence = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.50"))
+        min_confidence = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45"))
         
         if confidence < min_confidence:
             self._logger.info(f"🚫 Low Confidence Signal: {confidence:.2f} (min: {min_confidence:.2f})")
