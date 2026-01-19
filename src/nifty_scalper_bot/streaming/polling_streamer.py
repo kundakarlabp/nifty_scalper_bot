@@ -180,25 +180,34 @@ class PollingStreamer:
                             tick["source"] = "rest"
 
                             # [FIX] 3. Seed Cache Immediately (Synchronous)
-                            # Eliminates race condition: RiskManager sees data BEFORE _on_tick queue runs.
-                            if self._data_hub:
-                                token = tick.get("instrument_token")
-                                symbol = self._resolve_instrument(token)
-                                if symbol:
-                                    # FIX: update heartbeat FIRST so freshness never fails
-                                    ts = tick.get("timestamp")
-
+                            token = tick.get("instrument_token")
+                            symbol = self._resolve_instrument(token)
+                            
+                            # ✅ CRITICAL FIX: Add symbol to tick BEFORE callback
+                            if symbol:
+                                tick["symbol"] = symbol
+                            
+                            if self._data_hub and symbol:
                                 self._data_hub.store_quote(symbol, tick, source="rest", seed=True)
 
-                            
                             # 4. Update Metrics
                             with suppress(Exception):
                                 self._m_last_tick.set(int(time.time() * 1000))
                             
                             # 5. Async Handoff (Strategy Pipeline)
-                            with suppress(Exception):
-                                self._on_tick(tick)
-                                self._m_ticks_ingested.inc()
+                            # ✅ CRITICAL: Only call if symbol was resolved
+                            if symbol:
+                                with suppress(Exception):
+                                    self._on_tick(tick)
+                                    self._m_ticks_ingested.inc()
+                            else:
+                                log_throttled(
+                                    LOGGER,
+                                    f"no_symbol_{token}",
+                                    f"⚠️ SKIPPED tick - no symbol for token {token}",
+                                    level=30,
+                                    interval_sec=60.0
+                                )
 
                 # Success: Update health metrics & reset backoff
                 with suppress(Exception):
