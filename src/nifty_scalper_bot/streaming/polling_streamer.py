@@ -310,34 +310,35 @@ class PollingStreamer:
     # ✅ HELPERS (Inlined to ensure stability)
     # ----------------------------------------------------------------
     def _try_quote_bulk(self, batch: list[int], timestamp_ms: int) -> list[dict[str, Any]]:
-        """Helper: Fetch full quotes (price + volume) safely.
-        
-        ✅ WORLD CLASS FIX: Use exchange:tradingsymbol format for reliable API calls.
-        """
+        """Fetch full quotes with proper token handling."""
         try:
             if not batch:
                 return []
             
-            # ✅ FIX: Convert tokens to exchange:tradingsymbol format
-            # Zerodha API works more reliably with this format
+            # Build symbol list with token mapping
             symbols_to_fetch = []
             token_to_symbol_map = {}
+            symbol_to_token_map = {}  # Reverse map for extracting tokens from API response
             
             for token in batch:
                 symbol = self._resolve_instrument(token)
                 if symbol:
                     symbols_to_fetch.append(symbol)
                     token_to_symbol_map[symbol] = token
+                    symbol_to_token_map[symbol] = token
+                    # Also map variations (Zerodha may return slightly different keys)
+                    symbol_to_token_map[symbol.upper()] = token
+                    symbol_to_token_map[symbol.replace(" ", "")] = token
                 else:
-                    # Fallback: try numeric token as string
+                    # Last resort: try numeric token
                     symbols_to_fetch.append(str(token))
                     token_to_symbol_map[str(token)] = token
+                    symbol_to_token_map[str(token)] = token
             
             if not symbols_to_fetch:
                 LOGGER.warning("[POLL] No symbols resolved from tokens")
                 return []
             
-            # ✅ FIX: Log what we're fetching (throttled)
             log_throttled(
                 LOGGER,
                 "quote_fetch_attempt",
@@ -345,7 +346,7 @@ class PollingStreamer:
                 interval_sec=60.0
             )
             
-            # The Broker call (Standard Zerodha API)
+            # Call Zerodha API
             quote_map = self._broker.quote(symbols_to_fetch)
             
             if not quote_map:
@@ -359,22 +360,38 @@ class PollingStreamer:
                     if lp <= 0:
                         continue
                     
-                    # Get instrument token from quote or map
+                    # ✅ FIX: Get token from quote data first, then from our map
                     token = quote.get("instrument_token")
-                    if not token and key in token_to_symbol_map:
-                        token = token_to_symbol_map[key]
-                    if not token:
-                        # Try to extract from key if it's numeric
-                        try:
-                            token = int(key)
-                        except (ValueError, TypeError):
-                            token = None
                     
                     if not token:
-                        LOGGER.debug(f"[POLL] Skipping quote without token: {key}")
+                        # Try to find token from our reverse map
+                        token = symbol_to_token_map.get(key)
+                        if not token:
+                            token = symbol_to_token_map.get(str(key).upper())
+                        if not token:
+                            # Try without spaces
+                            token = symbol_to_token_map.get(str(key).replace(" ", ""))
+                    
+                    # ✅ FIX: DON'T try int(key) if key is a symbol string!
+                    # Only convert if token is still numeric-looking
+                    if token is None:
+                        if str(key).isdigit():
+                            token = int(key)
+                        else:
+                            # Use the first token from our batch as fallback
+                            # (This handles single-symbol case)
+                            if len(batch) == 1:
+                                token = batch[0]
+                            else:
+                                LOGGER.warning(f"[POLL] Cannot determine token for key: {key}")
+                                continue
+                    
+                    # Ensure token is integer
+                    token_int = int(token) if token else None
+                    if not token_int:
                         continue
                     
-                    # Use broker timestamp if available
+                    # Build timestamp
                     q_ts = quote.get("timestamp")
                     if q_ts and hasattr(q_ts, "timestamp"):
                         ts = int(q_ts.timestamp() * 1000)
@@ -382,14 +399,13 @@ class PollingStreamer:
                         ts = timestamp_ms
 
                     tick = {
-                        "instrument_token": int(token),
+                        "instrument_token": token_int,
                         "last_price": lp,
                         "timestamp": ts,
                         "volume": quote.get("volume", 0),
                         "average_price": quote.get("average_price", 0.0),
                         "oi": quote.get("oi", 0),
                         "depth": quote.get("depth"),
-                        # ✅ FIX: Add symbol directly from key
                         "symbol": key if ":" in str(key) else None
                     }
                     ticks.append(tick)
@@ -444,29 +460,61 @@ class PollingStreamer:
             yield lst[i : i + n]
 
     def _resolve_instrument(self, token: int) -> str | None:
-        """Resolve instrument token to tradingsymbol with exchange prefix.
+        """Resolve instrument token to exchange:tradingsymbol format.
         
-        ✅ WORLD CLASS FIX: Return full exchange:tradingsymbol format.
+        Returns format like 'NSE:NIFTY 50' or 'NFO:NIFTY2612025700CE'.
         """
         if not token:
             return None
-            
+        
         try:
-            if hasattr(self._resolver, "get_instrument_by_token"):
-                inst = self._resolver.get_instrument_by_token(token)
-                if inst:
-                    # ✅ FIX: Return full symbol with exchange prefix
-                    exchange = getattr(inst, "exchange", "NFO")
-                    tradingsymbol = getattr(inst, "tradingsymbol", None)
-                    if tradingsymbol:
-                        return f"{exchange}:{tradingsymbol}"
+            token_int = int(token)
             
-            # Fallback: check if resolver has symbol_by_token cache
+            # 1. Try format_token_as_symbol (best method - uses CANONICAL_TOKENS)
+            if hasattr(self._resolver, "format_token_as_symbol"):
+                result = self._resolver.format_token_as_symbol(token_int)
+                if result and result != str(token_int):
+                    return result
+            
+            # 2. Try lookup method
+            if hasattr(self._resolver, "lookup"):
+                info = self._resolver.lookup(token_int)
+                if info:
+                    exchange = info.get("exchange", "NSE")
+                    symbol = info.get("symbol") or info.get("tradingsymbol")
+                    if symbol:
+                        # Handle special case: NIFTY 50 / NIFTY BANK
+                        if symbol in ("NIFTY", "NIFTY 50"):
+                            return "NSE:NIFTY 50"
+                        elif symbol in ("BANKNIFTY", "NIFTY BANK"):
+                            return "NSE:NIFTY BANK"
+                        return f"{exchange}:{symbol}"
+            
+            # 3. Try direct cache access with exchange lookup
             if hasattr(self._resolver, "_symbol_by_token"):
-                symbol = self._resolver._symbol_by_token.get(token)
+                symbol = self._resolver._symbol_by_token.get(token_int)
                 if symbol:
-                    return symbol
+                    # Get exchange from cache
+                    exchange = "NSE"
+                    if hasattr(self._resolver, "_exchange_by_token"):
+                        exchange = self._resolver._exchange_by_token.get(token_int, "NSE")
                     
+                    # Handle NIFTY special case
+                    if symbol in ("NIFTY", "NIFTY 50"):
+                        return "NSE:NIFTY 50"
+                    elif symbol in ("BANKNIFTY", "NIFTY BANK"):
+                        return "NSE:NIFTY BANK"
+                    
+                    return f"{exchange}:{symbol}"
+            
+            # 4. Well-known token fallback
+            WELL_KNOWN_TOKENS = {
+                256265: "NSE:NIFTY 50",
+                260105: "NSE:NIFTY BANK",
+            }
+            if token_int in WELL_KNOWN_TOKENS:
+                return WELL_KNOWN_TOKENS[token_int]
+                
         except Exception as e:
             LOGGER.debug(f"[POLL] Symbol resolution error for token {token}: {e}")
         
