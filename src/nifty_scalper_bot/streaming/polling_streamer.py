@@ -77,10 +77,53 @@ class PollingStreamer:
             LOGGER.info("🛑 Polling Streamer Stopped", extra={"event": "polling_stopped"})
 
     def subscribe(self, tokens: Sequence[int]) -> None:
-        """Add tokens to the polling list and seed DataHub immediately."""
+        """Add tokens to the polling list and seed DataHub immediately.
+        
+        Args:
+            tokens: Sequence of integer instrument tokens. 
+                   Strings will be validated and converted if numeric.
+        """
+        # ✅ CRITICAL FIX: Validate and convert tokens to integers
+        valid_tokens = set()
+        for token in tokens or []:
+            try:
+                if isinstance(token, int):
+                    valid_tokens.add(token)
+                elif isinstance(token, str):
+                    stripped = token.strip()
+                    if stripped.isdigit():
+                        valid_tokens.add(int(stripped))
+                    else:
+                        LOGGER.warning(
+                            "PollingStreamer.subscribe: skipping non-numeric token %r",
+                            token,
+                            extra={"event": "polling_subscribe_skip", "token": token},
+                        )
+                elif isinstance(token, float):
+                    valid_tokens.add(int(token))
+                else:
+                    LOGGER.warning(
+                        "PollingStreamer.subscribe: invalid token type %s",
+                        type(token).__name__,
+                        extra={"event": "polling_subscribe_invalid_type", "token_type": type(token).__name__},
+                    )
+            except (ValueError, TypeError) as e:
+                LOGGER.warning(
+                    "PollingStreamer.subscribe: cannot convert token %r: %s",
+                    token, e,
+                    extra={"event": "polling_subscribe_convert_error", "token": str(token)},
+                )
+        
+        if not valid_tokens:
+            LOGGER.warning(
+                "PollingStreamer.subscribe: no valid tokens provided",
+                extra={"event": "polling_subscribe_empty"},
+            )
+            return
+        
         with self._lock:
             initial_count = len(self._tokens)
-            self._tokens.update(tokens)
+            self._tokens.update(valid_tokens)
             new_count = len(self._tokens)
 
         if new_count > initial_count:
@@ -90,23 +133,19 @@ class PollingStreamer:
                 extra={"event": "polling_subscribe", "count": new_count},
             )
 
-        # [FIX] CRITICAL: Immediate seed to avoid RiskState race
-        # This creates a "Fresh" state immediately so RiskManager doesn't block startup.
+        # Seed DataHub immediately
         if self._data_hub:
             import time
-            for token in tokens:
+            for token in valid_tokens:
                 symbol = self._resolve_instrument(token)
                 if symbol:
-                    # We send a "Ghost Quote" with 0.0 price but FRESH timestamp.
-                    # This satisfies the RiskState's freshness check immediately.
-                    # Note: We removed 'seed=True' to prevent TypeError.
                     self._data_hub.store_quote(
                         symbol,
                         {
                             "instrument_token": token,
-                            "last_price": None,   # Safe placeholder (strategies check > 0)
+                            "last_price": None,
                             "timestamp": int(time.time() * 1000),
-                            "source": "rest"     # Important: Applies 90s freshness rule
+                            "source": "rest"
                         },
                         source="rest",
                         seed=True,
@@ -321,19 +360,26 @@ class PollingStreamer:
             symbol_to_token_map = {}  # Reverse map for extracting tokens from API response
             
             for token in batch:
-                symbol = self._resolve_instrument(token)
+                # ✅ DEFENSIVE: Ensure token is integer
+                try:
+                    token_int = int(token) if not isinstance(token, int) else token
+                except (ValueError, TypeError):
+                    LOGGER.warning(f"[POLL] Skipping non-integer in batch: {token!r}")
+                    continue
+                
+                symbol = self._resolve_instrument(token_int)
                 if symbol:
                     symbols_to_fetch.append(symbol)
-                    token_to_symbol_map[symbol] = token
-                    symbol_to_token_map[symbol] = token
+                    token_to_symbol_map[symbol] = token_int
+                    symbol_to_token_map[symbol] = token_int
                     # Also map variations (Zerodha may return slightly different keys)
-                    symbol_to_token_map[symbol.upper()] = token
-                    symbol_to_token_map[symbol.replace(" ", "")] = token
+                    symbol_to_token_map[symbol.upper()] = token_int
+                    symbol_to_token_map[symbol.replace(" ", "")] = token_int
                 else:
                     # Last resort: try numeric token
-                    symbols_to_fetch.append(str(token))
-                    token_to_symbol_map[str(token)] = token
-                    symbol_to_token_map[str(token)] = token
+                    symbols_to_fetch.append(str(token_int))
+                    token_to_symbol_map[str(token_int)] = token_int
+                    symbol_to_token_map[str(token_int)] = token_int
             
             if not symbols_to_fetch:
                 LOGGER.warning("[POLL] No symbols resolved from tokens")
@@ -440,12 +486,26 @@ class PollingStreamer:
                          
                     if lp <= 0: continue
                     
+                    # ✅ FIX: API returns keys as "exchange:symbol", need to map back to token
+                    # First check if token_str is actually numeric
+                    if str(token_str).isdigit():
+                        inst_token = int(token_str)
+                    else:
+                        # Look up in our batch - single token case
+                        if len(batch) == 1:
+                            inst_token = batch[0]
+                        else:
+                            # Can't determine token from LTP response key
+                            LOGGER.debug(f"[POLL-LTP] Cannot map key to token: {token_str}")
+                            continue
+                    
                     ticks.append({
-                        "instrument_token": int(token_str),
+                        "instrument_token": inst_token,
                         "last_price": lp,
                         "timestamp": timestamp_ms,
                         "volume": 0,
-                        "average_price": 0.0
+                        "average_price": 0.0,
+                        "symbol": token_str if ":" in str(token_str) else None
                     })
                 except Exception:
                     continue
@@ -464,11 +524,18 @@ class PollingStreamer:
         
         Returns format like 'NSE:NIFTY 50' or 'NFO:NIFTY2612025700CE'.
         """
-        if not token:
+        if token is None:
             return None
         
         try:
-            token_int = int(token)
+            # ✅ FIX: Handle case where token is already a symbol string
+            if isinstance(token, str):
+                if not token.strip().isdigit():
+                    # It's already a symbol like "NSE:NIFTY 50", return it directly
+                    return token if ":" in token else None
+                token_int = int(token.strip())
+            else:
+                token_int = int(token)
             
             # 1. Try format_token_as_symbol (best method - uses CANONICAL_TOKENS)
             if hasattr(self._resolver, "format_token_as_symbol"):
