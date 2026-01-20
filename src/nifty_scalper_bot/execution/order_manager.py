@@ -609,12 +609,14 @@ class OrderManager:
         self.trade_store = TradeStore()
         self._logger = get_logger(__name__)
         self._broker_circuit = CircuitBreaker()
-        self._history_path = Path(history_path or Path("data") / "order_history.json")
+        _data_dir = Path(os.getenv("DATA_DIR", "data"))
+        _data_dir.mkdir(parents=True, exist_ok=True)
+        self._history_path = Path(history_path or _data_dir / "order_history.json")
         self._orders: dict[str, OrderDetails] = {}
         self._history: deque[OrderDetails] = deque(maxlen=1000)
         self._history_index: dict[str, int] = {}
         self._history_base_index = 0
-        self._history_persist_path = Path("data/order_history_archive.jsonl")
+        self._history_persist_path = _data_dir / "order_history_archive.jsonl"
         self._history_persist_path.parent.mkdir(parents=True, exist_ok=True)
         self._history_persisted_ids: set[str] = set()
         self._notifier: TelegramEnhancedNotifier | None = None
