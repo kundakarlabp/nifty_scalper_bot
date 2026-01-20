@@ -5,7 +5,6 @@ Production Entrypoint
 - Preserves existing bot logic
 - Prevents zombie / false-alive state
 - Fails fast on core app crash
-- ✅ FIX: Explicit .env file loading
 - ✅ FIX: Data directory permission handling
 """
 
@@ -73,7 +72,7 @@ def _ensure_data_directory() -> None:
     data_dirs = [
         Path("/app/data"),
         Path.cwd() / "data",
-        Path("/tmp/nifty_scalper_data"),  # Fallback - always writable
+        Path("/tmp/nifty_scalper_data"),
     ]
     
     for data_dir in data_dirs:
@@ -89,7 +88,6 @@ def _ensure_data_directory() -> None:
             print(f"⚠️ Cannot use {data_dir}: {e}", flush=True)
             continue
     
-    # Ultimate fallback
     fallback = Path("/tmp/nifty_scalper_data")
     fallback.mkdir(parents=True, exist_ok=True)
     os.environ["DATA_DIR"] = str(fallback)
@@ -102,7 +100,6 @@ _ensure_data_directory()
 logging.basicConfig(level="INFO", stream=sys.stdout)
 LOG = logging.getLogger("nifty_scalper_bot.main")
 
-# ✅ CRITICAL: Log the actual env values for debugging
 print("🚀 PYTHON START: Initializing...", flush=True)
 print(f"   🔧 ENABLE_LIVE = {os.getenv('ENABLE_LIVE', 'NOT_SET')}", flush=True)
 print(f"   🔧 EXECUTION_MODE = {os.getenv('EXECUTION_MODE', 'NOT_SET')}", flush=True)
