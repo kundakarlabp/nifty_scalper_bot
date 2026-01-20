@@ -5,6 +5,8 @@ Production Entrypoint
 - Preserves existing bot logic
 - Prevents zombie / false-alive state
 - Fails fast on core app crash
+- ✅ FIX: Explicit .env file loading
+- ✅ FIX: Data directory permission handling
 """
 
 import sys
@@ -22,7 +24,7 @@ from dotenv import load_dotenv
 
 sys.stdout.reconfigure(line_buffering=True)
 
-# ✅ CRITICAL FIX: Explicitly find and load .env file
+
 def _load_env_file() -> None:
     """Load .env file from multiple possible locations.
     
@@ -33,39 +35,76 @@ def _load_env_file() -> None:
     4. Parent directories up to 3 levels
     """
     search_paths = [
-        Path.cwd() / ".env",                          # Current directory
-        Path("/app/.env"),                            # Docker/Railway standard
-        Path(__file__).resolve().parent.parent.parent.parent / ".env",  # Project root from src/
-        Path(__file__).resolve().parent.parent.parent / ".env",         # One level up
+        Path.cwd() / ".env",
+        Path("/app/.env"),
+        Path(__file__).resolve().parent.parent.parent.parent / ".env",
+        Path(__file__).resolve().parent.parent.parent / ".env",
     ]
     
-    # Also check WORKDIR environment variable if set
     workdir = os.getenv("WORKDIR") or os.getenv("APP_DIR")
     if workdir:
         search_paths.insert(0, Path(workdir) / ".env")
     
     env_loaded = False
     for env_path in search_paths:
-        if env_path.exists() and env_path.is_file():
-            print(f"✅ ENV FILE FOUND: {env_path}", flush=True)
-            load_dotenv(dotenv_path=str(env_path), override=True)
-            env_loaded = True
-            
-            # Debug: Print critical env vars to verify loading
-            enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
-            exec_mode = os.getenv("EXECUTION_MODE", "NOT_SET")
-            print(f"   📋 ENABLE_LIVE={enable_live}", flush=True)
-            print(f"   📋 EXECUTION_MODE={exec_mode}", flush=True)
-            break
+        try:
+            if env_path.exists() and env_path.is_file():
+                print(f"✅ ENV FILE FOUND: {env_path}", flush=True)
+                load_dotenv(dotenv_path=str(env_path), override=True)
+                env_loaded = True
+                
+                enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
+                exec_mode = os.getenv("EXECUTION_MODE", "NOT_SET")
+                print(f"   📋 ENABLE_LIVE={enable_live}", flush=True)
+                print(f"   📋 EXECUTION_MODE={exec_mode}", flush=True)
+                break
+        except Exception as e:
+            print(f"⚠️ Error checking {env_path}: {e}", flush=True)
+            continue
     
     if not env_loaded:
         print("⚠️ WARNING: No .env file found! Using Railway/system env vars only.", flush=True)
         print(f"   Searched paths: {[str(p) for p in search_paths]}", flush=True)
     
-    # Always call load_dotenv() as fallback (handles Railway env vars)
-    load_dotenv(override=False)  # Don't override what we already loaded
+    load_dotenv(override=False)
+
+
+def _ensure_data_directory() -> None:
+    """Ensure /app/data directory exists and is writable.
+    
+    ✅ FIX: Prevents '[Errno 13] Permission denied: /app/data/trades.json'
+    """
+    data_dirs = [
+        Path("/app/data"),
+        Path.cwd() / "data",
+        Path("/tmp/nifty_scalper_data"),  # Fallback that's always writable
+    ]
+    
+    for data_dir in data_dirs:
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            # Test write permission
+            test_file = data_dir / ".write_test"
+            test_file.write_text("test")
+            test_file.unlink()
+            
+            # Set environment variable so other modules use this path
+            os.environ.setdefault("DATA_DIR", str(data_dir))
+            print(f"✅ DATA DIRECTORY: {data_dir} (writable)", flush=True)
+            return
+        except (PermissionError, OSError) as e:
+            print(f"⚠️ Cannot use {data_dir}: {e}", flush=True)
+            continue
+    
+    # Ultimate fallback - use /tmp
+    fallback = Path("/tmp/nifty_scalper_data")
+    fallback.mkdir(parents=True, exist_ok=True)
+    os.environ["DATA_DIR"] = str(fallback)
+    print(f"⚠️ Using fallback data directory: {fallback}", flush=True)
+
 
 _load_env_file()
+_ensure_data_directory()
 
 logging.basicConfig(level="INFO", stream=sys.stdout)
 LOG = logging.getLogger("nifty_scalper_bot.main")
@@ -75,6 +114,8 @@ print("🚀 PYTHON START: Initializing...", flush=True)
 print(f"   🔧 ENABLE_LIVE = {os.getenv('ENABLE_LIVE', 'NOT_SET')}", flush=True)
 print(f"   🔧 EXECUTION_MODE = {os.getenv('EXECUTION_MODE', 'NOT_SET')}", flush=True)
 print(f"   🔧 FORCE_SIGNAL = {os.getenv('FORCE_SIGNAL', 'NOT_SET')}", flush=True)
+print(f"   🔧 DATA_DIR = {os.getenv('DATA_DIR', 'NOT_SET')}", flush=True)
+
 
 # -------------------------------------------------------
 # HARD EXIT (CRITICAL FOR TRADING SAFETY)
@@ -82,7 +123,7 @@ print(f"   🔧 FORCE_SIGNAL = {os.getenv('FORCE_SIGNAL', 'NOT_SET')}", flush=Tr
 
 def _fatal_exit(reason: str, exc: Exception | None = None) -> None:
     LOG.critical(f"❌ FATAL BOT EXIT: {reason}", exc_info=exc)
-    os._exit(1)   # DO NOT allow partial survival
+    os._exit(1)
 
 
 # -------------------------------------------------------
@@ -96,7 +137,6 @@ async def lifespan(app: FastAPI):
 
     async def run_bot_background():
         try:
-            # Preserve your existing startup delay
             print("⏳ BACKGROUND: Waiting 5s for Server Port Bind...", flush=True)
             await asyncio.sleep(5)
 
@@ -117,20 +157,14 @@ async def lifespan(app: FastAPI):
             raise
 
         except Exception as exc:
-            # THIS IS THE KEY FIX
             app.state.bot_error = str(exc)
             print(f"❌ FATAL BOT CRASH: {exc}", flush=True)
             LOG.critical("Bot crash during startup", exc_info=True)
-
-            # HARD EXIT – NO ZOMBIE STATE
             _fatal_exit("Core bot crashed during startup", exc)
 
     task = asyncio.create_task(run_bot_background())
-
-    # Yield immediately so FastAPI can bind ports (Railway-safe)
     yield
 
-    # Shutdown path
     try:
         if not task.done():
             task.cancel()
@@ -146,6 +180,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+
 @app.get("/")
 def root():
     return {
@@ -153,13 +188,9 @@ def root():
         "service": "Nifty Scalper Bot",
     }
 
+
 @app.get("/health")
 def health():
-    """
-    Accurate health:
-    - crashed → bot_error present
-    - running → bot exists
-    """
     if app.state.bot_error:
         return {
             "status": "crashed",
@@ -170,6 +201,7 @@ def health():
         "status": "running" if app.state.bot else "starting",
         "bot_loaded": app.state.bot is not None,
     }
+
 
 @app.get("/debug/env")
 def debug_env():
@@ -183,7 +215,23 @@ def debug_env():
         "ELITE_STRATEGIES_ENABLED": os.getenv("ELITE_STRATEGIES_ENABLED", "NOT_SET"),
         "SMC_ENABLED": os.getenv("SMC_ENABLED", "NOT_SET"),
         "WEBSOCKET__DISABLED": os.getenv("WEBSOCKET__DISABLED", "NOT_SET"),
+        "DATA_DIR": os.getenv("DATA_DIR", "NOT_SET"),
         "cwd": os.getcwd(),
         "env_file_exists_cwd": os.path.exists(".env"),
         "env_file_exists_app": os.path.exists("/app/.env"),
+    }
+
+
+@app.get("/trading/status")
+def trading_status():
+    """Check if bot is configured for LIVE trading."""
+    enable_live = os.getenv("ENABLE_LIVE", "false").lower() == "true"
+    exec_mode = os.getenv("EXECUTION_MODE", "SHADOW")
+    
+    return {
+        "enable_live": enable_live,
+        "execution_mode": exec_mode,
+        "will_trade": enable_live and exec_mode.upper() == "LIVE",
+        "bot_status": "running" if app.state.bot else ("crashed" if app.state.bot_error else "starting"),
+        "warning": None if enable_live else "⚠️ ENABLE_LIVE is not 'true' - bot will NOT execute real trades!",
     }
