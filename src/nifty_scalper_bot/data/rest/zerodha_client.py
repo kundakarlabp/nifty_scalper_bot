@@ -693,33 +693,71 @@ class ZerodhaKiteClient(BaseBrokerClient):
             payload["last_price"] = 0.0
         return payload
 
-    def get_quote_bulk(self, tokens: list[int]) -> dict[int, dict[str, Any]]:
-        """Return mapping of instrument tokens to Zerodha quote payloads."""
-
+    def get_quote_bulk(self, tokens: list[int] | list[str]) -> dict[str, dict[str, Any]]:
+        """Return mapping of symbols to Zerodha quote payloads.
+        
+        ✅ PRODUCTION FIX: Now accepts both integer tokens AND symbol strings.
+        Returns dict keyed by symbol string for consistency with Zerodha API response.
+        
+        Args:
+            tokens: List of integer tokens OR symbol strings (e.g., ["NSE:NIFTY 50"])
+            
+        Returns:
+            Dict mapping symbol strings to quote payloads
+        """
         if not tokens:
             return {}
+            
         symbols, symbol_map = self._tokens_to_symbols(tokens)
         if not symbols:
-            LOGGER.error("Token-to-symbol mapping empty: tokens=%s", tokens)
-            raise ValueError(f"Token-to-symbol mapping failed for tokens: {tokens}")
+            LOGGER.warning(
+                "Token-to-symbol mapping empty",
+                extra={"event": "quote_bulk_mapping_empty", "tokens": str(tokens)[:100]}
+            )
+            return {}
             
         self._acquire_bucket(self._QUOTE_BUCKET)
-        response = self._ensure_json(
-            self._make_request("GET", "/quote", params={"i": symbols})
-        )
+        try:
+            response = self._ensure_json(
+                self._make_request("GET", "/quote", params={"i": symbols})
+            )
+        except Exception as exc:
+            LOGGER.error(
+                "Quote bulk request failed: %s",
+                exc,
+                extra={"event": "quote_bulk_request_error", "symbols_count": len(symbols)}
+            )
+            return {}
+            
         data = cast(dict[str, Any], response.get("data", {}))
-        out: dict[int, dict[str, Any]] = {}
+        
+        # ✅ FIX: Return keyed by symbol (not token) for consistency
+        out: dict[str, dict[str, Any]] = {}
         for symbol, payload in data.items():
-            token = int(payload.get("instrument_token") or symbol_map.get(symbol) or 0)
-            if token <= 0:
+            if not payload:
                 continue
-            out[token] = payload
+            # Ensure instrument_token is present
+            if "instrument_token" not in payload:
+                token_from_map = symbol_map.get(symbol)
+                if token_from_map:
+                    payload["instrument_token"] = token_from_map
+            out[symbol] = payload
+            
         return out
 
-    def quote(self, instruments: list[str] | str) -> dict[str, Any]:
-        """Standard KiteConnect compliant alias for quote fetching."""
-        # Handle single string input which KiteConnect supports
-        if isinstance(instruments, str):
+    def quote(self, instruments: list[str] | list[int] | str | int) -> dict[str, Any]:
+        """Standard KiteConnect compliant alias for quote fetching.
+        
+        ✅ PRODUCTION FIX: Now accepts both symbol strings AND integer tokens.
+        
+        Args:
+            instruments: List of symbols (e.g., ["NSE:NIFTY 50"]) OR tokens OR single value
+            
+        Returns:
+            Dict mapping symbol strings to quote payloads
+        """
+        # Handle single input
+        if isinstance(instruments, (str, int)):
             instruments = [instruments]
         return self.get_quote_bulk(instruments)
 
@@ -1895,31 +1933,98 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._client.close()
 
     def _tokens_to_symbols(
-        self, tokens: Iterable[int]
+        self, tokens: Iterable[int | str]
     ) -> tuple[list[str], dict[str, int]]:
-        """Map instrument tokens to ``EXCHANGE:SYMBOL`` identifiers (fallbacks included)."""
-
+        """Map instrument tokens OR symbol strings to ``EXCHANGE:SYMBOL`` identifiers.
+        
+        ✅ PRODUCTION FIX: Now handles both integer tokens AND symbol strings.
+        This supports the PollingStreamer which resolves tokens to symbols before calling.
+        
+        Args:
+            tokens: Sequence of integer tokens OR symbol strings (e.g., "NSE:NIFTY 50")
+            
+        Returns:
+            Tuple of (symbols list, symbol->token mapping)
+        """
         resolver = self._resolver
         symbols: list[str] = []
         symbol_map: dict[str, int] = {}
+        
         if resolver is None:
             return symbols, symbol_map
+            
         for token in tokens:
+            # ✅ CRITICAL FIX: Handle symbol strings directly
+            if isinstance(token, str):
+                token_str = token.strip()
+                
+                # Check if it's already a valid symbol (contains ":")
+                if ":" in token_str:
+                    symbols.append(token_str)
+                    # Try to get the token from resolver for the reverse map
+                    try:
+                        if hasattr(resolver, "get_token_for_symbol"):
+                            resolved_token = resolver.get_token_for_symbol(token_str)
+                            if resolved_token:
+                                symbol_map[token_str] = int(resolved_token)
+                        elif hasattr(resolver, "lookup_by_symbol"):
+                            info = resolver.lookup_by_symbol(token_str)
+                            if info and "instrument_token" in info:
+                                symbol_map[token_str] = int(info["instrument_token"])
+                    except Exception:
+                        pass  # Token lookup failed, but we can still use the symbol
+                    continue
+                    
+                # Check if it's a numeric string (token as string)
+                if token_str.isdigit():
+                    try:
+                        token_int = int(token_str)
+                        formatted = resolver.format_token_as_symbol(token_int)
+                        if formatted:
+                            if ":" not in formatted:
+                                formatted = f"{self._default_exchange}:{formatted}"
+                            symbols.append(formatted)
+                            symbol_map[formatted] = token_int
+                        else:
+                            symbols.append(token_str)
+                            symbol_map[token_str] = token_int
+                        continue
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Non-numeric string without ":" - prefix with default exchange
+                formatted = f"{self._default_exchange}:{token_str}"
+                symbols.append(formatted)
+                continue
+            
+            # Handle integer tokens (original behavior)
             try:
-                formatted = resolver.format_token_as_symbol(int(token))
+                token_int = int(token)
+                formatted = resolver.format_token_as_symbol(token_int)
+            except (ValueError, TypeError):
+                continue
             except Exception:
                 formatted = ""
+                
             if not formatted:
                 # last resort: use numeric token string
-                s = str(int(token))
-                symbols.append(s)
-                symbol_map[s] = int(token)
+                try:
+                    s = str(int(token))
+                    symbols.append(s)
+                    symbol_map[s] = int(token)
+                except (ValueError, TypeError):
+                    continue
                 continue
-            # ensure canonical form contains exchange prefix; if not, prefix with default exchange
+                
+            # ensure canonical form contains exchange prefix
             if ":" not in formatted:
                 formatted = f"{self._default_exchange}:{formatted}"
             symbols.append(formatted)
-            symbol_map[formatted] = int(token)
+            try:
+                symbol_map[formatted] = int(token)
+            except (ValueError, TypeError):
+                pass
+                
         return symbols, symbol_map
 
     def _configure_rate_limits(self) -> None:
