@@ -12,20 +12,69 @@ import os
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI
 from dotenv import load_dotenv
 
 # -------------------------------------------------------
-# BASIC PROCESS SETUP (UNCHANGED BEHAVIOR)
+# BASIC PROCESS SETUP - PRODUCTION-GRADE ENV LOADING
 # -------------------------------------------------------
 
 sys.stdout.reconfigure(line_buffering=True)
-load_dotenv(override=True)
+
+# ✅ CRITICAL FIX: Explicitly find and load .env file
+def _load_env_file() -> None:
+    """Load .env file from multiple possible locations.
+    
+    Search order:
+    1. Current working directory
+    2. /app/.env (Docker/Railway standard)
+    3. Project root (relative to this file)
+    4. Parent directories up to 3 levels
+    """
+    search_paths = [
+        Path.cwd() / ".env",                          # Current directory
+        Path("/app/.env"),                            # Docker/Railway standard
+        Path(__file__).resolve().parent.parent.parent.parent / ".env",  # Project root from src/
+        Path(__file__).resolve().parent.parent.parent / ".env",         # One level up
+    ]
+    
+    # Also check WORKDIR environment variable if set
+    workdir = os.getenv("WORKDIR") or os.getenv("APP_DIR")
+    if workdir:
+        search_paths.insert(0, Path(workdir) / ".env")
+    
+    env_loaded = False
+    for env_path in search_paths:
+        if env_path.exists() and env_path.is_file():
+            print(f"✅ ENV FILE FOUND: {env_path}", flush=True)
+            load_dotenv(dotenv_path=str(env_path), override=True)
+            env_loaded = True
+            
+            # Debug: Print critical env vars to verify loading
+            enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
+            exec_mode = os.getenv("EXECUTION_MODE", "NOT_SET")
+            print(f"   📋 ENABLE_LIVE={enable_live}", flush=True)
+            print(f"   📋 EXECUTION_MODE={exec_mode}", flush=True)
+            break
+    
+    if not env_loaded:
+        print("⚠️ WARNING: No .env file found! Using Railway/system env vars only.", flush=True)
+        print(f"   Searched paths: {[str(p) for p in search_paths]}", flush=True)
+    
+    # Always call load_dotenv() as fallback (handles Railway env vars)
+    load_dotenv(override=False)  # Don't override what we already loaded
+
+_load_env_file()
 
 logging.basicConfig(level="INFO", stream=sys.stdout)
 LOG = logging.getLogger("nifty_scalper_bot.main")
 
+# ✅ CRITICAL: Log the actual env values for debugging
 print("🚀 PYTHON START: Initializing...", flush=True)
+print(f"   🔧 ENABLE_LIVE = {os.getenv('ENABLE_LIVE', 'NOT_SET')}", flush=True)
+print(f"   🔧 EXECUTION_MODE = {os.getenv('EXECUTION_MODE', 'NOT_SET')}", flush=True)
+print(f"   🔧 FORCE_SIGNAL = {os.getenv('FORCE_SIGNAL', 'NOT_SET')}", flush=True)
 
 # -------------------------------------------------------
 # HARD EXIT (CRITICAL FOR TRADING SAFETY)
