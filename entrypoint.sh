@@ -2,17 +2,21 @@
 set -e
 
 echo "================================================="
-echo "🔵 NIFTY SCALPER BOT STARTUP: $(date)"
+echo "🔵 NIFTY SCALPER BOT v2.0 | $(date '+%Y-%m-%d %H:%M:%S')"
 echo "================================================="
 
-# === ENVIRONMENT LOADING ===
-echo "🔍 Loading Environment Variables..."
+# === CRITICAL: Change to /app first ===
+cd /app || { echo "❌ FATAL: Cannot cd to /app"; exit 1; }
 
-# Multiple .env locations for robustness
+# === ENVIRONMENT LOADING ===
+echo "📂 Loading Environment..."
+
 ENV_LOADED=false
-for env_file in "/app/.env" "/.env" "./.env"; do
+
+# Try multiple .env locations
+for env_file in "/app/.env" "./.env" "/home/appuser/.env"; do
     if [ -f "$env_file" ]; then
-        echo "✅ Found env file: $env_file"
+        echo "   ✅ Found: $env_file"
         set -a
         source "$env_file"
         set +a
@@ -22,62 +26,54 @@ for env_file in "/app/.env" "/.env" "./.env"; do
 done
 
 if [ "$ENV_LOADED" = false ]; then
-    echo "⚠️  WARNING: No .env file found - using system environment only"
+    echo "   ⚠️ No .env file found - using Railway environment variables only"
 fi
 
-# === CRITICAL VARIABLE VALIDATION ===
-echo "🔍 Validating Critical Trading Variables..."
+# === ENVIRONMENT VALIDATION ===
+echo "🔍 Environment Check:"
+echo "   PORT=${PORT:-8000}"
+echo "   ENABLE_LIVE=${ENABLE_LIVE:-NOT_SET}"
+echo "   EXECUTION_MODE=${EXECUTION_MODE:-NOT_SET}"
+echo "   PWD=$(pwd)"
 
-# Trading Mode Validation
-if [ "$ENABLE_LIVE" = "true" ] || [ "$ENABLE_LIVE" = "True" ] || [ "$ENABLE_LIVE" = "TRUE" ] || [ "$ENABLE_LIVE" = "1" ]; then
-    echo "✅ TRADING MODE: LIVE (ENABLE_LIVE=$ENABLE_LIVE)"
-    TRADING_ENABLED=true
-else
-    echo "⚠️  WARNING: SHADOW/PAPER MODE (ENABLE_LIVE=${ENABLE_LIVE:-NOT_SET})"
-    TRADING_ENABLED=false
+# Set defaults
+export PORT=${PORT:-8000}
+
+# === CRITICAL VARIABLE WARNINGS ===
+if [ "$ENABLE_LIVE" != "true" ] && [ "$ENABLE_LIVE" != "True" ] && [ "$ENABLE_LIVE" != "TRUE" ]; then
+    echo ""
+    echo "⚠️  WARNING: ENABLE_LIVE is NOT 'true'"
+    echo "   Current value: '${ENABLE_LIVE:-NOT_SET}'"
+    echo "   Bot will run in SHADOW mode - NO REAL TRADES!"
+    echo ""
 fi
 
-# API Keys Validation
-if [ -z "$ZERODHA_API_KEY" ] && [ -z "$KITE_API_KEY" ]; then
-    echo "❌ CRITICAL: No API key found (need ZERODHA_API_KEY or KITE_API_KEY)"
-    TRADING_ENABLED=false
-else
-    echo "✅ API KEY: Found"
-fi
+# === QUICK IMPORT TEST ===
+echo "🔧 Verifying Python imports..."
+python -c "from nifty_scalper_bot.main import app; print('   ✅ Main module OK')" 2>&1 || {
+    echo "❌ FATAL: Cannot import main module"
+    echo "Running diagnostic..."
+    python -c "
+import sys
+sys.path.insert(0, '/app/src')
+sys.path.insert(0, '/app')
+try:
+    import nifty_scalper_bot
+except Exception as e:
+    print(f'Import error: {e}')
+    import traceback
+    traceback.print_exc()
+"
+    exit 1
+}
 
-# Access Token Validation
-if [ -z "$ZERODHA_ACCESS_TOKEN" ] && [ -z "$KITE_ACCESS_TOKEN" ]; then
-    echo "❌ CRITICAL: No access token found (need ZERODHA_ACCESS_TOKEN or KITE_ACCESS_TOKEN)"
-    TRADING_ENABLED=false
-else
-    echo "✅ ACCESS TOKEN: Found"
-fi
-
-# Telegram Bot Validation
-if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-    echo "⚠️  WARNING: TELEGRAM_BOT_TOKEN not set - notifications disabled"
-else
-    echo "✅ TELEGRAM BOT: Configured"
-fi
-
-# Port Configuration
-if [ -z "$PORT" ]; then
-    echo "⚠️  PORT not set, defaulting to 8000"
-    export PORT=8000
-else
-    echo "✅ PORT: $PORT"
-fi
-
-# === FINAL VALIDATION ===
+# === LAUNCH ===
 echo "================================================="
-if [ "$TRADING_ENABLED" = true ]; then
-    echo "🚀 BOT READY FOR LIVE TRADING"
-else
-    echo "⚠️  BOT WILL RUN IN SHADOW/PAPER MODE"
-fi
+echo "🚀 LAUNCHING UVICORN on port $PORT"
 echo "================================================="
 
-# === LAUNCH APPLICATION ===
-echo "🚀 Starting Nifty Scalper Bot..."
-cd /app
-exec python -m uvicorn nifty_scalper_bot.main:app --host 0.0.0.0 --port "$PORT" --log-level info
+exec python -m uvicorn nifty_scalper_bot.main:app \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --log-level info \
+    --access-log
