@@ -11,13 +11,13 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Set working directory
+WORKDIR /app
+
 # Copy requirements first for better caching
 COPY requirements.txt pyproject.toml setup.py* ./
 RUN pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r requirements.txt
-
-# Set working directory
-WORKDIR /app
 
 # Copy source code
 COPY . .
@@ -44,17 +44,30 @@ COPY --from=builder /app /app
 # Set working directory
 WORKDIR /app
 
+# ============================================================
+# FIX: Create data directories with proper permissions BEFORE
+# switching to non-root user
+# ============================================================
+RUN mkdir -p /app/data /tmp/nifty_scalper_data \
+    && chmod 777 /app/data /tmp/nifty_scalper_data
+
 # Copy and setup entrypoint
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh && sed -i 's/\r$//' /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+# Set DATA_DIR environment variable as fallback
+ENV DATA_DIR=/tmp/nifty_scalper_data
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
 # Create non-root user for security
+# NOTE: /app/data and /tmp/nifty_scalper_data are already chmod 777
+# so the appuser can write to them
 RUN groupadd -r appuser && useradd -r -g appuser appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app /tmp/nifty_scalper_data
+
 USER appuser
 
 # Use entrypoint script
