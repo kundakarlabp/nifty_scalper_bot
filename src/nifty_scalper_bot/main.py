@@ -47,20 +47,16 @@ def _load_env_file() -> None:
     
     env_loaded = False
     for env_path in search_paths:
-        try:
-            if env_path.exists() and env_path.is_file():
-                print(f"✅ ENV FILE FOUND: {env_path}", flush=True)
-                load_dotenv(dotenv_path=str(env_path), override=True)
-                env_loaded = True
-                
-                enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
-                exec_mode = os.getenv("EXECUTION_MODE", "NOT_SET")
-                print(f"   📋 ENABLE_LIVE={enable_live}", flush=True)
-                print(f"   📋 EXECUTION_MODE={exec_mode}", flush=True)
-                break
-        except Exception as e:
-            print(f"⚠️ Error checking {env_path}: {e}", flush=True)
-            continue
+        if env_path.exists() and env_path.is_file():
+            print(f"✅ ENV FILE FOUND: {env_path}", flush=True)
+            load_dotenv(dotenv_path=str(env_path), override=True)
+            env_loaded = True
+            
+            enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
+            exec_mode = os.getenv("EXECUTION_MODE", "NOT_SET")
+            print(f"   📋 ENABLE_LIVE={enable_live}", flush=True)
+            print(f"   📋 EXECUTION_MODE={exec_mode}", flush=True)
+            break
     
     if not env_loaded:
         print("⚠️ WARNING: No .env file found! Using Railway/system env vars only.", flush=True)
@@ -70,33 +66,30 @@ def _load_env_file() -> None:
 
 
 def _ensure_data_directory() -> None:
-    """Ensure /app/data directory exists and is writable.
+    """Ensure data directory exists and is writable.
     
     ✅ FIX: Prevents '[Errno 13] Permission denied: /app/data/trades.json'
     """
     data_dirs = [
         Path("/app/data"),
         Path.cwd() / "data",
-        Path("/tmp/nifty_scalper_data"),  # Fallback that's always writable
+        Path("/tmp/nifty_scalper_data"),  # Fallback - always writable
     ]
     
     for data_dir in data_dirs:
         try:
             data_dir.mkdir(parents=True, exist_ok=True)
-            # Test write permission
             test_file = data_dir / ".write_test"
             test_file.write_text("test")
             test_file.unlink()
-            
-            # Set environment variable so other modules use this path
-            os.environ.setdefault("DATA_DIR", str(data_dir))
+            os.environ["DATA_DIR"] = str(data_dir)
             print(f"✅ DATA DIRECTORY: {data_dir} (writable)", flush=True)
             return
         except (PermissionError, OSError) as e:
             print(f"⚠️ Cannot use {data_dir}: {e}", flush=True)
             continue
     
-    # Ultimate fallback - use /tmp
+    # Ultimate fallback
     fallback = Path("/tmp/nifty_scalper_data")
     fallback.mkdir(parents=True, exist_ok=True)
     os.environ["DATA_DIR"] = str(fallback)
