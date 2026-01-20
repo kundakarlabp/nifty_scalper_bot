@@ -3044,7 +3044,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             extra={"event": "regime_subscription_failed", "symbol": regime_symbol},
             exc_info=exc,
         )
-    persistent_state = PersistentStateManager(base_path=Path("data"))
+    data_dir = os.getenv("DATA_DIR", "data")
+    persistent_state = PersistentStateManager(base_path=Path(data_dir))
 
     heartbeat_interval = max(
         1.0,
@@ -3059,7 +3060,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     market_data_manager.register_heartbeat_callback(heartbeat_flusher.handle_heartbeat)
 
-    position_state_path = Path("data") / "positions.json"
+    position_state_path = Path(data_dir) / "positions.json"
     position_manager = PositionManager(state_file=str(position_state_path))
     position_manager.attach_persistent_state(persistent_state)
     position_manager.restore_positions(persistent_state.load_positions())
