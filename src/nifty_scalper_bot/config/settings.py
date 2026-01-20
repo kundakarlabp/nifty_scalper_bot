@@ -58,6 +58,45 @@ from nifty_scalper_bot.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
+def _ensure_env_loaded_before_settings() -> None:
+    """Load .env file before any settings are built.
+    
+    ✅ CRITICAL FIX: This MUST run at import time!
+    
+    Problem: Python imports settings.py which calls _build_order_settings()
+    at module level. If load_dotenv() hasn't run yet, os.getenv("ENABLE_LIVE")
+    returns None, and the bot starts in SHADOW mode.
+    
+    Solution: Load .env here, before any settings classes are built.
+    """
+    from dotenv import load_dotenv
+    
+    search_paths = [
+        Path.cwd() / ".env",
+        Path("/app/.env"),
+        Path(__file__).resolve().parent.parent.parent / ".env",  # src/../.env
+        Path(__file__).resolve().parent.parent / ".env",
+    ]
+    
+    for env_path in search_paths:
+        try:
+            if env_path.exists() and env_path.is_file():
+                load_dotenv(dotenv_path=str(env_path), override=True)
+                enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
+                print(f"✅ [SETTINGS] Loaded .env from {env_path}", flush=True)
+                print(f"   ENABLE_LIVE={enable_live}", flush=True)
+                return
+        except Exception as e:
+            print(f"⚠️ [SETTINGS] Error loading {env_path}: {e}", flush=True)
+            continue
+    
+    # Fallback
+    load_dotenv(override=True)
+    print("⚠️ [SETTINGS] No .env found, using system environment", flush=True)
+
+# ✅ EXECUTE IMMEDIATELY when settings.py is imported
+_ensure_env_loaded_before_settings()
+
 def _sanitize_token(raw: str) -> str:
     token = raw.strip().strip('"').strip("'")
     for sep in ("#", ",", ";"):
