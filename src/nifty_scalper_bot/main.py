@@ -170,3 +170,20 @@ def health():
         "status": "running" if app.state.bot else "starting",
         "bot_loaded": app.state.bot is not None,
     }
+
+@app.get("/debug/env")
+def debug_env():
+    """Debug endpoint to verify environment variables are loaded correctly."""
+    return {
+        "ENABLE_LIVE": os.getenv("ENABLE_LIVE", "NOT_SET"),
+        "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "NOT_SET"),
+        "FORCE_SIGNAL": os.getenv("FORCE_SIGNAL", "NOT_SET"),
+        "GLOBAL_MIN_SIGNAL_CONFIDENCE": os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "NOT_SET"),
+        "MIN_INDICATOR_BARS": os.getenv("MIN_INDICATOR_BARS", "NOT_SET"),
+        "ELITE_STRATEGIES_ENABLED": os.getenv("ELITE_STRATEGIES_ENABLED", "NOT_SET"),
+        "SMC_ENABLED": os.getenv("SMC_ENABLED", "NOT_SET"),
+        "WEBSOCKET__DISABLED": os.getenv("WEBSOCKET__DISABLED", "NOT_SET"),
+        "cwd": os.getcwd(),
+        "env_file_exists_cwd": os.path.exists(".env"),
+        "env_file_exists_app": os.path.exists("/app/.env"),
+    }
