@@ -2984,7 +2984,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             on_tick=_on_poll_tick,
             instrument_resolver=instrument_resolver,
             data_hub=data_hub,
-            ctx=ctx,
             poll_interval_ms=int(poll_interval_sec * 1000),
             batch_size=poll_batch_size,
             require_depth=poll_require_depth,
@@ -4175,6 +4174,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         session_guard=session_guard,
     )
 
+    setattr(streamer, "_ctx", ctx)
+    
     resolver_candidate = ctx.instrument_resolver
     if resolver_candidate is None and ctx.broker_client is not None:
         try:
