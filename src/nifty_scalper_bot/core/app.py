@@ -5095,7 +5095,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
             streamer = ctx.streamer
-            tokens_to_poll = []
+            tokens_to_poll: dict[str, int] = {}
 
             LOGGER.info(f"🔧 Processing {len(targets)} symbols for wiring...")
             resolved_count = 0
@@ -5109,7 +5109,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.instrument_resolver:
                     tok = ctx.instrument_resolver.resolve(sym)
                     if tok:
-                        tokens_to_poll.append(tok)
+                        tokens_to_poll[sym] = tok
                         resolved_count += 1
                         LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
                     else:
