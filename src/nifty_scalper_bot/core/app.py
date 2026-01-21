@@ -2842,7 +2842,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 pass 
                 
         # ✅ 8. CRITICAL: Feed BracketManager (Virtual Execution)
-        _bm_ref = getattr(ctx.order_manager, "_bracket_manager", None) if ctx.order_manager else None
+        _global_ctx = get_latest_bot_context()
+        _bm_ref = None
+        
+        if _global_ctx and _global_ctx.order_manager:
+             _bm_ref = getattr(_global_ctx.order_manager, "_bracket_manager", None)
         
         if _bm_ref is not None:
             _sym = t.get("symbol")
@@ -3020,7 +3024,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         monitor_interval_s=300.0,
     )
     stream_supervisor.bootstrap()
-    stream_supervisor.ensure_started()
+    #stream_supervisor.ensure_started()
 
     # Initialize Indicators & Regime
     indicator_engine = IndicatorEngine()
