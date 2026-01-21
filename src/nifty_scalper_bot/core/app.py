@@ -2990,6 +2990,40 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             require_depth=poll_require_depth,
             warn_on_rate_limit=poll_warn_rate_limit,
         )
+        polling_streamer._ctx = ctx
+
+        ctx.market_data_streamer = polling_streamer
+        polling_streamer.start()
+
+        LOGGER.info("Market data streamer starting in polling mode")
+
+        # -------------------------------------------------
+        # Secondary: KiteTicker (Best-Effort, Railway-Safe)
+        # -------------------------------------------------
+        ctx.kite_streamer = None
+
+        if settings.websocket_enabled:
+            try:
+                from nifty_scalper_bot.streaming.kite_ticker_streamer import KiteTickerStreamer
+
+                kite_streamer = KiteTickerStreamer(
+                    broker_client=broker_client,
+                    data_hub=ctx.data_hub,
+                    on_tick=strategy_runner.on_tick,
+                )
+
+                kite_streamer.start()
+                ctx.kite_streamer = kite_streamer
+
+                LOGGER.info("✅ KiteTicker started (best-effort, non-fatal)")
+
+            except Exception as e:
+                # ⚠️ IMPORTANT: WS must NEVER crash the bot on Railway
+                LOGGER.warning(f"⚠️ KiteTicker disabled (non-fatal): {e}")
+                ctx.kite_streamer = None
+            else:
+                LOGGER.info("ℹ️ KiteTicker disabled via settings")
+
         
         # Initialize Managers for Polling Mode
         # Note: WebSocketManager is None in polling mode
