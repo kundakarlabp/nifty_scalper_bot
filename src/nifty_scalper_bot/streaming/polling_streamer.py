@@ -168,6 +168,11 @@ class PollingStreamer:
         """
         Main polling loop with immediate cache seeding and adaptive backoff.
         Executed in a background thread.
+        
+        OPTIMIZED LOGIC:
+        1. Unified Starvation Detection (Tokens vs Data).
+        2. Strict NFO Liveness Check (Index-only data = Starvation).
+        3. Hard rejection of unresolved symbols.
         """
         backoff = self._interval_s
         
@@ -182,25 +187,24 @@ class PollingStreamer:
                     tokens = list(self._tokens)
                 
                 # --------------------------------------------------
-                # 🟡 STARVATION DETECTION (TEMPORAL)
+                # 🟡 UNIFIED STARVATION DETECTION
                 # --------------------------------------------------
-                if not tokens:
-                    # If we have tracked nothing for > 30s, we are broken.
-                    if time.monotonic() - last_healthy_ts > 30.0:
-                        LOGGER.critical(
-                            "💀 FATAL POLLER ERROR: No symbols tracked for >30s. "
-                            "Stopping polling thread for supervisor escalation."
-                        )
-                        self._stop.set() # Signal stop so Supervisor sees thread is dead
-                        return  # 🔴 EXIT THREAD CLEANLY
-                else:
-                    # We have symbols, update health timestamp
-                    last_healthy_ts = time.monotonic()
-                
+                # If we haven't seen healthy NFO data for > 30s, we are broken.
+                # This covers two cases:
+                # 1. tokens list is empty for 30s.
+                # 2. tokens exist, but API returns only NSE Index (or nothing) for 30s.
+                if time.monotonic() - last_healthy_ts > 30.0:
+                    LOGGER.critical(
+                        "💀 FATAL POLLER ERROR: Starvation detected (No NFO data for >30s). "
+                        "Stopping polling thread for supervisor escalation."
+                    )
+                    self._stop.set() # Signal stop so Supervisor sees thread is dead
+                    return  # 🔴 EXIT THREAD CLEANLY
+
                 if tokens:
                     # Yield chunks to avoid massive requests (Batch Size limit)
                     for batch in self._chunks(tokens, self._batch_size):
-                        # ✅ CRITICAL FIX: Safe Fetch with Timeout logic (prevents zombie threads)
+                        # ✅ Safe Fetch with Timeout logic (prevents zombie threads)
                         ticks = self._fetch_ticks(batch)
                         
                         # Trace logging for empty batches
@@ -213,8 +217,24 @@ class PollingStreamer:
                                 interval_sec=60.0
                             )
                         
+                        # --------------------------------------------------
+                        # 🟢 CRITICAL FIX: UPDATE HEALTH ONLY ON TRADABLE DATA
+                        # --------------------------------------------------
+                        # Prevents "Index-Only Zombie" mode.
+                        # We scan the batch for ANY NFO symbol to prove we are trading-capable.
+                        has_nfo = False
+                        for t in ticks:
+                            sym = t.get("symbol")
+                            if sym and str(sym).startswith("NFO:"):
+                                has_nfo = True
+                                break
+                        
+                        # Only NFO data proves the trading loop is truly alive
+                        if has_nfo:
+                            last_healthy_ts = time.monotonic()
+                        
                         for tick in ticks:
-                            # 1. Validate Payload
+                            # 1. Validate Payload Structure
                             if (
                                 "instrument_token" not in tick
                                 or "last_price" not in tick
@@ -233,39 +253,31 @@ class PollingStreamer:
                                     },
                                 )
                                 continue  
-                            # [FIX] 2. Tag Source as REST
-                            # Critical: Tells DataHub.is_fresh() to apply the relaxed 90s threshold.
+                            
+                            # 2. Tag Source as REST
                             tick["source"] = "rest"
 
-                            # [FIX] 3. Seed Cache Immediately (Synchronous)
-                            token = tick.get("instrument_token")
-                            symbol = self._resolve_instrument(token)
+                            # 3. Symbol Validation
+                            # Note: Symbol is already resolved in _try_quote_bulk / _fetch_ticks
+                            symbol = tick.get("symbol")
                             
-                            # ✅ CRITICAL FIX: Add symbol to tick BEFORE callback
-                            if symbol:
-                                tick["symbol"] = symbol
+                            # ✅ CRITICAL FIX: HARD DROP UNRESOLVED SYMBOLS
+                            # If we cannot identify the symbol, it CANNOT enter the DataHub.
+                            if not symbol:
+                                continue
                             
-                            if self._data_hub and symbol:
+                            # 4. Seed DataHub (Synchronous)
+                            if self._data_hub:
                                 self._data_hub.store_quote(symbol, tick, source="rest", seed=True)
 
-                            # 4. Update Metrics
+                            # 5. Update Metrics
                             with suppress(Exception):
                                 self._m_last_tick.set(int(time.time() * 1000))
                             
-                            # 5. Async Handoff (Strategy Pipeline)
-                            # ✅ CRITICAL: Only call if symbol was resolved
-                            if symbol:
-                                with suppress(Exception):
-                                    self._on_tick(tick)
-                                    self._m_ticks_ingested.inc()
-                            else:
-                                log_throttled(
-                                    LOGGER,
-                                    f"no_symbol_{token}",
-                                    f"⚠️ SKIPPED tick - no symbol for token {token}",
-                                    level=30,
-                                    interval_sec=60.0
-                                )
+                            # 6. Async Handoff (Strategy Pipeline)
+                            with suppress(Exception):
+                                self._on_tick(tick)
+                                self._m_ticks_ingested.inc()
 
                 # Success: Update health metrics & reset backoff
                 with suppress(Exception):
