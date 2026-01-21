@@ -2980,6 +2980,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             on_tick=_on_poll_tick,
             instrument_resolver=instrument_resolver,
             data_hub=data_hub,
+            ctx=ctx,
             poll_interval_ms=int(poll_interval_sec * 1000),
             batch_size=poll_batch_size,
             require_depth=poll_require_depth,
@@ -5145,6 +5146,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     tokens=nfo_tokens,
                 )
                 kt_streamer.start()
+                ctx.kite_streamer = kt_streamer
                 LOGGER.info(f"🚀 KiteTicker started for {len(nfo_tokens)} NFO instruments")
 
             if streamer and hasattr(streamer, "subscribe"):
