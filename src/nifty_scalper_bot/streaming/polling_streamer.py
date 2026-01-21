@@ -173,6 +173,7 @@ class PollingStreamer:
         backoff = self._interval_s
         
         # 🟢 Initialize health timestamp (outside loop)
+        # This tracks the last time we saw 'ideal' (NFO) data
         last_healthy_ts = time.monotonic()
         
         while not self._stop.is_set():
@@ -182,36 +183,9 @@ class PollingStreamer:
                 with self._lock:
                     tokens = list(self._tokens)
                 
-                # --------------------------------------------------
-                # --------------------------------------------------
-                # 🔴 WS-AWARE STARVATION DETECTION (CORRECT)
-                # --------------------------------------------------
-
-                ws_healthy = False
-
-                # Check KiteTicker health if available
-                if hasattr(self, "_ctx") and hasattr(self._ctx, "kite_streamer"):
-                    try:
-                        # WS is healthy if we saw a tick in last 10 seconds
-                        ws_healthy = self._ctx.kite_streamer.last_tick_age() < 10.0
-                    except Exception:
-                        ws_healthy = False
-
-                # Declare starvation ONLY if:
-                # 1) We have tokens
-                # 2) REST has not seen NFO data
-                # 3) WS is ALSO unhealthy
-                if tokens and not ws_healthy and (time.monotonic() - last_healthy_ts > 30.0):
-                    LOGGER.critical(
-                        "💀 FATAL POLLER ERROR: Market data starvation "
-                        "(REST + WS dead for >30s). Escalating to supervisor."
-                    )
-                    self._stop.set()
-                    return
-
-
-                # FIX 2: Track health across the entire cycle, not per batch.
+                # Track data quality for this specific poll cycle
                 seen_nfo_this_cycle = False
+                seen_any_tick_this_cycle = False
 
                 if tokens:
                     # Yield chunks to avoid massive requests
@@ -228,9 +202,11 @@ class PollingStreamer:
                                 level=10, 
                                 interval_sec=60.0
                             )
+                        else:
+                            # ✅ CRITICAL FIX 1: Mark that we saw *some* data (even if just NSE)
+                            seen_any_tick_this_cycle = True
                         
-                        # Accumulate NFO health status
-                        # We don't update timestamp yet; we just flag if we saw good data.
+                        # Check for NFO data in this batch (without resetting timestamp yet)
                         if not seen_nfo_this_cycle:
                             for t in ticks:
                                 sym = t.get("symbol")
@@ -264,11 +240,44 @@ class PollingStreamer:
                                 self._m_ticks_ingested.inc()
 
                 # --------------------------------------------------
-                # 🟢 UPDATE HEALTH ONCE PER CYCLE
+                # 🟢 UPDATE HEALTH METRICS
                 # --------------------------------------------------
-                # Only update the heartbeat if we saw NFO data anywhere in this cycle.
+                # We update the 'healthy' timestamp if we saw NFO data.
+                # This keeps the 'starvation timer' low during normal trading.
                 if seen_nfo_this_cycle:
                     last_healthy_ts = time.monotonic()
+
+                # Check KiteTicker health if available
+                ws_healthy = False
+                if hasattr(self, "_ctx") and hasattr(self._ctx, "kite_streamer"):
+                    try:
+                        # WS is healthy if we saw a tick in last 10 seconds
+                        # (Checking specific streamer if available, or generic context)
+                        ws_healthy = self._ctx.kite_streamer.last_tick_age() < 10.0
+                    except Exception:
+                        ws_healthy = False
+
+                # --------------------------------------------------
+                # 🔴 WS-AWARE STARVATION DETECTION (CORRECTED)
+                # --------------------------------------------------
+                # KILL CONDITION:
+                # 1. We are supposed to be tracking tokens.
+                # 2. We received ZERO ticks this cycle (REST is dead).
+                # 3. WebSocket is NOT healthy (WS is dead).
+                # 4. NFO data has been stale for > 30s (Long term starvation).
+                #
+                # NOTE: If 'seen_any_tick_this_cycle' is True (e.g. NSE Index ticks), 
+                # we do NOT kill the bot, even if 'last_healthy_ts' is old. 
+                # This prevents "Quiet Market" suicide.
+                
+                if tokens and not seen_any_tick_this_cycle and not ws_healthy:
+                    if time.monotonic() - last_healthy_ts > 30.0:
+                        LOGGER.critical(
+                            "💀 FATAL POLLER ERROR: True market data starvation "
+                            "(REST + WS silent for >30s). Escalating to supervisor."
+                        )
+                        self._stop.set()
+                        return
 
                 # Success: Update health metrics & reset backoff
                 with suppress(Exception):
