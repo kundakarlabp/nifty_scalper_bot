@@ -32,6 +32,7 @@ class PollingStreamer:
         warn_on_rate_limit: bool = True,
     ) -> None:
         self._broker = broker_client
+        self._ctx = ctx
         self._on_tick = on_tick
         self._resolver = instrument_resolver
         self._data_hub = data_hub
@@ -182,17 +183,32 @@ class PollingStreamer:
                     tokens = list(self._tokens)
                 
                 # --------------------------------------------------
-                # 🟡 UNIFIED STARVATION DETECTION
                 # --------------------------------------------------
-                # FIX 1: Only enforce starvation if we actually have tokens to poll.
-                # This prevents false positives during startup or re-subscription.
-                if tokens and (time.monotonic() - last_healthy_ts > 30.0):
+                # 🔴 WS-AWARE STARVATION DETECTION (CORRECT)
+                # --------------------------------------------------
+
+                ws_healthy = False
+
+                # Check KiteTicker health if available
+                if hasattr(self, "_ctx") and hasattr(self._ctx, "kite_streamer"):
+                    try:
+                        # WS is healthy if we saw a tick in last 10 seconds
+                        ws_healthy = self._ctx.kite_streamer.last_tick_age() < 10.0
+                    except Exception:
+                        ws_healthy = False
+
+                # Declare starvation ONLY if:
+                # 1) We have tokens
+                # 2) REST has not seen NFO data
+                # 3) WS is ALSO unhealthy
+                if tokens and not ws_healthy and (time.monotonic() - last_healthy_ts > 30.0):
                     LOGGER.critical(
-                        "💀 FATAL POLLER ERROR: Starvation detected (No NFO data for >30s). "
-                        "Stopping polling thread for supervisor escalation."
+                        "💀 FATAL POLLER ERROR: Market data starvation "
+                        "(REST + WS dead for >30s). Escalating to supervisor."
                     )
-                    self._stop.set() # Signal stop so Supervisor sees thread is dead
-                    return  # 🔴 EXIT THREAD CLEANLY
+                    self._stop.set()
+                    return
+
 
                 # FIX 2: Track health across the entire cycle, not per batch.
                 seen_nfo_this_cycle = False
