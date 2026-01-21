@@ -5148,15 +5148,39 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.info(f"🚀 KiteTicker started for {len(nfo_tokens)} NFO instruments")
 
             if streamer and hasattr(streamer, "subscribe"):
-                streamer.subscribe(tokens_to_poll)
-                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
+                try:
+                    if tokens_to_poll:
+                        streamer.subscribe(tokens_to_poll)
+                        LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
+                    else:
+                        # Re-enforce the No-Fly Rule here just in case
+                        import sys
+                        LOGGER.critical("❌ FATAL: No tokens available for subscription.")
+                        sys.exit(1)
+                except Exception:
+                    LOGGER.critical(
+                        "❌ FATAL: Failed to subscribe tokens to PollingStreamer",
+                        exc_info=True
+                    )
+                    raise  # 🔴 Hard Stop: Cannot trade without data
 
-
+            # =========================================================
+            # 🟢 FIX 2: ISOLATE LEGACY MDM TASK (Non-Fatal)
+            # =========================================================
+            # This was the likely cause of your "Hydration/Tracking failed" log.
+            # We wrap it specifically so it doesn't crash the startup flow.
             if mdm:
-                asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
-
-        except Exception as e:
-            LOGGER.error("Hydration/Tracking failed", exc_info=True)
+                try:
+                    # Safety check: Ensure method exists before calling
+                    if hasattr(mdm, "_rest_poll_loop"):
+                        asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
+                    else:
+                        LOGGER.debug("ℹ️ MDM does not require _rest_poll_loop (Skipping)")
+                except Exception:
+                    LOGGER.warning(
+                        "⚠️ MDM rest poll loop failed to start (Non-Fatal)",
+                        exc_info=True
+                    )
 
     # ---------------------------------------------------------
     # 4. Start subsystems (UNCHANGED)
