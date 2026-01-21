@@ -5122,9 +5122,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.error(f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}")
             LOGGER.info(f"✅ tokens_to_poll has {len(tokens_to_poll)} tokens")
 
-            if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
+            # =========================================================
+            # 🔴 FATAL STARTUP INVARIANT — NO SYMBOLS = NO LIFE
+            # =========================================================
+            if not tokens_to_poll:
+                import sys
+                LOGGER.critical(
+                    "❌ FATAL STARTUP ERROR: No symbols resolved to poll. "
+                    "Refusing to start trading system (Zombie Mode prevention)."
+                )
+                sys.exit(1)
+            # =========================================================
+
+            if streamer and hasattr(streamer, "subscribe"):
                 streamer.subscribe(tokens_to_poll)
                 LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
+
 
             if mdm:
                 asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
