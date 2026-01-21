@@ -19,6 +19,7 @@ import inspect
 import os
 from pathlib import Path
 from nifty_scalper_bot.data.robust_provider import RobustDataProvider, CircuitBreakerConfig
+from nifty_scalper_bot.streaming.kite_ticker_streamer import KiteTickerStreamer
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
 from nifty_scalper_bot.infra.watchdog import start_watchdog
 from collections import OrderedDict
@@ -5123,16 +5124,28 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info(f"✅ tokens_to_poll has {len(tokens_to_poll)} tokens")
 
             # =========================================================
-            # 🔴 FATAL STARTUP INVARIANT — NO SYMBOLS = NO LIFE
+            # SPLIT TOKENS: NFO (WebSocket) vs NSE (REST)
             # =========================================================
-            if not tokens_to_poll:
-                import sys
-                LOGGER.critical(
-                    "❌ FATAL STARTUP ERROR: No symbols resolved to poll. "
-                    "Refusing to start trading system (Zombie Mode prevention)."
+            nfo_tokens = []
+            rest_tokens = []
+
+            for symbol, token in tokens_to_poll.items():
+                if symbol.startswith("NFO:"):
+                    nfo_tokens.append(token)
+                else:
+                    rest_tokens.append(token)
+
+            # =========================================================
+            # START KITE TICKER FOR NFO (OPTIONS / FUTURES)
+            # =========================================================
+            if nfo_tokens:
+                kt_streamer = KiteTickerStreamer(
+                    broker=ctx.broker,
+                    data_hub=ctx.data_hub,
+                    tokens=nfo_tokens,
                 )
-                sys.exit(1)
-            # =========================================================
+                kt_streamer.start()
+                LOGGER.info(f"🚀 KiteTicker started for {len(nfo_tokens)} NFO instruments")
 
             if streamer and hasattr(streamer, "subscribe"):
                 streamer.subscribe(tokens_to_poll)
