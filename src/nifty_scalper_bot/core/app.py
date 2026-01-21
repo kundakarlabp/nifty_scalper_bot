@@ -19,7 +19,6 @@ import inspect
 import os
 from pathlib import Path
 from nifty_scalper_bot.data.robust_provider import RobustDataProvider, CircuitBreakerConfig
-from nifty_scalper_bot.streaming.kite_ticker_streamer import KiteTickerStreamer
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
 from nifty_scalper_bot.infra.watchdog import start_watchdog
 from collections import OrderedDict
@@ -1845,233 +1844,210 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
 
 
 def _get_symbols(
-    config: AppConfig,
-    resolver: InstrumentResolver | None = None,
+    config: AppConfig, 
+    resolver: InstrumentResolver | None = None, 
     broker: Any | None = None
 ) -> list[str]:
     """
-    Return validated option symbols for trading.
-    
-    PRODUCTION FIX v2.0:
-    - Fixed 'contracts' undefined bug
-    - Guaranteed option symbol generation
-    - Robust price fetching with multiple fallbacks
+    Return validated symbols. Fetches live Spot price (ATM).
+    Fix: Type-safe fetching to prevent 'invalid literal for int()' errors.
     """
-    import datetime
-    import calendar
-    from datetime import timedelta
-
-    LOGGER.info("=" * 60)
-    LOGGER.info("🔍 _get_symbols() STARTING - Symbol Resolution")
-
-    # 1. Check for explicit configuration (highest priority)
+    # 1. Explicit Configuration
     symbols = getattr(config, "symbols", None)
     if symbols:
         if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
-            result = [str(s).strip() for s in symbols if str(s).strip()]
-            LOGGER.info(f"✅ Using configured SYMBOLS env: {result}")
-            LOGGER.info("=" * 60)
-            return result
-        result = [str(symbols)]
-        LOGGER.info(f"✅ Using configured SYMBOLS env: {result}")
-        LOGGER.info("=" * 60)
-        return result
+            return [str(s).strip() for s in symbols if str(s).strip()]
+        return [str(symbols)]
 
     final_symbols: list[str] = []
     atm_price: int | None = None
-    ltp: float = 0.0
-
+    
     # 2. Fetch Live Spot Price
     if broker:
         try:
-            token_candidates = [256265]
-            str_candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
-
+            # Defined separately to respect API type constraints
+            token_candidates = [256265]  # Nifty 50 Token (Integer)
+            str_candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX", "256265"]
+            
+            ltp = 0.0
+            
+            # Unwrap wrapper
             inner = getattr(broker, "client", getattr(broker, "_broker", broker))
-
+            
+            # Helper to parse price
             def parse_price(data: Any) -> float:
-                if not data:
-                    return 0.0
-                if isinstance(data, (int, float)):
-                    return float(data)
+                if not data: return 0.0
+                if isinstance(data, (int, float)): return float(data)
                 if isinstance(data, dict):
-                    for key in ("last_price", "ltp", "close"):
-                        val = data.get(key)
-                        if val:
-                            try:
-                                return float(val)
-                            except (ValueError, TypeError):
-                                continue
+                    return float(data.get("last_price") or data.get("ltp") or data.get("close") or 0.0)
                 return 0.0
 
-            # Strategy A: get_ltp_bulk
+            # --- Strategy A: get_ltp_bulk (Strictly Integers) ---
             if ltp == 0 and hasattr(inner, "get_ltp_bulk"):
                 try:
+                    # ✅ FIX: Only pass INTEGERS to get_ltp_bulk
+                    LOGGER.debug(f"Attempting get_ltp_bulk with tokens: {token_candidates}")
                     response = inner.get_ltp_bulk(token_candidates)
+                    
                     if response:
+                        # Check for token key (as int or str)
                         for t in token_candidates:
                             val = response.get(t) or response.get(str(t))
                             price = parse_price(val)
                             if price > 0:
                                 ltp = price
-                                LOGGER.info(f"✅ NIFTY price via get_ltp_bulk: {ltp}")
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp_bulk({t})")
                                 break
                 except Exception as e:
-                    LOGGER.debug(f"get_ltp_bulk failed: {e}")
+                    LOGGER.warning(f"get_ltp_bulk failed: {e}")
 
-            # Strategy B: get_ltp
+            # --- Strategy B: get_ltp (Try Integers, then Strings) ---
             if ltp == 0 and hasattr(inner, "get_ltp"):
-                for s in str_candidates:
+                # 1. Try Tokens first
+                for t in token_candidates:
                     try:
-                        p = inner.get_ltp(s)
+                        p = inner.get_ltp(t)
                         price = parse_price(p)
                         if price > 0:
                             ltp = price
-                            LOGGER.info(f"✅ NIFTY price via get_ltp: {ltp}")
+                            LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp({t})")
                             break
-                    except Exception:
-                        pass
+                    except Exception: pass
+                
+                # 2. Try Strings if Tokens failed
+                if ltp == 0:
+                    for s in str_candidates:
+                        try:
+                            p = inner.get_ltp(s)
+                            price = parse_price(p)
+                            if price > 0:
+                                ltp = price
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via get_ltp('{s}')")
+                                break
+                        except Exception: pass
 
-            # Strategy C: Standard Kite .ltp()
+            # --- Strategy C: Standard Kite .ltp() (Strictly Strings) ---
             if ltp == 0 and hasattr(inner, "ltp"):
                 try:
+                    # Standard Kite API expects strings
                     q = inner.ltp(str_candidates)
                     for k in str_candidates:
                         if k in q:
                             price = parse_price(q[k])
                             if price > 0:
                                 ltp = price
-                                LOGGER.info(f"✅ NIFTY price via .ltp(): {ltp}")
+                                LOGGER.info(f"✅ Found NIFTY price {ltp} via standard .ltp('{k}')")
                                 break
                 except Exception as e:
-                    LOGGER.debug(f".ltp() failed: {e}")
+                    LOGGER.debug(f"Standard .ltp() failed: {e}")
 
-            # Strategy D: quote()
-            if ltp == 0 and hasattr(inner, "quote"):
-                try:
-                    q = inner.quote(str_candidates)
-                    for k in str_candidates:
-                        if k in q:
-                            price = parse_price(q[k])
-                            if price > 0:
-                                ltp = price
-                                LOGGER.info(f"✅ NIFTY price via .quote(): {ltp}")
-                                break
-                except Exception as e:
-                    LOGGER.debug(f".quote() failed: {e}")
-
+            # --- Result ---
             if ltp > 0:
                 atm_price = round(ltp / 50) * 50
-                LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM Strike: {atm_price}")
+                LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM: {atm_price}")
                 global _LATEST_CTX
                 if _LATEST_CTX:
-                    _LATEST_CTX.update_spot_price("NIFTY", ltp)
+                    _LATEST_CTX.update_spot_price('NIFTY', ltp)
             else:
-                LOGGER.warning("⚠️ Could not fetch live NIFTY price from broker")
+                LOGGER.warning(f"⚠️ Live price fetch returned 0. Tried tokens: {token_candidates}")
 
         except Exception as exc:
             LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
 
-    # 3. Fallback ATM price (Update based on current NIFTY ~25200)
-    if atm_price is None or atm_price < 15000:
-        fallback_base = 25200
-        LOGGER.warning(f"⚠️ Using fallback ATM: {fallback_base}")
+    # 3. Fallback Logic
+    if atm_price is None:
+        fallback_base = 24500 
+        LOGGER.warning(f"Using Static Fallback ATM: {fallback_base}")
         atm_price = fallback_base
 
-    # 4. Generate strike range
+    # 4. Generate Strikes
     strike_step = 50
     strikes_to_fetch = [
-        atm_price - strike_step,
-        atm_price,
-        atm_price + strike_step,
+        # atm_price - (2 * strike_step), 
+        atm_price - strike_step,       
+        atm_price,                     
+        atm_price + strike_step,       
+        # atm_price + (2 * strike_step), 
     ]
-    LOGGER.info(f"📊 Strikes to fetch: {strikes_to_fetch}")
 
-    # 5. Try Smart Resolution (FIXED: contracts initialization)
+    # 5. Resolve Symbols
     try:
         from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
-
         contract_map = {}
-        contracts: list = []  # FIX: Initialize contracts list
-
         if resolver:
             if hasattr(resolver, "option_contracts"):
-                try:
-                    contracts = resolver.option_contracts("NIFTY") or []
-                    LOGGER.info(f"📦 Got {len(contracts)} contracts from option_contracts()")
-                except Exception as e:
-                    LOGGER.debug(f"option_contracts() failed: {e}")
-                    contracts = []
-
-            if not contracts and hasattr(resolver, "_option_contracts"):
-                try:
-                    raw = getattr(resolver, "_option_contracts", {})
-                    for c_list in raw.values():
-                        if isinstance(c_list, list):
-                            contracts.extend(c_list)
-                    LOGGER.info(f"📦 Got {len(contracts)} contracts from _option_contracts")
-                except Exception as e:
-                    LOGGER.debug(f"_option_contracts access failed: {e}")
-
+                contracts = resolver.option_contracts("NIFTY")
+            elif hasattr(resolver, "_option_contracts"):
+                raw = getattr(resolver, "_option_contracts", {})
+                for c_list in raw.values():
+                    contracts.extend(c_list)
             for c in contracts:
                 t = c.get("instrument_token")
-                if t:
-                    try:
-                        contract_map[int(t)] = c
-                    except (ValueError, TypeError):
-                        pass
-
+                if t: contract_map[int(t)] = c
+        
         if contract_map and get_next_valid_symbols:
-            LOGGER.info(f"🔍 Trying smart resolution with {len(contract_map)} contracts")
             results = get_next_valid_symbols(
-                strikes_to_fetch,
-                opt_types=("CE", "PE"),
-                instrument_map=contract_map
+                strikes_to_fetch, 
+                opt_types=('CE', 'PE'), 
+                instrument_map=contract_map 
             )
             for inst in results:
                 ts = inst.get("tradingsymbol") or inst.get("symbol")
                 if ts:
                     prefix = "NFO:" if not ts.startswith("NFO:") else ""
                     final_symbols.append(f"{prefix}{ts}")
-
             if final_symbols:
-                LOGGER.info(f"✅ Smart resolution found {len(final_symbols)} symbols: {final_symbols}")
+                 LOGGER.info(f"Smart Resolution found {len(final_symbols)} symbols.")
 
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
 
-    # 6. GUARANTEED Fallback - Always generate options if none found
+    # 6. Manual Fallback (Tuesday Expiry Logic)
     if not final_symbols:
-        LOGGER.warning("⚠️ Smart resolution failed. Using GUARANTEED fallback.")
-
+        import datetime
+        import calendar
+        from datetime import timedelta
+        
         now = datetime.datetime.now()
         today = now.date()
-
-        # Find next Tuesday (weekly expiry)
-        target_weekday = 1  # Tuesday
+        
+        # ---------------------------------------------------------
+        # CONFIG: Target Weekday (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri)
+        # ✅ FIX: Set to 1 for TUESDAY Expiry
+        # ---------------------------------------------------------
+        target_weekday = 1 
+        
+        # 1. Find the Nearest Tuesday
         days_ahead = target_weekday - today.weekday()
-        if days_ahead < 0:
+        if days_ahead < 0: # Target day passed this week, go to next
             days_ahead += 7
+        
+        # If today IS expiry but market closed, skip to next week
         if days_ahead == 0 and now.hour >= 16:
-            days_ahead += 7
-
+             days_ahead += 7
+             
         next_expiry = today + timedelta(days=days_ahead)
-
-        # Check if monthly expiry (last Tuesday of month)
+        
+        # 2. Check if it is a Monthly Expiry
+        # Logic: Is it the last Tuesday of the month?
         last_day_of_month = calendar.monthrange(next_expiry.year, next_expiry.month)[1]
         potential_monthly = datetime.date(next_expiry.year, next_expiry.month, last_day_of_month)
+        
+        # Backtrack from month-end to find the last Tuesday
         while potential_monthly.weekday() != target_weekday:
             potential_monthly -= timedelta(days=1)
-
+            
         is_monthly = (next_expiry == potential_monthly)
-
-        # Format expiry code (Zerodha convention)
+        
+        # 3. Format Symbol (Zerodha Convention)
         if is_monthly:
+            # Monthly: NIFTY26JAN... (YYMMM)
             date_code = next_expiry.strftime("%y%b").upper()
         else:
+            # Weekly: NIFTY26106... (YYMDD)
             y = next_expiry.strftime("%y")
             d = next_expiry.strftime("%d")
-            m_map = {10: "O", 11: "N", 12: "D"}
+            m_map = {10: 'O', 11: 'N', 12: 'D'}
             m = m_map.get(next_expiry.month, str(next_expiry.month))
             date_code = f"{y}{m}{d}"
 
@@ -2081,11 +2057,8 @@ def _get_symbols(
             for kind in ("CE", "PE"):
                 sym = f"NFO:NIFTY{date_code}{strike}{kind}"
                 final_symbols.append(sym)
-
-        LOGGER.info(f"✅ Generated fallback symbols: {final_symbols}")
-
-    LOGGER.info(f"🎯 FINAL SYMBOLS TO TRADE: {final_symbols}")
-    LOGGER.info("=" * 60)
+        
+        LOGGER.info(f"Generated fallback symbols: {final_symbols}")
     return final_symbols
 
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
@@ -2842,11 +2815,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 pass 
                 
         # ✅ 8. CRITICAL: Feed BracketManager (Virtual Execution)
-        _global_ctx = get_latest_bot_context()
-        _bm_ref = None
-        
-        if _global_ctx and _global_ctx.order_manager:
-             _bm_ref = getattr(_global_ctx.order_manager, "_bracket_manager", None)
+        _bm_ref = getattr(ctx.order_manager, "_bracket_manager", None) if ctx.order_manager else None
         
         if _bm_ref is not None:
             _sym = t.get("symbol")
@@ -2978,7 +2947,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     else:
         LOGGER.info("Initializing Polling Streamer...")
         
-        # 1. Initialize Polling Streamer
+        # Initialize Polling Streamer
         streamer = PollingStreamer(
             broker_client=broker_client,
             on_tick=_on_poll_tick,
@@ -2989,19 +2958,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             require_depth=poll_require_depth,
             warn_on_rate_limit=poll_warn_rate_limit,
         )
-        # 2. Start it immediately
-        streamer.start()
-
-        LOGGER.info("Market data streamer starting in polling mode")
-
-        # -------------------------------------------------
-        # Secondary: KiteTicker (Best-Effort)
-        # -------------------------------------------------
-        # NOTE: We deleted the buggy initialization block here.
-        # KiteTicker is now correctly initialized at the END of this function
-        # (Lines 1902+) where strategy_runner is actually available.
         
         # Initialize Managers for Polling Mode
+        # Note: WebSocketManager is None in polling mode
         market_data_manager = MarketDataManager(
             broker_client,
             None, 
@@ -3015,6 +2974,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             store=hub_store,
             message_bus=message_bus,
         )
+
     # ------------------------------------------------------------------
     # Common Supervisor & Wiring Logic
     # ------------------------------------------------------------------
@@ -3032,7 +2992,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         monitor_interval_s=300.0,
     )
     stream_supervisor.bootstrap()
-    #stream_supervisor.ensure_started()
+    stream_supervisor.ensure_started()
 
     # Initialize Indicators & Regime
     indicator_engine = IndicatorEngine()
@@ -4149,32 +4109,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         session_guard=session_guard,
     )
 
-    if isinstance(streamer, PollingStreamer):
-        setattr(streamer, "_ctx", ctx) 
-        ctx.market_data_streamer = streamer
-
-    # ------------------------------------------------------------
-    # FIX: Initialize KiteTicker HERE, not earlier
-    # ------------------------------------------------------------
-    # Doing it here ensures strategy_runner and data_hub are fully ready
-    if not websocket_enabled and settings.websocket_enabled:
-        try:
-            from nifty_scalper_bot.streaming.kite_ticker_streamer import KiteTickerStreamer
-            
-            # Now safe to use strategy_runner because it was created at Line ~1680
-            kite_streamer = KiteTickerStreamer(
-                broker_client=broker_client,
-                data_hub=data_hub,
-                on_tick=strategy_runner.on_tick, 
-            )
-            kite_streamer.start()
-            ctx.kite_streamer = kite_streamer
-            LOGGER.info("✅ KiteTicker started (best-effort)")
-        except Exception as e:
-            LOGGER.warning(f"⚠️ KiteTicker failed to start: {e}")
-            ctx.kite_streamer = None
-        
-    
     resolver_candidate = ctx.instrument_resolver
     if resolver_candidate is None and ctx.broker_client is not None:
         try:
@@ -4971,6 +4905,8 @@ async def startup_sequence(ctx: BotContext) -> None:
         broker_ready = False
 
     # ---------------------------------------------------------
+    # 2. Load instruments
+    # ---------------------------------------------------------
     if broker_ready:
         try:
             inner = getattr(
@@ -4978,31 +4914,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                 "broker",
                 getattr(ctx.broker_client, "_broker", ctx.broker_client),
             )
-            LOGGER.info("📦 Loading NSE instruments...")
             await asyncio.to_thread(inner.load_instruments, "NSE")
-            LOGGER.info("✅ NSE instruments loaded")
-            
-            LOGGER.info("📦 Loading NFO instruments...")
             await asyncio.to_thread(inner.load_instruments, "NFO")
-            LOGGER.info("✅ NFO instruments loaded")
-            
-            # Verify NFO instruments are available
-            if ctx.instrument_resolver:
-                test_sym = "NFO:NIFTY26JAN25200CE"
-                test_tok = ctx.instrument_resolver.resolve(test_sym)
-                if test_tok:
-                    LOGGER.info(f"✅ NFO resolution test passed: {test_sym} -> {test_tok}")
-                else:
-                    LOGGER.error(f"🔴 NFO resolution test FAILED: {test_sym} -> None")
-                    LOGGER.error("🔴 Option symbols will NOT be tradeable!")
         except Exception as e:
-            LOGGER.error(f"Instrument load failed: {e}", exc_info=True)
-            
+            LOGGER.error(f"Instrument load failed: {e}")
+
     # ---------------------------------------------------------
     # 3. Symbol resolution + HYDRATION (FIXED)
     # ---------------------------------------------------------
     if broker_ready:
-        if True:  
+        try:
             targets = _get_symbols(
                 ctx.config,
                 ctx.instrument_resolver,
@@ -5134,93 +5055,31 @@ async def startup_sequence(ctx: BotContext) -> None:
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
             streamer = ctx.streamer
-            tokens_to_poll: dict[str, int] = {}
-
-            LOGGER.info(f"🔧 Processing {len(targets)} symbols for wiring...")
-            resolved_count = 0
-            unresolved_symbols = []
+            tokens_to_poll = []
 
             for sym in targets:
                 if mdm:
                     mdm.ensure_tracking(sym)
 
-                tok = None
                 if ctx.instrument_resolver:
                     tok = ctx.instrument_resolver.resolve(sym)
                     if tok:
-                        tokens_to_poll[sym] = tok
-                        resolved_count += 1
-                        LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
-                    else:
-                        unresolved_symbols.append(sym)
-                        LOGGER.warning(f"⚠️ UNRESOLVED (no token): {sym}")
+                        tokens_to_poll.append(tok)
 
-                ctx.strategy_runner.add_symbol(sym)
-
-            LOGGER.info(f"📊 Resolution summary: {resolved_count}/{len(targets)} resolved")
-            if unresolved_symbols:
-                LOGGER.error(f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}")
-            LOGGER.info(f"✅ tokens_to_poll has {len(tokens_to_poll)} tokens")
-
-            # =========================================================
-            # SPLIT TOKENS: NFO (WebSocket) vs NSE (REST)
-            # =========================================================
-            nfo_tokens = []
-            rest_tokens = []
-
-            for symbol, token in tokens_to_poll.items():
-                if symbol.startswith("NFO:"):
-                    nfo_tokens.append(token)
+                if sym.endswith("CE") or sym.endswith("PE"):
+                    ctx.strategy_runner.add_symbol(sym)
                 else:
-                    rest_tokens.append(token)
+                    LOGGER.info(f"🔭 Monitoring (No Trade): {sym}")
 
-            # =========================================================
-            # START KITE TICKER FOR NFO (OPTIONS / FUTURES)
-            # =========================================================
-            if nfo_tokens:
-                kt_streamer = KiteTickerStreamer(
-                    broker=ctx.broker,
-                    data_hub=ctx.data_hub,
-                    tokens=nfo_tokens,
-                )
-                kt_streamer.start()
-                ctx.kite_streamer = kt_streamer
-                LOGGER.info(f"🚀 KiteTicker started for {len(nfo_tokens)} NFO instruments")
+            if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
+                streamer.subscribe(tokens_to_poll)
+                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
 
-            if streamer and hasattr(streamer, "subscribe"):
-                try:
-                    if tokens_to_poll:
-                        streamer.subscribe(tokens_to_poll)
-                        LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
-                    else:
-                        # Re-enforce the No-Fly Rule here just in case
-                        import sys
-                        LOGGER.critical("❌ FATAL: No tokens available for subscription.")
-                        sys.exit(1)
-                except Exception:
-                    LOGGER.critical(
-                        "❌ FATAL: Failed to subscribe tokens to PollingStreamer",
-                        exc_info=True
-                    )
-                    raise  # 🔴 Hard Stop: Cannot trade without data
-
-            # =========================================================
-            # 🟢 FIX 2: ISOLATE LEGACY MDM TASK (Non-Fatal)
-            # =========================================================
-            # This was the likely cause of your "Hydration/Tracking failed" log.
-            # We wrap it specifically so it doesn't crash the startup flow.
             if mdm:
-                try:
-                    # Safety check: Ensure method exists before calling
-                    if hasattr(mdm, "_rest_poll_loop"):
-                        asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
-                    else:
-                        LOGGER.debug("ℹ️ MDM does not require _rest_poll_loop (Skipping)")
-                except Exception:
-                    LOGGER.warning(
-                        "⚠️ MDM rest poll loop failed to start (Non-Fatal)",
-                        exc_info=True
-                    )
+                asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
+
+        except Exception as e:
+            LOGGER.error("Hydration/Tracking failed", exc_info=True)
 
     # ---------------------------------------------------------
     # 4. Start subsystems (UNCHANGED)
