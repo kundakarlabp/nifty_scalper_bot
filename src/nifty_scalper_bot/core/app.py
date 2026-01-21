@@ -4963,7 +4963,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     # 3. Symbol resolution + HYDRATION (FIXED)
     # ---------------------------------------------------------
     if broker_ready:
-        try:
+        if True:  
             targets = _get_symbols(
                 ctx.config,
                 ctx.instrument_resolver,
