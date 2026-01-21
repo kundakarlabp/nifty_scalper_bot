@@ -166,13 +166,8 @@ class PollingStreamer:
 
     def _run(self) -> None:
         """
-        Main polling loop with immediate cache seeding and adaptive backoff.
+        Main polling loop with unified starvation detection.
         Executed in a background thread.
-        
-        OPTIMIZED LOGIC:
-        1. Unified Starvation Detection (Tokens vs Data).
-        2. Strict NFO Liveness Check (Index-only data = Starvation).
-        3. Hard rejection of unresolved symbols.
         """
         backoff = self._interval_s
         
@@ -182,18 +177,16 @@ class PollingStreamer:
         while not self._stop.is_set():
             started = time.monotonic()
             try:
-                # Copy token list under lock to avoid holding lock during network calls
+                # Copy token list under lock
                 with self._lock:
                     tokens = list(self._tokens)
                 
                 # --------------------------------------------------
                 # 🟡 UNIFIED STARVATION DETECTION
                 # --------------------------------------------------
-                # If we haven't seen healthy NFO data for > 30s, we are broken.
-                # This covers two cases:
-                # 1. tokens list is empty for 30s.
-                # 2. tokens exist, but API returns only NSE Index (or nothing) for 30s.
-                if time.monotonic() - last_healthy_ts > 30.0:
+                # FIX 1: Only enforce starvation if we actually have tokens to poll.
+                # This prevents false positives during startup or re-subscription.
+                if tokens and (time.monotonic() - last_healthy_ts > 30.0):
                     LOGGER.critical(
                         "💀 FATAL POLLER ERROR: Starvation detected (No NFO data for >30s). "
                         "Stopping polling thread for supervisor escalation."
@@ -201,10 +194,13 @@ class PollingStreamer:
                     self._stop.set() # Signal stop so Supervisor sees thread is dead
                     return  # 🔴 EXIT THREAD CLEANLY
 
+                # FIX 2: Track health across the entire cycle, not per batch.
+                seen_nfo_this_cycle = False
+
                 if tokens:
-                    # Yield chunks to avoid massive requests (Batch Size limit)
+                    # Yield chunks to avoid massive requests
                     for batch in self._chunks(tokens, self._batch_size):
-                        # ✅ Safe Fetch with Timeout logic (prevents zombie threads)
+                        # Safe Fetch (Uses the corrected _fetch_ticks)
                         ticks = self._fetch_ticks(batch)
                         
                         # Trace logging for empty batches
@@ -213,58 +209,30 @@ class PollingStreamer:
                                 LOGGER,
                                 "poll_empty_batch",
                                 f"[POLL-TRACE] Empty ticks returned for batch {batch[:5]}...",
-                                level=10, # DEBUG
+                                level=10, 
                                 interval_sec=60.0
                             )
                         
-                        # --------------------------------------------------
-                        # 🟢 CRITICAL FIX: UPDATE HEALTH ONLY ON TRADABLE DATA
-                        # --------------------------------------------------
-                        # Prevents "Index-Only Zombie" mode.
-                        # We scan the batch for ANY NFO symbol to prove we are trading-capable.
-                        has_nfo = False
-                        for t in ticks:
-                            sym = t.get("symbol")
-                            if sym and str(sym).startswith("NFO:"):
-                                has_nfo = True
-                                break
-                        
-                        # Only NFO data proves the trading loop is truly alive
-                        if has_nfo:
-                            last_healthy_ts = time.monotonic()
+                        # Accumulate NFO health status
+                        # We don't update timestamp yet; we just flag if we saw good data.
+                        if not seen_nfo_this_cycle:
+                            for t in ticks:
+                                sym = t.get("symbol")
+                                if sym and str(sym).startswith("NFO:"):
+                                    seen_nfo_this_cycle = True
+                                    break
                         
                         for tick in ticks:
                             # 1. Validate Payload Structure
-                            if (
-                                "instrument_token" not in tick
-                                or "last_price" not in tick
-                                or "timestamp" not in tick
-                            ):
-                                LOGGER.error("[POLL-ERR] Invalid tick payload structure: %s", tick)
+                            if "instrument_token" not in tick or "last_price" not in tick:
                                 continue
 
-                            lp = tick.get("last_price")
-                            if not isinstance(lp, (int, float)) or lp <= 0:
-                                LOGGER.warning(
-                                    "PollingStreamer: invalid price tick skipped",
-                                    extra={
-                                        "instrument_token": tick.get("instrument_token"),
-                                        "price": lp,
-                                    },
-                                )
-                                continue  
-                            
                             # 2. Tag Source as REST
                             tick["source"] = "rest"
-
-                            # 3. Symbol Validation
-                            # Note: Symbol is already resolved in _try_quote_bulk / _fetch_ticks
-                            symbol = tick.get("symbol")
                             
-                            # ✅ CRITICAL FIX: HARD DROP UNRESOLVED SYMBOLS
-                            # If we cannot identify the symbol, it CANNOT enter the DataHub.
-                            if not symbol:
-                                continue
+                            # 3. Get Symbol (Already resolved in _fetch_ticks)
+                            symbol = tick.get("symbol")
+                            if not symbol: continue
                             
                             # 4. Seed DataHub (Synchronous)
                             if self._data_hub:
@@ -279,6 +247,13 @@ class PollingStreamer:
                                 self._on_tick(tick)
                                 self._m_ticks_ingested.inc()
 
+                # --------------------------------------------------
+                # 🟢 UPDATE HEALTH ONCE PER CYCLE
+                # --------------------------------------------------
+                # Only update the heartbeat if we saw NFO data anywhere in this cycle.
+                if seen_nfo_this_cycle:
+                    last_healthy_ts = time.monotonic()
+
                 # Success: Update health metrics & reset backoff
                 with suppress(Exception):
                     self._m_poll_ok.inc()
@@ -288,7 +263,7 @@ class PollingStreamer:
                 backoff = self._interval_s
 
             except Exception as exc:  # noqa: BLE001
-                # Failure: Adaptive Backoff to prevent API hammering
+                # Failure: Adaptive Backoff
                 with suppress(Exception):
                     self._m_poll_fail.inc()
                 
@@ -301,7 +276,7 @@ class PollingStreamer:
                     interval_sec=10.0
                 )
 
-            # Smart Sleep: Adjust for network latency to maintain consistent cadence
+            # Smart Sleep
             elapsed = time.monotonic() - started
             sleep_time = max(0.1, backoff - elapsed)
             time.sleep(sleep_time)
@@ -311,71 +286,76 @@ class PollingStreamer:
     # ----------------------------------------------------------------
     def _fetch_ticks(self, batch: list[int]) -> list[dict[str, Any]]:
         """
-        Fetch ticks for a batch with strict 3s timeout to prevent 'Zombie Mode'.
-        Wraps logic in a thread to unblock the main loop if Broker API hangs.
+        Fetch quotes using Instrument Tokens DIRECTLY.
         """
-        if not batch:
-            return []
+        try:
+            # Clean Batch: Ensure all items are integers
+            tokens = []
+            for t in batch:
+                try:
+                    tokens.append(int(t))
+                except (ValueError, TypeError):
+                    continue
 
-        # Container for thread results
-        result_holder = {"ticks": []}
-
-        # 1. Define the Fetch Logic
-        def _fetch_logic():
-            try:
-                timestamp_ms = int(time.time() * 1000)
-
-                # --- STRATEGY: TRY QUOTE FIRST (Contains Volume + VWAP) ---
-                ticks = self._try_quote_bulk(batch, timestamp_ms)
-                if ticks:
-                    log_throttled(
-                        LOGGER, 
-                        "quote_fetch_success", 
-                        f"✅ QUOTE SUCCESS: Fetched {len(ticks)} ticks with Volume/VWAP data (Throttled 60s)", 
-                        interval_sec=60.0
-                    )
-                    result_holder["ticks"] = ticks
-                    return
-
-                # --- FALLBACK: TRY LTP BULK (Price Only) ---
-                log_throttled(
-                    LOGGER,
-                    "poll_fallback_ltp",
-                    "[POLL-WARN] Quote fetch failed/empty. Falling back to LTP (NO VOLUME DATA!)",
-                    level=30, # WARNING
-                    interval_sec=10.0
-                )
-                
-                ticks = self._try_ltp_bulk(batch, timestamp_ms)
-                if ticks:
-                    result_holder["ticks"] = ticks
-                    return
-
-            except Exception as e:
-                # Catch internal logic errors so thread finishes cleanly
-                LOGGER.debug(f"[POLL-THREAD] Logic error: {e}")
-
-        # 2. Execute with Timeout
-        # Daemon=True ensures this thread doesn't block app shutdown
-        t = threading.Thread(target=_fetch_logic, name="poll_safe_fetch", daemon=True)
-        t.start()
-        
-        # ✅ THE FIX: Wait max 3.0 seconds. If it hangs, we move on.
-        t.join(timeout=3.0)
-
-        # 3. Check for Hang
-        if t.is_alive():
+            if not tokens:
+                return []
+            
+            # Diagnostic Log
             log_throttled(
                 LOGGER,
-                "poll_timeout_crit",
-                "🚨 CRITICAL: Polling Hung! Timeout enforced (3s). Skipping batch.",
-                level=50, # CRITICAL
-                interval_sec=5.0
+                "quote_token_fetch",
+                f"📡 Fetching {len(tokens)} tokens: {tokens[:3]}...",
+                interval_sec=60.0
             )
+            
+            # DIRECT API CALL: Pass list of Integers
+            quote_map = self._broker.quote(tokens)
+            
+            if not quote_map:
+                LOGGER.warning(f"[POLL] Empty quote_map returned for tokens: {tokens[:3]}...")
+                return []
+
+            ticks = []
+            for key, quote in quote_map.items():
+                try:
+                    lp = float(quote.get("last_price") or 0.0)
+                    if lp <= 0: continue
+                    
+                    token = quote.get("instrument_token")
+                    if not token:
+                        if str(key).isdigit(): token = int(key)
+                        else: continue
+                            
+                    token_int = int(token)
+                    symbol = self._resolve_instrument(token_int)
+                    
+                    if not symbol: continue
+
+                    q_ts = quote.get("timestamp")
+                    if q_ts and hasattr(q_ts, "timestamp"):
+                        ts = int(q_ts.timestamp() * 1000)
+                    else:
+                        ts = int(time.time() * 1000)
+
+                    tick = {
+                        "instrument_token": token_int,
+                        "last_price": lp,
+                        "timestamp": ts,
+                        "volume": quote.get("volume", 0),
+                        "average_price": quote.get("average_price", 0.0),
+                        "oi": quote.get("oi", 0),
+                        "depth": quote.get("depth"),
+                        "symbol": symbol 
+                    }
+                    ticks.append(tick)
+                except Exception as e:
+                    continue
+            
+            return ticks
+            
+        except Exception as e:
+            LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}")
             return []
-
-        return result_holder["ticks"]
-
     # ----------------------------------------------------------------
     # ✅ HELPERS (Inlined to ensure stability)
     # ----------------------------------------------------------------
