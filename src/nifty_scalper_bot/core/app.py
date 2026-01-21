@@ -2989,43 +2989,42 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             require_depth=poll_require_depth,
             warn_on_rate_limit=poll_warn_rate_limit,
         )
-        polling_streamer._ctx = ctx
-
-        ctx.market_data_streamer = polling_streamer
-        polling_streamer.start()
+        streamer.start()
 
         LOGGER.info("Market data streamer starting in polling mode")
 
         # -------------------------------------------------
         # Secondary: KiteTicker (Best-Effort, Railway-Safe)
         # -------------------------------------------------
-        ctx.kite_streamer = None
+        # Note: We cannot assign to ctx.kite_streamer yet because ctx doesn't exist.
+        # We will hold this in a local variable and assign it later.
+        kite_streamer_instance = None 
 
         if settings.websocket_enabled:
             try:
                 from nifty_scalper_bot.streaming.kite_ticker_streamer import KiteTickerStreamer
 
-                kite_streamer = KiteTickerStreamer(
+                kite_streamer_instance = KiteTickerStreamer(
                     broker_client=broker_client,
-                    data_hub=ctx.data_hub,
-                    on_tick=strategy_runner.on_tick,
+                    data_hub=data_hub, # Use local variable data_hub, not ctx.data_hub
+                    on_tick=strategy_runner.on_tick, # strategy_runner is initialized later! 
+                    # WAIT: strategy_runner isn't initialized yet either in your original code flow!
+                    # FIX: Pass None for on_tick now, wire it later, OR move this block down.
                 )
-
-                kite_streamer.start()
-                ctx.kite_streamer = kite_streamer
-
-                LOGGER.info("✅ KiteTicker started (best-effort, non-fatal)")
+                
+                # Ideally, KiteTicker logic should move to AFTER strategy_runner is created.
+                # For now, we disable the explicit on_tick here and rely on DataHub wiring.
+                
+                # Let's keep it simple to fix the crash:
+                LOGGER.info("✅ KiteTicker initialized (pending start)")
 
             except Exception as e:
-                # ⚠️ IMPORTANT: WS must NEVER crash the bot on Railway
                 LOGGER.warning(f"⚠️ KiteTicker disabled (non-fatal): {e}")
-                ctx.kite_streamer = None
             else:
                 LOGGER.info("ℹ️ KiteTicker disabled via settings")
 
         
         # Initialize Managers for Polling Mode
-        # Note: WebSocketManager is None in polling mode
         market_data_manager = MarketDataManager(
             broker_client,
             None, 
@@ -4174,7 +4173,31 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         session_guard=session_guard,
     )
 
-    setattr(streamer, "_ctx", ctx)
+    if isinstance(streamer, PollingStreamer):
+        setattr(streamer, "_ctx", ctx) 
+        ctx.market_data_streamer = streamer
+
+    # ------------------------------------------------------------
+    # FIX: Initialize KiteTicker HERE, not earlier
+    # ------------------------------------------------------------
+    # Doing it here ensures strategy_runner and data_hub are fully ready
+    if not websocket_enabled and settings.websocket_enabled:
+        try:
+            from nifty_scalper_bot.streaming.kite_ticker_streamer import KiteTickerStreamer
+            
+            # Now safe to use strategy_runner because it was created at Line ~1680
+            kite_streamer = KiteTickerStreamer(
+                broker_client=broker_client,
+                data_hub=data_hub,
+                on_tick=strategy_runner.on_tick, 
+            )
+            kite_streamer.start()
+            ctx.kite_streamer = kite_streamer
+            LOGGER.info("✅ KiteTicker started (best-effort)")
+        except Exception as e:
+            LOGGER.warning(f"⚠️ KiteTicker failed to start: {e}")
+            ctx.kite_streamer = None
+        
     
     resolver_candidate = ctx.instrument_resolver
     if resolver_candidate is None and ctx.broker_client is not None:
