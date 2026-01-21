@@ -4931,8 +4931,6 @@ async def startup_sequence(ctx: BotContext) -> None:
         broker_ready = False
 
     # ---------------------------------------------------------
-    # 2. Load instruments
-    # ---------------------------------------------------------
     if broker_ready:
         try:
             inner = getattr(
@@ -4940,11 +4938,26 @@ async def startup_sequence(ctx: BotContext) -> None:
                 "broker",
                 getattr(ctx.broker_client, "_broker", ctx.broker_client),
             )
+            LOGGER.info("📦 Loading NSE instruments...")
             await asyncio.to_thread(inner.load_instruments, "NSE")
+            LOGGER.info("✅ NSE instruments loaded")
+            
+            LOGGER.info("📦 Loading NFO instruments...")
             await asyncio.to_thread(inner.load_instruments, "NFO")
+            LOGGER.info("✅ NFO instruments loaded")
+            
+            # Verify NFO instruments are available
+            if ctx.instrument_resolver:
+                test_sym = "NFO:NIFTY26JAN25200CE"
+                test_tok = ctx.instrument_resolver.resolve(test_sym)
+                if test_tok:
+                    LOGGER.info(f"✅ NFO resolution test passed: {test_sym} -> {test_tok}")
+                else:
+                    LOGGER.error(f"🔴 NFO resolution test FAILED: {test_sym} -> None")
+                    LOGGER.error("🔴 Option symbols will NOT be tradeable!")
         except Exception as e:
-            LOGGER.error(f"Instrument load failed: {e}")
-
+            LOGGER.error(f"Instrument load failed: {e}", exc_info=True)
+            
     # ---------------------------------------------------------
     # 3. Symbol resolution + HYDRATION (FIXED)
     # ---------------------------------------------------------
@@ -5083,17 +5096,31 @@ async def startup_sequence(ctx: BotContext) -> None:
             streamer = ctx.streamer
             tokens_to_poll = []
 
+            LOGGER.info(f"🔧 Processing {len(targets)} symbols for wiring...")
+            resolved_count = 0
+            unresolved_symbols = []
+
             for sym in targets:
                 if mdm:
                     mdm.ensure_tracking(sym)
 
+                tok = None
                 if ctx.instrument_resolver:
                     tok = ctx.instrument_resolver.resolve(sym)
                     if tok:
                         tokens_to_poll.append(tok)
+                        resolved_count += 1
+                        LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
+                    else:
+                        unresolved_symbols.append(sym)
+                        LOGGER.warning(f"⚠️ UNRESOLVED (no token): {sym}")
 
                 ctx.strategy_runner.add_symbol(sym)
-                LOGGER.info(f"📈 Strategy tracking: {sym}")
+
+            LOGGER.info(f"📊 Resolution summary: {resolved_count}/{len(targets)} resolved")
+            if unresolved_symbols:
+                LOGGER.error(f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}")
+            LOGGER.info(f"✅ tokens_to_poll has {len(tokens_to_poll)} tokens")
 
             if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
                 streamer.subscribe(tokens_to_poll)
