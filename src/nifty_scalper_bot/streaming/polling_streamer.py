@@ -32,7 +32,6 @@ class PollingStreamer:
         warn_on_rate_limit: bool = True,
     ) -> None:
         self._broker = broker_client
-        self._ctx = ctx
         self._on_tick = on_tick
         self._resolver = instrument_resolver
         self._data_hub = data_hub
@@ -44,6 +43,7 @@ class PollingStreamer:
         self._thread: threading.Thread | None = None
         self._require_depth = bool(require_depth)
         self._warn_on_rate_limit = bool(warn_on_rate_limit)
+        self._kite_streamer = None  # Optional KiteTicker reference for health checks
 
         # Metrics
         self._m_poll_ok = Counter("polling_success_total", "Successful poll cycles")
@@ -76,6 +76,10 @@ class PollingStreamer:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
             LOGGER.info("🛑 Polling Streamer Stopped", extra={"event": "polling_stopped"})
+
+    def set_kite_streamer(self, kite_streamer) -> None:
+        """Set optional KiteTicker streamer reference for health monitoring."""
+        self._kite_streamer = kite_streamer
 
     def subscribe(self, tokens: Sequence[int]) -> None:
         """Add tokens to the polling list and seed DataHub immediately.
@@ -249,11 +253,10 @@ class PollingStreamer:
 
                 # Check KiteTicker health if available
                 ws_healthy = False
-                if hasattr(self, "_ctx") and hasattr(self._ctx, "kite_streamer"):
+                if self._kite_streamer is not None:
                     try:
                         # WS is healthy if we saw a tick in last 10 seconds
-                        # (Checking specific streamer if available, or generic context)
-                        ws_healthy = self._ctx.kite_streamer.last_tick_age() < 10.0
+                        ws_healthy = self._kite_streamer.last_tick_age() < 10.0
                     except Exception:
                         ws_healthy = False
 
