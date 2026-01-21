@@ -177,12 +177,21 @@ class PollingStreamer:
                 # Copy token list under lock to avoid holding lock during network calls
                 with self._lock:
                     tokens = list(self._tokens)
-                
-                if tokens:
-                    # Yield chunks to avoid massive requests (Batch Size limit)
-                    for batch in self._chunks(tokens, self._batch_size):
-                        # ✅ CRITICAL FIX: Safe Fetch with Timeout logic (prevents zombie threads)
-                        ticks = self._fetch_ticks(batch)
+
+                # --------------------------------------------------
+                # 🟡 STARVATION DETECTION (TEMPORAL, NOT IMMEDIATE)
+                # --------------------------------------------------
+                if not tokens:
+                    if time.monotonic() - last_healthy_ts > 30.0:
+                        LOGGER.critical(
+                            "💀 FATAL POLLER ERROR: No symbols tracked for >30s. "
+                            "Stopping polling thread for supervisor escalation."
+                        )
+                        self._stop.set()
+                        return  # EXIT THREAD CLEANLY
+                else:
+                last_healthy_ts = time.monotonic()
+
                         
                         # Trace logging for empty batches
                         if not ticks:
