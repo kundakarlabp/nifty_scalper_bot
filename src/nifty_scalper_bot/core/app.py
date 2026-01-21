@@ -2978,7 +2978,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     else:
         LOGGER.info("Initializing Polling Streamer...")
         
-        # Initialize Polling Streamer
+        # 1. Initialize Polling Streamer
         streamer = PollingStreamer(
             broker_client=broker_client,
             on_tick=_on_poll_tick,
@@ -2989,40 +2989,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             require_depth=poll_require_depth,
             warn_on_rate_limit=poll_warn_rate_limit,
         )
+        # 2. Start it immediately
         streamer.start()
 
         LOGGER.info("Market data streamer starting in polling mode")
 
         # -------------------------------------------------
-        # Secondary: KiteTicker (Best-Effort, Railway-Safe)
+        # Secondary: KiteTicker (Best-Effort)
         # -------------------------------------------------
-        # Note: We cannot assign to ctx.kite_streamer yet because ctx doesn't exist.
-        # We will hold this in a local variable and assign it later.
-        kite_streamer_instance = None 
-
-        if settings.websocket_enabled:
-            try:
-                from nifty_scalper_bot.streaming.kite_ticker_streamer import KiteTickerStreamer
-
-                kite_streamer_instance = KiteTickerStreamer(
-                    broker_client=broker_client,
-                    data_hub=data_hub, # Use local variable data_hub, not ctx.data_hub
-                    on_tick=strategy_runner.on_tick, # strategy_runner is initialized later! 
-                    # WAIT: strategy_runner isn't initialized yet either in your original code flow!
-                    # FIX: Pass None for on_tick now, wire it later, OR move this block down.
-                )
-                
-                # Ideally, KiteTicker logic should move to AFTER strategy_runner is created.
-                # For now, we disable the explicit on_tick here and rely on DataHub wiring.
-                
-                # Let's keep it simple to fix the crash:
-                LOGGER.info("✅ KiteTicker initialized (pending start)")
-
-            except Exception as e:
-                LOGGER.warning(f"⚠️ KiteTicker disabled (non-fatal): {e}")
-            else:
-                LOGGER.info("ℹ️ KiteTicker disabled via settings")
-
+        # NOTE: We deleted the buggy initialization block here.
+        # KiteTicker is now correctly initialized at the END of this function
+        # (Lines 1902+) where strategy_runner is actually available.
         
         # Initialize Managers for Polling Mode
         market_data_manager = MarketDataManager(
@@ -3038,7 +3015,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             store=hub_store,
             message_bus=message_bus,
         )
-
     # ------------------------------------------------------------------
     # Common Supervisor & Wiring Logic
     # ------------------------------------------------------------------
