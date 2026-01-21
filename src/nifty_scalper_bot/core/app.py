@@ -2973,19 +2973,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     else:
         LOGGER.info("Initializing Polling Streamer...")
         
-        # Initialize Polling Streamer
-        streamer = PollingStreamer(
-            broker_client=broker_client,
-            on_tick=_on_poll_tick,
-            instrument_resolver=instrument_resolver,
-            data_hub=data_hub,
-            poll_interval_ms=int(poll_interval_sec * 1000),
-            batch_size=poll_batch_size,
-            require_depth=poll_require_depth,
-            warn_on_rate_limit=poll_warn_rate_limit,
-        )
-        
-        # Initialize Managers for Polling Mode
+        # ✅ FIX: Initialize Managers for Polling Mode FIRST
         # Note: WebSocketManager is None in polling mode
         market_data_manager = MarketDataManager(
             broker_client,
@@ -2993,6 +2981,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             settings=settings,
             resolver=instrument_resolver,
         )
+        
+        # ✅ FIX: Create DataHub BEFORE PollingStreamer so it's not None
         data_hub = DataHub(
             market_data_manager,
             instrument_resolver,
@@ -3000,6 +2990,20 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             store=hub_store,
             message_bus=message_bus,
         )
+        LOGGER.info(f"✅ DataHub created: {data_hub is not None}")
+        
+        # ✅ FIX: NOW Initialize Polling Streamer with valid data_hub
+        streamer = PollingStreamer(
+            broker_client=broker_client,
+            on_tick=_on_poll_tick,
+            instrument_resolver=instrument_resolver,
+            data_hub=data_hub,  # data_hub is now valid!
+            poll_interval_ms=int(poll_interval_sec * 1000),
+            batch_size=poll_batch_size,
+            require_depth=poll_require_depth,
+            warn_on_rate_limit=poll_warn_rate_limit,
+        )
+        LOGGER.info(f"✅ PollingStreamer initialized with DataHub wired")
 
     # ------------------------------------------------------------------
     # Common Supervisor & Wiring Logic
