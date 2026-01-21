@@ -4935,6 +4935,9 @@ async def startup_sequence(ctx: BotContext) -> None:
         broker_ready = False
 
     # ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # 2. Load instruments AND sync to resolver
+    # ---------------------------------------------------------
     if broker_ready:
         try:
             inner = getattr(
@@ -4950,15 +4953,58 @@ async def startup_sequence(ctx: BotContext) -> None:
             await asyncio.to_thread(inner.load_instruments, "NFO")
             LOGGER.info("✅ NFO instruments loaded")
             
-            # Verify NFO instruments are available
+            # ✅ CRITICAL FIX: Sync loaded instruments to InstrumentResolver
+            # The resolver was warmed BEFORE instruments were loaded, so we must update it now
             if ctx.instrument_resolver:
+                LOGGER.info("🔄 Syncing NFO instruments to InstrumentResolver...")
+                synced_count = 0
+                
+                # Get instruments from broker cache
+                broker_ref = getattr(ctx.broker_client, "_broker", ctx.broker_client)
+                nfo_cache = getattr(broker_ref, "_instrument_cache", {}).get("NFO", {})
+                
+                if not nfo_cache:
+                    # Fallback: try list_instruments
+                    list_fn = getattr(broker_ref, "list_instruments", None)
+                    if callable(list_fn):
+                        all_instruments = list_fn()
+                        nfo_cache = {
+                            row.get("tradingsymbol", ""): row 
+                            for row in all_instruments 
+                            if row.get("exchange") == "NFO"
+                        }
+                
+                for key, row in nfo_cache.items():
+                    try:
+                        token = row.get("instrument_token")
+                        ts = row.get("tradingsymbol") or row.get("symbol")
+                        exchange = row.get("exchange", "NFO")
+                        
+                        if token and ts:
+                            # Add to resolver's internal caches
+                            ctx.instrument_resolver.upsert(ts, int(token), exchange=exchange)
+                            synced_count += 1
+                    except Exception:
+                        pass
+                
+                LOGGER.info(f"✅ Synced {synced_count} NFO instruments to resolver")
+                
+                # Verify resolution now works
                 test_sym = "NFO:NIFTY26JAN25200CE"
                 test_tok = ctx.instrument_resolver.resolve(test_sym)
                 if test_tok:
-                    LOGGER.info(f"✅ NFO resolution test passed: {test_sym} -> {test_tok}")
+                    LOGGER.info(f"✅ NFO resolution test PASSED: {test_sym} -> {test_tok}")
                 else:
                     LOGGER.error(f"🔴 NFO resolution test FAILED: {test_sym} -> None")
-                    LOGGER.error("🔴 Option symbols will NOT be tradeable!")
+                    LOGGER.error("🔴 Trying alternative symbol formats...")
+                    
+                    # Try without NFO prefix
+                    for alt_sym in ["NIFTY26JAN25200CE", "NIFTY2612725200CE"]:
+                        alt_tok = ctx.instrument_resolver.resolve(alt_sym)
+                        if alt_tok:
+                            LOGGER.info(f"✅ Found with alternate format: {alt_sym} -> {alt_tok}")
+                            break
+                    
         except Exception as e:
             LOGGER.error(f"Instrument load failed: {e}", exc_info=True)
             
