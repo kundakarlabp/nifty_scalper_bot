@@ -171,27 +171,37 @@ class PollingStreamer:
         """
         backoff = self._interval_s
         
+        # 🟢 Initialize health timestamp (outside loop)
+        last_healthy_ts = time.monotonic()
+        
         while not self._stop.is_set():
             started = time.monotonic()
             try:
                 # Copy token list under lock to avoid holding lock during network calls
                 with self._lock:
                     tokens = list(self._tokens)
-
+                
                 # --------------------------------------------------
-                # 🟡 STARVATION DETECTION (TEMPORAL, NOT IMMEDIATE)
+                # 🟡 STARVATION DETECTION (TEMPORAL)
                 # --------------------------------------------------
                 if not tokens:
+                    # If we have tracked nothing for > 30s, we are broken.
                     if time.monotonic() - last_healthy_ts > 30.0:
                         LOGGER.critical(
                             "💀 FATAL POLLER ERROR: No symbols tracked for >30s. "
                             "Stopping polling thread for supervisor escalation."
                         )
-                        self._stop.set()
-                        return  # EXIT THREAD CLEANLY
+                        self._stop.set() # Signal stop so Supervisor sees thread is dead
+                        return  # 🔴 EXIT THREAD CLEANLY
                 else:
-                last_healthy_ts = time.monotonic()
-
+                    # We have symbols, update health timestamp
+                    last_healthy_ts = time.monotonic()
+                
+                if tokens:
+                    # Yield chunks to avoid massive requests (Batch Size limit)
+                    for batch in self._chunks(tokens, self._batch_size):
+                        # ✅ CRITICAL FIX: Safe Fetch with Timeout logic (prevents zombie threads)
+                        ticks = self._fetch_ticks(batch)
                         
                         # Trace logging for empty batches
                         if not ticks:
