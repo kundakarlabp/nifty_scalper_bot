@@ -17,11 +17,38 @@ log = get_logger(__name__)
 class HubStore:
     """Simple SQLite-backed snapshot and WAL store for hub state."""
 
-    def __init__(self, path: str | Path = "data/hub.db") -> None:
+    def __init__(self, path: str | Path | None = None) -> None:
+        import os
+        
+        # ✅ FIX: Use environment variable or fallback to /tmp (always writable on Railway)
+        if path is None:
+            path = os.getenv("HUB_STORE_PATH")
+            if not path:
+                # Check if /tmp exists (Railway/Docker), otherwise use data/
+                if os.path.isdir("/tmp"):
+                    path = "/tmp/hub.db"
+                else:
+                    path = "data/hub.db"
+                log.info(f"HubStore using path: {path}")
+        
         self._path = Path(path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.warning(f"Could not create parent dir for {self._path}: {e}")
+            # Fallback to /tmp
+            self._path = Path("/tmp/hub.db")
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            
         self._lock = RLock()
-        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        try:
+            self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        except sqlite3.OperationalError as e:
+            log.error(f"Failed to open SQLite at {self._path}: {e}")
+            # Last resort fallback
+            self._path = Path("/tmp/hub_fallback.db")
+            self._conn = sqlite3.connect(self._path, check_same_thread=False)
+            log.warning(f"Using fallback SQLite path: {self._path}")
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(
