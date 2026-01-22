@@ -76,6 +76,9 @@ class MarketRegimeManager:
 
     # ✅ FIXED: Missing field that caused the crash
     _refresh_task_started: bool = field(init=False, default=False, repr=False)
+    
+    # ✅ FIX: Add indicators_ready field (required by startup_sequence)
+    indicators_ready: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialise shared state and subscribe to detector updates."""
