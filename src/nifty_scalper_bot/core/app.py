@@ -5200,9 +5200,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                 streamer.subscribe(tokens_to_poll)
                 LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
 
-            if mdm:
+            # ✅ FIX: Disable MDM polling when PollingStreamer is active
+            # MDM polling is redundant - PollingStreamer already feeds DataHub
+            if mdm and not ctx.streamer:
+                # Only start MDM polling if there's no streamer
                 asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
-
+            else:
+                LOGGER.info("📡 MDM polling disabled (PollingStreamer is active)")
         except Exception as e:
             LOGGER.error("Hydration/Tracking failed", exc_info=True)
 
