@@ -275,7 +275,7 @@ class InstrumentResolver:
                 self._symbol_by_token[token_int] = base_symbol
                 # clear any negative/no-token state
                 self._clear_negative_cache_for_key(base_symbol)
-            LOGGER.info("Condition met: instrument_resolver_upsert", extra={"event": "instrument_resolver_upsert", "symbol": base_symbol, "token": token_int, "exchange": exchange_hint or ""})
+            LOGGER.debug("Condition met: instrument_resolver_upsert", extra={"event": "instrument_resolver_upsert", "symbol": base_symbol, "token": token_int, "exchange": exchange_hint or ""})
         except Exception:
             LOGGER.exception("Failure in InstrumentResolver.upsert")
 
