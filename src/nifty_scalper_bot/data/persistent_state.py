@@ -1,7 +1,7 @@
 """Durable persistence for trades, positions, and shadow equity."""
 
 from __future__ import annotations
-
+import os
 import json
 import signal
 import time
@@ -73,6 +73,9 @@ class PersistentStateDB:
         self._lock = RLock()
         
         # ✅ FIX 1: Auto-create directory
+        # Fallback to /tmp if the path appears to be in a readonly location
+        if not db_path:
+            db_path = Path(os.getenv("STATE_DB_PATH", "/tmp/state.db"))
         self._path = Path(db_path).resolve()
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
