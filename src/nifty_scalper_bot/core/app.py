@@ -4578,7 +4578,21 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     telegram_cfg = getattr(config, "telegram", None)
     ctx.telegram_bot = None
+    # Ensure controller exists for telegram setup
     controller = _HTTP_CONTROLLER
+    if controller is None and settings.notifications.enabled:
+        # Create a minimal controller if the HTTP app wasn't started
+        try:
+            from nifty_scalper_bot.notifications.telegram_controller import TelegramWebhookController
+            notifier = ctx.telegram_notifier
+            if notifier and hasattr(notifier, 'bot'):
+                controller = TelegramWebhookController(
+                    bot=notifier.bot,
+                    settings=settings.notifications,
+                )
+                LOGGER.info("✅ Created fallback TelegramWebhookController")
+        except Exception as e:
+            LOGGER.warning(f"Could not create fallback controller: {e}")
     telegram_bot_instance: TelegramBot | None = None
     telegram_chat_id: int | None = None
 
