@@ -4974,7 +4974,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if row.get("exchange") == "NFO"
                         }
                 
-                for key, row in nfo_cache.items():
+                total_items = len(nfo_cache)
+                LOGGER.info(f"📊 NFO cache has {total_items} items to sync")
+                
+                for idx, (key, row) in enumerate(nfo_cache.items(), 1):
                     try:
                         token = row.get("instrument_token")
                         ts = row.get("tradingsymbol") or row.get("symbol")
@@ -4982,12 +4985,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                         
                         if token and ts:
                             # Add to resolver's internal caches
+                            # Note: upsert now logs at DEBUG level (not INFO)
                             ctx.instrument_resolver.upsert(ts, int(token), exchange=exchange)
                             synced_count += 1
-                    except Exception:
-                        pass
+                        
+                        # Progress logging every 1000 instruments to show activity
+                        if idx % 1000 == 0:
+                            LOGGER.info(f"📥 NFO sync progress: {idx}/{total_items}")
+                            
+                    except Exception as e:
+                        # Log failures at debug level to avoid spam
+                        LOGGER.debug(f"Skip NFO instrument {key}: {e}")
                 
-                LOGGER.info(f"✅ Synced {synced_count} NFO instruments to resolver")
+                LOGGER.info(f"✅ Synced {synced_count}/{total_items} NFO instruments to resolver")
                 
                 # Verify resolution now works
                 test_sym = "NFO:NIFTY26JAN25200CE"
