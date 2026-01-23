@@ -2758,14 +2758,57 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 pass
 
         # 3. Symbol Mapping (If token exists but symbol missing)
+        # 3. Symbol Mapping (If token exists but symbol missing)
         token_value = t.get("instrument_token")
-        if token_value and "symbol" not in t:
+        if token_value and not t.get("symbol"):
             try:
                 mapped = None
+                token_int = int(token_value) if token_value else None
                 
-                # Try multiple sources
-                if market_data_manager:
-                    mapped = market_data_manager._symbol_by_token.get(int(token_value))
+                # Try instrument_resolver FIRST (most reliable)
+                if not mapped and instrument_resolver:
+                    try:
+                        # Method 1: format_token_as_symbol
+                        if hasattr(instrument_resolver, 'format_token_as_symbol'):
+                            mapped = instrument_resolver.format_token_as_symbol(token_int)
+                        
+                        # Method 2: get_instrument_by_token
+                        if not mapped and hasattr(instrument_resolver, 'get_instrument_by_token'):
+                            inst = instrument_resolver.get_instrument_by_token(token_int)
+                            if inst:
+                                exchange = getattr(inst, 'exchange', 'NFO')
+                                sym = getattr(inst, 'tradingsymbol', None) or getattr(inst, 'symbol', None)
+                                if sym:
+                                    mapped = f"{exchange}:{sym}"
+                        
+                        # Method 3: lookup
+                        if not mapped and hasattr(instrument_resolver, 'lookup'):
+                            info = instrument_resolver.lookup(token_int)
+                            if info:
+                                exchange = info.get('exchange', 'NFO')
+                                sym = info.get('tradingsymbol') or info.get('symbol')
+                                if sym:
+                                    mapped = f"{exchange}:{sym}"
+                    except Exception as e:
+                        LOGGER.debug(f"Resolver lookup failed for {token_int}: {e}")
+                
+                # Fallback to market_data_manager
+                if not mapped and market_data_manager:
+                    mapped = market_data_manager._symbol_by_token.get(token_int)
+                
+                if mapped:
+                    t["symbol"] = mapped
+                    LOGGER.debug(f"✅ Symbol resolved: {token_int} -> {mapped}")
+                else:
+                    # Log unmapped token (throttled)
+                    log_throttled(
+                        LOGGER,
+                        f"unmapped_token_{token_value}",
+                        f"⚠️ UNMAPPED TOKEN: {token_value} - all resolution methods failed",
+                        interval_sec=60.0
+                    )
+            except Exception as e:
+                LOGGER.debug(f"Symbol mapping error for token {token_value}: {e}")
                 
                 if not mapped and instrument_resolver:
                     inst = instrument_resolver.get_instrument_by_token(int(token_value))
@@ -2815,19 +2858,45 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             t["timestamp"] = datetime.now(timezone.utc).timestamp()
 
         # 6. CRITICAL: Direct Strategy Feed (Bypass DataHub if needed)
-        if strategy_runner_ref:
+        # 6. CRITICAL: Direct Strategy Feed
+        sym = t.get("symbol")
+        ltp = t.get("ltp") or t.get("last_price")
+        
+        # Diagnostic log (throttled every 30s per symbol)
+        if sym and ltp:
+            log_throttled(
+                LOGGER,
+                f"poll_tick_{sym}",
+                f"📡 POLL TICK: {sym} | LTP: {ltp}",
+                interval_sec=30.0
+            )
+        
+        if strategy_runner_ref and sym:
             runner = strategy_runner_ref.get("instance")
             if runner:
-                sym = t.get("symbol")
-                if sym:
-                    try:
-                        # Try safe handler first, then standard
-                        handler = getattr(runner, "_on_tick_safe", getattr(runner, "_on_tick", None))
-                        if callable(handler):
-                            if handler.__name__ == "_on_tick":
-                                handler(sym, t)
-                            else:
-                                handler(t)
+                try:
+                    # Prefer _on_tick_safe if available
+                    if hasattr(runner, "_on_tick_safe") and callable(runner._on_tick_safe):
+                        runner._on_tick_safe(t)
+                    elif hasattr(runner, "_on_tick") and callable(runner._on_tick):
+                        runner._on_tick(sym, t)
+                    
+                    # Diagnostic log (throttled every 60s per symbol)
+                    log_throttled(
+                        LOGGER,
+                        f"tick_to_strategy_{sym}",
+                        f"✅ TICK -> StrategyRunner: {sym}",
+                        interval_sec=60.0
+                    )
+                except Exception as e:
+                    LOGGER.error(f"❌ Strategy handler error for {sym}: {e}", exc_info=True)
+        elif not sym:
+            log_throttled(
+                LOGGER,
+                f"no_symbol_skip_{token_value}",
+                f"⚠️ SKIPPING tick (no symbol): token={token_value}",
+                interval_sec=60.0
+            )
                     except Exception:
                         pass # Don't let strategy errors kill the poller
 
