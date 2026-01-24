@@ -2774,29 +2774,36 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         t.setdefault("source", "polling")
 
         # ---------------------------------------------------------
-        # ✅ FIX: Normalize Depth Keys (VWAP & Volume)
+        # ✅ FIX: Robust Depth Normalization (VWAP, Vol, OI)
         # ---------------------------------------------------------
-        # Zerodha sends 'average_price', bot expects 'vwap'
-        if "average_price" in t and "vwap" not in t:
-            t["vwap"] = t["average_price"]
+        # 1. VWAP: Explicitly cast 'average_price' to float
+        # This fixes the issue where VWAP was 0.00 despite key presence
+        if "average_price" in t:
+            try:
+                avg_price = float(t["average_price"])
+                if avg_price > 0:
+                    t["vwap"] = avg_price
+            except (ValueError, TypeError):
+                # Keep existing vwap if present, or ignore
+                pass 
         
-        # Ensure volume is an integer
+        # 2. Volume: Ensure Integer (handle '100.0' strings)
         if "volume" in t:
             try:
-                t["volume"] = int(t["volume"])
+                t["volume"] = int(float(t["volume"]))
             except (ValueError, TypeError):
                 t["volume"] = 0
                 
-        # If 'oi' is present, ensure it's mapped
-        if "oi" in t:
+        # 3. OI: Map 'oi' -> 'open_interest' standard key
+        if "oi" in t and "open_interest" not in t:
             t["open_interest"] = t["oi"]
         # ---------------------------------------------------------
 
-        # [DIAGNOSTIC] Log entry (Now Safe)
+        # [DIAGNOSTIC] Log entry (Throttled)
         log_throttled(
             LOGGER,
             "poll_tick_callback_entry",
-            f"🔔 _on_poll_tick CALLED | tick_keys={list(tick.keys())[:5]}",
+            f"🔔 _on_poll_tick CALLED | keys={list(t.keys())[:6]}",
             interval_sec=30.0
         )
 
@@ -2832,12 +2839,24 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             else:
                 log_throttled(LOGGER, f"map_fail_{token_value}", f"⚠️ UNMAPPED TOKEN: {token_value}", 60.0)
 
-        # 4. Extract Critical Data
+        # 4. Extract Critical Data (Ensure LTP exists and is float)
         sym = t.get("symbol")
         ltp = t.get("ltp") or t.get("last_price") or t.get("close")
-        
-        # Ensure LTP is set in the dict for downstream consumers
-        t["ltp"] = ltp
+        if ltp is not None:
+            try:
+                t["ltp"] = float(ltp)
+            except (ValueError, TypeError):
+                t["ltp"] = 0.0
+
+        # [DIAGNOSTIC] Log Tick Details (WITH VWAP VERIFICATION)
+        # This confirms if the fix worked in your next log cycle
+        if sym:
+            log_throttled(
+                LOGGER,
+                f"tick_received_{sym}",
+                f"📡 TICK: {sym} | LTP: {t.get('ltp')} | VWAP: {t.get('vwap', 'MISSING')}",
+                interval_sec=30.0
+            )
 
         # 5. Inject Timestamp
         if "timestamp" not in t:
@@ -2869,9 +2888,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if _safe_ctx and _safe_ctx.order_manager:
             _bm_ref = getattr(_safe_ctx.order_manager, "_bracket_manager", None)
         
-        if _bm_ref is not None and sym and ltp:
+        if _bm_ref is not None and sym and t.get("ltp"):
             try:
-                _bm_ref.on_tick(str(sym), float(ltp))
+                _bm_ref.on_tick(str(sym), float(t["ltp"]))
             except Exception:
                 pass
 
