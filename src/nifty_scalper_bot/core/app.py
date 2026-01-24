@@ -2761,13 +2761,36 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             # Failsafe: Never crash the trading bot just because logging failed
             pass
 
-    # 2. The Corrected Tick Handler
+    # 2. The Corrected Tick Handler (With Depth Normalization)
     def _on_poll_tick(tick: dict[str, Any]) -> None:
         """
         Handle incoming poll tick with Robust Validation & Recovery.
         """
         if not tick or not isinstance(tick, dict):
             return
+
+        # 1. Normalize Tick
+        t = dict(tick) if isinstance(tick, dict) else {"raw": tick}
+        t.setdefault("source", "polling")
+
+        # ---------------------------------------------------------
+        # ✅ FIX: Normalize Depth Keys (VWAP & Volume)
+        # ---------------------------------------------------------
+        # Zerodha sends 'average_price', bot expects 'vwap'
+        if "average_price" in t and "vwap" not in t:
+            t["vwap"] = t["average_price"]
+        
+        # Ensure volume is an integer
+        if "volume" in t:
+            try:
+                t["volume"] = int(t["volume"])
+            except (ValueError, TypeError):
+                t["volume"] = 0
+                
+        # If 'oi' is present, ensure it's mapped
+        if "oi" in t:
+            t["open_interest"] = t["oi"]
+        # ---------------------------------------------------------
 
         # [DIAGNOSTIC] Log entry (Now Safe)
         log_throttled(
@@ -2776,10 +2799,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             f"🔔 _on_poll_tick CALLED | tick_keys={list(tick.keys())[:5]}",
             interval_sec=30.0
         )
-
-        # 1. Normalize Tick
-        t = dict(tick) if isinstance(tick, dict) else {"raw": tick}
-        t.setdefault("source", "polling")
 
         # 2. Token Normalization
         if "instrument_token" not in t and "token" in t:
@@ -2798,7 +2817,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             # Try Resolver
             if instrument_resolver:
                 try:
-                    # Try efficient cache lookup first
                     mapped = getattr(instrument_resolver, "_symbol_by_token", {}).get(token_int)
                     if not mapped:
                         mapped = instrument_resolver.format_token_as_symbol(token_int)
@@ -2811,22 +2829,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
             if mapped:
                 t["symbol"] = mapped
-                log_throttled(LOGGER, f"map_success_{token_value}", f"✅ Mapped {token_value} -> {mapped}", 300.0)
             else:
                 log_throttled(LOGGER, f"map_fail_{token_value}", f"⚠️ UNMAPPED TOKEN: {token_value}", 60.0)
 
         # 4. Extract Critical Data
         sym = t.get("symbol")
-        ltp = t.get("ltp") or t.get("last_price")
+        ltp = t.get("ltp") or t.get("last_price") or t.get("close")
         
-        # [DIAGNOSTIC] Log Tick Details (Now Safe)
-        if sym:
-            log_throttled(
-                LOGGER,
-                f"tick_received_{sym}",
-                f"📡 TICK: {sym} | LTP: {ltp}",
-                interval_sec=30.0
-            )
+        # Ensure LTP is set in the dict for downstream consumers
+        t["ltp"] = ltp
 
         # 5. Inject Timestamp
         if "timestamp" not in t:
@@ -2852,11 +2863,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             except (RuntimeError, Exception):
                 pass 
 
-        # 8. Feed BracketManager (Virtual Execution)
-        # ✅ FIX: Use Global Accessor to prevent "free variable 'ctx' referenced before assignment"
+        # 8. Feed BracketManager
         _safe_ctx = get_latest_bot_context()
         _bm_ref = None
-        
         if _safe_ctx and _safe_ctx.order_manager:
             _bm_ref = getattr(_safe_ctx.order_manager, "_bracket_manager", None)
         
