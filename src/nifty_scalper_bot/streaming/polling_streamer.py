@@ -235,13 +235,30 @@ class PollingStreamer:
                                 self._data_hub.store_quote(symbol, tick, source="rest", seed=True)
 
                             # 5. Update Metrics
-                            with suppress(Exception):
+                            try:
                                 self._m_last_tick.set(int(time.time() * 1000))
+                            except Exception as metric_err:
+                                LOGGER.debug(f"Metric update error: {metric_err}")
                             
                             # 6. Async Handoff (Strategy Pipeline)
-                            with suppress(Exception):
+                            try:
                                 self._on_tick(tick)
                                 self._m_ticks_ingested.inc()
+                                
+                                # ✅ DIAGNOSTIC: Confirm callback was invoked
+                                log_throttled(
+                                    LOGGER,
+                                    f"tick_callback_{symbol}",
+                                    f"✅ CALLBACK INVOKED: {symbol} | LTP={tick.get('last_price')}",
+                                    interval_sec=60.0,
+                                    level=10  # DEBUG
+                                )
+                            except Exception as callback_err:
+                                # ❌ CRITICAL: Log the actual error instead of suppressing!
+                                LOGGER.error(
+                                    f"❌ TICK CALLBACK FAILED for {symbol}: {callback_err}",
+                                    exc_info=True
+                                )
 
                 # --------------------------------------------------
                 # 🟢 UPDATE HEALTH METRICS
