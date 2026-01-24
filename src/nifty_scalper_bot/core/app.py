@@ -2744,6 +2744,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if not tick or not isinstance(tick, dict):
             return
 
+        # ✅ DIAGNOSTIC: Log entry into callback (throttled)
+        log_throttled(
+            LOGGER,
+            "poll_tick_callback_entry",
+            f"🔔 _on_poll_tick CALLED | tick_keys={list(tick.keys())[:5]}",
+            interval_sec=30.0
+        )
+
         # 1. Normalize Tick
         t = dict(tick) if isinstance(tick, dict) else {"raw": tick}
         t.setdefault("source", "polling")
@@ -2810,17 +2818,20 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             except Exception as e:
                 LOGGER.debug(f"Symbol mapping error for token {token_value}: {e}")
                 
+                # Fallback recovery attempt
                 if not mapped and instrument_resolver:
-                    inst = instrument_resolver.get_instrument_by_token(int(token_value))
-                    if inst:
-                        exchange = getattr(inst, 'exchange', 'NFO')
-                        tradingsymbol = getattr(inst, 'tradingsymbol', None)
-                        if tradingsymbol:
-                            mapped = f"{exchange}:{tradingsymbol}"
+                    try:
+                        inst = instrument_resolver.get_instrument_by_token(int(token_value))
+                        if inst:
+                            exchange = getattr(inst, 'exchange', 'NFO')
+                            tradingsymbol = getattr(inst, 'tradingsymbol', None)
+                            if tradingsymbol:
+                                mapped = f"{exchange}:{tradingsymbol}"
+                    except Exception as fallback_err:
+                        LOGGER.debug(f"Fallback resolution failed: {fallback_err}")
                 
                 if mapped:
                     t["symbol"] = mapped
-                    # ✅ DIAGNOSTIC: Log successful mapping
                     log_throttled(
                         LOGGER,
                         f"symbol_mapped_{token_value}",
@@ -2828,15 +2839,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         interval_sec=120.0
                     )
                 else:
-                    # ✅ DIAGNOSTIC: Log failed mapping
                     log_throttled(
                         LOGGER,
                         f"symbol_unmapped_{token_value}",
                         f"⚠️ UNMAPPED TOKEN: {token_value}",
                         interval_sec=60.0
                     )
-            except Exception as e:
-                LOGGER.debug(f"Symbol mapping error: {e}")
 
         # ✅ DIAGNOSTIC: Log tick reception at INFO level
         sym = t.get("symbol")
@@ -2873,6 +2881,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         
         if strategy_runner_ref and sym:
             runner = strategy_runner_ref.get("instance")
+
+            # ✅ DIAGNOSTIC: Log runner state
+            log_throttled(
+                LOGGER,
+                f"runner_check_{sym}",
+                f"🔍 RUNNER CHECK: sym={sym} | runner_exists={runner is not None}",
+                interval_sec=60.0
+            )
+            
             if runner:
                 try:
                     # Prefer _on_tick_safe if available
