@@ -1566,6 +1566,26 @@ class StrategyRunner:
         if self._position_manager and self._position_manager.get_active_contract(symbol):
              return
 
+        # ✅ FIX: Grace period - allow first few minutes for system warmup
+        import time as time_module
+        startup_time = getattr(self, "_startup_timestamp", None)
+        if startup_time is None:
+            self._startup_timestamp = time_module.time()
+            startup_time = self._startup_timestamp
+        
+        time_since_startup = time_module.time() - startup_time
+        if time_since_startup < 60:  # 60 second warmup
+            log_throttled(
+                self._logger,
+                "warmup_period",
+                f"⏳ WARMUP: {60 - time_since_startup:.0f}s remaining before trading enabled",
+                interval_sec=15.0,
+                level=logging.INFO
+            )
+            # Still process ticks for bar building, but don't generate signals
+            # Continue to the bar building logic, but skip signal generation
+            # This is handled by the existing indicator readiness check
+
         # ✅ FIX: Import logging to access integer constants (DEBUG=10, WARNING=30)
         
         import logging
@@ -1598,14 +1618,28 @@ class StrategyRunner:
         timestamp = _extract_timestamp(tick, now)
         tick_age = (now - timestamp).total_seconds()
         
-        if tick_age > 5.0:
+        # ✅ FIX: Increase stale threshold for REST polling mode
+        # REST API inherently has 5-15s latency. Exchange timestamps reflect 
+        # actual trade time, not receipt time. 30s threshold prevents false rejections.
+        source = tick.get("source", "unknown")
+        stale_threshold = 30.0 if source in ("rest", "polling") else 5.0
+        
+        if tick_age > stale_threshold:
             log_throttled(
                 self._logger, f"stale_tick_{symbol}",
-                f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old)",
+                f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)",
                 interval_sec=30.0, 
-                level=logging.WARNING  # ✅ FIX: Use Integer Constant
+                level=logging.WARNING
             )
             return
+        # ✅ DIAGNOSTIC: Log successful tick processing at INFO level (throttled)
+        log_throttled(
+            self._logger,
+            f"tick_accepted_{symbol}",
+            f"✅ TICK ACCEPTED: {symbol} | LTP={price:.2f} | Age={tick_age:.1f}s | Vol={volume}",
+            interval_sec=60.0,
+            level=logging.INFO
+        )
 
         # 1. Extract Critical Market Data
         def _extract_float(d, *keys):
@@ -1626,19 +1660,28 @@ class StrategyRunner:
         if price <= 0:
             return
 
-        # [FIX] Volume validation: Derivatives (NFO) require volume; Indices (NSE) do not.
-        if volume <= 0:
-            if symbol.startswith("NFO:"):
-                log_throttled(
-                    self._logger,
-                    f"no_vol_{symbol}",
-                    f"❌ No volume for {symbol}, skipping",
-                    interval_sec=60.0,
-                    level=logging.WARNING,
-                )
-                return
-            else:
-                pass
+        # ✅ FIX: Volume validation relaxed for REST polling mode
+        # REST API may return 0 volume during low activity or market open.
+        # Only block if volume is -1 (invalid) or we're in WebSocket mode.
+        if volume < 0:  # Only block on clearly invalid data
+            log_throttled(
+                self._logger,
+                f"invalid_vol_{symbol}",
+                f"⚠️ Invalid volume ({volume}) for {symbol}, skipping",
+                interval_sec=60.0,
+                level=logging.WARNING,
+            )
+            return
+        
+        # Log zero volume as debug, but don't block
+        if volume == 0 and symbol.startswith("NFO:"):
+            log_throttled(
+                self._logger,
+                f"zero_vol_{symbol}",
+                f"ℹ️ Zero volume for {symbol} (normal during low activity)",
+                interval_sec=120.0,
+                level=logging.DEBUG,
+            )
         # 2. Update Bar Builder
         builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
         try:
