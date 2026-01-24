@@ -59,7 +59,7 @@ class KiteTickerStreamer:
             LOGGER.info(f"📡 Subscribed to {len(self._tokens)} tokens")
 
     def _on_ticks(self, ws, ticks):
-        """Handle incoming ticks from WebSocket with Robust Normalization."""
+        """Handle incoming ticks from WebSocket with Normalization + Active Ingestion."""
         now = int(time.time() * 1000)
         self._last_tick_ts = time.monotonic()
 
@@ -73,35 +73,33 @@ class KiteTickerStreamer:
                 continue
 
             # ===========================================================
-            # ✅ CRITICAL FIX: NORMALIZATION LAYER (Zerodha -> Canonical)
+            # 1️⃣ DATA NORMALIZATION (Zerodha -> Bot Canonical)
             # ===========================================================
             
-            # 1. Price (LTP)
+            # Price
             if "last_price" in tick:
                 tick["ltp"] = tick["last_price"]
             
-            # 2. Volume (Refined Logic)
-            # Try 'volume_traded' first, fall back to 'last_traded_quantity', default to 0.
-            # We default to 0 because NoneType usually crashes strategy math.
+            # Volume (Try all Zerodha keys)
+            # This fixes "Vol=0" in logs
             vol = tick.get("volume_traded") or tick.get("last_traded_quantity")
             if vol is not None:
                 tick["volume"] = vol
             else:
                 tick["volume"] = 0
                 
-            # 3. VWAP (Average Traded Price)
+            # VWAP (Average Traded Price)
+            # This fixes "VWAP=0.0" in logs
             if "average_price" in tick:
                 tick["vwap"] = tick["average_price"]
             else:
                 tick["vwap"] = 0.0
                 
-            # 4. Open Interest (Dual Key Support)
-            # Keep 'oi' for strategies that use it, add 'open_interest' for canonical standard.
+            # Open Interest (Support dual keys)
             if "oi" in tick:
                 tick["open_interest"] = tick["oi"]
             
-            # 5. Best Bid/Ask (Flatten Depth)
-            # Essential for execution algorithms checking spread/liquidity.
+            # Depth Flattening
             if "depth" in tick:
                 buy_depth = tick["depth"].get("buy", [])
                 sell_depth = tick["depth"].get("sell", [])
@@ -111,19 +109,28 @@ class KiteTickerStreamer:
                 if sell_depth:
                     tick["best_ask"] = sell_depth[0].get("price", 0.0)
                     tick["best_ask_qty"] = sell_depth[0].get("quantity", 0)
-            
-            # ===========================================================
 
+            # Metadata
             tick["symbol"] = symbol
             tick["timestamp"] = now
             tick["source"] = "ws"
 
-            # Store in DataHub
+            # ===========================================================
+            # 2️⃣ INGESTION PATH FIX (The "Smoking Gun")
+            # ===========================================================
+            # WAS: self._data_hub.store_quote(symbol, tick, source="ws")
+            # FIX: Use ingest_tick_sync to trigger MessageBus, Freshness, and Strategies
+            
             if self._data_hub:
                 try:
-                    self._data_hub.store_quote(symbol, tick, source="ws")
+                    # Prefer the sync wrapper if available (handles async loop dispatch)
+                    if hasattr(self._data_hub, "ingest_tick_sync"):
+                        self._data_hub.ingest_tick_sync(tick)
+                    else:
+                        # Fallback for safety
+                        self._data_hub.store_quote(symbol, tick, source="ws")
                 except Exception as e:
-                    LOGGER.debug(f"DataHub store_quote failed: {e}")
+                    LOGGER.debug(f"DataHub ingestion failed: {e}")
 
     def _on_close(self, ws, code, reason):
         """Handle WebSocket close."""
