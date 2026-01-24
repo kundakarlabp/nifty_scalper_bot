@@ -59,7 +59,7 @@ class KiteTickerStreamer:
             LOGGER.info(f"📡 Subscribed to {len(self._tokens)} tokens")
 
     def _on_ticks(self, ws, ticks):
-        """Handle incoming ticks from WebSocket."""
+        """Handle incoming ticks from WebSocket with Robust Normalization."""
         now = int(time.time() * 1000)
         self._last_tick_ts = time.monotonic()
 
@@ -70,41 +70,38 @@ class KiteTickerStreamer:
                 
             symbol = self._resolve_token_to_symbol(token)
             if not symbol:
-                # LOGGER.warning(f"Could not resolve token {token} to symbol") # Reduce log spam
                 continue
 
-            # -----------------------------------------------------------
-            # ✅ CRITICAL FIX: DATA NORMALIZATION
-            # Map Zerodha specific keys to Bot canonical keys
-            # -----------------------------------------------------------
+            # ===========================================================
+            # ✅ CRITICAL FIX: NORMALIZATION LAYER (Zerodha -> Canonical)
+            # ===========================================================
             
             # 1. Price (LTP)
             if "last_price" in tick:
                 tick["ltp"] = tick["last_price"]
             
-            # 2. Volume
-            # Zerodha sends 'volume_traded'. Bot expects 'volume'.
-            if "volume_traded" in tick:
-                tick["volume"] = tick["volume_traded"]
-            elif "last_traded_quantity" in tick: # Fallback for some packets
-                tick["volume"] = tick["last_traded_quantity"]
+            # 2. Volume (Refined Logic)
+            # Try 'volume_traded' first, fall back to 'last_traded_quantity', default to 0.
+            # We default to 0 because NoneType usually crashes strategy math.
+            vol = tick.get("volume_traded") or tick.get("last_traded_quantity")
+            if vol is not None:
+                tick["volume"] = vol
             else:
                 tick["volume"] = 0
                 
             # 3. VWAP (Average Traded Price)
-            # Zerodha sends 'average_price'. Bot expects 'vwap'.
             if "average_price" in tick:
                 tick["vwap"] = tick["average_price"]
             else:
-                # If missing (e.g. index), default to 0.0 to prevent NoneType errors
                 tick["vwap"] = 0.0
                 
-            # 4. Open Interest
+            # 4. Open Interest (Dual Key Support)
+            # Keep 'oi' for strategies that use it, add 'open_interest' for canonical standard.
             if "oi" in tick:
                 tick["open_interest"] = tick["oi"]
-                
-            # 5. Best Bid/Ask (Depth)
-            # Flatten depth for easier access by strategies
+            
+            # 5. Best Bid/Ask (Flatten Depth)
+            # Essential for execution algorithms checking spread/liquidity.
             if "depth" in tick:
                 buy_depth = tick["depth"].get("buy", [])
                 sell_depth = tick["depth"].get("sell", [])
@@ -114,7 +111,8 @@ class KiteTickerStreamer:
                 if sell_depth:
                     tick["best_ask"] = sell_depth[0].get("price", 0.0)
                     tick["best_ask_qty"] = sell_depth[0].get("quantity", 0)
-            # -----------------------------------------------------------
+            
+            # ===========================================================
 
             tick["symbol"] = symbol
             tick["timestamp"] = now
