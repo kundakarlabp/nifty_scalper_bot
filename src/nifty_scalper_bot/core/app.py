@@ -2736,7 +2736,32 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # Explicitly mark WS disconnected in polling mode so health reflects polling
         market_data_manager.set_ws_connected(False)
 
-    # [FIX] Fan-out: every polled tick updates MDM and the supervisor heartbeat
+    # ------------------------------------------------------------------
+    # [FIX] Polling Tick Handler & Throttling Helper
+    # ------------------------------------------------------------------
+    
+    # 1. Define the throttling cache and helper locally to guarantee existence.
+    #    This fixes the "NameError: name 'log_throttled' is not defined".
+    _log_throttling_cache: dict[str, float] = {}
+
+    def log_throttled(logger: Any, key: str, msg: str, interval_sec: float = 60.0) -> None:
+        """
+        Thread-safe helper to log messages only once per interval.
+        Prevents log file flooding during high-frequency tick updates.
+        """
+        try:
+            # Use the global time_module alias defined at top of file
+            now = time_module.time()
+            last_time = _log_throttling_cache.get(key, 0.0)
+            
+            if now - last_time >= interval_sec:
+                logger.info(msg)
+                _log_throttling_cache[key] = now
+        except Exception:
+            # Failsafe: Never crash the trading bot just because logging failed
+            pass
+
+    # 2. The Corrected Tick Handler
     def _on_poll_tick(tick: dict[str, Any]) -> None:
         """
         Handle incoming poll tick with Robust Validation & Recovery.
@@ -2744,7 +2769,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if not tick or not isinstance(tick, dict):
             return
 
-        # ✅ DIAGNOSTIC: Log entry into callback (throttled)
+        # [DIAGNOSTIC] Log entry (Now Safe)
         log_throttled(
             LOGGER,
             "poll_tick_callback_entry",
@@ -2756,99 +2781,45 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         t = dict(tick) if isinstance(tick, dict) else {"raw": tick}
         t.setdefault("source", "polling")
 
-        # 2. Token Normalization & Validation
+        # 2. Token Normalization
         if "instrument_token" not in t and "token" in t:
             raw_token = t["token"]
             try:
                 t["instrument_token"] = int(float(raw_token))
             except (ValueError, TypeError):
-                # LOGGER.warning("Invalid token: %s", raw_token)
                 pass
 
-        # 3. Symbol Mapping (If token exists but symbol missing)
-        # 3. Symbol Mapping (If token exists but symbol missing)
+        # 3. Symbol Mapping
         token_value = t.get("instrument_token")
         if token_value and not t.get("symbol"):
-            try:
-                mapped = None
-                token_int = int(token_value) if token_value else None
-                
-                # Try instrument_resolver FIRST (most reliable)
-                if not mapped and instrument_resolver:
-                    try:
-                        # Method 1: format_token_as_symbol
-                        if hasattr(instrument_resolver, 'format_token_as_symbol'):
-                            mapped = instrument_resolver.format_token_as_symbol(token_int)
-                        
-                        # Method 2: get_instrument_by_token
-                        if not mapped and hasattr(instrument_resolver, 'get_instrument_by_token'):
-                            inst = instrument_resolver.get_instrument_by_token(token_int)
-                            if inst:
-                                exchange = getattr(inst, 'exchange', 'NFO')
-                                sym = getattr(inst, 'tradingsymbol', None) or getattr(inst, 'symbol', None)
-                                if sym:
-                                    mapped = f"{exchange}:{sym}"
-                        
-                        # Method 3: lookup
-                        if not mapped and hasattr(instrument_resolver, 'lookup'):
-                            info = instrument_resolver.lookup(token_int)
-                            if info:
-                                exchange = info.get('exchange', 'NFO')
-                                sym = info.get('tradingsymbol') or info.get('symbol')
-                                if sym:
-                                    mapped = f"{exchange}:{sym}"
-                    except Exception as e:
-                        LOGGER.debug(f"Resolver lookup failed for {token_int}: {e}")
-                
-                # Fallback to market_data_manager
-                if not mapped and market_data_manager:
-                    mapped = market_data_manager._symbol_by_token.get(token_int)
-                
-                if mapped:
-                    t["symbol"] = mapped
-                    LOGGER.debug(f"✅ Symbol resolved: {token_int} -> {mapped}")
-                else:
-                    # Log unmapped token (throttled)
-                    log_throttled(
-                        LOGGER,
-                        f"unmapped_token_{token_value}",
-                        f"⚠️ UNMAPPED TOKEN: {token_value} - all resolution methods failed",
-                        interval_sec=60.0
-                    )
-            except Exception as e:
-                LOGGER.debug(f"Symbol mapping error for token {token_value}: {e}")
-                
-                # Fallback recovery attempt
-                if not mapped and instrument_resolver:
-                    try:
-                        inst = instrument_resolver.get_instrument_by_token(int(token_value))
-                        if inst:
-                            exchange = getattr(inst, 'exchange', 'NFO')
-                            tradingsymbol = getattr(inst, 'tradingsymbol', None)
-                            if tradingsymbol:
-                                mapped = f"{exchange}:{tradingsymbol}"
-                    except Exception as fallback_err:
-                        LOGGER.debug(f"Fallback resolution failed: {fallback_err}")
-                
-                if mapped:
-                    t["symbol"] = mapped
-                    log_throttled(
-                        LOGGER,
-                        f"symbol_mapped_{token_value}",
-                        f"✅ Mapped token {token_value} -> {mapped}",
-                        interval_sec=120.0
-                    )
-                else:
-                    log_throttled(
-                        LOGGER,
-                        f"symbol_unmapped_{token_value}",
-                        f"⚠️ UNMAPPED TOKEN: {token_value}",
-                        interval_sec=60.0
-                    )
+            mapped = None
+            token_int = int(token_value)
+            
+            # Try Resolver
+            if instrument_resolver:
+                try:
+                    # Try efficient cache lookup first
+                    mapped = getattr(instrument_resolver, "_symbol_by_token", {}).get(token_int)
+                    if not mapped:
+                        mapped = instrument_resolver.format_token_as_symbol(token_int)
+                except Exception:
+                    pass
+            
+            # Try MDM
+            if not mapped and market_data_manager:
+                mapped = market_data_manager._symbol_by_token.get(token_int)
 
-        # ✅ DIAGNOSTIC: Log tick reception at INFO level
+            if mapped:
+                t["symbol"] = mapped
+                log_throttled(LOGGER, f"map_success_{token_value}", f"✅ Mapped {token_value} -> {mapped}", 300.0)
+            else:
+                log_throttled(LOGGER, f"map_fail_{token_value}", f"⚠️ UNMAPPED TOKEN: {token_value}", 60.0)
+
+        # 4. Extract Critical Data
         sym = t.get("symbol")
         ltp = t.get("ltp") or t.get("last_price")
+        
+        # [DIAGNOSTIC] Log Tick Details (Now Safe)
         if sym:
             log_throttled(
                 LOGGER,
@@ -2857,109 +2828,60 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 interval_sec=30.0
             )
 
-        # 4. LTP Normalization
-        if "ltp" not in t:
-            t["ltp"] = t.get("last_price") or t.get("close")
-
         # 5. Inject Timestamp
         if "timestamp" not in t:
             t["timestamp"] = datetime.now(timezone.utc).timestamp()
 
-        # 6. CRITICAL: Direct Strategy Feed (Bypass DataHub if needed)
-        # 6. CRITICAL: Direct Strategy Feed
-        sym = t.get("symbol")
-        ltp = t.get("ltp") or t.get("last_price")
-        
-        # Diagnostic log (throttled every 30s per symbol)
-        if sym and ltp:
-            log_throttled(
-                LOGGER,
-                f"poll_tick_{sym}",
-                f"📡 POLL TICK: {sym} | LTP: {ltp}",
-                interval_sec=30.0
-            )
-        
+        # 6. Direct Strategy Feed
         if strategy_runner_ref and sym:
             runner = strategy_runner_ref.get("instance")
-
-            # ✅ DIAGNOSTIC: Log runner state
-            log_throttled(
-                LOGGER,
-                f"runner_check_{sym}",
-                f"🔍 RUNNER CHECK: sym={sym} | runner_exists={runner is not None}",
-                interval_sec=60.0
-            )
-            
             if runner:
                 try:
-                    # Prefer _on_tick_safe if available
                     if hasattr(runner, "_on_tick_safe") and callable(runner._on_tick_safe):
                         runner._on_tick_safe(t)
                     elif hasattr(runner, "_on_tick") and callable(runner._on_tick):
                         runner._on_tick(sym, t)
-                    
-                    # Diagnostic log (throttled every 60s per symbol)
-                    log_throttled(
-                        LOGGER,
-                        f"tick_to_strategy_{sym}",
-                        f"✅ TICK -> StrategyRunner: {sym}",
-                        interval_sec=60.0
-                    )
                 except Exception as e:
-                    LOGGER.error(f"❌ Strategy handler error for {sym}: {e}", exc_info=True)
-        elif not sym:
-            log_throttled(
-                LOGGER,
-                f"no_symbol_skip_{token_value}",
-                f"⚠️ SKIPPING tick (no symbol): token={token_value}",
-                interval_sec=60.0
-            )
+                    log_throttled(LOGGER, f"strat_error_{sym}", f"❌ Strategy Error {sym}: {e}", 5.0)
 
-        # 7. DataHub Ingestion (Async)
+        # 7. DataHub Ingestion
         if data_hub is not None:
             try:
-                # Fire and forget ingest
                 loop = asyncio.get_running_loop()
                 loop.create_task(data_hub.ingest_tick(t))
             except (RuntimeError, Exception):
                 pass 
-                
-        # ✅ 8. CRITICAL: Feed BracketManager (Virtual Execution)
-        _bm_ref = getattr(ctx.order_manager, "_bracket_manager", None) if ctx.order_manager else None
+
+        # 8. Feed BracketManager (Virtual Execution)
+        # ✅ FIX: Use Global Accessor to prevent "free variable 'ctx' referenced before assignment"
+        _safe_ctx = get_latest_bot_context()
+        _bm_ref = None
         
-        if _bm_ref is not None:
-            _sym = t.get("symbol")
-            _ltp = t.get("ltp") or t.get("last_price")
-            
-            if _sym and _ltp:
-                try:
-                    # Fire the "Sniper" Logic
-                    # This now triggers the AdaptiveTrailingController internally
-                    _bm_ref.on_tick(str(_sym), float(_ltp))
-                except Exception:
-                    pass
-                    
-        # 9. Market Data Manager Processing (With Recovery)
+        if _safe_ctx and _safe_ctx.order_manager:
+            _bm_ref = getattr(_safe_ctx.order_manager, "_bracket_manager", None)
+        
+        if _bm_ref is not None and sym and ltp:
+            try:
+                _bm_ref.on_tick(str(sym), float(ltp))
+            except Exception:
+                pass
+
+        # 9. Market Data Manager Processing
         try:
-            # HEARTBEAT FIX: Update timestamp so watchdog is happy
             if hasattr(market_data_manager, "last_tick_time"):
                 market_data_manager.last_tick_time = time_module.time()
 
             market_data_manager._handle_tick(t)
             
-            # CIRCUIT BREAKER RESET
             if hasattr(streamer, '_consecutive_errors'):
                 streamer._consecutive_errors = 0
 
         except Exception as exc:
-            # Track errors for circuit breaker
             if not hasattr(streamer, '_consecutive_errors'):
                 streamer._consecutive_errors = 0
             streamer._consecutive_errors += 1
-            
-            # If > 10 failures, log error
             if streamer._consecutive_errors > 10:
-                 LOGGER.error(f"MDM Tick Failed (x{streamer._consecutive_errors}): {exc}")
+                log_throttled(LOGGER, "mdm_fail", f"MDM Tick Failed: {exc}", 10.0)
         
         finally:
             if stream_supervisor is not None:
