@@ -2897,8 +2897,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 f"⚠️ SKIPPING tick (no symbol): token={token_value}",
                 interval_sec=60.0
             )
-            except Exception:
-                pass # Don't let strategy errors kill the poller
 
         # 7. DataHub Ingestion (Async)
         if data_hub is not None:
