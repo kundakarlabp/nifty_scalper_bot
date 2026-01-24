@@ -7,6 +7,8 @@ import os
 import threading
 import asyncio
 import time
+import time as time_module
+import logging
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -1585,11 +1587,7 @@ class StrategyRunner:
             # Still process ticks for bar building, but don't generate signals
             # Continue to the bar building logic, but skip signal generation
             # This is handled by the existing indicator readiness check
-
-        # ✅ FIX: Import logging to access integer constants (DEBUG=10, WARNING=30)
-        
-        import logging
-
+       
         # DEBUG: Confirm tick received (Throttled to 60s)
         log_throttled(
             self._logger,
