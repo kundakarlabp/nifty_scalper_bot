@@ -68,11 +68,53 @@ class KiteTickerStreamer:
             if not token:
                 continue
                 
-            # ✅ FIX: Use proper token resolution method
             symbol = self._resolve_token_to_symbol(token)
             if not symbol:
-                LOGGER.warning(f"Could not resolve token {token} to symbol")
+                # LOGGER.warning(f"Could not resolve token {token} to symbol") # Reduce log spam
                 continue
+
+            # -----------------------------------------------------------
+            # ✅ CRITICAL FIX: DATA NORMALIZATION
+            # Map Zerodha specific keys to Bot canonical keys
+            # -----------------------------------------------------------
+            
+            # 1. Price (LTP)
+            if "last_price" in tick:
+                tick["ltp"] = tick["last_price"]
+            
+            # 2. Volume
+            # Zerodha sends 'volume_traded'. Bot expects 'volume'.
+            if "volume_traded" in tick:
+                tick["volume"] = tick["volume_traded"]
+            elif "last_traded_quantity" in tick: # Fallback for some packets
+                tick["volume"] = tick["last_traded_quantity"]
+            else:
+                tick["volume"] = 0
+                
+            # 3. VWAP (Average Traded Price)
+            # Zerodha sends 'average_price'. Bot expects 'vwap'.
+            if "average_price" in tick:
+                tick["vwap"] = tick["average_price"]
+            else:
+                # If missing (e.g. index), default to 0.0 to prevent NoneType errors
+                tick["vwap"] = 0.0
+                
+            # 4. Open Interest
+            if "oi" in tick:
+                tick["open_interest"] = tick["oi"]
+                
+            # 5. Best Bid/Ask (Depth)
+            # Flatten depth for easier access by strategies
+            if "depth" in tick:
+                buy_depth = tick["depth"].get("buy", [])
+                sell_depth = tick["depth"].get("sell", [])
+                if buy_depth:
+                    tick["best_bid"] = buy_depth[0].get("price", 0.0)
+                    tick["best_bid_qty"] = buy_depth[0].get("quantity", 0)
+                if sell_depth:
+                    tick["best_ask"] = sell_depth[0].get("price", 0.0)
+                    tick["best_ask_qty"] = sell_depth[0].get("quantity", 0)
+            # -----------------------------------------------------------
 
             tick["symbol"] = symbol
             tick["timestamp"] = now
