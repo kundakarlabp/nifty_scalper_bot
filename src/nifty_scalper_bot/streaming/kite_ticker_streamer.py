@@ -146,59 +146,55 @@ class KiteTickerStreamer:
 
     def _resolve_token_to_symbol(self, token: int) -> str | None:
         """
-        Resolve instrument token to exchange:symbol format.
-        
-        Args:
-            token: Instrument token (integer)
-            
-        Returns:
-            Symbol string like 'NSE:NIFTY 50' or 'NFO:NIFTY26JAN25200CE', or None
+        Resolve instrument token to strict EXCHANGE:SYMBOL format.
+        Ensures strategies can match subscriptions to incoming ticks.
         """
         try:
-            # 1. Try resolver if available (preferred)
-            if self._resolver is not None:
-                # Method 1: format_token_as_symbol
-                if hasattr(self._resolver, "format_token_as_symbol"):
-                    result = self._resolver.format_token_as_symbol(token)
-                    if result and result != str(token):
-                        return result
-                
-                # Method 2: lookup
-                if hasattr(self._resolver, "lookup"):
-                    info = self._resolver.lookup(token)
-                    if info:
-                        exchange = info.get("exchange", "NFO")
-                        sym = info.get("symbol") or info.get("tradingsymbol")
-                        if sym:
-                            return f"{exchange}:{sym}"
-            
-            # 2. Try broker's resolver if available
-            if hasattr(self._broker, "_resolver") and self._broker._resolver:
-                resolver = self._broker._resolver
-                if hasattr(resolver, "format_token_as_symbol"):
-                    result = resolver.format_token_as_symbol(token)
-                    if result and result != str(token):
-                        return result
-            
-            # 3. Try broker's format_token_as_symbol directly
-            if hasattr(self._broker, "format_token_as_symbol"):
-                result = self._broker.format_token_as_symbol(token)
-                if result and result != str(token):
-                    return result
-            
-            # 4. Canonical tokens fallback
+            # 1. Fast Path: Known Canonical Tokens (Indices)
+            # Checking this first is an optimization to avoid overhead for common symbols.
             CANONICAL_TOKENS = {
                 256265: "NSE:NIFTY 50",
                 260105: "NSE:NIFTY BANK",
             }
             if token in CANONICAL_TOKENS:
                 return CANONICAL_TOKENS[token]
+
+            # 2. Try Resolver Lookup (Preferred - Source of Truth)
+            # This is safer because it retrieves the specific 'exchange' field from metadata.
+            if self._resolver and hasattr(self._resolver, "lookup"):
+                info = self._resolver.lookup(token)
+                if info:
+                    exchange = info.get("exchange", "NFO")
+                    sym = info.get("tradingsymbol") or info.get("symbol")
+                    if sym:
+                        return f"{exchange}:{sym}"
+
+            # 3. Fallback: Format String (Resolver or Broker)
+            # If lookup fails, try to get the string representation.
+            raw_sym = None
+            
+            # Try resolver first
+            if self._resolver and hasattr(self._resolver, "format_token_as_symbol"):
+                raw_sym = self._resolver.format_token_as_symbol(token)
+            
+            # Try broker second
+            if (not raw_sym or raw_sym == str(token)) and hasattr(self._broker, "format_token_as_symbol"):
+                raw_sym = self._broker.format_token_as_symbol(token)
+
+            # 4. Normalization Fix (Critical)
+            # If we got a valid symbol string, ensure it has an exchange prefix.
+            if raw_sym and raw_sym != str(token):
+                if ":" in raw_sym:
+                    return raw_sym
                 
+                # If exchange is missing, force NFO (since NSE indices are caught in Step 1)
+                return f"NFO:{raw_sym}"
+
         except Exception as e:
             LOGGER.debug(f"Token resolution failed for {token}: {e}")
         
         return None
-
+        
     def subscribe(self, tokens: list[int]) -> None:
         """Subscribe to additional tokens."""
         new_tokens = [t for t in tokens if t not in self._tokens]
