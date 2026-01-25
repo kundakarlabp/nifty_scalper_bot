@@ -331,7 +331,24 @@ class PollingStreamer:
     # ----------------------------------------------------------------
     def _fetch_ticks(self, batch: list[int]) -> list[dict[str, Any]]:
         """
-        Fetch quotes using Instrument Tokens DIRECTLY.
+        Fetch quotes using exchange:tradingsymbol format for FULL quote data.
+        
+        ✅ CRITICAL FIX: Zerodha returns VWAP/Volume ONLY when symbols are 
+        passed as "exchange:tradingsymbol" format, NOT integer tokens!
+        
+        When you pass integer tokens like [15018242, 15017730], Zerodha returns:
+        - ✅ last_price
+        - ✅ instrument_token  
+        - ❌ average_price = 0 (MISSING!)
+        - ❌ volume = 0 (MISSING!)
+        
+        When you pass symbols like ["NFO:NIFTY26JAN25000CE"], Zerodha returns:
+        - ✅ last_price
+        - ✅ instrument_token
+        - ✅ average_price (VWAP!)
+        - ✅ volume
+        - ✅ oi
+        - ✅ depth
         """
         try:
             # Clean Batch: Ensure all items are integers
@@ -345,62 +362,164 @@ class PollingStreamer:
             if not tokens:
                 return []
             
-            # Diagnostic Log
+            # ✅ CRITICAL FIX: Convert tokens to "exchange:tradingsymbol" format
+            # Zerodha returns average_price (VWAP) ONLY for this format!
+            symbols_for_api = []
+            token_to_symbol_map = {}
+            symbol_to_token_map = {}
+            
+            for token in tokens:
+                symbol = self._resolve_instrument(token)
+                if symbol:
+                    # Ensure proper exchange prefix
+                    if ":" not in symbol:
+                        # Determine exchange based on symbol content
+                        if any(x in symbol.upper() for x in ["CE", "PE", "FUT"]):
+                            symbol = f"NFO:{symbol}"
+                        else:
+                            symbol = f"NSE:{symbol}"
+                    
+                    symbols_for_api.append(symbol)
+                    token_to_symbol_map[token] = symbol
+                    symbol_to_token_map[symbol] = token
+                    # Also map without exchange for reverse lookup
+                    base_symbol = symbol.split(":", 1)[-1] if ":" in symbol else symbol
+                    symbol_to_token_map[base_symbol] = token
+                else:
+                    log_throttled(
+                        LOGGER,
+                        f"resolve_fail_{token}",
+                        f"⚠️ Cannot resolve token {token} to symbol",
+                        interval_sec=120.0
+                    )
+            
+            if not symbols_for_api:
+                LOGGER.warning("[POLL] No symbols resolved from tokens - check instrument resolver")
+                return []
+            
+            # Diagnostic Log - show what we're sending to API
             log_throttled(
                 LOGGER,
-                "quote_token_fetch",
-                f"📡 Fetching {len(tokens)} tokens: {tokens[:3]}...",
+                "quote_symbol_fetch",
+                f"📡 Fetching {len(symbols_for_api)} symbols (NOT tokens): {symbols_for_api[:3]}...",
                 interval_sec=60.0
             )
             
-            # DIRECT API CALL: Pass list of Integers
-            quote_map = self._broker.quote(tokens)
+            # ✅ API CALL: Pass symbols as "exchange:tradingsymbol" strings
+            # This is the KEY FIX - passing symbols instead of integer tokens
+            quote_map = self._broker.quote(symbols_for_api)
             
             if not quote_map:
-                LOGGER.warning(f"[POLL] Empty quote_map returned for tokens: {tokens[:3]}...")
+                LOGGER.warning(f"[POLL] Empty quote_map returned for symbols: {symbols_for_api[:3]}...")
                 return []
+            
+            # ✅ DIAGNOSTIC: Check if we got VWAP data
+            sample_quote = next(iter(quote_map.values()), {})
+            has_vwap = sample_quote.get("average_price", 0) and float(sample_quote.get("average_price", 0)) > 0
+            has_volume = sample_quote.get("volume", 0) and int(sample_quote.get("volume", 0)) > 0
+            
+            log_throttled(
+                LOGGER,
+                "quote_quality_check",
+                f"📊 QUOTE QUALITY: VWAP={'✅' if has_vwap else '❌'} | Volume={'✅' if has_volume else '❌'} | Keys={list(sample_quote.keys())[:8]}",
+                interval_sec=60.0
+            )
 
             ticks = []
             for key, quote in quote_map.items():
                 try:
                     lp = float(quote.get("last_price") or 0.0)
-                    if lp <= 0: continue
+                    if lp <= 0: 
+                        continue
                     
+                    # Get token from our map or from quote
                     token = quote.get("instrument_token")
                     if not token:
-                        if str(key).isdigit(): token = int(key)
-                        else: continue
-                            
-                    token_int = int(token)
-                    symbol = self._resolve_instrument(token_int)
+                        # Try to find token from our reverse map
+                        token = symbol_to_token_map.get(key)
+                        if not token:
+                            # Try base symbol without exchange
+                            base_key = key.split(":", 1)[-1] if ":" in str(key) else key
+                            token = symbol_to_token_map.get(base_key)
                     
-                    if not symbol: continue
+                    if not token:
+                        LOGGER.debug(f"[POLL] Cannot determine token for key: {key}")
+                        continue
+                        
+                    token_int = int(token)
+                    
+                    # ✅ CRITICAL: Extract VWAP (average_price) and Volume
+                    avg_price = quote.get("average_price")
+                    volume = quote.get("volume")
+                    oi = quote.get("oi")
+                    
+                    # Convert to proper types with safe defaults
+                    avg_price_float = float(avg_price) if avg_price is not None else 0.0
+                    volume_int = int(volume) if volume is not None else 0
+                    oi_int = int(oi) if oi is not None else 0
+                    
+                    # ✅ DIAGNOSTIC: Log if VWAP is missing (but don't spam)
+                    if avg_price_float == 0:
+                        log_throttled(
+                            LOGGER,
+                            f"vwap_zero_{key}",
+                            f"⚠️ VWAP=0 for {key} | This prevents VWAP strategy from triggering",
+                            interval_sec=300.0  # Only log every 5 minutes
+                        )
 
+                    # Handle timestamp
                     q_ts = quote.get("timestamp")
                     if q_ts and hasattr(q_ts, "timestamp"):
                         ts = int(q_ts.timestamp() * 1000)
+                    elif q_ts and isinstance(q_ts, (int, float)):
+                        ts = int(q_ts * 1000) if q_ts < 10000000000 else int(q_ts)
                     else:
                         ts = int(time.time() * 1000)
 
+                    # Build tick with ALL available data
                     tick = {
                         "instrument_token": token_int,
                         "last_price": lp,
                         "timestamp": ts,
-                        "volume": quote.get("volume", 0),
-                        "average_price": quote.get("average_price", 0.0),
-                        "oi": quote.get("oi", 0),
+                        "volume": volume_int,
+                        "average_price": avg_price_float,  # ✅ VWAP
+                        "oi": oi_int,
                         "depth": quote.get("depth"),
-                        "symbol": symbol 
+                        "symbol": key if ":" in str(key) else self._resolve_instrument(token_int),
+                        "source": "rest"
                     }
+                    
+                    # ✅ LOG SUCCESS when we have VWAP (throttled)
+                    if avg_price_float > 0:
+                        log_throttled(
+                            LOGGER,
+                            f"full_quote_{key}",
+                            f"✅ FULL QUOTE: {key} | LTP={lp:.2f} | VWAP={avg_price_float:.2f} | Vol={volume_int}",
+                            interval_sec=120.0
+                        )
+                    
                     ticks.append(tick)
+                    
                 except Exception as e:
+                    LOGGER.debug(f"[POLL] Error processing quote {key}: {e}")
                     continue
+            
+            # ✅ Summary log
+            if ticks:
+                vwap_count = sum(1 for t in ticks if t.get("average_price", 0) > 0)
+                log_throttled(
+                    LOGGER,
+                    "fetch_summary",
+                    f"📈 FETCH COMPLETE: {len(ticks)} ticks | {vwap_count} with VWAP",
+                    interval_sec=60.0
+                )
             
             return ticks
             
         except Exception as e:
-            LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}")
+            LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}", exc_info=True)
             return []
+            
     # ----------------------------------------------------------------
     # ✅ HELPERS (Inlined to ensure stability)
     # ----------------------------------------------------------------
