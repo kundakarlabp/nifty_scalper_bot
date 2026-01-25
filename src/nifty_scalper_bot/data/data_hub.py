@@ -188,26 +188,30 @@ class DataHub:
         seed: bool = False,
     ) -> None:
         """
-        Store a new quote with explicit source tagging.
-        Entry point for REST Polling / Scout to inject 'source=rest'.
+        Universal entry point. 
+        Redirects legacy/polling calls to the ACTIVE ingestion pipeline.
         """
-        # [FIX] Enforce source tagging
-        quote_data["source"] = source
-        quote_data["seed"] = bool(seed)
-
-        if "timestamp" not in quote_data:
-            quote_data["timestamp"] = time.time()       
-
+        # 1. Defensive Copy & Normalization
+        # Prevents reference bugs if the caller reuses the dict
+        payload = dict(quote_data)
         
-        # Update Cache directly (Synchronous)
-        with self._lock:
-            self._quotes[symbol] = quote_data
+        # 2. Enforce Metadata
+        payload["source"] = source
+        payload["seed"] = bool(seed)
+        
+        # Ensure symbol presence
+        if "symbol" not in payload:
+            payload["symbol"] = symbol
             
-            # Cross-reference token mapping if present (similar to ingest_tick)
-            token = quote_data.get("instrument_token") or quote_data.get("token")
-            if token is not None and str(token) == "256265":
-                self._quotes["NSE:NIFTY 50"] = quote_data
-                self._quotes["NIFTY 50"] = quote_data
+        # Ensure timestamp (critical for freshness checks)
+        if "timestamp" not in payload:
+            import time
+            payload["timestamp"] = int(time.time() * 1000)
+
+        # 3. 🔥 CRITICAL REDIRECT 🔥
+        # Send to the async pipeline to trigger MessageBus, Strategies, and Greeks.
+        # This makes Polling/Rest/Scout sources "Alive".
+        self.ingest_tick_sync(payload)
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
         """Atomically replace the entire position snapshot."""
