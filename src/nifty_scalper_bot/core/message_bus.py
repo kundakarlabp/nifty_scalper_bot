@@ -49,12 +49,20 @@ class MessageBus:
         LOGGER.info("MessageBus initialized with max_queue_size=%s", max_queue_size)
 
     async def publish(self, message: Message) -> None:
-        """Publish message to appropriate queue."""
+        """Publish message to appropriate queue with Lifecycle Safety."""
+        # 🛡️ SAFETY GUARD
+        if not self._running:
+            LOGGER.error(
+                f"🚨 CRITICAL: MessageBus published '{message.type.value}' BEFORE start()! Message DROPPED.",
+                extra={"event": "bus_not_running", "type": message.type.value}
+            )
+            return
+
         try:
             await self.queues[message.type].put(message)
         except asyncio.QueueFull:
             LOGGER.error(
-                f"Queue full for {message.type.value} - dropping message. Consider increasing capacity.",
+                f"Queue full for {message.type.value} - dropping message.",
                 extra={"event": "message_drop", "type": message.type.value}
             )
         except KeyError:
