@@ -2133,6 +2133,65 @@ class StrategyRunner:
 
         return order_id
 
+    def _resolve_contract_safely(
+        self, 
+        base_symbol: str, 
+        action: str, 
+        price: float,
+        option_type: str | None
+    ) -> SelectedContract | None:
+        """
+        CRITICAL FIX: Safely resolves option contracts with Null Guards.
+        Prevents crash if DataHub failed to initialize or Option Chain is empty.
+        """
+        # 1. GUARD: Check if Strike Selector component exists
+        if self._strike_selector is None:
+            log_throttled(
+                self._logger,
+                "strike_selector_none",
+                f"🛑 CRITICAL: Strike Selector is None! DataHub likely failed. Cannot trade {base_symbol}.",
+                interval_sec=60.0,
+                level=logging.CRITICAL
+            )
+            return None
+
+        # 2. GUARD: Check if we have actual chain data (Prevents selecting from empty chain)
+        # We rely on DataHub to tell us if the chain is alive.
+        if self._data_hub:
+             if hasattr(self._data_hub, "has_chain_data") and not self._data_hub.has_chain_data(base_symbol):
+                 log_throttled(
+                    self._logger,
+                    f"missing_chain_{base_symbol}",
+                    f"🛑 MISSING CHAIN DATA: Cannot select strike for {base_symbol}. DataHub returned no chain.",
+                    interval_sec=30.0,
+                    level=logging.ERROR
+                )
+                 return None
+
+        try:
+            # 3. EXECUTE: Safe selection
+            # Map action to selector side
+            selector_side = "BUY" if action == "BUY" else "SELL"
+            safe_opt_type = cast(Literal['CE', 'PE'], option_type) if option_type in ('CE', 'PE') else None
+            
+            selection = self._strike_selector.select_contract(
+                underlying=base_symbol, 
+                side=selector_side,
+                underlying_price=price, 
+                option_type=safe_opt_type,
+            )
+            
+            if not selection:
+                self._logger.warning(f"⚠️ Strike Selector returned None for {base_symbol} {action} @ {price}")
+                return None
+                
+            return selection
+
+        except Exception as e:
+            self._logger.error(f"💥 EXCEPTION in strike selection for {base_symbol}: {e}", exc_info=True)
+            return None
+            
+
     def _handle_entry_signal(
         self,
         signal: Signal,
@@ -2267,20 +2326,19 @@ class StrategyRunner:
                 trade_symbol = base_symbol
 
             # Selector Call
-            if selector and not selection:
-                safe_opt_type = cast(Literal['CE', 'PE'], option_type) if option_type in ('CE', 'PE') else None
-                selector_side = "BUY" if direction == "BULLISH" else "SELL"
-                try:
-                    selection = selector.select_contract(
-                        underlying=base_symbol, side=selector_side,
-                        underlying_price=trade_price, option_type=safe_opt_type,
-                    )
-                except Exception as e:
-                    self._logger.error(f"❌ Strike Selection Failed: {e}")
-                    selection = None
-
+            # Selector Call
+            if not selection:
+                # ✅ FIX: Use Safe Resolver with Null Guards
+                selection = self._resolve_contract_safely(
+                    base_symbol=base_symbol,
+                    action=action,
+                    price=trade_price,
+                    option_type=option_type
+                )
+                
                 if selection:
                     trade_symbol = selection.symbol
+                    # Use selection LTP if available, otherwise fallback to index price
                     trade_price = selection.ltp or trade_price
 
             if not selection:
