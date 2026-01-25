@@ -5252,6 +5252,12 @@ async def startup_sequence(ctx: BotContext) -> None:
     # ---------------------------------------------------------
     if broker_ready:
         try:
+            # 🚨 CRITICAL FIX: Start MessageBus Dispatchers FIRST 🚨
+            # Without this, ingested ticks sit in the queue forever.
+            if ctx.message_bus:
+                LOGGER.info("🚀 Starting MessageBus Dispatchers...")
+                ctx.message_bus.start()
+
             if ctx.order_manager:
                 ctx.order_manager.start_monitoring()
             if ctx.strategy_runner:
