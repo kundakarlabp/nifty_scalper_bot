@@ -889,12 +889,14 @@ class BracketManager:
         return Path("data/virtual_brackets.json")
 
     def save_state(self) -> None:
-        """Persist active brackets to disk."""
+        """Persist active brackets to disk ATOMICALLY."""
+        import uuid  # Add import if missing
+        
         data = {}
         with self._lock:
             for eid, b in self._brackets.items():
                 data[eid] = {
-                    "entry_order_id": eid,                       # ← ADD THIS
+                    "entry_order_id": eid,
                     "symbol": b.symbol,
                     "quantity": b.quantity,
                     "remaining_quantity": b.remaining_quantity,
@@ -903,14 +905,14 @@ class BracketManager:
                     "sl_trigger_price": b.sl_trigger_price,
                     "tp_trigger_price": b.tp_trigger_price,
                     "trailing_enabled": b.trailing_enabled,
-                    "trailing_config": b.trailing_config,        # ← ADD THIS
+                    "trailing_config": b.trailing_config,
                     "active": b.active,
                     "created_at": b.created_at,
-                    "updated_at": b.updated_at,                  # ← ADD THIS
+                    "updated_at": b.updated_at,
                     "highest_ltp": b.highest_ltp,
                     "lowest_ltp": b.lowest_ltp,
-                    "last_ltp": b.last_ltp,                      # ← ADD THIS
-                    "tp_levels": [                               # ← ADD THIS
+                    "last_ltp": b.last_ltp,
+                    "tp_levels": [
                         {
                             "price": tl.price,
                             "quantity": tl.quantity,
@@ -918,14 +920,24 @@ class BracketManager:
                             "name": tl.name
                         } for tl in b.tp_levels
                     ],
-                    "tag": b.tag                                 # ← ADD THIS
+                    "tag": b.tag
                 }
         
         try:
             path = self._get_storage_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w") as f:
+            
+            # ✅ FIX: Write to temp file first, then atomic replace
+            tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
+            
+            with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())  # Force write to physical disk
+            
+            # Atomic swap (Crash-safe)
+            os.replace(tmp_path, path)
+            
         except Exception as e:
             LOGGER.error(f"Failed to save bracket state: {e}")
 
