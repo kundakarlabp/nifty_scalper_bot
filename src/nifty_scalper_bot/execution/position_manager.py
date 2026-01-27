@@ -123,7 +123,7 @@ def _now() -> datetime:
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    """Persist *payload* to *path* atomically with unique temp files (Thread-Safe).
+    """Persist *payload* to *path* atomically with Enum handling (Thread-Safe).
 
     Args:
         path: Destination filesystem path for the JSON document.
@@ -134,25 +134,66 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
     Raises:
         None.
+        
+    ✅ PRODUCTION FIX: Added Enum, datetime, Decimal serialization support.
     """
     import json
     import os
     import uuid
     from contextlib import suppress
+    from enum import Enum
+    from datetime import datetime, date
+    from decimal import Decimal
 
-    # [FIX] Use unique temp identifier per write to prevent Thread Race Conditions.
-    # Appending UUID ensures no two threads/processes ever write to the same temp file.
-    # E.g., data.json -> data.json.tmp.3a1f8e...
+    # ✅ FIX 1: Custom JSON encoder for Enum, datetime, Decimal
+    class EnhancedJSONEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, Enum):
+                return obj.value if hasattr(obj, 'value') else obj.name
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            if isinstance(obj, Decimal):
+                return float(obj)
+            if hasattr(obj, 'to_dict'):
+                return obj.to_dict()
+            if hasattr(obj, '__dict__') and not isinstance(obj, type):
+                return obj.__dict__
+            return super().default(obj)
+
+    # ✅ FIX 2: Sanitize payload recursively before serialization
+    def _sanitize(obj):
+        """Recursively convert non-JSON-serializable types."""
+        if isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [_sanitize(item) for item in obj]
+        elif isinstance(obj, Enum):
+            return obj.value if hasattr(obj, 'value') else obj.name
+        elif isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        elif isinstance(obj, Decimal):
+            return float(obj)
+        elif hasattr(obj, 'to_dict'):
+            return _sanitize(obj.to_dict())
+        elif hasattr(obj, '__dict__') and not isinstance(obj, type):
+            return _sanitize(vars(obj))
+        return obj
+
+    # Pre-sanitize the payload
+    sanitized_payload = _sanitize(dict(payload))
+
+    # Use unique temp identifier per write to prevent Thread Race Conditions
     temp_path = path.with_suffix(f"{path.suffix}.tmp.{uuid.uuid4().hex}")
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Write to unique temp file
+        # Write to unique temp file with custom encoder + default=str fallback
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
+            json.dump(sanitized_payload, f, indent=2, sort_keys=True, 
+                      cls=EnhancedJSONEncoder, default=str)
             f.flush()
-            os.fsync(f.fileno())  # [FIX] Force flush to disk for durability
+            os.fsync(f.fileno())  # Force flush to disk for durability
 
         # Atomic Move (Overwrite destination)
         os.replace(temp_path, path)
@@ -165,6 +206,7 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         
         get_logger(__name__).error("Failure in _atomic_write_json: %s", exc)
         raise
+
 
 
 @dataclass(slots=True)
