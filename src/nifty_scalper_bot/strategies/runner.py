@@ -1806,6 +1806,7 @@ class StrategyRunner:
                 self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
 
             # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
+            # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
             if generated_signal is None and state.vwap and state.vwap > 0:
                 prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
                 curr_vwap = state.vwap
@@ -1815,58 +1816,104 @@ class StrategyRunner:
                     is_cross_up = (prev_ltp < (curr_vwap + threshold) and price > (curr_vwap + threshold))
                     is_cross_down = (prev_ltp > (curr_vwap - threshold) and price < (curr_vwap - threshold))
                     
+                    # ✅ FIX: Calculate proper stop_loss and take_profit
+                    sl_pct = float(os.getenv("VWAP_SL_PCT", "1.5"))  # 1.5% SL
+                    tp_pct = float(os.getenv("VWAP_TP_PCT", "2.0"))  # 2.0% TP (1:1.33 RR)
+                    
                     if is_cross_up:
+                        # BUY signal - SL below, TP above
+                        calculated_sl = price * (1 - sl_pct / 100)
+                        calculated_tp = price * (1 + tp_pct / 100)
+                        
                         self._logger.info(
                             f"⚡ VWAP CROSSOVER UP: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
                             extra={"event": "vwap_crossover", "symbol": symbol}
                         )
                         generated_signal = Signal(
                             action="BUY", symbol=symbol, quantity=1, confidence=0.75,
-                            reason="vwap_crossover_up", stop_loss=None, take_profit=None,
-                            metadata={"strategy": "vwap_scalp", "vwap": curr_vwap, "tag": "vwap_scalp"}
+                            reason="vwap_crossover_up", 
+                            stop_loss=calculated_sl,      # ✅ NOW HAS PROPER SL
+                            take_profit=calculated_tp,    # ✅ NOW HAS PROPER TP
+                            metadata={
+                                "strategy": "vwap_scalp", 
+                                "vwap": curr_vwap, 
+                                "tag": "vwap_scalp",
+                                "sl_pct": sl_pct,
+                                "tp_pct": tp_pct
+                            }
                         )
                     elif is_cross_down:
+                        # SELL signal - SL above, TP below
+                        calculated_sl = price * (1 + sl_pct / 100)
+                        calculated_tp = price * (1 - tp_pct / 100)
+                        
                         self._logger.info(
                             f"⚡ VWAP CROSSOVER DOWN: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
                             extra={"event": "vwap_crossover", "symbol": symbol}
                         )
                         generated_signal = Signal(
                             action="SELL", symbol=symbol, quantity=1, confidence=0.75,
-                            reason="vwap_crossover_down", stop_loss=None, take_profit=None,
-                            metadata={"strategy": "vwap_scalp", "vwap": curr_vwap, "tag": "vwap_scalp_short"}
+                            reason="vwap_crossover_down", 
+                            stop_loss=calculated_sl,      # ✅ NOW HAS PROPER SL
+                            take_profit=calculated_tp,    # ✅ NOW HAS PROPER TP
+                            metadata={
+                                "strategy": "vwap_scalp", 
+                                "vwap": curr_vwap, 
+                                "tag": "vwap_scalp_short",
+                                "sl_pct": sl_pct,
+                                "tp_pct": tp_pct
+                            }
                         )
 
             # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
-            # ✅ FIX: This block runs ONLY if VWAP is 0/None. It uses price velocity.
             if generated_signal is None and (not state.vwap or state.vwap == 0):
                 prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
                 
                 if prev_ltp and prev_ltp > 0 and price > 0:
-                    # Calculate simple percentage change between ticks
                     price_change_pct = ((price - prev_ltp) / prev_ltp) * 100
-                    
-                    # Threshold: 0.15% move in a single tick (High Momentum)
                     MOMENTUM_THRESHOLD_PCT = 0.15
                     
+                    # ✅ FIX: Calculate proper stop_loss for momentum signals too
+                    sl_pct = float(os.getenv("MOMENTUM_SL_PCT", "2.0"))
+                    tp_pct = float(os.getenv("MOMENTUM_TP_PCT", "2.5"))
+                    
                     if price_change_pct > MOMENTUM_THRESHOLD_PCT:
+                        calculated_sl = price * (1 - sl_pct / 100)
+                        calculated_tp = price * (1 + tp_pct / 100)
+                        
                         self._logger.info(
                             f"🚀 MOMENTUM FALLBACK BUY: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)",
                             extra={"event": "momentum_fallback", "symbol": symbol}
                         )
                         generated_signal = Signal(
                             action="BUY", symbol=symbol, quantity=1, confidence=0.60,
-                            reason="momentum_breakout_up", stop_loss=None, take_profit=None,
-                            metadata={"strategy": "momentum_fallback", "price_change_pct": price_change_pct, "tag": "fallback_long"}
+                            reason="momentum_breakout_up", 
+                            stop_loss=calculated_sl,      # ✅ NOW HAS PROPER SL
+                            take_profit=calculated_tp,    # ✅ NOW HAS PROPER TP
+                            metadata={
+                                "strategy": "momentum_fallback", 
+                                "price_change_pct": price_change_pct, 
+                                "tag": "fallback_long"
+                            }
                         )
                     elif price_change_pct < -MOMENTUM_THRESHOLD_PCT:
+                        calculated_sl = price * (1 + sl_pct / 100)
+                        calculated_tp = price * (1 - tp_pct / 100)
+                        
                         self._logger.info(
                             f"🔻 MOMENTUM FALLBACK SELL: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)",
                             extra={"event": "momentum_fallback", "symbol": symbol}
                         )
                         generated_signal = Signal(
                             action="SELL", symbol=symbol, quantity=1, confidence=0.60,
-                            reason="momentum_breakout_down", stop_loss=None, take_profit=None,
-                            metadata={"strategy": "momentum_fallback", "price_change_pct": price_change_pct, "tag": "fallback_short"}
+                            reason="momentum_breakout_down", 
+                            stop_loss=calculated_sl,      # ✅ NOW HAS PROPER SL
+                            take_profit=calculated_tp,    # ✅ NOW HAS PROPER TP
+                            metadata={
+                                "strategy": "momentum_fallback", 
+                                "price_change_pct": price_change_pct, 
+                                "tag": "fallback_short"
+                            }
                         )
 
             # Update last tick
