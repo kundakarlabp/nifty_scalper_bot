@@ -886,16 +886,58 @@ class BracketManager:
     # 💾 PERSISTENCE LAYER (Add to BracketManager)
     # ----------------------------------------------------------------
     def _get_storage_path(self) -> Path:
-        return Path("data/virtual_brackets.json")
+        """Get storage path with DATA_DIR support for Railway.
+        
+        ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback.
+        """
+        import os
+        
+        data_dir = os.getenv("DATA_DIR", "data")
+        path = Path(data_dir) / "virtual_brackets.json"
+        
+        # Test if we can write to this directory
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            test_file = path.parent / ".write_test"
+            test_file.write_text("test")
+            test_file.unlink()
+        except (PermissionError, OSError):
+            # ✅ FIX: Fallback to /tmp
+            path = Path("/tmp/nifty_scalper_data/virtual_brackets.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            LOGGER.warning(f"⚠️ Using /tmp fallback for brackets: {path}")
+        
+        return path
 
     def save_state(self) -> None:
-        """Persist active brackets to disk ATOMICALLY."""
-        import uuid  # Add import if missing
+        """Persist active brackets to disk ATOMICALLY with Enum handling.
+        
+        ✅ PRODUCTION FIX: Added Enum serialization and DATA_DIR support.
+        """
+        import uuid
+        import os
+        from enum import Enum
+        from datetime import datetime, date
+        from decimal import Decimal
+        
+        # ✅ FIX: Sanitize function for Enum types
+        def _sanitize(obj):
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_sanitize(item) for item in obj]
+            elif isinstance(obj, Enum):
+                return obj.value if hasattr(obj, 'value') else obj.name
+            elif isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, Decimal):
+                return float(obj)
+            return obj
         
         data = {}
         with self._lock:
             for eid, b in self._brackets.items():
-                data[eid] = {
+                data[eid] = _sanitize({
                     "entry_order_id": eid,
                     "symbol": b.symbol,
                     "quantity": b.quantity,
@@ -921,7 +963,7 @@ class BracketManager:
                         } for tl in b.tp_levels
                     ],
                     "tag": b.tag
-                }
+                })
         
         try:
             path = self._get_storage_path()
@@ -931,16 +973,16 @@ class BracketManager:
             tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
             
             with open(tmp_path, "w") as f:
-                json.dump(data, f, indent=2)
+                json.dump(data, f, indent=2, default=str)
                 f.flush()
                 os.fsync(f.fileno())  # Force write to physical disk
             
             # Atomic swap (Crash-safe)
             os.replace(tmp_path, path)
+            LOGGER.debug(f"✅ Brackets saved to {path}")
             
         except Exception as e:
             LOGGER.error(f"Failed to save bracket state: {e}")
-
 
     def load_state(self) -> None:
         """Restore brackets from disk on startup."""
