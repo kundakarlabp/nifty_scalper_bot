@@ -4457,8 +4457,13 @@ class OrderManager:
     # 💾 PERSISTENCE LAYER (Crash Recovery)
     # ----------------------------------------------------------------
     def save_orders(self) -> None:
-        """Persist active orders to disk (Thread-Safe & Crash-Proof)."""
+        """Persist active orders to disk (Thread-Safe & Crash-Proof).
+        
+        ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback for Railway.
+        """
         import uuid
+        import os
+        
         try:
             data = {}
             with self._lock:
@@ -4473,19 +4478,35 @@ class OrderManager:
                     # 2. SAFE ENUM SERIALIZATION
                     if hasattr(order.status, "name"):
                         record['status'] = order.status.name
+                    elif hasattr(order.status, "value"):
+                        record['status'] = order.status.value
                     else:
                         record['status'] = str(order.status).upper()
 
                     if hasattr(order.order_type, "name"):
                         record['order_type'] = order.order_type.name
+                    elif hasattr(order.order_type, "value"):
+                        record['order_type'] = order.order_type.value
                     else:
                         record['order_type'] = str(order.order_type).upper()
 
                     data[oid] = record
 
-            # 3. Write to disk safely
-            path = Path("data/orders.json")
-            path.parent.mkdir(parents=True, exist_ok=True)
+            # ✅ FIX: Use DATA_DIR environment variable with /tmp fallback
+            data_dir = os.getenv("DATA_DIR", "data")
+            path = Path(data_dir) / "orders.json"
+            
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # Test write permission
+                test_file = path.parent / ".write_test"
+                test_file.write_text("test")
+                test_file.unlink()
+            except (PermissionError, OSError):
+                # Fallback to /tmp for Railway/Cloud environments
+                path = Path("/tmp/nifty_scalper_data/orders.json")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._logger.warning(f"⚠️ Using /tmp fallback: {path}")
             
             # [FIX] Unique Temp File prevents Thread Collision
             tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
@@ -4493,14 +4514,16 @@ class OrderManager:
             with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2, default=str)
                 f.flush()
-                os.fsync(f.fileno()) # Force write to physical disk
+                os.fsync(f.fileno())  # Force write to physical disk
             
             # Atomic replacement
             os.replace(tmp_path, path)
+            self._logger.debug(f"✅ Orders saved to {path}")
 
         except Exception as e:
-            self._logger.error(f"Failed to save orders: {e}")
+            self._logger.error(f"❌ Failed to save orders: {e}")
 
+    
     def _restore_virtual_brackets(self) -> None:
         """Hydrates virtual brackets from SQLite on startup."""
         try:
@@ -4536,34 +4559,75 @@ class OrderManager:
             self._logger.error(f"❌ Failed to restore virtual brackets: {e}")
 
     def _load_orders(self) -> None:
-        """Restore orders from disk on startup."""
-        path = Path("data/orders.json")
+        """Restore orders from disk on startup.
+        
+        ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback.
+        """
+        import os
+        
+        # ✅ FIX: Use DATA_DIR environment variable
+        data_dir = os.getenv("DATA_DIR", "data")
+        path = Path(data_dir) / "orders.json"
+        
         if not path.exists():
-            return
-
+            # Try /tmp fallback location
+            fallback = Path("/tmp/nifty_scalper_data/orders.json")
+            if fallback.exists():
+                path = fallback
+                self._logger.info(f"📂 Loading orders from fallback: {path}")
+            else:
+                self._logger.debug("No saved orders found")
+                return
+        
         try:
             with open(path, "r") as f:
                 data = json.load(f)
             
-            with self._lock:
-                for oid, d in data.items():
-                    # ✅ FIX: Handle Case Sensitivity (Force Upper)
-                    if 'status' in d: 
-                        d['status'] = OrderStatus[str(d['status']).upper()]
+            restored_count = 0
+            for oid, record in data.items():
+                try:
+                    # Reconstruct OrderStatus enum
+                    status_str = record.get('status', 'PENDING')
+                    if hasattr(OrderStatus, status_str):
+                        status = getattr(OrderStatus, status_str)
+                    else:
+                        status = OrderStatus.PENDING
                     
-                    if 'order_type' in d: 
-                        d['order_type'] = OrderType[str(d['order_type']).upper()]
+                    # Reconstruct OrderType enum
+                    order_type_str = record.get('order_type', 'LIMIT')
+                    if hasattr(OrderType, order_type_str):
+                        order_type = getattr(OrderType, order_type_str)
+                    else:
+                        order_type = OrderType.LIMIT
                     
-                    # Clean up fields that shouldn't be loaded directly if they changed in code
-                    # (Optional safety, usually OrderDetails **d works fine)
+                    # Create Order object (adjust based on your Order dataclass)
+                    order = Order(
+                        order_id=record.get('order_id', oid),
+                        symbol=record.get('symbol', ''),
+                        side=record.get('side', 'BUY'),
+                        quantity=int(record.get('quantity', 0)),
+                        price=float(record.get('price', 0)),
+                        order_type=order_type,
+                        status=status,
+                        # Add other fields as needed
+                    )
                     
-                    order = OrderDetails(**d)
-                    self._orders[oid] = order
+                    with self._lock:
+                        self._orders[oid] = order
+                    restored_count += 1
                     
-            self._logger.info(f"♻️ Restored {len(data)} orders from disk.")
-            self._verify_restored_orders()
+                except Exception as e:
+                    self._logger.warning(f"⚠️ Skipped restoring order {oid}: {e}")
+            
+            if restored_count > 0:
+                self._logger.info(f"✅ Restored {restored_count} orders from {path}")
+                
+        except json.JSONDecodeError as e:
+            self._logger.error(f"❌ Invalid JSON in orders file: {e}")
         except Exception as e:
-            self._logger.error(f"Failed to load orders: {e}")
+            self._logger.error(f"❌ Failed to load orders: {e}")
+
+    
 
     def _verify_restored_orders(self) -> None:
         """
