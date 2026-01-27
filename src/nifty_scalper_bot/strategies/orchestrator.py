@@ -50,6 +50,9 @@ class StrategyOrchestrator:
         self._active: dict[str, ActiveAllocation] = {}
         self._lock = RLock()
         self._logger = LOGGER
+        # Rate limiting state
+        self._last_signal_time: float = 0.0
+        self._pending_underlyings: dict[str, float] = {}
 
     def register_strategy(
         self, name: str, *, capital_fraction: float, correlation_tags: Iterable[str]
@@ -75,9 +78,21 @@ class StrategyOrchestrator:
         indicators: Mapping[str, Any],
         position_manager: Any,
     ) -> Any | None:
-        """Return signal when allowed else ``None`` if blocked."""
-
+        """
+        Return signal when allowed else ``None`` if blocked.
+        
+        ✅ FIXES:
+        - Added time guard (earliest possible check)
+        - Added signal flood prevention (1 signal per 5 seconds)
+        - Added SELL signal blocking for options buying mode
+        - Added single-underlying constraint
+        """
+        import os
+        import time
+        
         symbol = getattr(signal, "symbol", "")
+        action = getattr(signal, "action", "")
+        
         self._logger.debug(
             "Entered StrategyOrchestrator.filter_signal",
             extra={
@@ -86,7 +101,19 @@ class StrategyOrchestrator:
             },
         )
         
-        # [FIX 1] CRITICAL: Block Futures Trading Explicitly
+        # ═══════════════════════════════════════════════════════════
+        # 🛡️ FIX 1: EARLY TIME GUARD
+        # ═══════════════════════════════════════════════════════════
+        from nifty_scalper_bot.utils.market_hours import is_market_hours_cached, get_time_status
+        
+        if not is_market_hours_cached():
+            _, reason = get_time_status()
+            # Log throttled (handled by market_hours module)
+            return None
+        
+        # ═══════════════════════════════════════════════════════════
+        # 🛡️ FIX 2: BLOCK FUTURES TRADING
+        # ═══════════════════════════════════════════════════════════
         if self._is_futures(symbol):
             self._logger.info(
                 "Orchestrator blocked Futures trade (Options Only Mode)",
@@ -94,19 +121,91 @@ class StrategyOrchestrator:
             )
             return None
 
+        # ═══════════════════════════════════════════════════════════
+        # 🛡️ FIX 3: BLOCK SELL SIGNALS FOR OPTIONS BUYING STRATEGY
+        # ═══════════════════════════════════════════════════════════
+        # For options BUYING strategy, SELL should mean "close position"
+        # not "open short". Block naked SELL entries.
+        options_long_only = os.getenv("OPTIONS_LONG_ONLY", "true").lower() == "true"
+        
+        if options_long_only and action == "SELL":
+            # Check if this is a position close or a new entry
+            is_position_close = False
+            
+            if position_manager:
+                # Check if we have an open position on this symbol
+                try:
+                    pos = position_manager.get_position(symbol)
+                    if pos and getattr(pos, "quantity", 0) > 0:
+                        is_position_close = True
+                except Exception:
+                    pass
+            
+            if not is_position_close:
+                self._logger.debug(
+                    f"🛡️ SELL blocked (Options Long Only): {symbol}",
+                    extra={"event": "orchestrator_sell_blocked", "symbol": symbol}
+                )
+                return None
+        
+        # ═══════════════════════════════════════════════════════════
+        # 🛡️ FIX 4: SIGNAL FLOOD PREVENTION (Rate Limiting)
+        # ═══════════════════════════════════════════════════════════
+        # Only allow 1 entry signal every 5 seconds globally
+        if not hasattr(self, "_last_signal_time"):
+            self._last_signal_time = 0.0
+        
+        signal_cooldown = float(os.getenv("ORCHESTRATOR_SIGNAL_COOLDOWN", "5.0"))
+        now = time.time()
+        
+        if action in {"BUY", "SELL"} and (now - self._last_signal_time) < signal_cooldown:
+            self._logger.debug(
+                f"⏳ Signal rate limited: {symbol} (cooldown: {signal_cooldown - (now - self._last_signal_time):.1f}s)",
+                extra={"event": "orchestrator_rate_limit", "symbol": symbol}
+            )
+            return None
+        
+        # ═══════════════════════════════════════════════════════════
+        # 🛡️ FIX 5: SINGLE UNDERLYING CONSTRAINT
+        # ═══════════════════════════════════════════════════════════
+        # Prevent multiple signals for same underlying (e.g., NIFTY)
+        # This stops the flood of 150CE, 150PE, 200CE, 200PE, etc.
+        underlying = self._normalize_underlying(symbol)
+        
+        if not hasattr(self, "_pending_underlyings"):
+            self._pending_underlyings = {}
+        
+        pending_cooldown = float(os.getenv("UNDERLYING_SIGNAL_COOLDOWN", "30.0"))
+        last_underlying_signal = self._pending_underlyings.get(underlying, 0.0)
+        
+        if action in {"BUY"} and (now - last_underlying_signal) < pending_cooldown:
+            self._logger.debug(
+                f"🛡️ Underlying rate limited: {underlying} already has pending signal",
+                extra={"event": "orchestrator_underlying_limit", "symbol": symbol}
+            )
+            return None
+        
+        # ═══════════════════════════════════════════════════════════
+        # EXISTING LOGIC (Strategy allocation, correlation checks)
+        # ═══════════════════════════════════════════════════════════
         strategy_name = self._resolve_strategy_name(signal)
         if not strategy_name:
+            # Update rate limit timestamp for untracked signals
+            if action in {"BUY"}:
+                self._last_signal_time = now
+                self._pending_underlyings[underlying] = now
             return signal
             
         allocation = self._allocations.get(strategy_name)
         if allocation is None:
+            if action in {"BUY"}:
+                self._last_signal_time = now
+                self._pending_underlyings[underlying] = now
             return signal
             
-        action = getattr(signal, "action", "")
         if action not in {"BUY", "SELL"}:
             return signal
             
-        underlying = self._normalize_underlying(symbol)
         if not underlying:
             return signal
 
@@ -132,15 +231,17 @@ class StrategyOrchestrator:
             self._set_skip_reason("orchestrator_correlation")
             return None
             
-        # [FIX 2] Removed the blocking check for _futures_context_ready.
-        # Previously, if futures volume wasn't ready, it killed Option trades.
-        # Now we just log a warning but ALLOW the trade.
         if not self._futures_context_ready(indicators):
             self._logger.debug(
                 "Futures context missing, but allowing Option trade.",
                 extra={"event": "orchestrator_futures_context_missing", "symbol": symbol}
             )
 
+        # ✅ Update rate limit timestamps on successful pass
+        if action in {"BUY"}:
+            self._last_signal_time = now
+            self._pending_underlyings[underlying] = now
+        
         return signal
 
     def notify_submission(self, signal: Any, underlying: str) -> None:
