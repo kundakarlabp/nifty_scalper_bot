@@ -1884,15 +1884,14 @@ class OrderManager:
                         )
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
 
-                    # 🛑 FIX 3: Safe Instant Sync (0.5s Delay)
-                    try:
-                        time.sleep(0.5) # Wait for Broker Latency
-                        if hasattr(self._broker, "get_order_status"):
-                            status_update = self._broker.get_order_status(order_id)
-                            if status_update:
-                                self.on_order_update(status_update)
-                    except Exception:
-                        pass
+                    # ✅ WORLD-CLASS: Fast fill confirmation & bracket activation
+                    # This replaces the old 0.5s sleep
+                    fill_confirmed = self._confirm_fill_fast(order_id, timeout_ms=2000)
+                    
+                    if fill_confirmed:
+                        self._logger.info(f"🟢 ORDER FILLED & BRACKET ACTIVE: {order_id}")
+                    else:
+                        self._logger.info(f"🟡 ORDER SUBMITTED (fill pending): {order_id}")
 
                     return order_id
                     
@@ -4260,6 +4259,89 @@ class OrderManager:
         today = datetime.now(timezone.utc).date()
         with self._lock:
             return [order for order in self._history if order.timestamp.date() == today]
+
+    def _confirm_fill_fast(self, order_id: str, timeout_ms: int = 2000) -> bool:
+        """
+        Fast fill confirmation with exponential backoff.
+        
+        ✅ WORLD-CLASS: Sub-500ms fill detection when possible
+        
+        Args:
+            order_id: The broker order ID to confirm
+            timeout_ms: Maximum time to wait (default 2 seconds)
+            
+        Returns:
+            True if fill confirmed, False if timeout/rejected
+        """
+        import time
+        
+        start = time.monotonic()
+        backoff_ms = 50  # Start checking every 50ms
+        max_backoff_ms = 300  # Don't wait more than 300ms between checks
+        attempts = 0
+        
+        self._logger.debug(f"⏱️ Fast fill check started for {order_id}")
+        
+        while (time.monotonic() - start) * 1000 < timeout_ms:
+            attempts += 1
+            
+            try:
+                # Check order status
+                status = None
+                if hasattr(self._broker, "get_order_status"):
+                    status = self._broker.get_order_status(order_id)
+                elif hasattr(self._broker, "order_history"):
+                    # Some brokers use order_history
+                    history = self._broker.order_history(order_id)
+                    if history and isinstance(history, list):
+                        status = history[-1] if history else None
+                
+                if not status:
+                    time.sleep(backoff_ms / 1000)
+                    backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
+                    continue
+                
+                status_str = str(status.get("status", "")).upper()
+                
+                # ✅ FILL DETECTED - Immediately process
+                if status_str in {"COMPLETE", "FILLED"}:
+                    elapsed = (time.monotonic() - start) * 1000
+                    self._logger.info(
+                        f"✅ FILL CONFIRMED in {elapsed:.0f}ms (attempts: {attempts}): {order_id}"
+                    )
+                    
+                    # CRITICAL: Trigger immediate order update processing
+                    # This activates the bracket instantly
+                    self.on_order_update(status)
+                    
+                    return True
+                
+                # ❌ REJECTED/CANCELLED - Stop waiting
+                if status_str in {"REJECTED", "CANCELLED", "CANCELED"}:
+                    self._logger.warning(
+                        f"❌ Order {order_id} {status_str}: {status.get('status_message', 'No reason')}"
+                    )
+                    self.on_order_update(status)
+                    return False
+                
+                # PENDING/SUBMITTED - Continue waiting with backoff
+                if status_str in {"PENDING", "SUBMITTED", "OPEN", "TRIGGER PENDING"}:
+                    time.sleep(backoff_ms / 1000)
+                    backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
+                    continue
+                
+            except Exception as e:
+                self._logger.debug(f"Fill check error (attempt {attempts}): {e}")
+            
+            time.sleep(backoff_ms / 1000)
+            backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
+        
+        # Timeout - rely on periodic reconcile
+        elapsed = (time.monotonic() - start) * 1000
+        self._logger.warning(
+            f"⏰ Fill check timeout after {elapsed:.0f}ms (attempts: {attempts}): {order_id}"
+        )
+        return False
 
     def start_monitoring(self) -> None:
         """Start background thread for order status monitoring."""
