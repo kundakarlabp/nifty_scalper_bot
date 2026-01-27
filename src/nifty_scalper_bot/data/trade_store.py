@@ -28,21 +28,63 @@ class TradeIntent:
         return cls(**data)
 
 class TradeStore:
-    def __init__(self, filepath="data/trades.json"):
+    """Store for trade intents with Railway-compatible paths.
+    
+    ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback.
+    """
+    
+    def __init__(self, filepath=None):
+        """Initialize TradeStore with DATA_DIR support for Railway.
+        
+        ✅ PRODUCTION FIX: Uses DATA_DIR environment variable.
+        """
+        import os
+        
+        if filepath is None:
+            # ✅ FIX: Use DATA_DIR environment variable
+            data_dir = os.getenv("DATA_DIR", "data")
+            filepath = os.path.join(data_dir, "trades.json")
+        
         self.filepath = filepath
         self._trades: Dict[str, TradeIntent] = {}
         self._ensure_dir()
         self._load()
 
     def _ensure_dir(self):
+        """Create directory with /tmp fallback on permission error.
+        
+        ✅ PRODUCTION FIX: Falls back to /tmp if main directory is read-only.
+        """
+        import os
+        
         directory = os.path.dirname(self.filepath)
-        if directory and not os.path.exists(directory):
-            os.makedirs(directory)
+        if directory:
+            try:
+                os.makedirs(directory, exist_ok=True)
+                # Test write permission
+                test_file = os.path.join(directory, ".write_test")
+                with open(test_file, "w") as f:
+                    f.write("test")
+                os.remove(test_file)
+                LOGGER.debug(f"✅ TradeStore directory ready: {directory}")
+            except (PermissionError, OSError) as e:
+                # ✅ FIX: Fallback to /tmp
+                fallback_dir = "/tmp/nifty_scalper_data"
+                os.makedirs(fallback_dir, exist_ok=True)
+                old_path = self.filepath
+                self.filepath = os.path.join(fallback_dir, "trades.json")
+                LOGGER.warning(f"⚠️ Permission denied on {old_path}, using fallback: {self.filepath}")
 
     def _load(self):
         """Load trades from disk safely."""
         if not os.path.exists(self.filepath):
-            return
+            # Also check fallback location
+            fallback = "/tmp/nifty_scalper_data/trades.json"
+            if os.path.exists(fallback):
+                self.filepath = fallback
+                LOGGER.info(f"📂 Loading trades from fallback: {fallback}")
+            else:
+                return
 
         try:
             with open(self.filepath, 'r') as f:
@@ -53,33 +95,83 @@ class TradeStore:
                 
                 data = json.loads(content)
 
-                # ✅ FIX 1: Handle List (Legacy/Corrupted)
+                # Handle List (Legacy/Corrupted)
                 if isinstance(data, list):
-                    LOGGER.warning("Trade store found as list. Resetting to empty dict to prevent crash.")
+                    LOGGER.warning("Trade store found as list. Resetting to empty dict.")
                     self._trades = {} 
                     return
 
-                # ✅ FIX 2: Handle Dict (Normal)
+                # Handle Dict (Normal)
                 if isinstance(data, dict):
                     self._trades = {k: TradeIntent.from_dict(v) for k, v in data.items()}
                 else:
                     LOGGER.warning(f"Unknown trade store format: {type(data)}. Resetting.")
                     self._trades = {}
 
-            LOGGER.info(f"Loaded {len(self._trades)} trades from store.")
+            LOGGER.info(f"✅ Loaded {len(self._trades)} trades from {self.filepath}")
 
         except Exception as e:
             LOGGER.error(f"Failed to load trade store: {e}")
-            # Fallback to empty to ensure bot starts even if file is bad
             self._trades = {}
 
     def save(self):
-        """Atomic save to disk."""
+        """Atomic save to disk with Enum handling.
+        
+        ✅ PRODUCTION FIX: Added unique temp file and Enum serialization.
+        """
+        import uuid
+        from enum import Enum
+        from datetime import datetime, date
+        from decimal import Decimal
+        
+        def _sanitize(obj):
+            """Recursively convert non-JSON-serializable types."""
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_sanitize(item) for item in obj]
+            elif isinstance(obj, Enum):
+                return obj.value if hasattr(obj, 'value') else obj.name
+            elif isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, Decimal):
+                return float(obj)
+            return obj
+        
         try:
-            temp_path = self.filepath + ".tmp"
+            # Ensure directory exists
+            directory = os.path.dirname(self.filepath)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            
+            # ✅ FIX: Use unique temp file to prevent race conditions
+            temp_path = f"{self.filepath}.tmp.{uuid.uuid4().hex}"
+            
+            # Sanitize data before serialization
+            data = {k: _sanitize(asdict(v)) for k, v in self._trades.items()}
+            
             with open(temp_path, 'w') as f:
-                json.dump({k: asdict(v) for k, v in self._trades.items()}, f, indent=2)
+                json.dump(data, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            
             os.replace(temp_path, self.filepath)
+            LOGGER.debug(f"✅ Trades saved to {self.filepath}")
+            
+        except PermissionError as e:
+            # ✅ FIX: Try fallback location
+            fallback_path = "/tmp/nifty_scalper_data/trades.json"
+            os.makedirs(os.path.dirname(fallback_path), exist_ok=True)
+            
+            data = {k: _sanitize(asdict(v)) for k, v in self._trades.items()}
+            temp_path = f"{fallback_path}.tmp.{uuid.uuid4().hex}"
+            with open(temp_path, 'w') as f:
+                json.dump(data, f, indent=2, default=str)
+            os.replace(temp_path, fallback_path)
+            
+            self.filepath = fallback_path
+            LOGGER.warning(f"⚠️ Saved trades to fallback: {fallback_path}")
+            
         except Exception as e:
             LOGGER.error(f"Failed to save trade store: {e}")
 
