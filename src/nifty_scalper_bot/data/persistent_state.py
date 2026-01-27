@@ -1735,23 +1735,123 @@ class PersistentStateManager:
         self._fills_path.write_text(data, encoding="utf-8")
 
     def _write_positions_json(self) -> None:
-        self._ensure_base_dir()  # ✅ ADD
-        data = json.dumps(self._position_cache, indent=2, sort_keys=True)
+        """Write positions cache to JSON with Enum handling.
+        
+        ✅ PRODUCTION FIX: Added sanitization for Enum, datetime, Decimal types.
+        """
+        self._ensure_base_dir()
+        
+        def _sanitize(obj):
+            """Recursively convert non-JSON-serializable types."""
+            from enum import Enum
+            from datetime import datetime, date
+            from decimal import Decimal
+            
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_sanitize(item) for item in obj]
+            elif isinstance(obj, Enum):
+                return obj.value if hasattr(obj, 'value') else obj.name
+            elif isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, Decimal):
+                return float(obj)
+            elif hasattr(obj, 'to_dict'):
+                return _sanitize(obj.to_dict())
+            elif hasattr(obj, '__dict__') and not isinstance(obj, type):
+                return _sanitize(vars(obj))
+            return obj
+        
+        sanitized = _sanitize(self._position_cache)
+        data = json.dumps(sanitized, indent=2, sort_keys=True, default=str)
         self._positions_path.write_text(data, encoding="utf-8")
 
     def _write_orders_json(self) -> None:
-        self._ensure_base_dir()  # ✅ ADD
-        data = json.dumps(self._orders_cache, indent=2, sort_keys=True)
+        """Write orders cache to JSON with Enum handling.
+        
+        ✅ PRODUCTION FIX: Added sanitization for Enum, datetime, Decimal types.
+        """
+        self._ensure_base_dir()
+        
+        def _sanitize(obj):
+            """Recursively convert non-JSON-serializable types."""
+            from enum import Enum
+            from datetime import datetime, date
+            from decimal import Decimal
+            
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_sanitize(item) for item in obj]
+            elif isinstance(obj, Enum):
+                return obj.value if hasattr(obj, 'value') else obj.name
+            elif isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, Decimal):
+                return float(obj)
+            elif hasattr(obj, 'to_dict'):
+                return _sanitize(obj.to_dict())
+            elif hasattr(obj, '__dict__') and not isinstance(obj, type):
+                return _sanitize(vars(obj))
+            return obj
+        
+        sanitized = _sanitize(self._orders_cache)
+        data = json.dumps(sanitized, indent=2, sort_keys=True, default=str)
         self._orders_path.write_text(data, encoding="utf-8")
 
     def _write_brackets_json(self) -> None:
-        self._ensure_base_dir()  # ✅ ADD
-        data = json.dumps(self._bracket_cache, indent=2, sort_keys=True)
+        """Write brackets cache to JSON with Enum handling.
+        
+        ✅ PRODUCTION FIX: Added sanitization for consistency.
+        """
+        self._ensure_base_dir()
+        
+        def _sanitize(obj):
+            from enum import Enum
+            from datetime import datetime, date
+            from decimal import Decimal
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_sanitize(item) for item in obj]
+            elif isinstance(obj, Enum):
+                return obj.value if hasattr(obj, 'value') else obj.name
+            elif isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, Decimal):
+                return float(obj)
+            return obj
+        
+        sanitized = _sanitize(self._bracket_cache)
+        data = json.dumps(sanitized, indent=2, sort_keys=True, default=str)
         self._brackets_path.write_text(data, encoding="utf-8")
 
     def _write_shadow_json(self) -> None:
-        self._ensure_base_dir()  # ✅ ADD
-        data = json.dumps(self._shadow_state, indent=2, sort_keys=True)
+        """Write shadow state to JSON with type handling.
+        
+        ✅ PRODUCTION FIX: Added sanitization for consistency.
+        """
+        self._ensure_base_dir()
+        
+        def _sanitize(obj):
+            from enum import Enum
+            from datetime import datetime, date
+            from decimal import Decimal
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_sanitize(item) for item in obj]
+            elif isinstance(obj, Enum):
+                return obj.value if hasattr(obj, 'value') else obj.name
+            elif isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, Decimal):
+                return float(obj)
+            return obj
+        
+        sanitized = _sanitize(self._shadow_state)
+        data = json.dumps(sanitized, indent=2, sort_keys=True, default=str)
         self._shadow_path.write_text(data, encoding="utf-8")
 
     def _register_signal(self, sig: int) -> None:
