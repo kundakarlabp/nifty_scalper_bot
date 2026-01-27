@@ -47,6 +47,7 @@ from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.reasons import canonical
+from nifty_scalper_bot.utils.market_hours import is_market_hours_cached, get_time_status
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.data_hub import DataHub
@@ -357,6 +358,8 @@ class StrategyRunner:
         self._bracket_manager = bracket_manager
         self._symbol_source: MarketDataManager | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # Time block logging throttle
+        self._time_block_logged: Dict[str, float] = {}
 
         # Subscribe to MessageBus if available
         if self._message_bus is not None:
@@ -2011,7 +2014,35 @@ class StrategyRunner:
             
             
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
-        """Handle signal execution with comprehensive error handling."""
+        """
+        Handle signal execution with comprehensive error handling.
+        
+        ✅ FIX: Added early time guard to prevent processing outside market hours.
+        """
+        # ═══════════════════════════════════════════════════════════
+        # 🛡️ FIX: EARLY TIME GUARD (Check BEFORE any processing)
+        # ═══════════════════════════════════════════════════════════
+        from nifty_scalper_bot.utils.market_hours import is_market_hours_cached, get_time_status
+        
+        if not is_market_hours_cached():
+            # Throttle logging to once per minute per symbol
+            cache_key = f"time_block_{signal.symbol}"
+            if not hasattr(self, '_time_block_logged'):
+                self._time_block_logged = {}
+            
+            now = timestamp.timestamp()
+            last_logged = self._time_block_logged.get(cache_key, 0)
+            
+            if now - last_logged > 60:  # Log once per minute
+                _, reason = get_time_status()
+                self._logger.debug(
+                    f"⏰ Signal blocked (outside market hours): {signal.symbol} | {reason}"
+                )
+                self._time_block_logged[cache_key] = now
+            
+            return  # ❌ STOP HERE - Don't process signal
+        # ═══════════════════════════════════════════════════════════
+        
         self._logger.info(
             f"🔴 1. SIGNAL HANDLER ENTERED: {signal.symbol} {signal.action}"
         )
@@ -2323,7 +2354,27 @@ class StrategyRunner:
 
             # Apply Premium Targets & Risk Sizing
             signal = self._apply_premium_targets(signal, trade_price, entry_side)
-            atr_val = _extract_float(metadata, "atr")
+            
+            # ═══════════════════════════════════════════════════════════
+            # ✅ FIX: Robust ATR extraction with multiple fallbacks
+            # ═══════════════════════════════════════════════════════════
+            atr_val = self._get_atr_with_fallback(
+                symbol=trade_symbol,
+                metadata=metadata,
+                current_price=trade_price
+            )
+            
+            self._logger.info(
+                f"📊 SIZING: {trade_symbol} | Price={trade_price:.2f} | "
+                f"SL={signal.stop_loss:.2f} | ATR={atr_val:.2f}",
+                extra={
+                    "event": "sizing_calculation",
+                    "symbol": trade_symbol,
+                    "price": trade_price,
+                    "stop_loss": signal.stop_loss,
+                    "atr": atr_val
+                }
+            )
             
             sized_qty = self._risk_manager.suggest_position_size(
                 side=entry_side, price=trade_price, stop_loss=signal.stop_loss,
@@ -2486,6 +2537,120 @@ class StrategyRunner:
                     
         except Exception as exc:
             self._logger.warning(f"Order verification/chase warning: {exc}")
+
+    def _get_atr_with_fallback(
+        self,
+        symbol: str,
+        metadata: dict,
+        current_price: float
+    ) -> float:
+        """
+        Get ATR with multiple fallback sources.
+        
+        Priority:
+        1. Signal metadata (from strategy)
+        2. Symbol state (from tick processing)
+        3. Indicator engine (live calculation)
+        4. Price-based estimate (1% of price)
+        
+        Args:
+            symbol: Trading symbol
+            metadata: Signal metadata dict
+            current_price: Current LTP
+            
+        Returns:
+            ATR value (never None, always positive)
+        """
+        atr_val = 0.0
+        source = "unknown"
+        
+        # 1. Try signal metadata
+        if metadata:
+            raw = metadata.get("atr")
+            if raw is not None:
+                try:
+                    atr_val = float(raw)
+                    if atr_val > 0:
+                        source = "metadata"
+                except (TypeError, ValueError):
+                    pass
+        
+        # 2. Try symbol state
+        if atr_val <= 0:
+            with self._lock:
+                state = self._symbol_state.get(symbol)
+                if state and hasattr(state, "atr") and state.atr:
+                    try:
+                        atr_val = float(state.atr)
+                        if atr_val > 0:
+                            source = "symbol_state"
+                    except (TypeError, ValueError):
+                        pass
+        
+        # 3. Try indicator engine
+        if atr_val <= 0 and self._indicator_engine:
+            try:
+                indicators = self._indicator_engine.get_indicators(symbol, ["atr"])
+                raw = indicators.get("atr")
+                if raw is not None:
+                    atr_val = float(raw)
+                    if atr_val > 0:
+                        source = "indicator_engine"
+            except Exception:
+                pass
+        
+        # 4. Try base underlying (e.g., NIFTY instead of NIFTY2620325200CE)
+        if atr_val <= 0:
+            base = self._extract_underlying(symbol)
+            if base and base != symbol:
+                with self._lock:
+                    state = self._symbol_state.get(base)
+                    if state and hasattr(state, "atr") and state.atr:
+                        try:
+                            atr_val = float(state.atr)
+                            if atr_val > 0:
+                                source = "underlying_state"
+                        except (TypeError, ValueError):
+                            pass
+        
+        # 5. Fallback: Calculate from price
+        # For NIFTY options, typical ATR is ~1-2% of premium
+        if atr_val <= 0:
+            atr_val = current_price * 0.015  # 1.5% of price
+            source = "price_fallback"
+            
+            self._logger.warning(
+                f"⚠️ ATR unavailable for {symbol}, using price-based estimate: {atr_val:.2f}",
+                extra={"event": "atr_fallback", "symbol": symbol, "atr": atr_val}
+            )
+        
+        self._logger.debug(
+            f"ATR resolved: {symbol} = {atr_val:.2f} (source: {source})",
+            extra={"event": "atr_resolved", "symbol": symbol, "atr": atr_val, "source": source}
+        )
+        
+        return atr_val
+
+    def _extract_underlying(self, symbol: str) -> str:
+        """Extract underlying from option symbol (e.g., NIFTY from NIFTY2620325200CE)."""
+        if not symbol:
+            return ""
+        
+        # Common patterns
+        if symbol.startswith("NIFTY") and not symbol.startswith("NIFTYFUT"):
+            return "NIFTY"
+        if symbol.startswith("BANKNIFTY"):
+            return "BANKNIFTY"
+        if symbol.startswith("FINNIFTY"):
+            return "FINNIFTY"
+        
+        # Generic extraction: take alphabetic prefix
+        import re
+        match = re.match(r'^([A-Z]+)', symbol)
+        if match:
+            return match.group(1)
+        
+        return symbol
 
     def _handle_exit_signal(
         self,
