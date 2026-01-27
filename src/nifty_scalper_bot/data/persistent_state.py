@@ -448,6 +448,100 @@ class PersistentStateDB:
             )
             raise RuntimeError("Failed to persist shadow equity") from exc
 
+    def _serialize_order(self, order: dict) -> str:
+        """Serialize order dict with Enum, datetime, Decimal handling.
+        
+        ✅ PRODUCTION FIX: Handles OrderType, OrderStatus, and other Enums.
+        """
+        from enum import Enum
+        from datetime import datetime, date
+        from decimal import Decimal
+        
+        def _sanitize(obj):
+            """Recursively convert non-JSON-serializable types."""
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [_sanitize(item) for item in obj]
+            elif isinstance(obj, Enum):
+                return obj.value if hasattr(obj, 'value') else obj.name
+            elif isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, Decimal):
+                return float(obj)
+            elif hasattr(obj, 'to_dict'):
+                return _sanitize(obj.to_dict())
+            elif hasattr(obj, '__dict__') and not isinstance(obj, type):
+                return _sanitize(vars(obj))
+            return obj
+        
+        sanitized = _sanitize(order)
+        return json.dumps(sanitized, ensure_ascii=False, default=str)
+
+# ============================================================
+# STEP 2: REPLACE THE save_order METHOD (starting at line ~451)
+# ============================================================
+
+    def save_order(self, order: OrderDict) -> None:
+        """Persist or update an *order* snapshot.
+
+        Args:
+            order: Order payload including ``order_id`` and ``status``.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If persistence fails.
+            
+        ✅ PRODUCTION FIX: Uses _serialize_order for Enum handling.
+        """
+
+        self._logger.debug(
+            "Entered PersistentStateDB.save_order",
+            extra={"event": "persistent_db_save_order"},
+        )
+        
+        # ✅ FIX: Defensive check for order_id
+        order_id = str(order.get("order_id", "")).strip()
+        if not order_id:
+            # Try alternative keys
+            order_id = str(order.get("broker_order_id", "") or order.get("id", "")).strip()
+            if order_id:
+                order["order_id"] = order_id
+            else:
+                self._logger.warning(
+                    "save_order: Missing order_id, skipping persist",
+                    extra={"event": "persistent_db_missing_order_id", "symbol": order.get("symbol")},
+                )
+                return
+                
+        status = str(order.get("status", "")).strip().upper() or "PENDING"
+        
+        try:
+            with self._lock:
+                with self._conn:  # type: ignore[attr-defined]
+                    self._conn.execute(
+                        """
+                        INSERT INTO orders(order_id, status, payload, updated_ts)
+                        VALUES(?, ?, ?, ?)
+                        ON CONFLICT(order_id) DO UPDATE SET
+                            status=excluded.status,
+                            payload=excluded.payload,
+                            updated_ts=excluded.updated_ts
+                        """,
+                        (
+                            order_id,
+                            status,
+                            self._serialize_order(dict(order)),  # ✅ FIX: Use serializer
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("Failure in PersistentStateDB.save_order: %s", exc)
+            raise RuntimeError("Failed to persist order") from exc
+            
+
     def save_order(self, order: OrderDict) -> None:
         """Persist or update an *order* snapshot.
 
