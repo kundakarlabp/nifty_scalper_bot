@@ -542,54 +542,7 @@ class PersistentStateDB:
             raise RuntimeError("Failed to persist order") from exc
             
 
-    def save_order(self, order: OrderDict) -> None:
-        """Persist or update an *order* snapshot.
-
-        Args:
-            order: Order payload including ``order_id`` and ``status``.
-
-        Returns:
-            None.
-
-        Raises:
-            RuntimeError: If persistence fails.
-        """
-
-        self._logger.debug(
-            "Entered PersistentStateDB.save_order",
-            extra={"event": "persistent_db_save_order"},
-        )
-        order_id = str(order.get("order_id", "")).strip()
-        if not order_id:
-            self._logger.info(
-                "Condition met: persistent_db_save_order_missing_id",
-                extra={"event": "persistent_db_missing_order_id"},
-            )
-            return
-        status = str(order.get("status", "")).strip().upper() or "PENDING"
-        try:
-            with self._lock:
-                with self._conn:  # type: ignore[attr-defined]
-                    self._conn.execute(
-                        """
-                        INSERT INTO orders(order_id, status, payload, updated_ts)
-                        VALUES(?, ?, ?, ?)
-                        ON CONFLICT(order_id) DO UPDATE SET
-                            status=excluded.status,
-                            payload=excluded.payload,
-                            updated_ts=excluded.updated_ts
-                        """,
-                        (
-                            order_id,
-                            status,
-                            json.dumps(dict(order), ensure_ascii=False),
-                            datetime.now(timezone.utc).isoformat(),
-                        ),
-                    )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in PersistentStateDB.save_order: %s", exc)
-            raise RuntimeError("Failed to persist order") from exc
-
+    
     def load_open_orders(self) -> list[OrderDict]:
         """Return persisted orders that remain open.
 
@@ -671,7 +624,7 @@ class PersistentStateDB:
                         """,
                         (
                             entry_id,
-                            json.dumps(dict(bracket), ensure_ascii=False),
+                            self._serialize_order(dict(bracket)),
                             datetime.now(timezone.utc).isoformat(),
                         ),
                     )
