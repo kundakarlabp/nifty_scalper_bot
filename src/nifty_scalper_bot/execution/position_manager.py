@@ -481,6 +481,8 @@ class PositionManager:
             )
         self._positions: Dict[str, Position] = {}
         self._orders: Dict[str, Order] = {}
+        self._processed_order_ids: set[str] = set()
+        self._max_processed_ids = 1000  # Limit memory usage
         self._daily_realized_pnl: float = 0.0
         self._active_contracts: Dict[str, ActiveContract] = {}
         self._contract_index: Dict[str, str] = {}
@@ -1374,11 +1376,33 @@ class PositionManager:
         price: float,
         order_type: str,
     ) -> None:
-        """Track a newly submitted order."""
+        """Track a newly submitted order.
+        
+        ✅ PRODUCTION FIX: Skip orders that have already been fully processed.
+        This prevents the infinite loop where historical filled orders are
+        re-added and re-processed every reconciliation cycle.
+        """
+        order_id = str(order_id).strip()
+        
+        # ✅ FIX 1: Don't re-add orders that were already processed
+        if hasattr(self, '_processed_order_ids') and order_id in self._processed_order_ids:
+            self._logger.debug(
+                f"Skipping add_pending_order for already-processed: {order_id}",
+                extra={"event": "order_add_skip_processed", "order_id": order_id}
+            )
+            return
+        
+        # ✅ FIX 2: Don't re-add orders that are already being tracked
+        if order_id in self._orders:
+            self._logger.debug(
+                f"Order already tracked, skipping: {order_id}",
+                extra={"event": "order_add_skip_existing", "order_id": order_id}
+            )
+            return
 
         symbol_key = symbol.upper()
         order = Order(
-            order_id=str(order_id),
+            order_id=order_id,
             symbol=symbol_key,
             side=_normalize_order_side(side),
             order_type=order_type,
@@ -1399,11 +1423,37 @@ class PositionManager:
         status: str,
         fill_price: float | None = None,
     ) -> None:
-        """Update the status of a tracked order and react to fills."""
-
-        order = self._orders.get(str(order_id))
+        """Update the status of a tracked order and react to fills.
+        
+        ✅ PRODUCTION FIX: Added guard against re-processing completed orders.
+        This prevents the position thrashing loop where the same filled orders
+        are processed over and over again, causing:
+        - "Opened LONG position" 
+        - "Position fully closed via order"
+        to repeat infinitely.
+        """
+        order_id = str(order_id).strip()
+        
+        # ✅ FIX: Initialize _processed_order_ids if not exists (backward compat)
+        if not hasattr(self, '_processed_order_ids'):
+            self._processed_order_ids = set()
+            self._max_processed_ids = 1000
+        
+        # ✅ FIX: Skip if this order was already fully processed
+        if order_id in self._processed_order_ids:
+            self._logger.debug(
+                f"Skipping already-processed order: {order_id}",
+                extra={"event": "order_already_processed", "order_id": order_id}
+            )
+            return
+        
+        order = self._orders.get(order_id)
         if order is None:
-            self._logger.warning("Attempted to update unknown order %s", order_id)
+            # ✅ FIX: Also skip unknown orders that might be historical
+            self._logger.debug(
+                f"Attempted to update unknown order {order_id} - may be historical",
+                extra={"event": "order_update_skip_unknown", "order_id": order_id}
+            )
             return
 
         try:
@@ -1420,6 +1470,23 @@ class PositionManager:
         if order.status == "FILLED" and order.fill_price is not None:
             order.filled_quantity = order.quantity
             self._handle_filled_order(order)
+            
+            # ✅ FIX: Mark this order as processed AFTER handling the fill
+            # This ensures we never process the same fill twice
+            self._processed_order_ids.add(order_id)
+            self._logger.debug(
+                f"Marked order as processed: {order_id}",
+                extra={"event": "order_marked_processed", "order_id": order_id}
+            )
+            
+            # ✅ FIX: Prevent memory leak - trim old IDs if too many
+            if len(self._processed_order_ids) > self._max_processed_ids:
+                to_remove = list(self._processed_order_ids)[:self._max_processed_ids // 2]
+                for old_id in to_remove:
+                    self._processed_order_ids.discard(old_id)
+                self._logger.debug(
+                    f"Trimmed processed_order_ids: removed {len(to_remove)} old entries"
+                )
 
         self._persist_order_state(order)
 
