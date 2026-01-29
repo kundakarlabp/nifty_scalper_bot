@@ -1811,7 +1811,10 @@ class StrategyRunner:
                 self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
 
             # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
-            if (generated_signal is None 
+            vwap_crossover_enabled = os.getenv("ENABLE_VWAP_CROSSOVER", "false").lower() == "true"
+            
+            if (vwap_crossover_enabled
+                and generated_signal is None 
                 and state.vwap 
                 and state.vwap > 0 
                 and "FUT" not in symbol.upper()):
