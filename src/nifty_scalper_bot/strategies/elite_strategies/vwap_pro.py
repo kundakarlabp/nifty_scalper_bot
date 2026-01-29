@@ -2,6 +2,9 @@
 VWAP Pro Strategy.
 World-Class implementation with Trend Pullbacks, Volume Validation, and Greeks Safety.
 Refactored for Push-Based Architecture (Zero-Latency).
+
+🔧 FIX APPLIED: SELL/PE signal generation was broken due to asymmetric
+   strong_trend evaluation that only allowed BUY signals in strong trends.
 """
 
 from __future__ import annotations
@@ -74,6 +77,7 @@ class VWAPProStrategy(EliteStrategy):
         
         ✅ FIX: Added time guard at source to prevent signal generation
                 outside market hours.
+        ✅ FIX: Corrected asymmetric strong_trend evaluation for SELL signals.
         """
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX: EARLIEST TIME GUARD (Stop signals at source)
@@ -133,8 +137,15 @@ class VWAPProStrategy(EliteStrategy):
             trend_momentum = abs(current_price - vwap) / vwap
             strong_trend = trend_momentum > 0.05  # >5% from VWAP = strong trend
             
-            # Allow signal if: near VWAP OR in strong trend with correct direction
-            should_evaluate = touched_vwap or near_vwap or (strong_trend and trend_bullish)
+            # ═══════════════════════════════════════════════════════════
+            # 🔧 FIX: CRITICAL BUG - SELL signals were being blocked
+            # 
+            # OLD (BUG): should_evaluate = touched_vwap or near_vwap or (strong_trend and trend_bullish)
+            #            This ONLY allowed strong trend signals for BULLISH, not BEARISH!
+            #
+            # NEW (FIXED): Include trend_bearish for symmetric SELL signal generation
+            # ═══════════════════════════════════════════════════════════
+            should_evaluate = touched_vwap or near_vwap or (strong_trend and (trend_bullish or trend_bearish))
 
             if not should_evaluate:
                 return None
