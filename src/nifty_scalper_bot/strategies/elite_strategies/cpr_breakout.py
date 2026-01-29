@@ -27,6 +27,7 @@ class CPRBreakoutStrategy(EliteStrategy):
     Engage when Central Pivot Range (CPR) is Narrow (Trending) or NR7 compression resolves.
     Entry: Price breaks CPR/R1/S1 with Volume.
     """
+    MIN_BARS_REQUIRED = 2
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_cpr_config", "_range_history")
