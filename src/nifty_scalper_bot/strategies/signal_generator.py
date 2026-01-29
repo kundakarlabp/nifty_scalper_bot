@@ -1042,7 +1042,12 @@ class StrategyManager:
                     take_profit=rr_levels[1]
                 )
             else:
-                logger.info(f"⛔ Rejected {symbol}: Invalid Risk/Reward Profile")
+                logger.info(
+                    f"⛔ RISK REJECT: {symbol} | "
+                    f"Invalid Risk/Reward Profile | "
+                    f"SL={combined.stop_loss} | TP={combined.take_profit}",
+                    extra={"event": "signal_risk_reject", "symbol": symbol}
+                )
                 return None
 
         # 7. Final Output Filter
@@ -1066,6 +1071,13 @@ class StrategyManager:
                     },
                 )
                 return combined
+        else:
+            # ✅ NEW: Log when filter rejects signal
+            logger.info(
+                f"⛔ FILTER REJECT: {symbol} | "
+                f"Action={combined.action} | Conf={combined.confidence:.2f}",
+                extra={"event": "signal_filter_reject", "symbol": symbol}
+            )
         
         return None
 
