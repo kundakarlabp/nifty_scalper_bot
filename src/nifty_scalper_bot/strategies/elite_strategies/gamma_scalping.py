@@ -27,6 +27,7 @@ class GammaScalpingStrategy(EliteStrategy):
     Captures explosive moves where Gamma (Acceleration) justifies the Theta (Decay) cost.
     Entry: High Momentum + Positive Gamma Environment.
     """
+    MIN_BARS_REQUIRED = 3
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_gamma_config",)
