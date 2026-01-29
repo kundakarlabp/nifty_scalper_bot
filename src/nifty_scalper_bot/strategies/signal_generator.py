@@ -935,6 +935,12 @@ class StrategyManager:
         """
         MASTER EXECUTION LOOP.
         """
+        # ✅ DIAGNOSTIC: Log strategy count at entry
+        self._logger.info(
+            f"📋 StrategyManager.generate_signal | {symbol} | "
+            f"strategies={len(self._strategies)} | names={[s.name for s in self._strategies]}"
+        )
+
         logger.debug(
             "Entered StrategyManager.generate_signal",
             extra={"event": "strategy_manager_generate", "symbol": symbol},
@@ -962,6 +968,14 @@ class StrategyManager:
         # 3. Augment with Futures Data (if needed)
         self._augment_futures_metrics(indicators)
 
+        # ✅ DIAGNOSTIC: Log all available indicators
+        self._logger.info(
+            f"📈 Indicators for {symbol}: keys={list(indicators.keys())} | "
+            f"bar_count={indicators.get('bar_count', 'MISSING')} | "
+            f"rsi={indicators.get('rsi', 'MISSING')} | "
+            f"ema={indicators.get('ema', 'MISSING')}"
+        )
+
         # 4. Evaluate Strategies
         all_signals: list[Signal] = []
         eval_count = 0
@@ -973,11 +987,18 @@ class StrategyManager:
 
         for strategy in self._strategies:
             try:
+                # ✅ Log entry into each strategy evaluation
+                self._logger.info(
+                    f"🔍 Evaluating: {strategy.name} | {symbol}",
+                    extra={"event": "strategy_eval_start", "strategy": strategy.name}
+                )
+                
                 # Gating: Min Bars
                 strategy_min_bars = getattr(strategy, 'MIN_BARS_REQUIRED', 3)
                 if bar_count < strategy_min_bars:
-                    logger.debug(
-                        f"⏭️ SKIP {strategy.name}: Need {strategy_min_bars} bars, have {bar_count}"
+                    self._logger.info(
+                        f"⏭️ SKIP {strategy.name}: need {strategy_min_bars} bars, have {bar_count} | {symbol}",
+                        extra={"event": "strategy_skip_bars"}
                     )
                     skip_count += 1
                     continue
@@ -985,49 +1006,63 @@ class StrategyManager:
                 # Gating: Missing Data
                 reqs = strategy.get_required_indicators()
                 missing = [k for k in reqs if indicators.get(k) is None]
+                
                 if missing:
-                    logger.debug(
-                        f"⏭️ SKIP {strategy.name}: Missing indicators: {missing}"
+                    self._logger.info(
+                        f"⏭️ SKIP {strategy.name}: missing {missing} | {symbol}",
+                        extra={"event": "strategy_skip_indicators", "missing": missing}
                     )
                     skip_count += 1
                     continue
 
-                # Gating: Low VIX filter for Momentum
+                # Gating: Low VIX filter for Momentum strategies
                 if vix < 12.0 and ("Breakout" in strategy.name or "ORB" in strategy.name):
-                    logger.debug(
-                        f"⏭️ SKIP {strategy.name}: VIX too low ({vix:.1f} < 12.0)"
+                    self._logger.info(
+                        f"⏭️ SKIP {strategy.name}: low VIX={vix:.1f} | {symbol}",
+                        extra={"event": "strategy_skip_vix"}
                     )
                     skip_count += 1
                     continue
 
                 eval_count += 1
+                self._logger.info(
+                    f"✅ Calling {strategy.name}.generate_signal() | {symbol}",
+                    extra={"event": "strategy_call"}
+                )
+                
                 signal = strategy.generate_signal(symbol, indicators, current_price, position)
                 
                 if signal:
+                    # Apply regime factor
                     if regime_factor < 1.0:
                         signal = dataclasses.replace(
                             signal, 
-                            confidence=signal.confidence * regime_factor
+                            confidence=signal.confidence * regime_factor,
                         )
                     
+                    # ✅ Collect ALL signals with strategy attribution
                     all_signals.append(signal.with_metadata(
                         indicators=indicators,
                         source_strategy=strategy.name,
                     ))
                     
-                    logger.info(
-                        f"📊 Signal from {strategy.name}: {signal.action} | conf={signal.confidence:.2f}",
+                    self._logger.info(
+                        f"📊 Signal from {strategy.name}: {signal.action} | conf={signal.confidence:.2f} | {symbol}",
                         extra={
                             "event": "strategy_signal_generated",
                             "strategy": strategy.name,
-                            "symbol": symbol,
                             "action": signal.action,
                             "confidence": signal.confidence,
                         }
                     )
+                else:
+                    self._logger.info(
+                        f"📭 {strategy.name} returned None | {symbol}",
+                        extra={"event": "strategy_no_signal", "strategy": strategy.name}
+                    )
                     
             except Exception as exc: 
-                logger.exception(f"Strategy {strategy.name} failed: {exc}")
+                self._logger.exception(f"❌ Strategy {strategy.name} FAILED: {exc}")
                 continue
 
         # ✅ FIX: Change to INFO level so we can see in production logs
