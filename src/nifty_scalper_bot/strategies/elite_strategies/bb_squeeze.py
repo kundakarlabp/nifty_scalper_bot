@@ -26,6 +26,7 @@ class BBSqueezeStrategy(EliteStrategy):
     Trade volatility expansion following tight Bollinger compression.
     Detects 'Squeeze' (Low Volatility) -> 'Expansion' (High Volatility).
     """
+    MIN_BARS_REQUIRED = 25
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_bb_config",)
