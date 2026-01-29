@@ -148,6 +148,11 @@ class Strategy(ABC):
     ) -> Signal | None:
         """Generate trading signal."""
 
+        # ✅ FIX: Block futures at strategy entry, not execution
+        # This saves CPU cycles and prevents misleading signals
+        if "FUT" in symbol.upper():
+            return None
+
     @abstractmethod
     def get_required_indicators(self) -> list[str]:
         """Return list of required indicators."""
@@ -930,25 +935,26 @@ class StrategyManager:
         )
 
         required: set[str] = {"volume", "avg_volume", "minutes_since_open", "minutes_until_close"}
-        for strategy in self._strategies:
-            required.update(strategy.get_required_indicators())
-
-        indicators_raw = self._indicator_engine.get_indicators(symbol, required)
-        indicators: dict[str, Any] = dict(indicators_raw)
-        self._augment_futures_metrics(indicators)
-        
-        vix_data = self._indicator_engine.get_indicators("NSE:INDIA VIX", ["ltp"])
-        vix = float(vix_data.get("ltp", 15.0)) if vix_data else 15.0
-        regime_factor = self._get_regime_modifier(vix)
-
-        position = self._position_manager.get_position(symbol)
-        signals: list[Signal] = []
-
+        # ✅ FIX: Evaluate ALL strategies, collect ALL signals (no short-circuit)
+        all_signals: list[Signal] = []
         eval_count = 0
         skip_count = 0
 
+        # Get bar count for strategy-specific gating
+        bar_count = int(indicators.get('bar_count', 100))
+
         for strategy in self._strategies:
-            # [OBSERVABILITY] Pre-validation Check
+            # ✅ FIX: Check strategy-specific min_bars requirement
+            strategy_min_bars = getattr(strategy, 'MIN_BARS_REQUIRED', 3)
+            
+            if bar_count < strategy_min_bars:
+                logger.debug(
+                    f"SKIP {strategy.name}: need {strategy_min_bars} bars, have {bar_count} | {symbol}"
+                )
+                skip_count += 1
+                continue
+            
+            # Check required indicators
             reqs = strategy.get_required_indicators()
             missing = [k for k in reqs if k not in indicators or indicators[k] is None]
             
@@ -958,7 +964,7 @@ class StrategyManager:
                 continue
 
             try:
-                # Optimization: Skip Momentum strategies in Dead markets
+                # Skip momentum strategies in dead markets
                 if vix < 12.0 and ("Breakout" in strategy.name or "ORB" in strategy.name):
                     logger.debug(f"SKIP {strategy.name}: low_vix_filter | {symbol}")
                     skip_count += 1
@@ -968,12 +974,44 @@ class StrategyManager:
                 signal = strategy.generate_signal(symbol, indicators, current_price, position)
                 
                 if signal:
+                    # Apply regime factor
                     if regime_factor < 1.0:
                         signal = dataclasses.replace(
                             signal, 
                             confidence=signal.confidence * regime_factor,
                         )
-                    signals.append(signal.with_metadata(indicators=indicators))
+                    
+                    # ✅ Collect ALL signals with strategy attribution
+                    all_signals.append(signal.with_metadata(
+                        indicators=indicators,
+                        source_strategy=strategy.name,
+                    ))
+                    
+                    logger.info(
+                        f"📊 Signal from {strategy.name}: {signal.action} | conf={signal.confidence:.2f}",
+                        extra={
+                            "event": "strategy_signal_generated",
+                            "strategy": strategy.name,
+                            "symbol": symbol,
+                            "action": signal.action,
+                            "confidence": signal.confidence,
+                        }
+                    )
+                    
+            except Exception as exc: 
+                logger.exception(f"Strategy {strategy.name} failed: {exc}")
+                continue
+
+        logger.debug(
+            f"StrategyManager Stats: Evaluated={eval_count}, Skipped={skip_count}, "
+            f"Signals={len(all_signals)} | {symbol}"
+        )
+
+        if not all_signals:
+            return None
+
+        # ✅ Combine ALL signals using ensemble voting
+        combined = self._combine_signals_ensemble(all_signals)
                     
             except Exception as exc: 
                 logger.exception("Strategy %s failed: %s", strategy.name, exc)
@@ -1025,6 +1063,62 @@ class StrategyManager:
                 return combined
         
         return None
+
+    def _combine_signals_ensemble(self, signals: list[Signal]) -> Signal | None:
+        """
+        ✅ NEW: Combine multiple strategy signals using weighted voting.
+        
+        Ensures all strategies get fair consideration instead of VWAP dominance.
+        """
+        if not signals:
+            return None
+        
+        if len(signals) == 1:
+            return signals[0]
+        
+        # Separate by action
+        buy_signals = [s for s in signals if s.action == "BUY"]
+        sell_signals = [s for s in signals if s.action == "SELL"]
+        
+        # Calculate weighted votes
+        buy_weight = sum(s.confidence for s in buy_signals)
+        sell_weight = sum(s.confidence for s in sell_signals)
+        
+        logger.info(
+            f"📊 Ensemble: BUY={len(buy_signals)} ({buy_weight:.1f}), "
+            f"SELL={len(sell_signals)} ({sell_weight:.1f})"
+        )
+        
+        # Determine winner
+        if buy_weight > sell_weight and buy_signals:
+            # Use the highest confidence BUY signal as base
+            best = max(buy_signals, key=lambda s: s.confidence)
+            # Average confidence across all BUY signals
+            avg_conf = buy_weight / len(buy_signals)
+            return dataclasses.replace(
+                best, 
+                confidence=min(avg_conf, 99.0),
+                metadata={
+                    **(best.metadata or {}),
+                    "ensemble_count": len(buy_signals),
+                    "ensemble_weight": round(buy_weight, 2),
+                }
+            )
+        elif sell_signals:
+            best = max(sell_signals, key=lambda s: s.confidence)
+            avg_conf = sell_weight / len(sell_signals)
+            return dataclasses.replace(
+                best, 
+                confidence=min(avg_conf, 99.0),
+                metadata={
+                    **(best.metadata or {}),
+                    "ensemble_count": len(sell_signals),
+                    "ensemble_weight": round(sell_weight, 2),
+                }
+            )
+        
+        return None
+        
 
     def _get_regime_modifier(self, vix: float) -> float:
         if vix > 24.0: return 0.8
