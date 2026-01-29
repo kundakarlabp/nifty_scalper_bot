@@ -901,6 +901,12 @@ class StrategyManager:
         
         raw_config = config if config else (strategies[0].config if strategies else {})
         self._config = raw_config
+        # ✅ FIX: Log which strategies are loaded
+        strategy_names = [s.name for s in self._strategies]
+        logger.info(
+            f"🎯 StrategyManager initialized with {len(self._strategies)} strategies: {strategy_names}",
+            extra={"event": "strategy_manager_init", "strategies": strategy_names}
+        )
 
         def get_cfg(key: str, default: Any) -> Any:
             if isinstance(raw_config, dict):
