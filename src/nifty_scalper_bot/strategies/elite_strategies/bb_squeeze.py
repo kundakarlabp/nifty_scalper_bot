@@ -50,7 +50,7 @@ class BBSqueezeStrategy(EliteStrategy):
         return {
             "bollinger_upper",
             "bollinger_lower",
-            "bollinger_mid",
+            "bollinger_middle",
             "atr",
             "volume",
             "average_volume",
@@ -71,7 +71,7 @@ class BBSqueezeStrategy(EliteStrategy):
             # 1. Safe Data Extraction
             upper = float(indicators.get("bollinger_upper") or 0.0)
             lower = float(indicators.get("bollinger_lower") or 0.0)
-            mid = float(indicators.get("bollinger_mid") or 0.0)
+            mid = float(indicators.get("bollinger_middle") or 0.0)
             atr = float(indicators.get("atr") or 0.0)
             vol = float(indicators.get("volume") or 0.0)
             avg_vol = float(indicators.get("average_volume") or 1.0)
