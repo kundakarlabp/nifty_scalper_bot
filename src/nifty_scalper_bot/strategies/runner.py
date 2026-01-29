@@ -1567,7 +1567,7 @@ class StrategyRunner:
         Includes robust data extraction, validation, and multi-tier strategy execution.
         """
         if "FUT" in symbol.upper():
-        return 
+            return 
         
         # =================================================================
         # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
