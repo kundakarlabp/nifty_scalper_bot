@@ -25,6 +25,7 @@ class OrderFlowStrategy(EliteStrategy):
     """
     Trade based on L2 Market Depth (Level 2) Imbalances and Large Orders.
     """
+    MIN_BARS_REQUIRED = 5
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_of_config",)
