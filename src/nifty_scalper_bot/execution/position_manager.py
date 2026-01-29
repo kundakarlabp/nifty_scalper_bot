@@ -480,6 +480,7 @@ class PositionManager:
                 legacy_candidate if legacy_candidate.exists() else None
             )
         self._positions: Dict[str, Position] = {}
+        self._lock = threading.RLock()
         self._orders: Dict[str, Order] = {}
         self._processed_order_ids: set[str] = set()
         self._max_processed_ids = 1000  # Limit memory usage
