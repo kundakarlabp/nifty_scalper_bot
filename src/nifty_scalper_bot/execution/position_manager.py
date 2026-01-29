@@ -1725,33 +1725,33 @@ class PositionManager:
         self.save_state()
 
     def _safe_get_net_qty(record: Mapping[str, object]) -> int:
-    """
-    🚨 CRITICAL FIX: Safely extract net quantity with explicit None checks.
+        """
+        🚨 CRITICAL FIX: Safely extract net quantity with explicit None checks.
     
-    Python's 'or' chain evaluates 0 as falsy:
-        0 or 65 = 65  ← WRONG!
+        Python's 'or' chain evaluates 0 as falsy:
+            0 or 65 = 65  ← WRONG!
     
-    We need explicit None checks because 0 is a VALID quantity (position closed).
-    """
-    # Check net quantity fields FIRST with explicit None check
-    for key in ("net_qty", "net_quantity", "netQuantity", "net"):
-        val = record.get(key)
-        if val is not None:  # Explicit None check - 0 is valid!
+        We need explicit None checks because 0 is a VALID quantity (position closed).
+        """
+        # Check net quantity fields FIRST with explicit None check
+        for key in ("net_qty", "net_quantity", "netQuantity", "net"):
+            val = record.get(key)
+            if val is not None:  # Explicit None check - 0 is valid!
+                try:
+                    return int(float(val))
+                except (ValueError, TypeError):
+                    continue
+    
+        # Only fallback to 'quantity' if ALL net keys are genuinely missing
+        # This is the dangerous fallback that caused the infinite loop
+        qty_val = record.get("quantity")
+        if qty_val is not None:
             try:
-                return int(float(val))
+                return int(float(qty_val))
             except (ValueError, TypeError):
-                continue
+                pass
     
-    # Only fallback to 'quantity' if ALL net keys are genuinely missing
-    # This is the dangerous fallback that caused the infinite loop
-    qty_val = record.get("quantity")
-    if qty_val is not None:
-        try:
-            return int(float(qty_val))
-        except (ValueError, TypeError):
-            pass
-    
-    return 0
+        return 0
     
 
     def synchronize_with_broker(
