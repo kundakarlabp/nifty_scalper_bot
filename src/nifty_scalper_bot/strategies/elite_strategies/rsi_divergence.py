@@ -26,6 +26,7 @@ class RSIDivergenceStrategy(EliteStrategy):
     """
     Detects RSI divergences (Regular & Hidden) to play reversals.
     """
+    MIN_BARS_REQUIRED = 20
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_rsi_config", "_price_history")
