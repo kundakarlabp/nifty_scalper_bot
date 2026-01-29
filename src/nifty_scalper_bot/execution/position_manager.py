@@ -1757,37 +1757,43 @@ class PositionManager:
     def synchronize_with_broker(
         self, broker_positions: Sequence[Mapping[str, object]]
     ) -> None:
-        """Align local positions with broker-provided *broker_positions*.
-
-        Args:
-            broker_positions: Sequence of broker position payloads.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
         """
-
+        Align local positions with broker-provided *broker_positions*.
+        Optimized for robustness, atomic updates, and error handling.
+        """
         self._logger.debug(
             "Entered synchronize_with_broker",
             extra={"event": "position_manager_sync"},
         )
+
         try:
             payloads = list(broker_positions or [])
-        except Exception as exc:  # noqa: BLE001 - defensive snapshot
+        except Exception as exc:
             self._logger.error(
-                "Failure in synchronize_with_broker: %s",
+                "Failure in synchronize_with_broker input validation: %s",
                 exc,
                 extra={"event": "position_manager_sync_error"},
-                exc_info=exc,
+                exc_info=True,
             )
             return
 
         reconciled: Dict[str, Position] = {}
+
+        # Helper to safely extract floats from multiple possible keys
+        def _get_float(record: Mapping, keys: list[str], default: float = 0.0) -> float:
+            for k in keys:
+                if val := record.get(k):
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        continue
+            return default
+
         for record in payloads:
             if not isinstance(record, Mapping):
                 continue
+
+            # 1. Symbol Normalization
             raw_symbol = (
                 record.get("tradingsymbol")
                 or record.get("symbol")
@@ -1797,174 +1803,120 @@ class PositionManager:
             symbol = str(raw_symbol).strip().upper()
             if not symbol:
                 continue
-            quantity = _safe_get_net_qty(record)
+
+            # 2. Quantity Extraction (Fail-Safe)
+            try:
+                # Handle various broker keys for quantity
+                qty_val = record.get("quantity") or record.get("net_quantity") or 0
+                quantity = int(float(qty_val))
+            except Exception as exc:
                 self._logger.error(
                     "Failure decoding broker quantity for %s: %s",
                     symbol,
                     exc,
                     extra={"event": "position_manager_sync_qty_error"},
-                    exc_info=exc,
+                    exc_info=True,
                 )
                 continue
+
             if quantity == 0:
                 continue
+
             side: Side = "LONG" if quantity > 0 else "SHORT"
             abs_quantity = abs(quantity)
-            avg_candidate = (
-                record.get("average_price")
-                or record.get("avg_price")
-                or record.get("price")
-                or record.get("buy_price")
-            )
-            try:
-                entry_price = (
-                    _to_float(avg_candidate) if avg_candidate is not None else 0.0
-                )
-            except Exception as exc:  # noqa: BLE001 - defensive decode
-                self._logger.error(
-                    "Failure decoding broker average price for %s: %s",
-                    symbol,
-                    exc,
-                    extra={"event": "position_manager_sync_avg_error"},
-                    exc_info=exc,
-                )
-                entry_price = 0.0
-            ltp_candidate = (
-                record.get("last_price")
-                or record.get("ltp")
-                or record.get("close")
-                or record.get("sell_price")
-            )
-            try:
-                current_price = (
-                    _to_float(ltp_candidate)
-                    if ltp_candidate is not None
-                    else entry_price
-                )
-            except Exception as exc:  # noqa: BLE001 - defensive decode
-                self._logger.error(
-                    "Failure decoding broker mark price for %s: %s",
-                    symbol,
-                    exc,
-                    extra={"event": "position_manager_sync_mark_error"},
-                    exc_info=exc,
-                )
-                current_price = entry_price
-            if entry_price <= 0.0:
-                entry_price = current_price if current_price > 0.0 else 0.0
-            if current_price <= 0.0:
-                current_price = entry_price
-            realized_candidate = record.get("realized") or record.get("pnl")
-            try:
-                realized = (
-                    _to_float(realized_candidate)
-                    if realized_candidate is not None
-                    else 0.0
-                )
-            except Exception:  # noqa: BLE001 - defensive decode
-                realized = 0.0
 
-            existing = self._positions.get(symbol)
+            # 3. Price & PnL Extraction
+            entry_price = _get_float(record, ["average_price", "avg_price", "price", "buy_price"])
+            current_price = _get_float(record, ["last_price", "ltp", "close", "sell_price"], default=entry_price)
+            realized_pnl = _get_float(record, ["realized", "pnl", "m2m", "realised"])
+
+            # Sanity check: Ensure prices are positive if possible
+            if entry_price <= 0.0 and current_price > 0.0:
+                entry_price = current_price
+            if current_price <= 0.0 and entry_price > 0.0:
+                current_price = entry_price
+
+            # 4. Construct Position Object
             try:
+                # Check if we have an existing position to preserve metadata
+                existing = self._positions.get(symbol)
+
                 if existing is None:
+                    # Import NEW position
                     position = self._create_position(
                         symbol=symbol,
                         quantity=abs_quantity,
                         side=side,
                         entry_price=entry_price,
                         current_price=current_price,
-                        realized_pnl=realized,
+                        realized_pnl=realized_pnl,
                         source="broker_sync",
                     )
                     self._logger.info(
-                        "Condition met: position.sync.import",
-                        extra={
-                            "event": "position_manager_sync_import",
-                            "symbol": symbol,
-                            "quantity": abs_quantity,
-                            "side": side,
-                        },
+                        f"Sync: Imported NEW {side} position: {symbol} x {abs_quantity}"
                     )
                 else:
+                    # Update EXISTING position
                     position = self._update_position(
                         position=existing,
                         quantity=abs_quantity,
                         side=side,
                         entry_price=entry_price,
                         current_price=current_price,
-                        realized_pnl=realized,
+                        realized_pnl=realized_pnl,
                         source="broker_sync",
                     )
-                    self._logger.info(
-                        "Condition met: position.sync.update",
-                        extra={
-                            "event": "position_manager_sync_update",
-                            "symbol": symbol,
-                            "quantity": abs_quantity,
-                            "side": side,
-                        },
-                    )
-            except Exception as exc:  # noqa: BLE001 - defensive apply
+                
+                reconciled[symbol] = position
+
+            except Exception as exc:
                 self._logger.error(
                     "Failure applying broker snapshot for %s: %s",
                     symbol,
                     exc,
                     extra={"event": "position_manager_sync_apply_error"},
-                    exc_info=exc,
+                    exc_info=True,
                 )
                 continue
-            reconciled[symbol] = position
 
-        if not reconciled:
-            if self._positions:
-                removed_symbols = sorted(self._positions)
-                self._positions = {}
-                self._logger.info(
-                    "Condition met: position.sync.cleared",
-                    extra={
-                        "event": "position_manager_sync_cleared",
-                        "symbols": removed_symbols,
-                    },
-                )
-                try:
-                    self.save_state()
-                except Exception as exc:  # noqa: BLE001 - defensive persist
-                    self._logger.error(
-                        "Failure persisting synchronized positions: %s",
-                        exc,
-                        extra={"event": "position_manager_sync_persist_error"},
-                        exc_info=exc,
-                    )
-            else:
-                self._logger.info(
-                    "Condition met: synchronize_with_broker_no_change",
-                    extra={"event": "position_manager_sync_skipped"},
-                )
+        # 5. Atomic Reconciliation & Persistence
+        with self._lock:
+            old_keys = set(self._positions.keys())
+            new_keys = set(reconciled.keys())
+            
+            # Identify what changed
+            removed_symbols = sorted(old_keys - new_keys)
+            added_symbols = sorted(new_keys - old_keys)
+            
+            # The Swap
+            self._positions = reconciled
+
+        # 6. Logging & Saving (Outside Lock)
+        if removed_symbols:
+            self._logger.info(
+                f"Sync: Pruned {len(removed_symbols)} positions not found in broker: {removed_symbols}"
+            )
+        
+        if not old_keys and not new_keys:
+            self._logger.debug("Sync: Broker and local state both empty.")
             return
 
-        removed = sorted(set(self._positions) - set(reconciled))
-        self._positions = reconciled
-        if removed:
-            self._logger.info(
-                "Condition met: position.sync.removed",
-                extra={"event": "position_manager_sync_removed", "symbols": removed},
-            )
-        self._logger.info(
-            "Condition met: synchronize_with_broker_applied",
-            extra={
-                "event": "position_manager_sync_applied",
-                "count": len(reconciled),
-                "symbols": sorted(reconciled),
-            },
-        )
         try:
             self.save_state()
-        except Exception as exc:  # noqa: BLE001 - defensive persist
+            self._logger.info(
+                "Sync: Completed successfully.",
+                extra={
+                    "total_managed": len(self._positions),
+                    "added": len(added_symbols),
+                    "removed": len(removed_symbols)
+                }
+            )
+        except Exception as exc:
             self._logger.error(
                 "Failure persisting synchronized positions: %s",
                 exc,
                 extra={"event": "position_manager_sync_persist_error"},
-                exc_info=exc,
+                exc_info=True,
             )
 
     def _create_position(
