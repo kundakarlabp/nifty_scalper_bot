@@ -1566,6 +1566,8 @@ class StrategyRunner:
         Handle incoming tick safely, updating state and triggering strategies.
         Includes robust data extraction, validation, and multi-tier strategy execution.
         """
+        if "FUT" in symbol.upper():
+        return 
         
         # =================================================================
         # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
@@ -1809,8 +1811,10 @@ class StrategyRunner:
                 self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
 
             # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
-            # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
-            if generated_signal is None and state.vwap and state.vwap > 0:
+            if (generated_signal is None 
+                and state.vwap 
+                and state.vwap > 0 
+                and "FUT" not in symbol.upper()):
                 prev_ltp = _extract_float(state.last_tick, "ltp", "last_price") if state.last_tick else None
                 curr_vwap = state.vwap
 
@@ -2213,8 +2217,10 @@ class StrategyRunner:
                 
                 if delta < debounce_limit:
                     self._logger.info(
-                        f"⏳ DEBOUNCE: Ignoring {base_symbol} signal. "
-                        f"Wait {debounce_limit - delta:.1f}s more."
+                        f"⏳ DEBOUNCE REJECT: {base_symbol} | "
+                        f"Wait {debounce_limit - delta:.1f}s more | "
+                        f"Action={signal.action}",
+                        extra={"event": "signal_debounce_reject", "symbol": base_symbol}
                     )
                     return
 
@@ -2224,9 +2230,12 @@ class StrategyRunner:
         if self._position_manager:
             active_contract = self._position_manager.get_active_contract(base_symbol)
             if active_contract and not self._risk_manager.settings.allow_pyramiding:
-                 self._logger.info(
-                     f"🛡️ SKIPPED: Already active on {active_contract.symbol}. Pyramiding Disabled."
-                 )
+                self._logger.info(
+                    f"🛡️ PYRAMID REJECT: {base_symbol} | "
+                    f"Already active on {active_contract.symbol} | "
+                    f"Pyramiding Disabled",
+                    extra={"event": "signal_pyramid_reject", "symbol": base_symbol}
+                )
                  # Update signal timer to prevent log spam
                  with self._lock:
                      if state: state.last_signal_at = timestamp
@@ -2240,7 +2249,11 @@ class StrategyRunner:
         min_confidence = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45"))
         
         if confidence < min_confidence:
-            self._logger.info(f"🚫 Low Confidence Signal: {confidence:.2f} (min: {min_confidence:.2f})")
+            self._logger.info(
+                f"🚫 CONFIDENCE REJECT: {base_symbol} | "
+                f"Score={confidence:.2f} < min={min_confidence:.2f}",
+                extra={"event": "signal_confidence_reject", "symbol": base_symbol}
+            )
             return
         action = signal.action
 
@@ -2263,8 +2276,11 @@ class StrategyRunner:
             
             # SCALP RULE: For BUY (Long), Price must be ABOVE VWAP
             if action == "BUY" and trade_price < current_vwap:
-                self._logger.warning(
-                    f"🛑 VWAP BLOCK: Price {trade_price:.2f} < VWAP {current_vwap:.2f} (Dist: {vwap_dist:.2f}%). Skipping BUY."
+                self._logger.info(
+                    f"🛑 VWAP REJECT: {base_symbol} | "
+                    f"Price={trade_price:.2f} < VWAP={current_vwap:.2f} | "
+                    f"Dist={vwap_dist:.2f}%",
+                    extra={"event": "signal_vwap_reject", "symbol": base_symbol}
                 )
                 self._record_trade(
                     base_symbol, 
@@ -2289,8 +2305,14 @@ class StrategyRunner:
             metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
             option_type = metadata.get("option_type")
 
-            if not option_type and self._legacy_side_to_type:
+            # ✅ FIX: ALWAYS infer option_type from direction if missing
+            # This ensures strike selector always gets a valid option_type
+            # Removes dependency on _legacy_side_to_type flag
+            if not option_type:
                 option_type = "CE" if direction == "BULLISH" else "PE"
+                self._logger.debug(
+                    f"Inferred option_type={option_type} from direction={direction} for {base_symbol}"
+                )
 
             sell_premium = bool(metadata.get("sell_premium")) and not self._options_long_only
             entry_side: OrderSide = "SELL" if sell_premium else "BUY"
@@ -2344,7 +2366,12 @@ class StrategyRunner:
                     trade_price = selection.ltp or trade_price
 
             if not selection:
-                self._logger.warning(f"🔴 No Contract Selected for {base_symbol}.")
+                self._logger.warning(
+                    f"🔴 CONTRACT REJECT: {base_symbol} | "
+                    f"No option contract selected | "
+                    f"Check option chain data availability",
+                    extra={"event": "signal_contract_reject", "symbol": base_symbol}
+                )
                 return
 
             # Monthly Lockout Check
