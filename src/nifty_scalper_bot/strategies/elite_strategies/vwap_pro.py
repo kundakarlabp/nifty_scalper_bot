@@ -29,6 +29,7 @@ class VWAPProStrategy(EliteStrategy):
     2. Retrace to VWAP.
     3. Bounce/Rejection at VWAP with Volume.
     """
+    MIN_BARS_REQUIRED = 1
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_vwap_config",)
