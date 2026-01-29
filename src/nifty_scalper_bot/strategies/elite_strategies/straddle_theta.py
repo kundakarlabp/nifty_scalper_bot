@@ -26,6 +26,7 @@ class StraddleThetaStrategy(EliteStrategy):
     Delta-Neutral-ish / Theta-Positive strategy.
     Shorts ATM/OTM options when market is range-bound (Low ADX) and IV is decent.
     """
+    MIN_BARS_REQUIRED = 3
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_theta_config",)
