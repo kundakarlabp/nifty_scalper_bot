@@ -27,6 +27,7 @@ class ORBProStrategy(EliteStrategy):
     Trade validated Opening Range Breakouts (ORB) with volume confirmation.
     Includes VWAP filtering to avoid false breakouts.
     """
+    MIN_BARS_REQUIRED = 5
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_orb_config", "_orb_cache")
