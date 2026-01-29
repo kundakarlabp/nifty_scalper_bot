@@ -120,11 +120,23 @@ class VWAPProStrategy(EliteStrategy):
                 return None
 
             # 3. Logic: Detect VWAP Interaction (The Pullback)
-            proximity = current_price * 0.0015
+            # ✅ FIX: Relaxed proximity for options (more volatile)
+            # Options can move 5-10% in minutes, so 0.15% is too tight
+            is_option = "CE" in symbol or "PE" in symbol
+            proximity_pct = 0.02 if is_option else 0.0015  # 2% for options, 0.15% for index
+            proximity = current_price * proximity_pct
+            
             touched_vwap = (low <= vwap <= high)
             near_vwap = abs(current_price - vwap) <= proximity
+            
+            # ✅ NEW: Also consider strong trend continuation
+            trend_momentum = abs(current_price - vwap) / vwap
+            strong_trend = trend_momentum > 0.05  # >5% from VWAP = strong trend
+            
+            # Allow signal if: near VWAP OR in strong trend with correct direction
+            should_evaluate = touched_vwap or near_vwap or (strong_trend and trend_bullish)
 
-            if not (touched_vwap or near_vwap):
+            if not should_evaluate:
                 return None
 
             # 4. Logic: Volume Confirmation
