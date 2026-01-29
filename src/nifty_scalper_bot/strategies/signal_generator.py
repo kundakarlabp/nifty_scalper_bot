@@ -970,17 +970,27 @@ class StrategyManager:
                 # Gating: Min Bars
                 strategy_min_bars = getattr(strategy, 'MIN_BARS_REQUIRED', 3)
                 if bar_count < strategy_min_bars:
+                    logger.debug(
+                        f"⏭️ SKIP {strategy.name}: Need {strategy_min_bars} bars, have {bar_count}"
+                    )
                     skip_count += 1
                     continue
                 
                 # Gating: Missing Data
                 reqs = strategy.get_required_indicators()
-                if any(indicators.get(k) is None for k in reqs):
+                missing = [k for k in reqs if indicators.get(k) is None]
+                if missing:
+                    logger.debug(
+                        f"⏭️ SKIP {strategy.name}: Missing indicators: {missing}"
+                    )
                     skip_count += 1
                     continue
 
                 # Gating: Low VIX filter for Momentum
                 if vix < 12.0 and ("Breakout" in strategy.name or "ORB" in strategy.name):
+                    logger.debug(
+                        f"⏭️ SKIP {strategy.name}: VIX too low ({vix:.1f} < 12.0)"
+                    )
                     skip_count += 1
                     continue
 
@@ -1014,9 +1024,19 @@ class StrategyManager:
                 logger.exception(f"Strategy {strategy.name} failed: {exc}")
                 continue
 
-        logger.debug(
-            f"StrategyManager Stats: Evaluated={eval_count}, Skipped={skip_count}, "
-            f"Signals={len(all_signals)} | {symbol}"
+        # ✅ FIX: Change to INFO level so we can see in production logs
+        logger.info(
+            f"📊 StrategyManager Stats: {symbol} | "
+            f"Evaluated={eval_count} | Skipped={skip_count} | "
+            f"Signals={len(all_signals)} | Strategies={len(self._strategies)}",
+            extra={
+                "event": "strategy_manager_stats",
+                "symbol": symbol,
+                "evaluated": eval_count,
+                "skipped": skip_count,
+                "signals": len(all_signals),
+                "total_strategies": len(self._strategies)
+            }
         )
 
         if not all_signals:
