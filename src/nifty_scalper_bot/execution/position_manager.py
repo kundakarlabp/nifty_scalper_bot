@@ -1724,6 +1724,36 @@ class PositionManager:
         )
         self.save_state()
 
+    def _safe_get_net_qty(record: Mapping[str, object]) -> int:
+    """
+    🚨 CRITICAL FIX: Safely extract net quantity with explicit None checks.
+    
+    Python's 'or' chain evaluates 0 as falsy:
+        0 or 65 = 65  ← WRONG!
+    
+    We need explicit None checks because 0 is a VALID quantity (position closed).
+    """
+    # Check net quantity fields FIRST with explicit None check
+    for key in ("net_qty", "net_quantity", "netQuantity", "net"):
+        val = record.get(key)
+        if val is not None:  # Explicit None check - 0 is valid!
+            try:
+                return int(float(val))
+            except (ValueError, TypeError):
+                continue
+    
+    # Only fallback to 'quantity' if ALL net keys are genuinely missing
+    # This is the dangerous fallback that caused the infinite loop
+    qty_val = record.get("quantity")
+    if qty_val is not None:
+        try:
+            return int(float(qty_val))
+        except (ValueError, TypeError):
+            pass
+    
+    return 0
+    
+
     def synchronize_with_broker(
         self, broker_positions: Sequence[Mapping[str, object]]
     ) -> None:
@@ -1767,17 +1797,7 @@ class PositionManager:
             symbol = str(raw_symbol).strip().upper()
             if not symbol:
                 continue
-            qty_candidate = (
-                record.get("net_qty")
-                or record.get("net_quantity")
-                or record.get("netQuantity")
-                or record.get("quantity")
-                or record.get("net")
-            )
-            quantity: int
-            try:
-                quantity = _to_int(qty_candidate)
-            except Exception as exc:  # noqa: BLE001 - defensive decode
+            quantity = _safe_get_net_qty(record)
                 self._logger.error(
                     "Failure decoding broker quantity for %s: %s",
                     symbol,
