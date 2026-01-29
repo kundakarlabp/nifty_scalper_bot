@@ -26,6 +26,7 @@ class SMCStrategy(EliteStrategy):
     Detects Liquidity Sweeps (Stop Hunts).
     Enters on Rejection Candles where price pierces a level (Bollinger Band) but closes back inside.
     """
+    MIN_BARS_REQUIRED = 15
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_smc_config",)
