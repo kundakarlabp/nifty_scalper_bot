@@ -925,7 +925,95 @@ class StrategyManager:
             self.max_iv_percentile = 85.0
             self.max_spread_pct = 5.0
 
-    def generate_signal
+    def generate_signal(self, symbol: str, current_price: float) -> Signal | None:
+        """
+        MASTER EXECUTION LOOP.
+        """
+        logger.debug(
+            "Entered StrategyManager.generate_signal",
+            extra={"event": "strategy_manager_generate", "symbol": symbol},
+        )
+
+        # 1. Fetch Position State
+        position = self._position_manager.get_position(symbol)
+
+        # 2. Gather All Required Indicators
+        required_indicators = {
+            "volume", "avg_volume", "minutes_since_open", "minutes_until_close",
+            "bar_count", "vix"
+        }
+        for strat in self._strategies:
+            required_indicators.update(strat.get_required_indicators())
+        
+        # Fetch from Engine
+        indicators = self._indicator_engine.get_indicators(symbol, list(required_indicators))
+        
+        # Basic Data Integrity Check
+        if not indicators:
+            logger.debug(f"SKIP {symbol}: No indicators returned from engine")
+            return None
+
+        # 3. Augment with Futures Data (if needed)
+        self._augment_futures_metrics(indicators)
+
+        # 4. Evaluate Strategies
+        all_signals: list[Signal] = []
+        eval_count = 0
+        skip_count = 0
+        
+        bar_count = int(float(indicators.get('bar_count', 0)))
+        vix = float(indicators.get('vix') or 15.0)
+        regime_factor = self._get_regime_modifier(vix)
+
+        for strategy in self._strategies:
+            try:
+                # Gating: Min Bars
+                strategy_min_bars = getattr(strategy, 'MIN_BARS_REQUIRED', 3)
+                if bar_count < strategy_min_bars:
+                    skip_count += 1
+                    continue
+                
+                # Gating: Missing Data
+                reqs = strategy.get_required_indicators()
+                if any(indicators.get(k) is None for k in reqs):
+                    skip_count += 1
+                    continue
+
+                # Gating: Low VIX filter for Momentum
+                if vix < 12.0 and ("Breakout" in strategy.name or "ORB" in strategy.name):
+                    skip_count += 1
+                    continue
+
+                eval_count += 1
+                signal = strategy.generate_signal(symbol, indicators, current_price, position)
+                
+                if signal:
+                    if regime_factor < 1.0:
+                        signal = dataclasses.replace(
+                            signal, 
+                            confidence=signal.confidence * regime_factor
+                        )
+                    
+                    all_signals.append(signal.with_metadata(
+                        indicators=indicators,
+                        source_strategy=strategy.name,
+                    ))
+                    
+                    logger.info(
+                        f"📊 Signal from {strategy.name}: {signal.action} | conf={signal.confidence:.2f}",
+                        extra={
+                            "event": "strategy_signal_generated",
+                            "strategy": strategy.name,
+                            "symbol": symbol,
+                            "action": signal.action,
+                            "confidence": signal.confidence,
+                        }
+                    )
+                    
+            except Exception as exc: 
+                logger.exception(f"Strategy {strategy.name} failed: {exc}")
+                continue
+
         logger.debug(
             f"StrategyManager Stats: Evaluated={eval_count}, Skipped={skip_count}, "
             f"Signals={len(all_signals)} | {symbol}"
@@ -934,21 +1022,13 @@ class StrategyManager:
         if not all_signals:
             return None
 
-        # ✅ Combine ALL signals using ensemble voting
+        # 5. Consensus / Ensemble Logic
         combined = self._combine_signals_ensemble(all_signals)
-                    
-            except Exception as exc: 
-                logger.exception("Strategy %s failed: %s", strategy.name, exc)
-                continue
-
-        if not signals:
-            logger.debug(f"StrategyManager Stats: Evaluated={eval_count}, Skipped={skip_count}, Signals=0 | {symbol}")
-            return None
-
-        combined = self._combine_signals(signals)
+        
         if not combined:
             return None
 
+        # 6. Global Risk & Physics Filters
         if ("CE" in symbol or "PE" in symbol) and not self._validate_option_physics(symbol, combined.action):
             logger.info(f"⛔ Rejected {symbol}: Failed Physics Check (Greeks/Liq)")
             return None
@@ -965,6 +1045,7 @@ class StrategyManager:
                 logger.info(f"⛔ Rejected {symbol}: Invalid Risk/Reward Profile")
                 return None
 
+        # 7. Final Output Filter
         if self._filter_signal(combined):
             if self._orchestrator:
                 try:
