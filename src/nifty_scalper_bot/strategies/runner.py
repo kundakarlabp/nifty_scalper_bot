@@ -2237,14 +2237,14 @@ class StrategyRunner:
                     extra={"event": "signal_pyramid_reject", "symbol": base_symbol}
                 )
                  # Update signal timer to prevent log spam
-                 with self._lock:
+                with self._lock:
                      if state: state.last_signal_at = timestamp
-                 return
+                return
 
         side = "LONG" if signal.action == "BUY" else "SHORT"
         confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
 
-        # ✅ WORLD CLASS FIX: Use environment variable for confidence threshold
+        # Confidence Threshold
         import os
         min_confidence = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45"))
         
@@ -2258,7 +2258,7 @@ class StrategyRunner:
         action = signal.action
 
         # ===========================================================
-        # ✅ FIX 1: SMART VWAP FILTER (Unshackles Elite Strategies)
+        # ✅ SMART VWAP FILTER (Unshackles Elite Strategies)
         # ===========================================================
         should_check_vwap = True
         if signal.metadata and signal.metadata.get("ignore_vwap"):
@@ -2305,19 +2305,14 @@ class StrategyRunner:
             metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
             option_type = metadata.get("option_type")
 
-            # ✅ FIX: ALWAYS infer option_type from direction if missing
-            # This ensures strike selector always gets a valid option_type
-            # Removes dependency on _legacy_side_to_type flag
+            # Always infer option_type if missing (Legacy Support)
             if not option_type:
                 option_type = "CE" if direction == "BULLISH" else "PE"
-                self._logger.debug(
-                    f"Inferred option_type={option_type} from direction={direction} for {base_symbol}"
-                )
 
             sell_premium = bool(metadata.get("sell_premium")) and not self._options_long_only
             entry_side: OrderSide = "SELL" if sell_premium else "BUY"
 
-            # Check active contract reuse logic
+            # Check active contract reuse logic (Scaling In)
             if self._position_manager:
                 active = self._position_manager.get_active_contract(base_symbol)
                 if active:
@@ -2339,7 +2334,7 @@ class StrategyRunner:
                             )
                             trade_symbol = selection.symbol
 
-            # Strategy Explicit Bypass
+            # Strategy Explicit Bypass (e.g. Signal is already on an Option)
             if not selection and (base_symbol.endswith("CE") or base_symbol.endswith("PE")):
                 selection = SelectedContract(
                     symbol=base_symbol,
@@ -2349,10 +2344,11 @@ class StrategyRunner:
                 )
                 trade_symbol = base_symbol
 
-            # Selector Call
-            # Selector Call
+            # -------------------------------------------------------------
+            # 🔎 SELECTOR CALL & PRICE SAFETY
+            # -------------------------------------------------------------
             if not selection:
-                # ✅ FIX: Use Safe Resolver with Null Guards
+                # Use Safe Resolver (Maps Futures -> Index)
                 selection = self._resolve_contract_safely(
                     base_symbol=base_symbol,
                     action=action,
@@ -2362,8 +2358,32 @@ class StrategyRunner:
                 
                 if selection:
                     trade_symbol = selection.symbol
-                    # Use selection LTP if available, otherwise fallback to index price
-                    trade_price = selection.ltp or trade_price
+                    
+                    # ✅ CRITICAL FIX: PRICE SAFETY CHECK
+                    # If we switched from Future/Index to Option, we MUST have the Option Price.
+                    # We cannot use the Underlying Price (e.g. 25000) for an Option (e.g. 200).
+                    
+                    if selection.ltp and selection.ltp > 0:
+                        trade_price = selection.ltp
+                    elif trade_symbol != base_symbol:
+                        # Fallback: Try fetching live quote for the Option
+                        # This happens if the selector found the symbol but hasn't received a tick yet
+                        q = self._market_data.get_quote(trade_symbol)
+                        
+                        # Extract price using robust helper (defined in file scope)
+                        safe_price = _extract_float(q, "ltp", "last_price", "close") if q else 0.0
+                        
+                        if safe_price > 0:
+                            trade_price = safe_price
+                            self._logger.info(f"🔄 Fetched fresh price for {trade_symbol}: {trade_price}")
+                        else:
+                            # CRITICAL: Do not trade if we don't know the Option price
+                            self._logger.error(
+                                f"🔴 PRICE MISSING: Cannot trade {trade_symbol}. "
+                                f"Selection LTP is None and Live Quote failed. "
+                                f"Preventing usage of Underlying Price ({trade_price})."
+                            )
+                            return
 
             if not selection:
                 self._logger.warning(
@@ -2382,9 +2402,7 @@ class StrategyRunner:
             # Apply Premium Targets & Risk Sizing
             signal = self._apply_premium_targets(signal, trade_price, entry_side)
             
-            # ═══════════════════════════════════════════════════════════
-            # ✅ FIX: Robust ATR extraction with multiple fallbacks
-            # ═══════════════════════════════════════════════════════════
+            # Use the robust ATR fallback helper
             atr_val = self._get_atr_with_fallback(
                 symbol=trade_symbol,
                 metadata=metadata,
@@ -2426,14 +2444,9 @@ class StrategyRunner:
                 return
 
             # ===========================================================
-            # ✅ FIX: SLIPPAGE KILLER (Marketable Limit Order)
+            # ✅ EXECUTION: Marketable Limit Order
             # ===========================================================
-            # Instead of MARKET (which can fill at any price), we send a LIMIT
-            # order slightly aggressive into the spread.
-            # Buy: Ask Price + 1% Buffer
-            # Sell: Bid Price - 1% Buffer
-            # This guarantees execution like Market, but caps slippage at 1%.
-            
+            # Send Limit slightly deeper than market to guarantee fill but cap slippage.
             execution_price = trade_price
             if self._market_data:
                 q = self._market_data.get_quote(trade_symbol)
@@ -2446,8 +2459,6 @@ class StrategyRunner:
 
             self._logger.info(f"🟡 SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty} Limit: {execution_price}")
             
-            # ✅ CORRECT FIX: Read from metadata safely
-            # Use .get() with a fallback 'MAN' (Manual) or 'UNK' (Unknown)
             strat_name = signal.metadata.get("strategy", "MAN") if signal.metadata else "MAN"
             unique_tag = f"{strat_name[:3]}_{int(timestamp.timestamp())}"
 
@@ -2455,15 +2466,15 @@ class StrategyRunner:
                 symbol=trade_symbol,
                 side=entry_side,
                 quantity=int(sized_qty),
-                order_type=OrderType.LIMIT, # <--- CHANGED to LIMIT
-                price=execution_price,      # <--- Protected Price
+                order_type=OrderType.LIMIT,
+                price=execution_price,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
                 signal_id=unique_tag,
                 tag=unique_tag
             )
-            # ✅ CRITICAL FIX: Always update timer OUTSIDE the success block
-            # This stops the infinite retry loop immediately.
+            
+            # ✅ Update State Timers (Debounce)
             with self._lock:
                 state = self._symbol_state.get(base_symbol)
                 if state: 
@@ -2476,7 +2487,7 @@ class StrategyRunner:
             if order_id:
                 self._logger.info(f"🟢 ORDER SUBMITTED! ID: {order_id}")
                 
-                # Async Verification
+                # Async Verification & Chase Logic
                 if self._main_loop and self._main_loop.is_running():
                     asyncio.run_coroutine_threadsafe(
                         self._verify_order_status(order_id, trade_symbol, 3.0),
@@ -2505,13 +2516,12 @@ class StrategyRunner:
                 self._set_trade_cooldown(base_symbol, timestamp)
             else:
                 self._logger.error(f"🔴 Order Execution Failed for {trade_symbol}")
-                # Timer was already updated above, so we won't retry instantly.
 
         except Exception as exc:
             self._logger.error(f"🔴 ENTRY LOGIC CRASH: {exc}", exc_info=True)
             # Ensure cooldown even on crash
             self._set_signal_cooldown(base_symbol, timestamp)
-
+            
     async def _verify_order_status(
         self, order_id: str, symbol: str, delay_seconds: float
     ) -> None:
