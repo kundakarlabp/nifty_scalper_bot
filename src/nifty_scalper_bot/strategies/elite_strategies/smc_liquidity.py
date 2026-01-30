@@ -51,7 +51,7 @@ class SMCStrategy(EliteStrategy):
             "bollinger_upper", 
             "bollinger_lower", 
             "volume", 
-            "average_volume", # Usually SMA(Volume, 20)
+            "avg_volume", # Usually SMA(Volume, 20)
             "atr", 
             "vwap",
             "high",
@@ -82,7 +82,7 @@ class SMCStrategy(EliteStrategy):
             upper = float(indicators.get("bollinger_upper") or 0.0)
             lower = float(indicators.get("bollinger_lower") or 0.0)
             vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("average_volume") or 1.0) # Avoid div/0
+            avg_vol = float(indicators.get("avg_volume") or 1.0) # Avoid div/0
             atr = float(indicators.get("atr") or 0.0)
             vwap = float(indicators.get("vwap") or current_price)
             
