@@ -200,9 +200,9 @@ class ORBProStrategy(EliteStrategy):
 
             # 6. Confidence Scoring
             # Base 80%. Boost if volume is massive (>2x)
-            confidence = 80.0
+            confidence = 0.80
             if (vol / avg_vol) > 2.0:
-                confidence += 10.0
+                confidence += 0.10
 
             LOGGER.info(
                 f"🚀 ORB Breakout: {symbol} {side} | Range: {range_low}-{range_high} | Vol: {(vol/avg_vol):.1f}x",
@@ -217,7 +217,7 @@ class ORBProStrategy(EliteStrategy):
             return EliteSignal(
                 symbol=symbol,
                 signal=side,
-                confidence=min(confidence, 99.0),
+                confidence=min(confidence, 0.99),
                 entry_price=current_price,
                 stop_loss=stop_loss,
                 target=tp1,
