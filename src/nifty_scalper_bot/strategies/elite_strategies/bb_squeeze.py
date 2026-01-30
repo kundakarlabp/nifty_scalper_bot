@@ -127,8 +127,8 @@ class BBSqueezeStrategy(EliteStrategy):
 
             # 6. Confidence Scoring
             # Base 75%. +15% if volume is extreme (>2.5x)
-            confidence = 75.0
-            if vol_ratio > 2.5: confidence += 15.0
+            confidence = o.75
+            if vol_ratio > 2.5: confidence += 0.15
 
             LOGGER.info(
                 f"🚀 BB Squeeze Breakout: {symbol} {side} | Bandwidth: {bandwidth_pct:.2f}% | Vol: {vol_ratio:.1f}x",
@@ -143,7 +143,7 @@ class BBSqueezeStrategy(EliteStrategy):
             return EliteSignal(
                 symbol=symbol,
                 signal=side,
-                confidence=min(confidence, 99.0),
+                confidence=min(confidence, 0.99),
                 entry_price=current_price,
                 stop_loss=stop_loss,
                 target=tp1,
