@@ -57,7 +57,7 @@ class ORBProStrategy(EliteStrategy):
             "low",
             "ltp",
             "volume",
-            "average_volume",
+            "avg_volume",
             "vwap",
             "atr",
             "timestamp" # Needed to check time of day
@@ -84,7 +84,7 @@ class ORBProStrategy(EliteStrategy):
             current_high = float(indicators.get("high") or current_price)
             current_low = float(indicators.get("low") or current_price)
             vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("average_volume") or 1.0)
+            avg_vol = float(indicators.get("avg_volume") or 1.0)
             vwap = float(indicators.get("vwap") or 0.0)
             atr = float(indicators.get("atr") or 0.0)
             
