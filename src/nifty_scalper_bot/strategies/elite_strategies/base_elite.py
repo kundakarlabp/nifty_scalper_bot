@@ -115,8 +115,6 @@ class EliteStrategy(Strategy):
         if hasattr(self, '_orchestrator') and self._orchestrator:
             if not self._orchestrator._has_capital_headroom_quick():
                 return None
-    
-        return self._evaluate_signal(symbol, indicators, current_price, position)
 
         elite_signal = self._evaluate_signal(
             symbol=symbol, 
