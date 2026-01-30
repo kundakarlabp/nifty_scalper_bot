@@ -127,7 +127,7 @@ class BBSqueezeStrategy(EliteStrategy):
 
             # 6. Confidence Scoring
             # Base 75%. +15% if volume is extreme (>2.5x)
-            confidence = o.75
+            confidence = 0.75
             if vol_ratio > 2.5: confidence += 0.15
 
             LOGGER.info(
