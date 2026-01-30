@@ -189,7 +189,7 @@ class GammaScalpingStrategy(EliteStrategy):
                     "type": "Momentum_Acceleration",
                     "gamma_efficiency": f"{gamma:.4f}/{theta:.1f}",
                     "momentum": "MACD_Bullish",
-                    "vol_ratio": round(vol_ratio, 2)
+                    "vol_ratio": round(vol_ratio, 2),
                     "option_type": option_type,
                 }
             )
