@@ -1031,26 +1031,50 @@ class StrategyManager:
                     extra={"event": "strategy_call"}
                 )
                 
+                # ---------------------------------------------------------
+                # ⚡ CORE SIGNAL GENERATION & AUTO-FIX LOGIC
+                # ---------------------------------------------------------
                 signal = strategy.generate_signal(symbol, indicators, current_price, position)
                 
                 if signal:
-                    # ═════════════════════════════════════════════════════════════
-                    # ✅ AUTO-FIX: Normalize Confidence Score (0-100 -> 0.0-1.0)
-                    # ═════════════════════════════════════════════════════════════
+                    # 🛡️ FIX 1: ELITE SIGNAL TRANSLATOR (EliteSignal -> Signal)
+                    # This prevents 'EliteSignal object has no attribute action' crash
+                    if not hasattr(signal, "action") and hasattr(signal, "signal"):
+                        # Map 'signal' field (Elite) to 'action' field (Standard)
+                        action_map = {"LONG": "BUY", "SHORT": "SELL"}
+                        raw_action = getattr(signal, "signal", "HOLD")
+                        final_action = action_map.get(raw_action, raw_action)
+                        
+                        # Map 'target' (Elite) to 'take_profit' (Standard)
+                        tp = getattr(signal, "target", None)
+                        
+                        # Create a valid Standard Signal
+                        signal = Signal(
+                            action=final_action,
+                            symbol=signal.symbol,
+                            quantity=getattr(signal, "quantity", 1),
+                            confidence=getattr(signal, "confidence", 0.0),
+                            reason=getattr(signal, "strategy_name", strategy.name),
+                            stop_loss=getattr(signal, "stop_loss", None),
+                            take_profit=tp,
+                            metadata=getattr(signal, "metadata", {})
+                        )
+
+                    # 🛡️ FIX 2: SCORE NORMALIZER (0-100 -> 0.0-1.0)
+                    # Automatically fix strategies returning 80.0 instead of 0.80
                     if signal.confidence > 1.0:
                         new_conf = signal.confidence / 100.0
-                        # Cap at 0.99 to prevent "100.0" or "999.0" bugs
-                        new_conf = min(new_conf, 0.99)
+                        new_conf = min(new_conf, 0.99) # Cap at 0.99
                         signal = dataclasses.replace(signal, confidence=new_conf)
 
-                    # Apply regime factor
+                    # Apply regime factor (Low VIX penalty)
                     if regime_factor < 1.0:
                         signal = dataclasses.replace(
                             signal, 
                             confidence=signal.confidence * regime_factor,
                         )
                     
-                    # ✅ Collect ALL signals with strategy attribution
+                    # Tag metadata and collect
                     all_signals.append(signal.with_metadata(
                         indicators=indicators,
                         source_strategy=strategy.name,
@@ -1101,7 +1125,7 @@ class StrategyManager:
 
         # 6. Global Risk & Physics Filters
         if ("CE" in symbol or "PE" in symbol) and not self._validate_option_physics(symbol, combined.action):
-            logger.info(f"⛔ Rejected {symbol}: Failed Physics Check (Greeks/Liq)")
+            self._logger.info(f"⛔ Rejected {symbol}: Failed Physics Check (Greeks/Liq)")
             return None
 
         if not combined.stop_loss or not combined.take_profit:
@@ -1113,7 +1137,7 @@ class StrategyManager:
                     take_profit=rr_levels[1]
                 )
             else:
-                logger.info(
+                self._logger.info(
                     f"⛔ RISK REJECT: {symbol} | "
                     f"Invalid Risk/Reward Profile | "
                     f"SL={combined.stop_loss} | TP={combined.take_profit}",
@@ -1127,11 +1151,11 @@ class StrategyManager:
                 try:
                     combined = self._orchestrator.filter_signal(combined, indicators, self._position_manager)
                 except Exception as exc:
-                    logger.error("Failure in orchestrator.filter_signal: %s", exc)
+                    self._logger.error("Failure in orchestrator.filter_signal: %s", exc)
                     return None
             
             if combined:
-                logger.info(
+                self._logger.info(
                     "✅ Signal Validated & Locked",
                     extra={
                         "event": "strategy_manager_signal_ready",
@@ -1144,7 +1168,7 @@ class StrategyManager:
                 return combined
         else:
             # ✅ NEW: Log when filter rejects signal
-            logger.info(
+            self._logger.info(
                 f"⛔ FILTER REJECT: {symbol} | "
                 f"Action={combined.action} | Conf={combined.confidence:.2f}",
                 extra={"event": "signal_filter_reject", "symbol": symbol}
