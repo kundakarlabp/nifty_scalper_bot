@@ -54,7 +54,7 @@ class GammaScalpingStrategy(EliteStrategy):
             "delta", 
             "ltp", 
             "volume", 
-            "average_volume",
+            "avg_volume",
             "macd",         # Momentum Trigger
             "macd_signal",  # Signal Line
             "atr"           # Volatility for stops
@@ -87,7 +87,7 @@ class GammaScalpingStrategy(EliteStrategy):
             
             atr = float(indicators.get("atr") or 0.0)
             vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("average_volume") or 1.0)
+            avg_vol = float(indicators.get("avg_volume") or 1.0)
 
             # Sanity Checks
             if current_price <= 0:
