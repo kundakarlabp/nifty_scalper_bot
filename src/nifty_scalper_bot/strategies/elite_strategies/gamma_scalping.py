@@ -145,13 +145,13 @@ class GammaScalpingStrategy(EliteStrategy):
 
             # 7. Confidence Scoring
             # Base 65% (Scalping is noisy).
-            confidence = 65.0
+            confidence = 0.65
             
             # Boost if Gamma is high (Acceleration is likely)
-            if gamma > 0.002: confidence += 15.0
+            if gamma > 0.002: confidence += 0.15
             
             # Boost if Volume is Absorbing (>2x)
-            if vol_ratio > 2.0: confidence += 10.0
+            if vol_ratio > 2.0: confidence += 0.10
 
             LOGGER.info(
                 f"⚡ Gamma Scalp: {symbol} {side} | Gamma: {gamma:.4f} | Theta: {theta:.2f} | MACD Diff: {(macd-signal_line):.2f}",
@@ -167,7 +167,7 @@ class GammaScalpingStrategy(EliteStrategy):
             return EliteSignal(
                 symbol=symbol,
                 signal=side,
-                confidence=min(confidence, 99.0),
+                confidence=min(confidence, 0.99),
                 entry_price=current_price,
                 stop_loss=stop_loss,
                 target=tp1,
