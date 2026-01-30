@@ -126,10 +126,22 @@ class GammaScalpingStrategy(EliteStrategy):
                 return None
 
             # 6. Construct Signal (Buy Scalp)
+            # 6. Construct Signal (Buy Scalp)
+            # ✅ FIX: Options Long-Only Mode handling
+            import os
+            options_long_only = os.getenv("OPTIONS_LONG_ONLY", "true").lower() == "true"
+            
+            option_type = None
             if bullish_momentum:
                 side = "BUY"
+                option_type = "CE"  # Bullish = Call
             else:
-                side = "SELL"  # For PUT buying on bearish momentum
+                # Bearish momentum
+                if options_long_only:
+                    side = "BUY"      # BUY the PUT option
+                    option_type = "PE"  # Bearish = Put
+                else:
+                    side = "SELL"     # Only for futures/short-selling mode
             
             # Fallback ATR
             if atr == 0: atr = current_price * 0.01
@@ -178,6 +190,7 @@ class GammaScalpingStrategy(EliteStrategy):
                     "gamma_efficiency": f"{gamma:.4f}/{theta:.1f}",
                     "momentum": "MACD_Bullish",
                     "vol_ratio": round(vol_ratio, 2)
+                    "option_type": option_type,
                 }
             )
 
