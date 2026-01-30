@@ -51,7 +51,7 @@ class OrderFlowStrategy(EliteStrategy):
             "vwap", 
             "atr", 
             "volume", 
-            "average_volume"
+            "avg_volume"
         }
 
     def _evaluate_signal(
@@ -84,7 +84,7 @@ class OrderFlowStrategy(EliteStrategy):
             vwap_deviation = abs(current_price - vwap) / vwap
             if vwap_deviation > 0.10:  # More than 10% deviation is suspicious
                 return None
-            avg_vol = float(indicators.get("average_volume") or 1.0) # Avoid div/0
+            avg_vol = float(indicators.get("avg_volume") or 1.0)
 
             # Sanity Check: If Depth is empty or Price is zero, skip
             if not depth or current_price <= 0:
