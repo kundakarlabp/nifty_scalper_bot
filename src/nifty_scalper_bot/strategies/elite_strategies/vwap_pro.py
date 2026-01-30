@@ -39,11 +39,13 @@ class VWAPProStrategy(EliteStrategy):
     """
     MIN_BARS_REQUIRED = 1
 
-    __slots__ = ("_vwap_config",)
+    __slots__ = ("_vwap_config", "_last_signal_time", "_signal_cooldown")
 
     def __init__(self, config: VWAPProStrategyConfig, indicator_engine: Any) -> None:
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._vwap_config = config
+        self._last_signal_time: dict[str, float] = {}
+        self._signal_cooldown = float(os.getenv("VWAP_SIGNAL_COOLDOWN", "30.0"))
 
     def get_required_indicators(self) -> set[str]:
         return {
