@@ -41,11 +41,13 @@ class EliteSignal:
     take_profit_1: float | None = None 
     take_profit_2: float | None = None
     side: str = field(init=False) 
+    action: str = field(init=False)
     
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
         object.__setattr__(self, 'side', self.signal)
+        object.__setattr__(self, 'action', self.signal)
         if self.target and not self.take_profit_1:
              object.__setattr__(self, 'take_profit_1', self.target)
 
