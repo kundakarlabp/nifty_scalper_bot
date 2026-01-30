@@ -77,6 +77,13 @@ class OrderFlowStrategy(EliteStrategy):
             vwap = float(indicators.get("vwap") or 0.0)
             atr = float(indicators.get("atr") or 0.0)
             vol = float(indicators.get("volume") or 0.0)
+            
+            # ✅ VWAP Sanity Check - Prevent false signals
+            if vwap <= 0:
+                return None
+            vwap_deviation = abs(current_price - vwap) / vwap
+            if vwap_deviation > 0.10:  # More than 10% deviation is suspicious
+                return None
             avg_vol = float(indicators.get("average_volume") or 1.0) # Avoid div/0
 
             # Sanity Check: If Depth is empty or Price is zero, skip
