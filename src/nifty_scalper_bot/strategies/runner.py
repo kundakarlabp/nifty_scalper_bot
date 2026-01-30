@@ -8,6 +8,7 @@ import threading
 import asyncio
 import time
 import time as time_module
+from datetime import timedelta
 import logging
 
 from collections import defaultdict, deque
@@ -381,6 +382,7 @@ class StrategyRunner:
             "iv": 0.1,
             "liquidity": 0.1,
         }
+        
 
         if strike_selector is not None:
             try:
@@ -439,7 +441,12 @@ class StrategyRunner:
         self._last_bar_ts: dict[str, datetime] = {}
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
-
+        self._orders_in_flight: dict[str, float] = {}  # symbol -> timestamp
+        self._order_in_flight_timeout: float = 30.0     # seconds
+        self._entry_lock = threading.Lock()             # Atomic entry lock
+        self._post_exit_cooldown_seconds: float = float(
+            os.getenv("POST_EXIT_COOLDOWN_SECONDS", "60.0")
+        )
     
 
     # ==================== LIFECYCLE MANAGEMENT ====================
@@ -1458,6 +1465,119 @@ class StrategyRunner:
                 extra={"event": "orchestrator_notify_exit_failed", "error": str(exc)},
             )
 
+    def _is_order_in_flight(self, symbol: str, underlying: str) -> bool:
+        """
+        Check if an order is currently pending for this symbol or underlying.
+        
+        This prevents duplicate order submissions when:
+        - Order is submitted but not yet filled
+        - Multiple ticks arrive before order confirmation
+        
+        Returns:
+            True if an order is in flight, False otherwise.
+        """
+        now = time.time()
+        with self._lock:
+            # Clean stale entries (orders older than timeout)
+            stale_symbols = [
+                s for s, t in self._orders_in_flight.items()
+                if now - t > self._order_in_flight_timeout
+            ]
+            for s in stale_symbols:
+                self._orders_in_flight.pop(s, None)
+                self._logger.debug(f"🧹 Cleared stale in-flight: {s}")
+            
+            # Check if symbol or underlying has pending order
+            if symbol in self._orders_in_flight:
+                elapsed = now - self._orders_in_flight[symbol]
+                self._logger.debug(
+                    f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s"
+                )
+                return True
+            
+            if underlying and underlying != symbol and underlying in self._orders_in_flight:
+                elapsed = now - self._orders_in_flight[underlying]
+                self._logger.debug(
+                    f"🛡️ UNDERLYING IN FLIGHT: {underlying} | Age: {elapsed:.1f}s"
+                )
+                return True
+            
+            return False
+
+    def _mark_order_in_flight(self, symbol: str, underlying: str | None = None) -> None:
+        """
+        Mark that an order has been submitted for this symbol.
+        
+        Args:
+            symbol: The actual trading symbol (option contract)
+            underlying: The base underlying (e.g., NIFTY)
+        """
+        now = time.time()
+        with self._lock:
+            self._orders_in_flight[symbol] = now
+            if underlying and underlying != symbol:
+                self._orders_in_flight[underlying] = now
+            
+            self._logger.info(
+                f"📌 MARKED IN-FLIGHT: {symbol}" + 
+                (f" (underlying: {underlying})" if underlying else "")
+            )
+
+    def _clear_order_in_flight(self, symbol: str) -> None:
+        """
+        Clear the in-flight status when order is filled/cancelled/rejected.
+        
+        Should be called from order update callback or verification routine.
+        """
+        with self._lock:
+            if symbol in self._orders_in_flight:
+                self._orders_in_flight.pop(symbol, None)
+                self._logger.debug(f"✅ CLEARED IN-FLIGHT: {symbol}")
+            
+            # Also try to clear underlying
+            try:
+                underlying = self._normalize_symbol(symbol)
+                if underlying and underlying != symbol:
+                    self._orders_in_flight.pop(underlying, None)
+            except Exception:
+                pass
+
+    def _set_post_exit_cooldown(self, base_symbol: str, timestamp: datetime) -> None:
+        """
+        Set a cooldown period after exiting a position.
+        
+        This prevents the classic thrashing pattern:
+        - Close position at T=0
+        - New signal at T=0.1s  
+        - Re-enter immediately
+        - Price reverses, close again
+        - Repeat (burning capital on commissions)
+        
+        Args:
+            base_symbol: The underlying symbol
+            timestamp: When the exit occurred
+        """
+        with self._lock:
+            state = self._symbol_state.get(base_symbol)
+            if state:
+                cooldown_end = timestamp + timedelta(
+                    seconds=self._post_exit_cooldown_seconds
+                )
+                state.cooldown_until = cooldown_end
+                state.last_signal_at = timestamp
+                
+                self._logger.info(
+                    f"🛡️ POST-EXIT COOLDOWN: {base_symbol} | "
+                    f"No new entries until {cooldown_end.strftime('%H:%M:%S')} "
+                    f"({self._post_exit_cooldown_seconds}s)",
+                    extra={
+                        "event": "post_exit_cooldown_set",
+                        "symbol": base_symbol,
+                        "cooldown_seconds": self._post_exit_cooldown_seconds
+                    }
+                )
+
+
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
         # [MODIFIED] Using defined helper correctly
@@ -2209,6 +2329,59 @@ class StrategyRunner:
         trade_price: float,
         timestamp: datetime,
     ) -> None:
+        """
+        Handle entry signal execution with comprehensive safeguards.
+        
+        Production-grade protections:
+        1. Entry lock (atomic execution)
+        2. Order-in-flight check
+        3. Signal debounce
+        4. Position check (no pyramiding)
+        5. Confidence threshold
+        6. VWAP filter
+        7. Risk validation
+        """
+        
+        # ═══════════════════════════════════════════════════════════════
+        # 🛡️ GUARD 0: ATOMIC ENTRY LOCK
+        # Prevents race conditions when multiple ticks trigger signals
+        # ═══════════════════════════════════════════════════════════════
+        if not self._entry_lock.acquire(blocking=False):
+            self._logger.debug(
+                f"🛡️ ENTRY LOCK BUSY: {base_symbol} | "
+                "Another entry being processed",
+                extra={"event": "entry_lock_busy", "symbol": base_symbol}
+            )
+            return
+        
+        try:
+            self._handle_entry_signal_inner(
+                signal, base_symbol, trade_symbol, trade_price, timestamp
+            )
+        finally:
+            self._entry_lock.release()
+
+    def _handle_entry_signal_inner(
+        self,
+        signal: Signal,
+        base_symbol: str,
+        trade_symbol: str,
+        trade_price: float,
+        timestamp: datetime,
+    ) -> None:
+        """Inner implementation of entry signal handling (lock already held)."""
+        
+        # ═══════════════════════════════════════════════════════════════
+        # 🛡️ GUARD 0.5: ORDER IN-FLIGHT CHECK
+        # Prevents duplicate submissions before order fills
+        # ═══════════════════════════════════════════════════════════════
+        if self._is_order_in_flight(trade_symbol or base_symbol, base_symbol):
+            self._logger.info(
+                f"🛡️ ORDER IN-FLIGHT REJECT: {base_symbol} | "
+                "Waiting for pending order to complete",
+                extra={"event": "order_in_flight_reject", "symbol": base_symbol}
+            )
+            return
         # -----------------------------------------------------------
         # 🛡️ GUARD 1: Signal Debounce (Anti-Whipsaw)
         # -----------------------------------------------------------
@@ -2476,6 +2649,8 @@ class StrategyRunner:
                 signal_id=unique_tag,
                 tag=unique_tag
             )
+            if order_id:
+                self._mark_order_in_flight(trade_symbol, base_symbol)
             
             # ✅ Update State Timers (Debounce)
             with self._lock:
@@ -2541,6 +2716,9 @@ class StrategyRunner:
                 if not order: return
 
                 status = str(order.status).upper()
+                # ═══════════════════════════════════════════════════════
+                if status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED", "EXPIRED"]:
+                    self._clear_order_in_flight(symbol)
                 
                 # 🛡️ ACTIVE CHASE LOGIC
                 # If Limit Order is ignored by market (OPEN) after 3s, we must act.
@@ -2574,6 +2752,8 @@ class StrategyRunner:
 
                 elif status == "COMPLETE":
                     self._logger.info(f"✅ ORDER {order_id} FILLED.")
+                
+
                     
         except Exception as exc:
             self._logger.warning(f"Order verification/chase warning: {exc}")
@@ -2822,6 +3002,12 @@ class StrategyRunner:
                     str(exc),
                 ),
             )
+            # ═══════════════════════════════════════════════════════════
+            self._set_post_exit_cooldown(base_symbol, timestamp)
+            
+            # Also clear any in-flight status for this symbol
+            self._clear_order_in_flight(trade_symbol)
+
 
     # [PASTE THIS METHOD INTO StrategyRunner CLASS]
     def calculate_portfolio_greeks(self) -> dict[str, float]:
