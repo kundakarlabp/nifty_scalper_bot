@@ -895,6 +895,7 @@ class StrategyManager:
         self._position_manager = position_manager
         self._min_confidence = min_confidence
         self._data_hub = data_hub
+        self._logger = logger
         self._orchestrator = orchestrator
         self._futures_symbol = (futures_symbol or "NIFTY").strip().upper()
         self._futures_volume_history: Deque[float] = deque(maxlen=120)
@@ -1033,6 +1034,15 @@ class StrategyManager:
                 signal = strategy.generate_signal(symbol, indicators, current_price, position)
                 
                 if signal:
+                    # ═════════════════════════════════════════════════════════════
+                    # ✅ AUTO-FIX: Normalize Confidence Score (0-100 -> 0.0-1.0)
+                    # ═════════════════════════════════════════════════════════════
+                    if signal.confidence > 1.0:
+                        new_conf = signal.confidence / 100.0
+                        # Cap at 0.99 to prevent "100.0" or "999.0" bugs
+                        new_conf = min(new_conf, 0.99)
+                        signal = dataclasses.replace(signal, confidence=new_conf)
+
                     # Apply regime factor
                     if regime_factor < 1.0:
                         signal = dataclasses.replace(
@@ -1066,7 +1076,7 @@ class StrategyManager:
                 continue
 
         # ✅ FIX: Change to INFO level so we can see in production logs
-        logger.info(
+        self._logger.info(
             f"📊 StrategyManager Stats: {symbol} | "
             f"Evaluated={eval_count} | Skipped={skip_count} | "
             f"Signals={len(all_signals)} | Strategies={len(self._strategies)}",
