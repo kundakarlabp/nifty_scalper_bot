@@ -639,6 +639,7 @@ class IndicatorEngine:
             if tail:
                 avg_volume = sum(float(v) for v in tail) / len(tail)
                 indicators["avg_volume"] = avg_volume
+                indicators["average_volume"] = avg_volume  # ✅ ADD ALIAS
                 if avg_volume > 0:
                     indicators["volume_spike_ratio"] = last_volume / avg_volume
 
