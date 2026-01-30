@@ -116,7 +116,7 @@ class RSIDivergenceStrategy(EliteStrategy):
                         return EliteSignal(
                             symbol=symbol,
                             signal="BUY",
-                            confidence=80.0,
+                            confidence=0.80,
                             stop_loss=current_price - (atr * 2.0),
                             target=current_price + (atr * 4.0),
                             quantity=self._config.quantity or 1,
@@ -143,7 +143,7 @@ class RSIDivergenceStrategy(EliteStrategy):
                         return EliteSignal(
                             symbol=symbol,
                             signal="SELL",
-                            confidence=80.0,
+                            confidence=0.80,
                             stop_loss=current_price + (atr * 2.0),
                             target=current_price - (atr * 4.0),
                             quantity=self._config.quantity or 1,
