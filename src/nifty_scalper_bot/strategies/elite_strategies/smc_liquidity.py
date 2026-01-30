@@ -147,9 +147,9 @@ class SMCStrategy(EliteStrategy):
 
             # 5. Confidence Scoring
             # Base confidence 75%, +15% if volume is massive (>2x avg)
-            confidence = 75.0
+            confidence = 0.75
             if vol_ratio > 2.0:
-                confidence += 15.0
+                confidence += 0.15
 
             LOGGER.info(
                 f"🚀 SMC Sweep Detected: {symbol} {signal_side} | Vol: {vol_ratio:.1f}x | Wick: {sweep_level}",
@@ -164,7 +164,7 @@ class SMCStrategy(EliteStrategy):
             return EliteSignal(
                 symbol=symbol,
                 signal=signal_side, # Standardized to "BUY" / "SELL"
-                confidence=min(confidence, 99.0),
+                confidence=min(confidence, 0.99),
                 entry_price=close, # Enter at close of rejection candle
                 stop_loss=stop_loss,
                 target=tp1, # Primary Target
