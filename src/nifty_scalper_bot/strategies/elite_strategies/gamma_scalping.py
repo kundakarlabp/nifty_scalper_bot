@@ -109,17 +109,14 @@ class GammaScalpingStrategy(EliteStrategy):
                 # Too expensive to hold this position
                 return None
 
-            # 4. Logic: Momentum Trigger (MACD Crossover)
-            # This is a Scalper: We want to enter EXACTLY when momentum shifts.
             # Bullish Crossover: MACD crosses above Signal
             bullish_momentum = (macd > signal_line) and (macd - signal_line) > 0.5
             
-            # Bearish Crossover (for Shorting Options/Futures, or exiting)
-            # If trading Options Long, we generally only care about Bullish Momentum of the option price.
-            # However, if this strategy manages FUTURES, we can short.
-            # Assuming Option Buying for Gamma Scalping here.
+            # Bearish Crossover: MACD crosses below Signal
+            bearish_momentum = (macd < signal_line) and (signal_line - macd) > 0.5
             
-            if not bullish_momentum:
+            # Skip if no momentum in either direction
+            if not bullish_momentum and not bearish_momentum:
                 return None
 
             # 5. Logic: Volume Confirmation
@@ -129,7 +126,10 @@ class GammaScalpingStrategy(EliteStrategy):
                 return None
 
             # 6. Construct Signal (Buy Scalp)
-            side = "BUY"
+            if bullish_momentum:
+                side = "BUY"
+            else:
+                side = "SELL"  # For PUT buying on bearish momentum
             
             # Fallback ATR
             if atr == 0: atr = current_price * 0.01
