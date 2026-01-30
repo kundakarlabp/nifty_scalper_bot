@@ -123,7 +123,10 @@ class SMCStrategy(EliteStrategy):
             tp1 = 0.0
             tp2 = 0.0
             
-            buffer = atr * 0.2 # Tiny buffer for SL
+            # ✅ ATR fallback to prevent zero stop-loss
+            if atr <= 0:
+                atr = current_price * 0.01  # 1% fallback
+            buffer = max(atr * 0.2, current_price * 0.002)  # Min 0.2% buffer
 
             if bullish_sweep:
                 signal_side = "BUY"
