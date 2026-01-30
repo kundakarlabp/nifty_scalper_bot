@@ -141,9 +141,9 @@ class OrderFlowStrategy(EliteStrategy):
 
             # 5. Confidence Scoring
             # Base 75%. Boost if Wall exists or Imbalance is extreme (>3x)
-            confidence = 75.0
-            if has_bid_wall or has_ask_wall: confidence += 10.0
-            if imbalance_ratio > 3.0 or imbalance_ratio < 0.3: confidence += 10.0
+            confidence = 0.75
+            if has_bid_wall or has_ask_wall: confidence += 0.10
+            if imbalance_ratio > 3.0 or imbalance_ratio < 0.3: confidence += 0.10
 
             LOGGER.info(
                 f"🌊 Order Flow Signal: {symbol} {side} | Imbalance: {imbalance_ratio:.2f} | Wall: {'Yes' if (has_bid_wall or has_ask_wall) else 'No'}",
@@ -158,7 +158,7 @@ class OrderFlowStrategy(EliteStrategy):
             return EliteSignal(
                 symbol=symbol,
                 signal=side,
-                confidence=min(confidence, 99.0),
+                confidence=min(confidence, 0.99),
                 entry_price=current_price,
                 stop_loss=stop_loss,
                 target=tp1,
