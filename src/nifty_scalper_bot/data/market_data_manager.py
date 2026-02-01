@@ -971,9 +971,9 @@ class MarketDataManager:
         tick = self.get_latest_tick(symbol)
         if tick is not None:
             try:
-                    return float(tick["ltp"])
-                except (KeyError, TypeError, ValueError):
-                    pass
+                return float(tick["ltp"])
+            except (KeyError, TypeError, ValueError):
+                pass
 
             # 🔴 REST fallback (already available in this class)
             broker = getattr(self, "_broker", None)
