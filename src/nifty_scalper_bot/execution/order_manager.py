@@ -9505,9 +9505,15 @@ class OrderManager:
                         except Exception:
                             pass 
 
-                    if hasattr(self._market_data, 'subscribe'):
-                        self._market_data.subscribe(symbol, bracket_tick_handler)
+                    if self._market_data:
+                        self._market_data.ensure_tracking(symbol, seed=True)
+
+                        if hasattr(self._market_data, 'subscribe'):
+                            self._market_data.subscribe(symbol, bracket_tick_handler)
+
                         self._bracket_tick_subscriptions.add(symbol)
+
+                    
                         self._logger.info(f"📡 Subscribed to {symbol} for guarding.")
         except Exception as e:
             self._logger.warning(f"Subscription attempt warning: {e}")
