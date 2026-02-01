@@ -1693,8 +1693,30 @@ class StrategyRunner:
         # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
         # =================================================================
         
-        # Skip if we already have an active position for this symbol
-        if self._position_manager and self._position_manager.get_active_contract(symbol):
+        # 🔴 FIX 2: ORPHAN GUARD (Stops the infinite loop)
+        # If we already have a position in this symbol, DO NOT generate new signals.
+        if self._position_manager:
+            active_pos = self._position_manager.get_active_contract(symbol)
+            if active_pos:
+                # Check if it is an orphan (manual/unknown strategy)
+                strat = getattr(active_pos, "strategy", "") or "unknown"
+                
+                if "manual" in strat.lower() or "unknown" in strat.lower():
+                    # Log once every 30s to avoid spam
+                    log_throttled(
+                        self._logger,
+                        f"orphan_guard_{symbol}",
+                        f"🛡️ ORPHAN GUARD: {symbol} has unmanaged position. Blocking new signals.",
+                        interval_sec=30.0,
+                        level=logging.WARNING
+                    )
+                    return # <--- STOP HERE. Do not calculate signals.
+
+                # If it is a managed trade, we also stop (standard logic)
+                return
+
+        # 1. Market Time Check
+        if not self._is_market_open(now):
             return
 
         # =================================================================
