@@ -1,26 +1,5 @@
-"""
-VWAP Pro Strategy - PRACTICAL PRODUCTION FIX
-═══════════════════════════════════════════════════════════════════════════════
-
-This version works with EXISTING infrastructure without requiring new indicator fields.
-
-FIXES:
-1. ✅ CE only trades bullish (price > vwap), PE only trades bearish (price < vwap)
-2. ✅ Per-symbol signal cooldown prevents spam (30s default)
-3. ✅ Volume fallback handles empty history gracefully
-4. ✅ Options long-only mode: bearish = BUY PUT (not SELL)
-
-KEY INSIGHT: Instead of requiring underlying_ema (which doesn't exist), 
-we use a simple rule:
-- For CE options: Only signal when option price > VWAP (bullish momentum)
-- For PE options: Only signal when option price < VWAP (bearish momentum)
-
-This eliminates the contradiction of both CE and PE signaling simultaneously.
-"""
-
 from __future__ import annotations
 
-import os
 import time as time_module
 from typing import Any, Dict
 
@@ -38,156 +17,263 @@ LOGGER = get_logger(__name__)
 
 class VWAPProStrategy(EliteStrategy):
     """
-    VWAP Pro Strategy - Practical Production Implementation
-    
-    Key Logic:
-    - CE options: Only trade when showing BULLISH characteristics
-    - PE options: Only trade when showing BEARISH characteristics
-    - This prevents contradictory signals on same underlying
+    VWAP Pro – Final Institutional Grade Strategy
+
+    Features:
+    ✔ Expiry rollover handling
+    ✔ Expiry-aware strike locking
+    ✔ VWAP deviation bands
+    ✔ VWAP acceptance window
+    ✔ Session anchoring
+    ✔ Regime-aware VWAP
+    ✔ Time-based regime decay
+    ✔ Confidence-weighted sizing
+    ✔ Auto-unlock on exit
+    ✔ Performance telemetry hooks
     """
+
     MIN_BARS_REQUIRED = 1
 
-    __slots__ = ("_vwap_config", "_signal_cooldown_tracker")
+    COOLDOWN_SECONDS = 90
+    VWAP_ACCEPTANCE_BARS = 2
+    REGIME_DECAY_SECONDS = 20 * 60
+    VWAP_BAND_MULTIPLIER = 0.6
+    TELEMETRY_LOG_EVERY = 10
+
+    __slots__ = (
+        "_vwap_config",
+        "_signal_cooldown_tracker",
+        "_vwap_acceptance_tracker",
+        "_strike_lock",
+        "_index_regime",
+        "_regime_timestamp",
+        "_last_expiry",
+        "_telemetry",
+    )
 
     def __init__(self, config: VWAPProStrategyConfig, indicator_engine: Any) -> None:
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._vwap_config = config
+
         self._signal_cooldown_tracker: Dict[str, float] = {}
+        self._vwap_acceptance_tracker: Dict[str, int] = {}
+        self._strike_lock: Dict[str, str] = {}
+        self._index_regime: Dict[str, str] = {}
+        self._regime_timestamp: Dict[str, float] = {}
+        self._last_expiry: str | None = None
+
+        self._telemetry: Dict[str, int] = {
+            "signals": 0,
+            "ce": 0,
+            "pe": 0,
+            "trend": 0,
+            "range": 0,
+            "open": 0,
+            "mid": 0,
+        }
 
     def get_required_indicators(self) -> set[str]:
         return {
-            "vwap", 
-            "ema",
+            "vwap",
             "atr",
-            "volume", 
+            "volume",
             "avg_volume",
-            "high",
-            "low", 
-            "close",
             "open",
+            "high",
+            "low",
+            "close",
         }
 
+    # ───────────────────────────────
+    # Helpers
+    # ───────────────────────────────
+
+    def _session_phase(self) -> str:
+        t = time_module.localtime()
+        minutes = t.tm_hour * 60 + t.tm_min
+        return "OPEN" if 555 <= minutes <= 600 else "MID"
+
+    def _extract_expiry(self, symbol: str) -> str:
+        digits = "".join(c for c in symbol if c.isdigit())
+        return digits[:5] if len(digits) >= 5 else "UNK"
+
+    # ───────────────────────────────
+    # Core Strategy
+    # ───────────────────────────────
+
     def _evaluate_signal(
-        self, 
-        symbol: str, 
-        indicators: Dict[str, Any], 
-        current_price: float, 
-        position: Any | None = None
+        self,
+        symbol: str,
+        indicators: Dict[str, Any],
+        current_price: float,
+        position: Any | None = None,
     ) -> EliteSignal | None:
-        """
-        Evaluate VWAP Pro signal with TREND ANCHORING.
-        """
         try:
-            # 1. Get Option & Index Data
+            now = time_module.time()
+
+            # ───────────────────────────────
+            # Auto-unlock on exit (SAFE)
+            # ───────────────────────────────
+            if position is None:
+                self._strike_lock.clear()
+
+            # ───────────────────────────────
+            # Expiry rollover handling
+            # ───────────────────────────────
+            expiry = self._extract_expiry(symbol)
+            if self._last_expiry and expiry != self._last_expiry:
+                self._strike_lock.clear()
+                self._vwap_acceptance_tracker.clear()
+                self._index_regime.clear()
+                self._regime_timestamp.clear()
+
+            self._last_expiry = expiry
+
+            # ───────────────────────────────
+            # Cooldown
+            # ───────────────────────────────
+            if (now - self._signal_cooldown_tracker.get(symbol, 0.0)) < self.COOLDOWN_SECONDS:
+                return None
+
             vwap = float(indicators.get("vwap") or 0.0)
-            
-            # Retrieve Index Data (Injected by StrategyManager)
-            # If not available, we default to 0.0 and skip the anchor check (risky but functional)
-            index_ltp = float(indicators.get("nifty_index_ltp") or 0.0) 
-            index_vwap = float(indicators.get("nifty_index_vwap") or 0.0)
-            
-            # 2. Determine Option Type (CE or PE)
+            atr = float(indicators.get("atr") or 0.0)
+            if current_price <= 0 or vwap <= 0 or atr <= 0:
+                return None
+
             is_ce = "CE" in symbol.upper()
             is_pe = "PE" in symbol.upper()
+            if not (is_ce or is_pe):
+                return None
 
-            # ═════════════════════════════════════════════════════════════════
-            # 🛡️ ANCHOR LOGIC (The Fix for Rapid Firing)
-            # ═════════════════════════════════════════════════════════════════
+            index_key = "NIFTY"
+            direction = "CE" if is_ce else "PE"
+            lock_key = f"{index_key}:{expiry}:{direction}"
+
+            # ───────────────────────────────
+            # Regime detection + decay
+            # ───────────────────────────────
+            index_ltp = float(indicators.get("nifty_index_ltp") or 0.0)
+            index_vwap = float(indicators.get("nifty_index_vwap") or 0.0)
+
             if index_ltp > 0 and index_vwap > 0:
-                # Determine Macro Trend from Index
-                index_trend = "BULL" if index_ltp > index_vwap else "BEAR"
-                
-                # ⛔ REJECT CALLS if Index is Bearish
-                if is_ce and index_trend == "BEAR":
-                    return None
-                
-                # ⛔ REJECT PUTS if Index is Bullish
-                if is_pe and index_trend == "BULL":
-                    return None
+                regime = "TREND" if abs(index_ltp - index_vwap) > (index_vwap * 0.002) else "RANGE"
+                self._index_regime[index_key] = regime
+                self._regime_timestamp[index_key] = now
+            else:
+                regime = self._index_regime.get(index_key)
 
-            # 3. Standard VWAP Logic (Price must be valid)
-            if current_price <= 0 or vwap <= 0:
+            if (
+                index_key in self._regime_timestamp
+                and now - self._regime_timestamp[index_key] > self.REGIME_DECAY_SECONDS
+            ):
+                self._index_regime.pop(index_key, None)
                 return None
 
-            # 4. Entry Trigger: Price > VWAP (Momentum)
-            if current_price <= vwap:
-                return None 
-
-            # 5. Volume Confirmation (Fakeout Filter)
-            vol = float(indicators.get("volume") or 0)
-            avg_vol = float(indicators.get("average_volume") or 1)
-            
-            # Require 1.2x Volume vs Average (Slightly relaxed from 1.5x)
-            if vol < (avg_vol * 1.2): 
+            # ───────────────────────────────
+            # Session anchoring
+            # ───────────────────────────────
+            session = self._session_phase()
+            if session == "OPEN" and regime != "TREND":
+                return None
+            if session == "MID" and regime == "TREND":
                 return None
 
-            # 6. Construct Signal
-            # We always BUY options (Long CE or Long PE)
-            side = "BUY"
-            
-            atr = float(indicators.get("atr") or (current_price * 0.01))
-            stop_loss = current_price - (atr * 1.5)
-            target = current_price + (atr * 3.0)
+            # ───────────────────────────────
+            # VWAP deviation bands
+            # ───────────────────────────────
+            upper = vwap + atr * self.VWAP_BAND_MULTIPLIER
+            lower = vwap - atr * self.VWAP_BAND_MULTIPLIER
 
-            # 7. Confidence Scoring
-            # Base confidence 0.70 + Boosts
-            confidence = 0.70
-            if index_ltp > 0: confidence += 0.10 # Boost if we confirmed with Index
-            if vol > (avg_vol * 2.0): confidence += 0.10 # Boost for massive volume
+            if is_ce and current_price <= upper:
+                return None
+            if is_pe and current_price >= lower:
+                return None
+
+            # ───────────────────────────────
+            # VWAP acceptance
+            # ───────────────────────────────
+            acc_key = f"{symbol}_accept"
+            self._vwap_acceptance_tracker[acc_key] = self._vwap_acceptance_tracker.get(acc_key, 0) + 1
+            if self._vwap_acceptance_tracker[acc_key] < self.VWAP_ACCEPTANCE_BARS:
+                return None
+
+            # ───────────────────────────────
+            # Strike lock
+            # ───────────────────────────────
+            if lock_key in self._strike_lock:
+                return None
+
+            # ───────────────────────────────
+            # Volume filter
+            # ───────────────────────────────
+            vol = float(indicators.get("volume") or 0.0)
+            avg_vol = float(indicators.get("avg_volume") or 1.0)
+            if vol < avg_vol * 1.2:
+                return None
+
+            # ───────────────────────────────
+            # Risk geometry
+            # ───────────────────────────────
+            if is_ce:
+                sl = current_price - atr * 1.5
+                tp = current_price + atr * 3.0
+            else:
+                sl = current_price + atr * 1.5
+                tp = current_price - atr * 3.0
+
+            # ───────────────────────────────
+            # Confidence-weighted sizing
+            # ───────────────────────────────
+            confidence = 0.85
+            qty = int((self._vwap_config.quantity or 1) * confidence)
+            qty = max(1, qty)
+
+            # ───────────────────────────────
+            # Register state
+            # ───────────────────────────────
+            self._signal_cooldown_tracker[symbol] = now
+            self._strike_lock[lock_key] = symbol
+
+            # Telemetry
+            self._telemetry["signals"] += 1
+            self._telemetry["ce"] += int(is_ce)
+            self._telemetry["pe"] += int(is_pe)
+            self._telemetry["trend"] += int(regime == "TREND")
+            self._telemetry["range"] += int(regime == "RANGE")
+            self._telemetry["open"] += int(session == "OPEN")
+            self._telemetry["mid"] += int(session == "MID")
+
+            if self._telemetry["signals"] % self.TELEMETRY_LOG_EVERY == 0:
+                LOGGER.info(
+                    "📊 VWAP-Pro metrics",
+                    extra={"event": "vwap_pro_metrics", "metrics": self._telemetry},
+                )
 
             LOGGER.info(
-                f"🚀 VWAP Anchored Signal: {symbol} {side} | Index: {index_trend if index_ltp > 0 else 'N/A'}",
-                extra={
-                    "event": "vwap_pro_signal",
-                    "symbol": symbol,
-                    "index_trend": index_trend if index_ltp > 0 else "N/A",
-                    "confidence": confidence
-                }
+                f"🚀 VWAP-Pro FINAL SIGNAL: {symbol} BUY | {regime} | {session}",
+                extra={"event": "vwap_pro_signal"},
             )
 
             return EliteSignal(
                 symbol=symbol,
-                signal=side,
-                confidence=min(confidence, 0.99),
-                entry_price=current_price,
-                stop_loss=stop_loss,
-                target=target,
-                quantity=self._vwap_config.quantity or 1,
-                strategy_name="VWAP_Pro_Anchored",
-                metadata={
-                    "type": "Trend_Following",
-                    "anchor": "NIFTY_Index",
-                    "vol_ratio": round(vol/avg_vol, 2)
-                }
-            )
-
-        except Exception as e:
-            LOGGER.error(f"VWAP Strategy Error on {symbol}: {e}", exc_info=True)
-            return None
-
-            return EliteSignal(
-                symbol=symbol,
-                signal=side,
+                signal="BUY",
                 confidence=confidence,
                 entry_price=current_price,
-                stop_loss=stop_loss,
-                target=tp1,
-                quantity=self._vwap_config.quantity or 1,
-                strategy_name="VWAP_Pro_Trend",
+                stop_loss=sl,
+                target=tp,
+                quantity=qty,
+                strategy_name="VWAP_Pro_Ultimate",
                 metadata={
-                    "type": "Trend_Pullback",
-                    "vwap": round(vwap, 2),
-                    "ema_trend": trend_str,
-                    "vol_ratio": round(vol_ratio, 2),
-                    "atr": round(atr, 2),
-                    "option_type": option_type,
-                }
+                    "expiry": expiry,
+                    "regime": regime,
+                    "session": session,
+                },
             )
 
         except Exception as e:
             LOGGER.error(
-                f"🔴 VWAP Pro evaluation error: {e}",
-                extra={"event": "vwap_pro_error", "symbol": symbol}
+                f"🔴 VWAP-Pro fatal error on {symbol}: {e}",
+                exc_info=True,
             )
             return None
 
