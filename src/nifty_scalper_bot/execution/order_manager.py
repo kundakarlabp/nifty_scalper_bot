@@ -9536,7 +9536,9 @@ class OrderManager:
             else:
                 # [FIX] Return False gracefully, but we are now SUBSCRIBED.
                 # The next reconciliation loop will succeed.
-                self._logger.warning(f"⏳ Cannot guard {symbol} yet: Waiting for Tick/LTP...")
+                self._logger.warning(
+                    f"⏳ Cannot guard {symbol} yet: Waiting for Tick/LTP (tracking ensured)"
+                )
                 return False
 
         # --- STEP 2: Fix Accounting ---
