@@ -969,13 +969,26 @@ class MarketDataManager:
 
     def get_latest_price(self, symbol: str) -> float | None:
         tick = self.get_latest_tick(symbol)
-        if tick is None:
-            return None
-        try:
-            return float(tick["ltp"])
-        except (KeyError, TypeError, ValueError):
-            return None
+        if tick is not None:
+            try:
+                    return float(tick["ltp"])
+                except (KeyError, TypeError, ValueError):
+                    pass
 
+            # 🔴 REST fallback (already available in this class)
+            broker = getattr(self, "_broker", None)
+            if broker:
+                try:
+                    quote = broker.get_quote(symbol)
+                    if isinstance(quote, dict):
+                        price = quote.get("last_price") or quote.get("ltp")
+                        if price:
+                            return float(price)
+                except Exception:
+                    pass
+
+            return None
+            
     def _resolve_underlying_price(self, symbol: str) -> float | None:
         tick_price = self.get_latest_price(symbol)
         if tick_price is not None:
