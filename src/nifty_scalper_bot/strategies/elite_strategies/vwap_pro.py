@@ -75,197 +75,95 @@ class VWAPProStrategy(EliteStrategy):
         position: Any | None = None
     ) -> EliteSignal | None:
         """
-        Evaluate VWAP Pro signal with practical options handling.
+        Evaluate VWAP Pro signal with TREND ANCHORING.
         """
-        # ═══════════════════════════════════════════════════════════
-        # 🛡️ TIME GUARD
-        # ═══════════════════════════════════════════════════════════
         try:
-            from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
-            if not is_market_hours_cached():
-                return None
-        except ImportError:
-            pass
-
-        # ═══════════════════════════════════════════════════════════
-        # 🛡️ SIGNAL COOLDOWN (Prevents spam)
-        # ═══════════════════════════════════════════════════════════
-        cooldown_seconds = float(os.getenv("VWAP_SIGNAL_COOLDOWN", "30.0"))
-        now = time_module.time()
-        last_signal = self._signal_cooldown_tracker.get(symbol, 0)
-        
-        if now - last_signal < cooldown_seconds:
-            return None
-        
-        try:
-            # ═══════════════════════════════════════════════════════
-            # 1. DATA EXTRACTION
-            # ═══════════════════════════════════════════════════════
+            # 1. Get Option & Index Data
             vwap = float(indicators.get("vwap") or 0.0)
-            ema = float(indicators.get("ema") or 0.0)
-            atr = float(indicators.get("atr") or 0.0)
-            vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("avg_volume") or 0.0)
             
-            high = float(indicators.get("high") or current_price)
-            low = float(indicators.get("low") or current_price)
-            close = float(indicators.get("close") or current_price)
+            # Retrieve Index Data (Injected by StrategyManager)
+            # If not available, we default to 0.0 and skip the anchor check (risky but functional)
+            index_ltp = float(indicators.get("nifty_index_ltp") or 0.0) 
+            index_vwap = float(indicators.get("nifty_index_vwap") or 0.0)
+            
+            # 2. Determine Option Type (CE or PE)
+            is_ce = "CE" in symbol.upper()
+            is_pe = "PE" in symbol.upper()
 
-            # Volume fallback
-            if avg_vol <= 0:
-                avg_vol = vol * 0.8 if vol > 0 else 1.0
-
-            # Sanity Check
-            if vwap <= 0 or ema <= 0 or current_price <= 0:
-                return None
-
-            # ═══════════════════════════════════════════════════════
-            # 2. OPTION TYPE DETECTION
-            # ═══════════════════════════════════════════════════════
-            is_option = "CE" in symbol or "PE" in symbol
-            is_ce = "CE" in symbol
-            is_pe = "PE" in symbol
-
-            # ═══════════════════════════════════════════════════════
-            # 3. TREND DETECTION - ✅ FIXED: Option-specific rules
-            # ═══════════════════════════════════════════════════════
-            # Use price vs VWAP as primary trend indicator
-            price_above_vwap = current_price > vwap
-            price_below_vwap = current_price < vwap
-            price_above_ema = current_price > ema
-            price_below_ema = current_price < ema
-
-            # Define trend based on both VWAP and EMA
-            trend_bullish = price_above_vwap and price_above_ema
-            trend_bearish = price_below_vwap and price_below_ema
-
-            # ═══════════════════════════════════════════════════════
-            # ✅ CRITICAL FIX: Option type MUST match trend
-            # This prevents CE+PE both signaling simultaneously
-            # ═══════════════════════════════════════════════════════
-            if is_ce:
-                if not trend_bullish:
-                    return None  # CE only on confirmed bullish
-            elif is_pe:
-                if not trend_bearish:
-                    return None  # PE only on confirmed bearish
-            else:
-                # For futures/index - require clear trend
-                if not trend_bullish and not trend_bearish:
+            # ═════════════════════════════════════════════════════════════════
+            # 🛡️ ANCHOR LOGIC (The Fix for Rapid Firing)
+            # ═════════════════════════════════════════════════════════════════
+            if index_ltp > 0 and index_vwap > 0:
+                # Determine Macro Trend from Index
+                index_trend = "BULL" if index_ltp > index_vwap else "BEAR"
+                
+                # ⛔ REJECT CALLS if Index is Bearish
+                if is_ce and index_trend == "BEAR":
+                    return None
+                
+                # ⛔ REJECT PUTS if Index is Bullish
+                if is_pe and index_trend == "BULL":
                     return None
 
-            # ═══════════════════════════════════════════════════════
-            # 4. VWAP INTERACTION CHECK
-            # ═══════════════════════════════════════════════════════
-            proximity_pct = 0.02 if is_option else 0.005
-            proximity = current_price * proximity_pct
-            
-            touched_vwap = (low <= vwap <= high)
-            near_vwap = abs(current_price - vwap) <= proximity
-            
-            trend_momentum = abs(current_price - vwap) / vwap if vwap > 0 else 0
-            strong_trend = trend_momentum > 0.03  # Reduced from 0.05 for options
-
-            should_evaluate = touched_vwap or near_vwap or strong_trend
-
-            if not should_evaluate:
+            # 3. Standard VWAP Logic (Price must be valid)
+            if current_price <= 0 or vwap <= 0:
                 return None
 
-            # ═══════════════════════════════════════════════════════
-            # 5. VOLUME CONFIRMATION
-            # ═══════════════════════════════════════════════════════
-            vol_ratio = vol / avg_vol if avg_vol > 0 else 1.0
+            # 4. Entry Trigger: Price > VWAP (Momentum)
+            if current_price <= vwap:
+                return None 
+
+            # 5. Volume Confirmation (Fakeout Filter)
+            vol = float(indicators.get("volume") or 0)
+            avg_vol = float(indicators.get("average_volume") or 1)
             
-            if vol_ratio > 100:
-                LOGGER.warning(f"⚠️ Abnormal vol_ratio: {vol_ratio:.2f} for {symbol}")
-                vol_ratio = min(vol_ratio, 10.0)
-            
-            # Minimum volume threshold
-            if vol_ratio < 0.5:
+            # Require 1.2x Volume vs Average (Slightly relaxed from 1.5x)
+            if vol < (avg_vol * 1.2): 
                 return None
 
-            # ═══════════════════════════════════════════════════════
-            # 6. ATR FALLBACK
-            # ═══════════════════════════════════════════════════════
-            if atr <= 0:
-                atr = current_price * 0.01
-
-            # ═══════════════════════════════════════════════════════
-            # 7. SIGNAL CONSTRUCTION
-            # ═══════════════════════════════════════════════════════
-            options_long_only = os.getenv("OPTIONS_LONG_ONLY", "true").lower() == "true"
+            # 6. Construct Signal
+            # We always BUY options (Long CE or Long PE)
+            side = "BUY"
             
-            side = ""
-            option_type = None
-            stop_loss = 0.0
-            tp1 = 0.0
+            atr = float(indicators.get("atr") or (current_price * 0.01))
+            stop_loss = current_price - (atr * 1.5)
+            target = current_price + (atr * 3.0)
 
-            if is_ce or (not is_option and trend_bullish):
-                # Bullish signal
-                side = "BUY"
-                option_type = "CE" if is_option else None
-                stop_loss = current_price - (atr * 1.5)
-                tp1 = current_price + (atr * 3.0)
+            # 7. Confidence Scoring
+            # Base confidence 0.70 + Boosts
+            confidence = 0.70
+            if index_ltp > 0: confidence += 0.10 # Boost if we confirmed with Index
+            if vol > (avg_vol * 2.0): confidence += 0.10 # Boost for massive volume
 
-            elif is_pe or (not is_option and trend_bearish):
-                # Bearish signal
-                if options_long_only or is_pe:
-                    side = "BUY"
-                    option_type = "PE" if is_option else None
-                else:
-                    side = "SELL"
-                    option_type = None
-                
-                stop_loss = current_price + (atr * 1.5)
-                tp1 = current_price - (atr * 3.0)
-
-            if not side:
-                return None
-
-            # ═══════════════════════════════════════════════════════
-            # 8. CONFIDENCE SCORING (0-1 scale)
-            # ═══════════════════════════════════════════════════════
-            confidence = 0.75  # Base confidence
-            
-            # Volume boost
-            if vol_ratio > 1.5:
-                confidence += 0.10
-            elif vol_ratio > 1.2:
-                confidence += 0.05
-            
-            # Trend alignment boost
-            if trend_bullish and is_ce:
-                confidence += 0.05
-            elif trend_bearish and is_pe:
-                confidence += 0.05
-
-            # Strong momentum boost
-            if strong_trend:
-                confidence += 0.05
-
-            confidence = min(confidence, 0.95)
-
-            # ═══════════════════════════════════════════════════════
-            # 9. RECORD COOLDOWN & LOG
-            # ═══════════════════════════════════════════════════════
-            self._signal_cooldown_tracker[symbol] = time_module.time()
-            
-            trend_str = "Bull" if (is_ce or trend_bullish) else "Bear"
-            
             LOGGER.info(
-                f"🚀 VWAP Pro Signal: {symbol} {side} | "
-                f"Trend: {trend_str} | "
-                f"Vol: {vol_ratio:.1f}x | "
-                f"Option: {option_type or 'N/A'}",
+                f"🚀 VWAP Anchored Signal: {symbol} {side} | Index: {index_trend if index_ltp > 0 else 'N/A'}",
                 extra={
                     "event": "vwap_pro_signal",
                     "symbol": symbol,
-                    "side": side,
-                    "option_type": option_type,
-                    "vwap": vwap,
-                    "vol_ratio": vol_ratio,
+                    "index_trend": index_trend if index_ltp > 0 else "N/A",
+                    "confidence": confidence
                 }
             )
+
+            return EliteSignal(
+                symbol=symbol,
+                signal=side,
+                confidence=min(confidence, 0.99),
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                target=target,
+                quantity=self._vwap_config.quantity or 1,
+                strategy_name="VWAP_Pro_Anchored",
+                metadata={
+                    "type": "Trend_Following",
+                    "anchor": "NIFTY_Index",
+                    "vol_ratio": round(vol/avg_vol, 2)
+                }
+            )
+
+        except Exception as e:
+            LOGGER.error(f"VWAP Strategy Error on {symbol}: {e}", exc_info=True)
+            return None
 
             return EliteSignal(
                 symbol=symbol,
