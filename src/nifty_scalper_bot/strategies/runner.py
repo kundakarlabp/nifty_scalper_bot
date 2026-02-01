@@ -1725,6 +1725,8 @@ class StrategyRunner:
         Handle incoming tick safely, updating state and triggering strategies.
         Includes robust data extraction, validation, and multi-tier strategy execution.
         """
+        now = datetime.now(timezone.utc)
+        
         if "FUT" in symbol.upper():
             return 
         
@@ -1732,29 +1734,25 @@ class StrategyRunner:
         # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
         # =================================================================
         
-        # 🔴 FIX 2: ORPHAN GUARD (Stops the infinite loop)
-        # If we already have a position in this symbol, DO NOT generate new signals.
+        # 1. Orphan Guard (Logic we added previously)
         if self._position_manager:
             active_pos = self._position_manager.get_active_contract(symbol)
             if active_pos:
-                # Check if it is an orphan (manual/unknown strategy)
                 strat = getattr(active_pos, "strategy", "") or "unknown"
-                
                 if "manual" in strat.lower() or "unknown" in strat.lower():
-                    # Log once every 30s to avoid spam
                     log_throttled(
                         self._logger,
                         f"orphan_guard_{symbol}",
-                        f"🛡️ ORPHAN GUARD: {symbol} has unmanaged position. Blocking new signals.",
+                        f"🛡️ ORPHAN GUARD: {symbol} is unmanaged. Attempting adoption...",
                         interval_sec=30.0,
                         level=logging.WARNING
                     )
-                    return # <--- STOP HERE. Do not calculate signals.
+                    # Try to adopt (ensure self._adopt_orphan_positions exists)
+                    if hasattr(self, "_adopt_orphan_positions"):
+                        self._adopt_orphan_positions()
+                    return 
 
-                # If it is a managed trade, we also stop (standard logic)
-                return
-
-        # 1. Market Time Check
+        # 2. Market Time Check (Now 'now' is valid!)
         if not self._is_market_open(now):
             return
 
@@ -2266,6 +2264,73 @@ class StrategyRunner:
                     )
                 except Exception:
                     pass
+
+    def _adopt_orphan_positions(self) -> None:
+        """
+        Auto-adopt orphan positions with default risk management.
+        ✅ FIX: Handles LONG/SHORT math correctly.
+        """
+        if not self._position_manager:
+            return
+
+        positions = self._position_manager.get_all_positions()
+        for pos in positions or []:
+            symbol = getattr(pos, "symbol", "")
+            # Check strategy tag
+            strategy = getattr(pos, "strategy", "") or getattr(pos, "strategy_name", "") or "unknown"
+            
+            # Identify Orphan (Manual/Unknown/Empty)
+            if strategy.lower() in ("manual", "unknown", "manual/unknown", ""):
+                
+                # 1. Determine Side & Quantity Safely
+                raw_qty = int(getattr(pos, "quantity", 0) or 0)
+                qty = abs(raw_qty)
+                
+                # Use 'side' attr if available, else infer from sign
+                side = getattr(pos, "side", None)
+                if not side:
+                    side = "SHORT" if raw_qty < 0 else "LONG"
+                
+                entry = float(getattr(pos, "entry_price", 0) or getattr(pos, "avg_price", 0) or 0)
+                
+                if qty > 0 and entry > 0:
+                    # 2. Check if bracket already exists
+                    bracket = None
+                    if self._bracket_manager:
+                        bracket = self._bracket_manager.get_bracket(symbol)
+                    
+                    if bracket is None:
+                        # 3. Calculate Risk based on Side (Safety Bracket)
+                        if side == "LONG":
+                            default_sl = entry * 0.95  # SL 5% BELOW
+                            default_tp = entry * 1.10  # TP 10% ABOVE
+                        else:
+                            default_sl = entry * 1.05  # SL 5% ABOVE (Short)
+                            default_tp = entry * 0.90  # TP 10% BELOW (Short)
+
+                        self._logger.warning(
+                            f"🔧 AUTO-ADOPTING ORPHAN: {symbol} ({side}) | Entry={entry:.2f} | "
+                            f"Setting SL={default_sl:.2f} TP={default_tp:.2f}"
+                        )
+                        
+                        # 4. Create Bracket
+                        if self._bracket_manager:
+                            self._bracket_manager.create_bracket(
+                                symbol=symbol,
+                                side=side,
+                                entry_price=entry,
+                                stop_loss=default_sl,
+                                take_profit=default_tp,
+                                quantity=qty,
+                                strategy="Adopted_Orphan"
+                            )
+                            
+                            # 5. Try to tag the position in memory to stop 'Orphan Guard' spam
+                            # (If PositionManager supports mutable updates)
+                            try:
+                                pos.strategy = "Adopted_Orphan"
+                            except Exception:
+                                pass
 
     def _calculate_signal_score(self, symbol: str, side: str, price: float) -> float:
         """
