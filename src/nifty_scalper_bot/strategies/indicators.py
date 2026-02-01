@@ -1018,11 +1018,7 @@ class IndicatorEngine:
             avg_atr_20 = float(np.mean(atr_history)) if atr_history else current_atr
             atr_ratio = current_atr / avg_atr_20 if avg_atr_20 > 0.01 else 1.0
             
-            return ATRSnapshot(
-                value=current_atr,  # Correct field name for ATRSnapshot
-                timestamp=0.0,      # Placeholder, caller usually fills this
-                period=period
-            )
+            return current_atr
             
         except Exception as e:
             self._logger.error(f"ATR Compute Failed: {e}")
