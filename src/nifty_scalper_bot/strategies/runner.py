@@ -1601,6 +1601,45 @@ class StrategyRunner:
         except Exception as exc:
             LOGGER.error(f"Error in async tick processing: {exc}", exc_info=True)
 
+    def _is_market_open(self, now: datetime) -> bool:
+        """
+        Check if market is currently open (09:15 - 15:30 IST).
+        Handles timezone conversion robustly.
+        """
+        try:
+            # 1. Allow Override for Testing/Session Extension
+            # Checks environment variable to bypass time restrictions
+            if os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "false").lower() == "true":
+                return True
+
+            # 2. Define IST Timezone (UTC+5:30)
+            ist_offset = timedelta(hours=5, minutes=30)
+            ist_tz = timezone(ist_offset)
+            
+            # 3. Ensure 'now' is Timezone Aware
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            
+            # 4. Convert to IST
+            now_ist = now.astimezone(ist_tz)
+            
+            # 5. Check Weekend (Saturday=5, Sunday=6)
+            if now_ist.weekday() >= 5: 
+                return False
+                
+            # 6. Check Time Boundaries (09:15 to 15:30)
+            t = now_ist.time()
+            start = time(9, 15)
+            end = time(15, 30)
+            
+            return start <= t <= end
+            
+        except Exception as e:
+            # Fail safe: If check crashes, defaulting to True prevents locking the bot
+            # (Risk is managed elsewhere)
+            self._logger.warning(f"Market time check failed: {e}. Defaulting to OPEN.")
+            return True
+
     def _on_tick_safe(self, tick: Mapping[str, Any]) -> None:
         """Safe wrapper for _on_tick to handle exceptions."""
         symbol = tick.get("symbol")
