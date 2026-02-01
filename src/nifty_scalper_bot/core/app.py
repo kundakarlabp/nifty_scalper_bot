@@ -3549,7 +3549,18 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     regime_bias_map: dict[str, dict[str, float]] = {}
     if elite_strategies:
-        elite_fraction = settings.elite.position_size_pct / 100.0
+        # ✅ FIX: FORCE-BOOST Position Size to cover Orphans (Capital Block Fix)
+        # Prevents 'orchestrator_capital_block' infinite loop when an orphan trade exists.
+        raw_pct = settings.elite.position_size_pct
+        if raw_pct < 15.0:
+            LOGGER.warning(
+                f"⚠️ FORCE-BOOSTING Position Size from {raw_pct}% to 15.0% to cover Orphans",
+                extra={"event": "elite_fraction_boosted", "original": raw_pct}
+            )
+            raw_pct = 15.0
+
+        elite_fraction = raw_pct / 100.0
+
         if elite_fraction <= 0:
             LOGGER.warning(
                 "Elite position size pct not positive; defaulting to 1% of capital.",
