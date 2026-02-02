@@ -2268,19 +2268,41 @@ class StrategyRunner:
     def _adopt_orphan_positions(self) -> None:
         """
         Auto-adopt orphan positions with default risk management.
-        ✅ FIX: Handles LONG/SHORT math correctly.
+        
+        ✅ PRODUCTION FIX (Feb 2, 2026):
+        - Uses is_symbol_managed() instead of get_bracket(symbol)
+        - Uses attach_orphan_position() instead of non-existent create_bracket()
+        - Better logging and error handling
         """
         if not self._position_manager:
             return
+        
+        if not self._bracket_manager:
+            self._logger.debug("BracketManager not available, skipping orphan adoption")
+            return
 
         positions = self._position_manager.get_all_positions()
+        adopted_count = 0
+        
         for pos in positions or []:
-            symbol = getattr(pos, "symbol", "")
-            # Check strategy tag
-            strategy = getattr(pos, "strategy", "") or getattr(pos, "strategy_name", "") or "unknown"
-            
-            # Identify Orphan (Manual/Unknown/Empty)
-            if strategy.lower() in ("manual", "unknown", "manual/unknown", ""):
+            try:
+                symbol = getattr(pos, "symbol", "")
+                if not symbol:
+                    continue
+                    
+                # Check strategy tag
+                strategy = (
+                    getattr(pos, "strategy", "") or 
+                    getattr(pos, "strategy_name", "") or 
+                    getattr(pos, "tag", "") or 
+                    ""
+                )
+                
+                # Identify Orphan (Manual/Unknown/Empty)
+                is_orphan = strategy.lower().strip() in ("manual", "unknown", "manual/unknown", "", "none")
+                
+                if not is_orphan:
+                    continue
                 
                 # 1. Determine Side & Quantity Safely
                 raw_qty = int(getattr(pos, "quantity", 0) or 0)
@@ -2291,46 +2313,55 @@ class StrategyRunner:
                 if not side:
                     side = "SHORT" if raw_qty < 0 else "LONG"
                 
-                entry = float(getattr(pos, "entry_price", 0) or getattr(pos, "avg_price", 0) or 0)
+                entry = float(
+                    getattr(pos, "entry_price", 0) or 
+                    getattr(pos, "avg_price", 0) or 
+                    getattr(pos, "average_price", 0) or 
+                    0
+                )
                 
-                if qty > 0 and entry > 0:
-                    # 2. Check if bracket already exists
-                    is_managed = False
-                    if self._bracket_manager:
-                        # ✅ FIX: Use is_symbol_managed() which looks up by SYMBOL correctly
-                        is_managed = self._bracket_manager.is_symbol_managed(symbol)
-    
-                    if not is_managed:
-                        # 3. Calculate Risk based on Side (Safety Bracket)
-                        if side == "LONG":
-                            default_sl = entry * 0.95  # SL 5% BELOW
-                            default_tp = entry * 1.10  # TP 10% ABOVE
-                        else:
-                            default_sl = entry * 1.05  # SL 5% ABOVE (Short)
-                            default_tp = entry * 0.90  # TP 10% BELOW (Short)
-
-                        self._logger.warning(
-                            f"🔧 AUTO-ADOPTING ORPHAN: {symbol} ({side}) | Entry={entry:.2f} | "
-                            f"Setting SL={default_sl:.2f} TP={default_tp:.2f}"
-                        )
-
-                        # 4. Create Bracket using CORRECT method
-                        if self._bracket_manager:
-                            # ✅ FIX: Use attach_orphan_position() which EXISTS and is designed for this!
-                            bracket_id = self._bracket_manager.attach_orphan_position(
-                                symbol=symbol,
-                                side=side,  # "LONG" or "SHORT" or "BUY"/"SELL"
-                                qty=qty,
-                                entry_price=entry
-                            )
-                            self._logger.info(f"✅ Orphan bracket created: {bracket_id}")
-                            
-                            # 5. Try to tag the position in memory to stop 'Orphan Guard' spam
-                            # (If PositionManager supports mutable updates)
-                            try:
-                                pos.strategy = "Adopted_Orphan"
-                            except Exception:
-                                pass
+                if qty <= 0 or entry <= 0:
+                    continue
+                
+                # ═══════════════════════════════════════════════════════════════
+                # ✅ FIX #1: Use is_symbol_managed() instead of get_bracket()
+                # ═══════════════════════════════════════════════════════════════
+                if self._bracket_manager.is_symbol_managed(symbol):
+                    continue  # Already protected, skip
+                
+                # 3. Log the adoption
+                self._logger.warning(
+                    f"🔧 AUTO-ADOPTING ORPHAN: {symbol} ({side}) | "
+                    f"Qty={qty} | Entry={entry:.2f}"
+                )
+                
+                # ═══════════════════════════════════════════════════════════════
+                # ✅ FIX #2: Use attach_orphan_position() instead of create_bracket()
+                # ═══════════════════════════════════════════════════════════════
+                try:
+                    bracket_id = self._bracket_manager.attach_orphan_position(
+                        symbol=symbol,
+                        side=side,
+                        qty=qty,
+                        entry_price=entry
+                    )
+                    adopted_count += 1
+                    self._logger.info(f"✅ Orphan protected: {symbol} | Bracket={bracket_id}")
+                    
+                    # Try to tag the position to prevent re-adoption
+                    try:
+                        pos.strategy = "Adopted_Orphan"
+                    except (AttributeError, TypeError):
+                        pass  # Position might be frozen/immutable
+                        
+                except Exception as e:
+                    self._logger.error(f"❌ Failed to adopt orphan {symbol}: {e}")
+                    
+            except Exception as e:
+                self._logger.error(f"❌ Error processing position: {e}")
+        
+        if adopted_count > 0:
+            self._logger.info(f"📊 Orphan Adoption Complete: {adopted_count} positions protected")
 
     def _calculate_signal_score(self, symbol: str, side: str, price: float) -> float:
         """
