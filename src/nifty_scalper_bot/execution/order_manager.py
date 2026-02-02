@@ -1880,18 +1880,40 @@ class OrderManager:
                             sl=float(stop_loss) if stop_loss else 0.0,
                             tp=float(take_profit) if take_profit else 0.0,
                             tag=tag or "auto",
-                            activate_immediately=True
+                            activate_immediately=False
                         )
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
 
                     # ✅ WORLD-CLASS: Fast fill confirmation & bracket activation
                     # This replaces the old 0.5s sleep
                     fill_confirmed = self._confirm_fill_fast(order_id, timeout_ms=2000)
+                    if fill_confirmed and self._bracket_manager:
+                        bracket = self._bracket_manager.get_bracket(order_id)
+                        if bracket and bracket.stop_order_id and bracket.trailing_spec:
+                            try:
+                                self.attach_trailing_stop(
+                                    entry_order_id=order_id,
+                                    sl_order_id=bracket.stop_order_id,
+                                    symbol=normalized_symbol,
+                                    side=normalized_side,
+                                    entry_price=bracket.entry_price,
+                                    spec=bracket.trailing_spec,
+                                )
+                                self._logger.info(
+                                    f"📈 TRAILING SL ATTACHED | {normalized_symbol} | order={order_id}"
+                                )
+                            except Exception as exc:
+                                self._logger.error(
+                                    f"Trailing attach failed for {order_id}: {exc}"
+                                )
+
                     
                     if fill_confirmed:
                         self._logger.info(f"🟢 ORDER FILLED & BRACKET ACTIVE: {order_id}")
                     else:
-                        self._logger.info(f"🟡 ORDER SUBMITTED (fill pending): {order_id}")
+                        self._logger.warning(
+                            f"⏳ Fill pending for {order_id}. Bracket will auto-activate on tick."
+                        )
 
                     return order_id
                     
@@ -2106,6 +2128,35 @@ class OrderManager:
             created_at=datetime.now(timezone.utc),
         )
         self._register_guard_pair(pair)
+        
+        # ================= FIX-4: ATTACH VIRTUAL BRACKET =================
+        if self._bracket_manager:
+            try:
+                self._bracket_manager.attach_orphan_position(
+                    symbol=guard_symbol,
+                    side="BUY" if side.upper() == "LONG" else "SELL",
+                    qty=qty,
+                    entry_price=base_price,
+                )
+                self._logger.warning(
+                    "Orphan position attached to virtual bracket",
+                    extra={
+                        "event": "orphan_virtual_bracket_attached",
+                        "symbol": guard_symbol,
+                        "side": side,
+                        "quantity": qty,
+                    },
+                )
+            except Exception as exc:  # defensive, do not block guard
+                self._logger.error(
+                    "Failed to attach virtual bracket to orphan position: %s",
+                    exc,
+                    extra={
+                        "event": "orphan_virtual_bracket_failed",
+                        "symbol": guard_symbol,
+                    },
+                )
+        # ================= END FIX-4 =====================================
         self._logger.info(
             "Condition met: recover_orphan_position",
             extra={
