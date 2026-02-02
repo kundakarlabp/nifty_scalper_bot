@@ -203,12 +203,11 @@ class VWAPProStrategy(EliteStrategy):
             # -------------------------------
             # 🎯 Quantity (LOT SAFE)
             # -------------------------------
-            lot_size = self._vwap_config.lot_size or 75
-            base_qty = self._vwap_config.quantity or lot_size
+            base_qty = int(self._vwap_config.quantity or 1)
             confidence = 0.85 if entropy < 0.7 else 0.65
 
-            qty = int((base_qty * confidence) // lot_size) * lot_size
-            qty = max(lot_size, qty)
+            # Strategy emits intent, execution layer enforces lot sizing
+            qty = max(1, int(base_qty * confidence))
 
             # -------------------------------
             # 🛑 SL / 🎯 TP (Expiry aware)
