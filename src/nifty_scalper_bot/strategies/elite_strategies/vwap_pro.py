@@ -150,6 +150,17 @@ class VWAPProStrategy(EliteStrategy):
                 if not is_ce and index_ltp > index_vwap:
                     return None
 
+            else:
+                LOGGER.warning(
+                    "Index bias unavailable — proceeding without index confirmation",
+                    extra={
+                        "event": "index_bias_missing",
+                        "symbol": symbol,
+                        "index_ltp": index_ltp,
+                        "index_vwap": index_vwap,
+                    },
+                )
+
             # -------------------------------
             # 📐 VWAP Acceptance (2 bars)
             # -------------------------------
@@ -202,7 +213,7 @@ class VWAPProStrategy(EliteStrategy):
             # -------------------------------
             # 🛑 SL / 🎯 TP (Expiry aware)
             # -------------------------------
-            sl_mult = 1.2 if self._is_expiry_day() else 1.5
+            sl_mult = (1.2 if self._is_expiry_day() else 1.5) * (0.85 if entropy > 0.75 else 1.0)
             tp1_mult = 1.5
             tp2_mult = 3.0
 
