@@ -225,7 +225,7 @@ class BracketManager:
         tp1_price: float | None = None,
         tp1_qty: int | None = None,
         trailing_atr_mult: float | None = None
-    ) -> None:
+    ) -> str:
         """
         Legacy Bridge: Allows old code to call this method.
         Internally converts request to a Virtual Bracket.
@@ -245,8 +245,12 @@ class BracketManager:
             tag=tag,
             tp1_price=tp1_price,
             tp1_qty=tp1_qty,
-            trailing_atr_mult=trailing_atr_mult
+            trailing_atr_mult=trailing_atr_mult,
+            activate_immediately=False # 🔒 Safety: Wait for fill or tick
         )
+
+        LOGGER.info(f"🛡️ Bracket Registered: {entry_order_id} for {symbol}")
+        return entry_order_id  # 🟢 FIX 2: Return the ID
 
     def register_virtual_bracket(
         self, 
@@ -519,8 +523,9 @@ class BracketManager:
         with self._lock:
             for eid in relevant_ids:
                 b = self._brackets.get(eid)
-                if b and b.active and b.remaining_quantity > 0:
-                    candidates.append(b)
+                # 🟢 FIX: Remove 'b.active' check so we can catch inactive ones
+                if b and b.remaining_quantity > 0:
+                    candidates.append(b))
         
         if not candidates:
             return
@@ -542,6 +547,26 @@ class BracketManager:
         exits_to_fire = []
         
         for bracket in candidates:
+            # 🟢 FAILSAFE: Auto-activate on first tick if stuck inactive
+            if not bracket.active:
+                if ltp > 0:
+                    bracket.active = True
+                    # Fix missing entry price (Market Orders)
+                    if bracket.entry_price <= 0:
+                        bracket.entry_price = ltp
+                    
+                    # Initialize Watermarks for Trailing
+                    if bracket.side == "BUY": 
+                        bracket.highest_ltp = ltp
+                    else: 
+                        bracket.lowest_ltp = ltp
+                    
+                    # ✅ CORRECTED ATTRIBUTE: Use 'entry_order_id', not 'order_id'
+                    LOGGER.warning(f"⚠️ Failsafe Activation: {bracket.entry_order_id} @ {ltp}")
+                else:
+                    # If we can't activate (no price), skip this bracket
+                    continue
+
             # Atomic write - single field assignment is thread-safe in Python
             bracket.last_ltp = ltp
             
@@ -1733,3 +1758,53 @@ class BracketManager:
         
         if unique_symbols:
             LOGGER.info(f"✅ Resubscribed {len(unique_symbols)} symbols to market data")
+
+def attach_orphan_position(
+        self,
+        symbol: str,
+        side: str,
+        qty: int,
+        entry_price: float
+    ) -> str:
+        """
+        Wraps an existing naked position in a protective bracket.
+        Called by Runner when 'ORPHAN GUARD' triggers.
+        """
+        oid = f"orphan_{int(time.time())}_{symbol}"
+        
+        # 1. Dynamic ATR Calculation (if provider available)
+        atr = entry_price * 0.01  # Default 1%
+        if self._atr_provider:
+             calc_atr = self._atr_provider.get_current_atr(symbol)
+             if calc_atr and calc_atr > 0: atr = calc_atr
+
+        # 2. Define Rescue Levels (1.5x Risk / 3.0x Reward)
+        # Handle 'BUY'/'LONG' vs 'SELL'/'SHORT'
+        is_long = side.upper() in ["BUY", "LONG"]
+        
+        if is_long:
+            sl = entry_price - (atr * 1.5)
+            tp = entry_price + (atr * 3.0)
+        else:
+            sl = entry_price + (atr * 1.5)
+            tp = entry_price - (atr * 3.0)
+
+        # 3. Register as IMMEDIATELY ACTIVE
+        self.register_virtual_bracket(
+            order_id=oid,
+            symbol=symbol,
+            side="LONG" if is_long else "SHORT",
+            qty=abs(qty),
+            price=entry_price,
+            sl=sl,
+            tp=tp,
+            tag="orphan_recovery",
+            trailing_atr_mult=1.5,
+            activate_immediately=True  # 🟢 Critical: It's already live
+        )
+        
+        LOGGER.warning(
+            f"🧯 ORPHAN ATTACHED: {symbol} | Entry={entry_price:.2f} | "
+            f"SL={sl:.2f} | TP={tp:.2f} | ID={oid}"
+        )
+        return oid
