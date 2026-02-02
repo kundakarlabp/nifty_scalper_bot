@@ -1911,21 +1911,32 @@ class OrderManager:
                     if fill_confirmed:
                         self._logger.info(f"🟢 ORDER FILLED & BRACKET ACTIVE: {order_id}")
                     else:
-                        self._logger.warning(
-                            f"⏳ Fill pending for {order_id}. Activating bracket immediately for safety."
-                        )
+                        self._logger.info(f"🟡 ORDER SUBMITTED (fill pending): {order_id}")
                         # ✅ FIX: Force-activate bracket even without fill confirmation
                         # This ensures protection starts immediately
                         # confirm_entry_fill will update entry price when fill comes through
                         if self._bracket_manager:
                             try:
-                                # Get current price for activation
-                                current_price = float(price or 0.0)
-                                if current_price > 0:
-                                    self._bracket_manager.confirm_entry_fill(order_id, current_price)
-                                    self._logger.info(f"🛡️ Bracket pre-activated at {current_price}")
+                                # Use expected price for pre-activation
+                                activation_price = float(price or 0.0)
+                                if activation_price <= 0:
+                                    # Fallback: Try to get fresh quote
+                                    if self._market_data:
+                                        q = self._market_data.get_quote(normalized_symbol)
+                                        if q:
+                                            activation_price = float(
+                                                q.get("ltp") or q.get("last_price") or 0.0
+                                            )
+                                
+                                if activation_price > 0:
+                                    self._bracket_manager.confirm_entry_fill(order_id, activation_price)
+                                    self._logger.info(
+                                        f"🛡️ Bracket PRE-ACTIVATED: {order_id} @ {activation_price:.2f} "
+                                        "(Will update on actual fill)"
+                                    )
                             except Exception as exc:
-                            self._logger.debug(f"Pre-activation note: {exc}")
+                                # Don't fail the order just because pre-activation had issues
+                                self._logger.debug(f"Pre-activation note (non-critical): {exc}")
 
                     return order_id
                     
