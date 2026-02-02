@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
-from nifty_scalper_bot.execution.order_manager import OrderManager
+from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.execution.position_manager import PositionManager
 from nifty_scalper_bot.risk.risk_manager import RiskManager
 
@@ -45,114 +45,145 @@ class OrderProcessor:
         
         # 2. State Tracking
         self._active_trades: Dict[str, str] = {}
-        self._last_signal_time: Dict[str, datetime] = {}
-        
-        # 3. Settings
-        self._debounce_seconds = 60.0
+        self._last_signal_time: Dict[str, float] = {}
 
-        self.bus.subscribe(MessageType.SIGNAL, self.on_strategy_signal)
-        LOGGER.info("✅ OrderProcessor initialized with Risk & Position Gating.")
+        # 3. Validation: Ensure OrderManager supports brackets
+        # This prevents silent naked trading if the underlying manager is outdated
+        if not hasattr(self.executor, "place_bracket_order"):
+            LOGGER.critical("FATAL: OrderManager does not support 'place_bracket_order'. Brackets will fail.")
+            # We don't raise here to allow startup, but this is a critical configuration error.
+
+    async def start(self) -> None:
+        """Start the order processor message listener."""
+        LOGGER.info("OrderProcessor: Starting...")
+        self._running = True
+        await self.bus.subscribe(MessageType.STRATEGY_SIGNAL, self.on_strategy_signal)
+        # Ensure executor monitoring is active
+        with suppress(Exception):
+            self.executor.start_monitoring()
+
+    async def stop(self) -> None:
+        """Stop the order processor."""
+        LOGGER.info("OrderProcessor: Stopping...")
+        self._running = False
+        with suppress(Exception):
+            self.executor.stop_monitoring()
 
     async def on_strategy_signal(self, message: Message) -> None:
         """
-        Process signal -> Check Position/Risk -> Execute Order.
+        Handle incoming strategy signals with enforced Bracket Logic.
         """
-        signal: dict[str, Any] = message.data
-        symbol = signal.get("symbol")
-        side = signal.get("side")      # "BUY" / "SELL"
-        qty = signal.get("quantity")
-        
-        if not all([symbol, side, qty]):
+        if not self._running:
             return
 
-        # --- PHASE 1: INTELLIGENT GATING ---
-        async with self._lock:
-            key = symbol 
-            
-            # 1. Check Busy State
-            if self._active_trades.get(key):
-                LOGGER.warning(f"🚫 Execution busy for {symbol}")
-                return
-
-            # 2. Position Awareness & Exit Priority
-            # Check if we hold a position in this symbol
-            current_pos = None
-            if self.pos_manager:
-                # We iterate because PositionManager might key by different format
-                all_pos = self.pos_manager.get_all_positions()
-                for p in all_pos:
-                    if p.symbol == symbol:
-                        current_pos = p
-                        break
-            
-            is_exit = False
-            if current_pos and current_pos.quantity != 0:
-                # If we are BUYing and have negative qty -> Closing
-                # If we are SELLing and have positive qty -> Closing
-                if (side == "BUY" and current_pos.quantity < 0) or \
-                   (side == "SELL" and current_pos.quantity > 0):
-                    is_exit = True
-
-            # 3. Smart Debounce
-            # If it's an EXIT, we SKIP the timer (Get out fast!)
-            # If it's an ENTRY, we enforce the timer.
-            if not is_exit:
-                now = datetime.now(timezone.utc)
-                last_time = self._last_signal_time.get(key)
-                if last_time and (now - last_time).total_seconds() < self._debounce_seconds:
-                    LOGGER.info(f"⏳ Cooldown active for Entry: {symbol}")
-                    return
-                
-                # 4. Anti-Stacking
-                # If we already have a position and this is NOT an exit, BLOCK IT.
-                # This prevents "Double Exposure" if strategy misfires.
-                if current_pos and abs(current_pos.quantity) > 0:
-                    LOGGER.warning(f"🚫 Rejecting Stacked Entry for {symbol}. Position exists.")
-                    return
-
-            # 5. Risk Management Gate
-            if self.risk_manager:
-                # Unpack tuple (allowed, reason) from RiskManager.can_trade
-                allowed, reason = self.risk_manager.can_trade(symbol, side, qty)
-                if not allowed:
-                    LOGGER.error(f"🛡️ Risk Rejection for {symbol}: {reason}")
-                    return
-
-            # Lock Resources
-            self._last_signal_time[key] = datetime.now(timezone.utc)
-            self._active_trades[key] = INTENT
-
-        # --- PHASE 2: EXECUTION ---
+        signal: dict[str, Any] = message.data
+        symbol = signal.get("symbol")
+        side = signal.get("side")
+        qty = signal.get("quantity")
+        price = signal.get("price", 0.0) or 0.0
         
-        order_type = signal.get("order_type", "MARKET")
-        price = signal.get("price", 0.0)
-        
-        # Limit Price Logic
-        if order_type == "LIMIT" and price == 0.0 and self.data_hub:
-            tick = self.data_hub.get_quote(symbol)
-            if tick and tick.get("ltp"):
-                ltp = float(tick["ltp"])
-                # Apply 1% buffer to ensure limit fills
-                buffer = 1.01 if side == "BUY" else 0.99
-                price = round((ltp * buffer) / 0.05) * 0.05
+        # ✅ FIX 1: Extract Protection Data & Strategy Name
+        stop_loss = float(signal.get("stop_loss") or 0.0)
+        take_profit = float(signal.get("target") or signal.get("take_profit") or 0.0)
+        strategy_name = str(signal.get("strategy_name") or "strategy_auto")
 
-        LOGGER.info(f"🚀 Executing: {side} {qty} {symbol} @ {price or 'MKT'} (Is Exit: {is_exit})")
+        if not symbol or not side or not qty:
+            LOGGER.error(f"Invalid Signal: {signal}")
+            return
+
+        # 1. Concurrency Check (Debounce)
+        key = f"{symbol}"
+        if key in self._active_trades:
+            LOGGER.warning(f"⚠️ Skipping Signal {symbol}: Active Order in Process")
+            return
+
+        self._active_trades[key] = INTENT
 
         try:
-            # Use asyncio.to_thread because place_order is blocking
-            broker_order_id = await asyncio.to_thread(
-                self.executor.place_order,
-                symbol=symbol,
-                side=side,
-                quantity=qty,
-                order_type=order_type,
-                price=price,
-                tag="strategy_auto"
-            )
+            # 2. Position Awareness (Exit vs Entry)
+            position = self.pos_manager.get_position(symbol)
+            is_exit = False
             
-            # Unlock immediately after submission
-            self._active_trades.pop(key, None)
+            if position and position.quantity != 0:
+                # Simple logic: if side differs, it's an exit/reduction
+                if (position.side == "LONG" and side == "SELL") or \
+                   (position.side == "SHORT" and side == "BUY"):
+                    is_exit = True
+                    LOGGER.info(f"🔻 Signal Identified as EXIT for {symbol}")
+
+            # 3. Risk Check (Skip for exits to allow closing)
+            if not is_exit:
+                risk_ok, risk_msg = self.risk_manager.check_trade_risk(
+                    symbol=symbol, 
+                    side=side, 
+                    quantity=qty, 
+                    price=price
+                )
+                if not risk_ok:
+                    LOGGER.warning(f"⛔ Risk Reject {symbol}: {risk_msg}")
+                    # Release lock immediately on rejection
+                    self._active_trades.pop(key, None)
+                    return
+
+            # 4. Determine Order Type
+            order_type = OrderType.MARKET
+            if price > 0:
+                order_type = OrderType.LIMIT
+
+            LOGGER.info(f"🚀 Executing: {side} {qty} {symbol} @ {price or 'MKT'} (Is Exit: {is_exit})")
+
+            # 5. Execution Logic with FORCED BRACKETS
+            broker_order_id = None
+
+            # ✅ FIX 2: FORCE BRACKET EXECUTION FOR ENTRIES
+            # If it's an ENTRY and we have valid Stop/Target, use place_bracket_order
+            if not is_exit and stop_loss > 0 and take_profit > 0:
+                
+                # Double check capability to avoid crash
+                if hasattr(self.executor, "place_bracket_order"):
+                    LOGGER.info(
+                        f"🛡️ BRACKET ORDER SUBMITTED | {symbol} | SL={stop_loss} | TP={take_profit}"
+                    )
+                    
+                    broker_order_id = await asyncio.to_thread(
+                        self.executor.place_bracket_order,
+                        symbol=symbol,
+                        side=side,
+                        quantity=qty,
+                        entry_price=price if order_type == OrderType.LIMIT else None,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        trailing_atr_mult=1.5,  # Conservative default for auto-trail
+                        tag=strategy_name,
+                    )
+                else:
+                    # Critical fallback if OrderManager is outdated, but logs the orphan risk
+                    LOGGER.error("❌ OrderManager missing 'place_bracket_order'. Placing ORPHAN trade.")
+                    broker_order_id = await asyncio.to_thread(
+                        self.executor.place_order,
+                        symbol=symbol,
+                        side=side,
+                        quantity=qty,
+                        order_type=order_type,
+                        price=price,
+                        tag=strategy_name
+                    )
+            else:
+                # Standard Execution for Exits or Naked Entries (if missing SL/TP)
+                if not is_exit:
+                    LOGGER.warning(f"⚠️ Executing NAKED ENTRY for {symbol} (Missing SL/TP in signal)")
+                
+                broker_order_id = await asyncio.to_thread(
+                    self.executor.place_order,
+                    symbol=symbol,
+                    side=side,
+                    quantity=qty,
+                    order_type=order_type,
+                    price=price,
+                    tag=strategy_name
+                )
             
+            # ✅ FIX 3: Update message with strategy source
             await self.bus.publish(
                 Message(
                     type=MessageType.ORDER_UPDATE,
@@ -162,7 +193,8 @@ class OrderProcessor:
                         "symbol": symbol,
                         "status": "SUBMITTED",
                         "price": price,
-                        "side": side
+                        "side": side,
+                        "strategy": strategy_name
                     },
                     source="order_processor"
                 )
@@ -170,7 +202,6 @@ class OrderProcessor:
 
         except Exception as exc:
             LOGGER.error(f"❌ Order Execution Failed: {exc}", exc_info=True)
-            self._active_trades.pop(key, None)
             
             await self.bus.publish(
                 Message(
@@ -180,13 +211,8 @@ class OrderProcessor:
                     source="order_processor"
                 )
             )
-
-    def start(self) -> None:
-        with suppress(Exception):
-            self.executor.start_monitoring()
-        self._running = True
-        
-    async def stop(self) -> None:
-        self._running = False
-        with suppress(Exception):
-            self.executor.stop_monitoring()
+        finally:
+            # ✅ FIX 3 (Refined): Release lock AFTER protection logic completes.
+            # This ensures we don't accept a new signal until the bracket is effectively registered
+            # (since place_bracket_order is synchronous-inside-thread).
+            self._active_trades.pop(key, None)
