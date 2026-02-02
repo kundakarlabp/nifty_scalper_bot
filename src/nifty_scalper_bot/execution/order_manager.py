@@ -1912,8 +1912,20 @@ class OrderManager:
                         self._logger.info(f"🟢 ORDER FILLED & BRACKET ACTIVE: {order_id}")
                     else:
                         self._logger.warning(
-                            f"⏳ Fill pending for {order_id}. Bracket will auto-activate on tick."
+                            f"⏳ Fill pending for {order_id}. Activating bracket immediately for safety."
                         )
+                        # ✅ FIX: Force-activate bracket even without fill confirmation
+                        # This ensures protection starts immediately
+                        # confirm_entry_fill will update entry price when fill comes through
+                        if self._bracket_manager:
+                            try:
+                                # Get current price for activation
+                                current_price = float(price or 0.0)
+                                if current_price > 0:
+                                    self._bracket_manager.confirm_entry_fill(order_id, current_price)
+                                    self._logger.info(f"🛡️ Bracket pre-activated at {current_price}")
+                            except Exception as exc:
+                            self._logger.debug(f"Pre-activation note: {exc}")
 
                     return order_id
                     
