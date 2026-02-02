@@ -1808,3 +1808,170 @@ def attach_orphan_position(
             f"SL={sl:.2f} | TP={tp:.2f} | ID={oid}"
         )
         return oid
+
+def create_bracket(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        stop_loss: float,
+        take_profit: float,
+        quantity: int,
+        strategy: str = "auto",
+        order_id: str | None = None,
+    ) -> str:
+        """
+        Create a virtual bracket with specified SL/TP levels.
+        
+        This is an alias method that provides the API expected by runner.py.
+        Unlike attach_orphan_position(), this uses the SPECIFIED SL/TP values
+        rather than auto-calculating them from ATR.
+        
+        Args:
+            symbol: Trading symbol (e.g., "NIFTY2620324650CE")
+            side: "LONG", "SHORT", "BUY", or "SELL"
+            entry_price: Entry price for the position
+            stop_loss: Stop loss price (must be > 0)
+            take_profit: Take profit price (must be > 0)
+            quantity: Position size (will use absolute value)
+            strategy: Strategy name for tagging (default: "auto")
+            order_id: Optional specific order ID (auto-generated if None)
+            
+        Returns:
+            The order_id (entry_id) used for bracket registration.
+            
+        Example:
+            >>> bm.create_bracket(
+            ...     symbol="NIFTY2620324650CE",
+            ...     side="LONG",
+            ...     entry_price=165.0,
+            ...     stop_loss=155.0,
+            ...     take_profit=180.0,
+            ...     quantity=65,
+            ...     strategy="VWAP_Pro"
+            ... )
+        """
+        import time
+        
+        # Normalize side to LONG/SHORT
+        normalized_side = side.upper().strip()
+        if normalized_side == "BUY":
+            normalized_side = "LONG"
+        elif normalized_side == "SELL":
+            normalized_side = "SHORT"
+        
+        # Validate side
+        if normalized_side not in ("LONG", "SHORT"):
+            LOGGER.warning(f"⚠️ create_bracket: Invalid side '{side}', defaulting to LONG")
+            normalized_side = "LONG"
+        
+        # Auto-generate order_id if not provided
+        if not order_id:
+            safe_symbol = symbol.replace(":", "_")[:20]
+            order_id = f"bracket_{int(time.time() * 1000)}_{safe_symbol}"
+        
+        # Validate SL/TP (use defaults if invalid)
+        if stop_loss <= 0:
+            LOGGER.warning(f"⚠️ create_bracket: Invalid SL={stop_loss}, using 5% default")
+            stop_loss = entry_price * 0.95 if normalized_side == "LONG" else entry_price * 1.05
+            
+        if take_profit <= 0:
+            LOGGER.warning(f"⚠️ create_bracket: Invalid TP={take_profit}, using 10% default")
+            take_profit = entry_price * 1.10 if normalized_side == "LONG" else entry_price * 0.90
+        
+        # Register the bracket
+        self.register_virtual_bracket(
+            order_id=order_id,
+            symbol=symbol,
+            side=normalized_side,
+            qty=abs(quantity),
+            price=entry_price,
+            sl=stop_loss,
+            tp=take_profit,
+            tag=strategy,
+            trailing_atr_mult=1.5,  # Enable ATR-based trailing
+            activate_immediately=True,  # Start monitoring immediately
+        )
+        
+        LOGGER.info(
+            f"✅ create_bracket: {symbol} | {normalized_side} | "
+            f"Entry={entry_price:.2f} | SL={stop_loss:.2f} | TP={take_profit:.2f} | "
+            f"ID={order_id}"
+        )
+        
+        return order_id
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ✅ FIX: Add get_bracket_by_symbol() for Symbol-Based Lookup
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def get_bracket_by_symbol(self, symbol: str) -> Optional[BracketState]:
+        """
+        Get the first active bracket for a given symbol.
+        
+        This is different from get_bracket(entry_id) which looks up by order_id.
+        Use this when you have a symbol but not the order_id.
+        
+        Args:
+            symbol: Trading symbol (e.g., "NIFTY2620324650CE")
+            
+        Returns:
+            BracketState if found and active, None otherwise.
+            
+        Example:
+            >>> bracket = bm.get_bracket_by_symbol("NIFTY2620324650CE")
+            >>> if bracket:
+            ...     print(f"SL: {bracket.sl_trigger_price}")
+        """
+        with self._lock:
+            entry_ids = self._symbol_map.get(symbol, [])
+            
+            # First pass: Look for active brackets
+            for entry_id in entry_ids:
+                bracket = self._brackets.get(entry_id)
+                if bracket and bracket.active and bracket.remaining_quantity > 0:
+                    return bracket
+            
+            # Second pass: Look for any bracket (even inactive)
+            for entry_id in entry_ids:
+                bracket = self._brackets.get(entry_id)
+                if bracket and bracket.remaining_quantity > 0:
+                    return bracket
+            
+            return None
+
+    def get_all_brackets_for_symbol(self, symbol: str) -> List[BracketState]:
+        """
+        Get all brackets (active and inactive) for a given symbol.
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            List of BracketState objects (may be empty).
+        """
+        with self._lock:
+            entry_ids = self._symbol_map.get(symbol, [])
+            brackets = []
+            for entry_id in entry_ids:
+                bracket = self._brackets.get(entry_id)
+                if bracket:
+                    brackets.append(bracket)
+            return brackets
+
+    def has_active_bracket(self, symbol: str) -> bool:
+        """
+        Quick check if a symbol has any active bracket.
+        
+        This is an alias for is_symbol_managed() for clarity.
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            True if symbol has at least one active bracket with remaining quantity.
+        """
+        return self.is_symbol_managed(symbol)
+
+
+
