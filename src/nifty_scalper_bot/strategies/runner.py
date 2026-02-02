@@ -2295,11 +2295,12 @@ class StrategyRunner:
                 
                 if qty > 0 and entry > 0:
                     # 2. Check if bracket already exists
-                    bracket = None
+                    is_managed = False
                     if self._bracket_manager:
-                        bracket = self._bracket_manager.get_bracket(symbol)
-                    
-                    if bracket is None:
+                        # ✅ FIX: Use is_symbol_managed() which looks up by SYMBOL correctly
+                        is_managed = self._bracket_manager.is_symbol_managed(symbol)
+    
+                    if not is_managed:
                         # 3. Calculate Risk based on Side (Safety Bracket)
                         if side == "LONG":
                             default_sl = entry * 0.95  # SL 5% BELOW
@@ -2312,18 +2313,17 @@ class StrategyRunner:
                             f"🔧 AUTO-ADOPTING ORPHAN: {symbol} ({side}) | Entry={entry:.2f} | "
                             f"Setting SL={default_sl:.2f} TP={default_tp:.2f}"
                         )
-                        
-                        # 4. Create Bracket
+
+                        # 4. Create Bracket using CORRECT method
                         if self._bracket_manager:
-                            self._bracket_manager.create_bracket(
+                            # ✅ FIX: Use attach_orphan_position() which EXISTS and is designed for this!
+                            bracket_id = self._bracket_manager.attach_orphan_position(
                                 symbol=symbol,
-                                side=side,
-                                entry_price=entry,
-                                stop_loss=default_sl,
-                                take_profit=default_tp,
-                                quantity=qty,
-                                strategy="Adopted_Orphan"
+                                side=side,  # "LONG" or "SHORT" or "BUY"/"SELL"
+                                qty=qty,
+                                entry_price=entry
                             )
+                            self._logger.info(f"✅ Orphan bracket created: {bracket_id}")
                             
                             # 5. Try to tag the position in memory to stop 'Orphan Guard' spam
                             # (If PositionManager supports mutable updates)
