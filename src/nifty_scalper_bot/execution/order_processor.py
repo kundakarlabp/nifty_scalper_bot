@@ -5,6 +5,7 @@ Production-Grade: Handles Risk Checks, Thread Safety, Position Awareness, and Ex
 
 import asyncio
 import logging
+import os
 from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -93,6 +94,47 @@ class OrderProcessor:
         if not symbol or not side or not qty:
             LOGGER.error(f"Invalid Signal: {signal}")
             return
+
+        # ================= OPTION ENTRY LIMIT (ENV CONTROLLED) =================
+        if (
+            self._max_active_option_trades > 0
+            and symbol.startswith("NFO:")
+        ):
+            # exits must NEVER be blocked
+            position = self.pos_manager.get_position(symbol)
+            is_exit_check = False
+            if position and position.quantity != 0:
+                if (position.side == "LONG" and side == "SELL") or \
+                   (position.side == "SHORT" and side == "BUY"):
+                    is_exit_check = True
+
+            if not is_exit_check:
+                try:
+                    active_positions = self.pos_manager.get_all_positions()
+                except Exception:
+                    active_positions = []
+
+                active_option_count = sum(
+                    1
+                    for pos in active_positions
+                    if pos.symbol.startswith("NFO:")
+                    and pos.quantity != 0
+                )
+
+                if active_option_count >= self._max_active_option_trades:
+                    LOGGER.warning(
+                        "⛔ OPTION ENTRY BLOCKED (ENV LIMIT)",
+                        extra={
+                            "event": "option_trade_limit_block",
+                            "limit": self._max_active_option_trades,
+                            "active": active_option_count,
+                            "incoming_symbol": symbol,
+                            "strategy": strategy_name,
+                        },
+                    )
+                    return
+        # ================= END OPTION ENTRY LIMIT =============================
+
 
         # 1. Concurrency Check (Debounce)
         key = f"{symbol}"
