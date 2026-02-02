@@ -1759,7 +1759,7 @@ class BracketManager:
         if unique_symbols:
             LOGGER.info(f"✅ Resubscribed {len(unique_symbols)} symbols to market data")
 
-def attach_orphan_position(
+    def attach_orphan_position(
         self,
         symbol: str,
         side: str,
@@ -1809,7 +1809,7 @@ def attach_orphan_position(
         )
         return oid
 
-def create_bracket(
+    def create_bracket(
         self,
         symbol: str,
         side: str,
