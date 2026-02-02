@@ -6131,9 +6131,9 @@ class NiftyScalperApp:
             )
 
     async def _health_loop(self) -> None:
-        interval = 60.0
+        interval = 30.0
         last_heavy = time_module.monotonic()
-        heavy_interval = 60.0
+        heavy_interval = 30.0
         while not self._shutdown_event.is_set():
             try:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
