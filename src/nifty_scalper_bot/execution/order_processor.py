@@ -46,6 +46,9 @@ class OrderProcessor:
         # 2. State Tracking
         self._active_trades: Dict[str, str] = {}
         self._last_signal_time: Dict[str, float] = {}
+        self._max_active_option_trades = int(
+            os.getenv("MAX_ACTIVE_OPTION_TRADES", "0") or 0
+        )
 
         # 3. Validation: Ensure OrderManager supports brackets
         # This prevents silent naked trading if the underlying manager is outdated
