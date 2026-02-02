@@ -22,6 +22,7 @@ class ATRSnapshot:
         """Check if ATR is recent enough for trading decisions"""
         return self.age_seconds <= max_age_sec
 
+
 class SafeATRProvider:
     """Thread-safe ATR provider with staleness checks"""
     
@@ -31,6 +32,9 @@ class SafeATRProvider:
         self._cache: dict[str, ATRSnapshot] = {}
         self._lock = threading.RLock()
         self._logger = get_logger(__name__)
+        # ✅ FIX: Rate limiting for error logs
+        self._error_log_times: dict[str, float] = {}
+        self._error_log_interval = 60.0  # Log errors once per minute per symbol
     
     def get_atr(self, symbol: str, *, fallback: float | None = None) -> ATRSnapshot | None:
         """
@@ -65,10 +69,16 @@ class SafeATRProvider:
                 return snapshot
                 
             except Exception as exc:
-                self._logger.error(
-                    f"ATR fetch failed for {symbol}: {exc}",
-                    extra={"event": "atr_fetch_error", "symbol": symbol}
-                )
+                # ✅ FIX: Rate-limited error logging
+                now = time()
+                last_log = self._error_log_times.get(symbol, 0)
+                
+                if now - last_log > self._error_log_interval:
+                    self._logger.warning(
+                        f"ATR unavailable for {symbol} (will use fallback)",
+                        extra={"event": "atr_fetch_warning", "symbol": symbol}
+                    )
+                    self._error_log_times[symbol] = now
                 
                 # 3. Use fallback if provided
                 if fallback is not None and fallback > 0:
@@ -78,4 +88,28 @@ class SafeATRProvider:
                         source="fallback"
                     )
                 
+                # 4. ✅ NEW: Try to compute fallback from price
+                try:
+                    hist = self._engine._histories.get(symbol)
+                    if hist:
+                        closes = hist.get_closes(1)
+                        if closes and closes[0] > 0:
+                            estimated = closes[0] * 0.015  # 1.5% of price
+                            return ATRSnapshot(
+                                value=estimated,
+                                timestamp=time(),
+                                source="estimated"
+                            )
+                except Exception:
+                    pass
+                
                 return None
+    
+    def clear_cache(self, symbol: str | None = None) -> None:
+        """Clear cached ATR data."""
+        with self._lock:
+            if symbol:
+                self._cache.pop(symbol, None)
+            else:
+                self._cache.clear()
+                
