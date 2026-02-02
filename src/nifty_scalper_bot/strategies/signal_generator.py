@@ -1280,25 +1280,83 @@ class StrategyManager:
         return (sl, tp)
 
     def _augment_futures_metrics(self, indicators: MutableMapping[str, Any]) -> None:
+        """
+        Augment indicators with futures and index data.
+        
+        ✅ PRODUCTION FIX: Now includes nifty_index_ltp and nifty_index_vwap
+        """
         indicators.setdefault("futures_volume", None)
         indicators.setdefault("futures_volume_avg", None)
         indicators.setdefault("futures_volume_ratio", None)
-        data_hub = self._data_hub
-        if data_hub is None: return
+        indicators.setdefault("nifty_index_ltp", None)  # ✅ NEW
+        indicators.setdefault("nifty_index_vwap", None)  # ✅ NEW
         
+        data_hub = self._data_hub
+        if data_hub is None: 
+            return
+        
+        # ═══════════════════════════════════════════════════════════
+        # 1. FUTURES VOLUME DATA
+        # ═══════════════════════════════════════════════════════════
         try:
             quote = data_hub.get_quote(self._futures_symbol)
-        except Exception: return
+        except Exception: 
+            quote = None
         
-        volume = self._extract_float(quote, ("volume_traded_today", "volume", "last_quantity"))
-        if volume is None: return
+        if quote:
+            volume = self._extract_float(quote, ("volume_traded_today", "volume", "last_quantity"))
+            if volume is not None:
+                self._futures_volume_history.append(volume)
+                indicators["futures_volume"] = volume
+                if self._futures_volume_history:
+                    avg = sum(self._futures_volume_history) / len(self._futures_volume_history)
+                    indicators["futures_volume_avg"] = avg
+                    if avg > 0: 
+                        indicators["futures_volume_ratio"] = volume / avg
         
-        self._futures_volume_history.append(volume)
-        indicators["futures_volume"] = volume
-        if self._futures_volume_history:
-            avg = sum(self._futures_volume_history) / len(self._futures_volume_history)
-            indicators["futures_volume_avg"] = avg
-            if avg > 0: indicators["futures_volume_ratio"] = volume / avg
+        # ═══════════════════════════════════════════════════════════
+        # ✅ 2. INDEX LTP AND VWAP DATA (NEW)
+        # ═══════════════════════════════════════════════════════════
+        try:
+            # Try NIFTY 50 spot index first
+            index_quote = data_hub.get_quote("NSE:NIFTY 50")
+            if index_quote:
+                index_ltp = self._extract_float(index_quote, ("last_price", "ltp", "close"))
+                index_vwap = self._extract_float(index_quote, ("vwap", "average_price"))
+                
+                if index_ltp and index_ltp > 0:
+                    indicators["nifty_index_ltp"] = index_ltp
+                
+                if index_vwap and index_vwap > 0:
+                    indicators["nifty_index_vwap"] = index_vwap
+            
+            # ═══════════════════════════════════════════════════════
+            # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
+            # ═══════════════════════════════════════════════════════
+            if not indicators.get("nifty_index_vwap"):
+                fut_quote = data_hub.get_quote(self._futures_symbol)
+                if fut_quote:
+                    fut_vwap = self._extract_float(fut_quote, ("vwap", "average_price"))
+                    fut_ltp = self._extract_float(fut_quote, ("last_price", "ltp", "close"))
+                    
+                    if fut_vwap and fut_vwap > 0:
+                        # Adjust for basis (futures typically trades at ~0.2% premium)
+                        basis_adjustment = 0.998
+                        indicators["nifty_index_vwap"] = fut_vwap * basis_adjustment
+                    
+                    # Also use futures LTP if index LTP unavailable
+                    if not indicators.get("nifty_index_ltp") and fut_ltp and fut_ltp > 0:
+                        indicators["nifty_index_ltp"] = fut_ltp * 0.998
+            
+            # Log for debugging
+            if indicators.get("nifty_index_ltp") or indicators.get("nifty_index_vwap"):
+                self._logger.debug(
+                    f"📊 Index data: LTP={indicators.get('nifty_index_ltp')}, "
+                    f"VWAP={indicators.get('nifty_index_vwap')}"
+                )
+                
+        except Exception as e:
+            self._logger.debug(f"Index data augment failed: {e}")
 
     @staticmethod
     def _extract_float(payload: Mapping[str, Any] | None, keys: Iterable[str]) -> float | None:
