@@ -525,7 +525,7 @@ class BracketManager:
                 b = self._brackets.get(eid)
                 # 🟢 FIX: Remove 'b.active' check so we can catch inactive ones
                 if b and b.remaining_quantity > 0:
-                    candidates.append(b))
+                    candidates.append(b)
         
         if not candidates:
             return
