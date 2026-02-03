@@ -231,7 +231,7 @@ class VWAPProStrategy(EliteStrategy):
             self._strike_lock[lock_key] = symbol
             self._telemetry["signals"] += 1
 
-            if sl >= current_price or tp <= current_price:
+            if sl >= current_price or tp2 <= current_price:
                 LOGGER.error(
                     "Invalid SL/TP computed",
                     extra={
@@ -249,7 +249,7 @@ class VWAPProStrategy(EliteStrategy):
                 confidence=confidence,
                 entry_price=current_price,
                 stop_loss=sl,
-                target=tp,
+                target=tp2,
                 quantity=qty,
                 strategy_name="VWAP_Pro_WorldClass",
                 metadata={
