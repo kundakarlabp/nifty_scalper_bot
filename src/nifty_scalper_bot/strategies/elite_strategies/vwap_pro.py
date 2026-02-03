@@ -133,7 +133,7 @@ class VWAPProStrategy(EliteStrategy):
             vwap = float(indicators.get("vwap") or 0.0)
             vwap_std = float(indicators.get("vwap_std") or 0.0)
             vwap_15m = float(indicators.get("vwap_15m") or vwap)
-            atr = float(indicators.get("atr") or (current_price * 0.015))
+            atr = float(indicators.get("atr") or max(current_price * 0.015, 1.0))
             entropy = float(indicators.get("entropy_5") or 0.5)
 
             index_ltp = float(indicators.get("nifty_index_ltp") or 0.0)
@@ -221,7 +221,8 @@ class VWAPProStrategy(EliteStrategy):
             tp2_mult = 3.0
 
             sl = current_price - (atr * sl_mult)
-            tp = current_price + (atr * tp2_mult)
+            tp1 = current_price + (atr * tp1_mult)
+            tp2 = current_price + (atr * tp2_mult)
 
             # -------------------------------
             # ✅ Register State
@@ -229,6 +230,18 @@ class VWAPProStrategy(EliteStrategy):
             self._signal_cooldown_tracker[cooldown_key] = now
             self._strike_lock[lock_key] = symbol
             self._telemetry["signals"] += 1
+
+            if sl >= current_price or tp <= current_price:
+                LOGGER.error(
+                    "Invalid SL/TP computed",
+                    extra={
+                        "symbol": symbol,
+                        "entry": current_price,
+                        "sl": sl,
+                        "tp": tp,
+                    },
+                )
+                return None
 
             return EliteSignal(
                 symbol=symbol,
