@@ -216,16 +216,8 @@ class VWAPProStrategy(EliteStrategy):
             tp1_mult = 1.5
             tp2_mult = 3.0
 
-            sl = (
-                current_price - atr * sl_mult
-                if is_ce
-                else current_price + atr * sl_mult
-            )
-            tp = (
-                current_price + atr * tp2_mult
-                if is_ce
-                else current_price - atr * tp2_mult
-            )
+            sl = current_price - (atr * sl_mult)
+            tp = current_price + (atr * tp2_mult)
 
             # -------------------------------
             # ✅ Register State
