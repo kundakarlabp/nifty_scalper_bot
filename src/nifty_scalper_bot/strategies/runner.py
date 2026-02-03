@@ -1107,6 +1107,124 @@ class StrategyRunner:
             metadata=updated_metadata,
         )
 
+    def _correct_sl_tp_for_position_side(
+        self,
+        signal: Signal,
+        entry_price: float,
+        entry_side: OrderSide,
+        atr: float,
+    ) -> Signal:
+        """
+        ✅ PRODUCTION FIX (Feb 3, 2026): Ensure SL/TP are correct for position SIDE.
+        
+        RULE (Non-Negotiable):
+        - LONG (BUY): SL below entry, TP above entry
+        - SHORT (SELL): SL above entry, TP below entry
+        
+        Strategies calculate SL/TP based on market direction (bullish/bearish),
+        but the ACTUAL trade is on OPTION PREMIUM. For LONG options:
+        - You profit when premium RISES (regardless of CE/PE)
+        - You lose when premium FALLS
+        
+        This method corrects any inverted SL/TP from strategy signals.
+        """
+        sl = signal.stop_loss
+        tp = signal.take_profit
+        
+        if entry_price <= 0:
+            return signal
+        
+        # Use ATR-based defaults if missing
+        if atr <= 0:
+            atr = entry_price * 0.015  # 1.5% fallback
+            
+        if sl is None or sl <= 0:
+            sl = entry_price - (atr * 1.5) if entry_side == "BUY" else entry_price + (atr * 1.5)
+        if tp is None or tp <= 0:
+            tp = entry_price + (atr * 3.0) if entry_side == "BUY" else entry_price - (atr * 3.0)
+        
+        corrected = False
+        original_sl = sl
+        original_tp = tp
+        
+        if entry_side == "BUY":  # LONG position
+            # SL must be BELOW entry
+            if sl >= entry_price:
+                # Mirror the distance to the correct side
+                distance = abs(sl - entry_price)
+                sl = entry_price - distance
+                corrected = True
+            
+            # TP must be ABOVE entry
+            if tp <= entry_price:
+                # Mirror the distance to the correct side
+                distance = abs(entry_price - tp)
+                tp = entry_price + distance
+                corrected = True
+                
+        else:  # SHORT position
+            # SL must be ABOVE entry
+            if sl <= entry_price:
+                distance = abs(entry_price - sl)
+                sl = entry_price + distance
+                corrected = True
+            
+            # TP must be BELOW entry
+            if tp >= entry_price:
+                distance = abs(tp - entry_price)
+                tp = entry_price - distance
+                corrected = True
+        
+        # Ensure minimum distances
+        min_sl_distance = atr * 0.5
+        min_tp_distance = atr * 1.0
+        
+        if entry_side == "BUY":
+            if entry_price - sl < min_sl_distance:
+                sl = entry_price - min_sl_distance
+            if tp - entry_price < min_tp_distance:
+                tp = entry_price + min_tp_distance
+        else:
+            if sl - entry_price < min_sl_distance:
+                sl = entry_price + min_sl_distance
+            if entry_price - tp < min_tp_distance:
+                tp = entry_price - min_tp_distance
+        
+        # Force positive prices
+        sl = max(0.05, sl)
+        tp = max(0.05, tp)
+        
+        if corrected:
+            self._logger.warning(
+                f"⚠️ SL/TP CORRECTED for {entry_side}: "
+                f"SL {original_sl:.2f}→{sl:.2f} | TP {original_tp:.2f}→{tp:.2f}",
+                extra={
+                    "event": "sl_tp_corrected",
+                    "entry_side": entry_side,
+                    "entry_price": entry_price,
+                    "original_sl": original_sl,
+                    "original_tp": original_tp,
+                    "corrected_sl": sl,
+                    "corrected_tp": tp,
+                }
+            )
+        
+        if not corrected:
+            return signal
+        
+        # Create corrected signal
+        return Signal(
+            action=signal.action,
+            symbol=signal.symbol,
+            quantity=signal.quantity,
+            confidence=signal.confidence,
+            reason=signal.reason,
+            stop_loss=sl,
+            take_profit=tp,
+            metadata=signal.metadata,
+        )
+        
+
     def aggregate_signals_by_symbol(
         self,
         signals: list[Signal],
@@ -2740,6 +2858,16 @@ class StrategyRunner:
                 symbol=trade_symbol,
                 metadata=metadata,
                 current_price=trade_price
+            )
+            
+            # ═══════════════════════════════════════════════════════════════
+            # ✅ CRITICAL FIX: Correct SL/TP for position side
+            # ═══════════════════════════════════════════════════════════════
+            signal = self._correct_sl_tp_for_position_side(
+                signal=signal,
+                entry_price=trade_price,
+                entry_side=entry_side,
+                atr=atr_val
             )
             
             self._logger.info(
