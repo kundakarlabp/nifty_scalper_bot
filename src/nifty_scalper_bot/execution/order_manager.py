@@ -1621,6 +1621,25 @@ class OrderManager:
             )
             return None
 
+        # --- SEMANTIC VALIDATION GATEKEEPER ---
+        if price and price > 0:
+            if side == "BUY":
+                # For a Long, TP must be above Entry, SL must be below Entry
+                if take_profit and take_profit <= price:
+                    self._logger.error(f"🛑 REJECTED: BUY TP ({take_profit}) is below entry ({price})")
+                    return None
+                if stop_loss and stop_loss >= price:
+                    self._logger.error(f"🛑 REJECTED: BUY SL ({stop_loss}) is above entry ({price})")
+                    return None
+            elif side == "SELL":
+                # For a Short/Exit, TP must be below Entry, SL must be above Entry
+                if take_profit and take_profit >= price:
+                    self._logger.error(f"🛑 REJECTED: SELL TP ({take_profit}) is above entry ({price})")
+                    return None
+                if stop_loss and stop_loss <= price:
+                    self._logger.error(f"🛑 REJECTED: SELL SL ({stop_loss}) is below entry ({price})")
+                    return None
+
         # ---------------------------------------------------------------------
         # 2. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
         # ---------------------------------------------------------------------
