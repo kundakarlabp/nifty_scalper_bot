@@ -2216,10 +2216,31 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 self._raise_for_status(response, expect_order_response)
 
             if response.is_success:
+                # ✅ FIX: Check for empty response body (also transient)
+                if not response.content or len(response.content) == 0:
+                    raise RetryableError(
+                        "Empty response body from Zerodha",
+                        context=RetryErrorContext(
+                            status=response.status_code,
+                            endpoint=url,
+                            error=None,
+                            delay_hint=0.3,
+                        ),
+                    )
+                
                 try:
                     payload = response.json()
                 except json.JSONDecodeError as exc:
-                    raise BrokerError("Invalid JSON response from Zerodha") from exc
+                    # ✅ FIX: Make this RETRYABLE instead of terminal
+                    raise RetryableError(
+                        "Invalid JSON response from Zerodha",
+                        context=RetryErrorContext(
+                            status=response.status_code,
+                            endpoint=url,
+                            error=exc,
+                            delay_hint=0.5,
+                        ),
+                    ) from exc
                 self._reset_transient_state()
                 return payload
 
