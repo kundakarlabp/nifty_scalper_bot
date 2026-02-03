@@ -17,17 +17,12 @@ LOGGER = get_logger(__name__)
 
 class VWAPProStrategy(EliteStrategy):
     """
-    VWAP Pro – Production Hardened Version (World-Class Enhanced)
+    VWAP Pro – Production Hardened Version (Final Audit Applied)
     -------------------------------------------------------------
-    • Single option per expiry+direction
-    • No laddering
-    • No CE+PE overlap
-    • Stable cooldown + strike lock
-    • ATR-based virtual trailing SL
-    • TP1 partial exit + runner
-    • Expiry-day tightening
-    • Index-bias CE/PE suppression
-    • Bracket-safe (virtual)
+    • Direction-safe SL/TP (CE/PE correctly handled)
+    • Aggressive acceptance resets on all rejections and post-signal
+    • Futures-only Index Bias (Hardened against Spot VWAP=0)
+    • Single option per expiry+direction isolated state
     """
 
     MIN_BARS_REQUIRED = 10
@@ -75,7 +70,6 @@ class VWAPProStrategy(EliteStrategy):
         return digits[:5] if len(digits) >= 5 else "UNK"
 
     def _dynamic_volume_threshold(self) -> float:
-        """Clamped U-shape volume logic (SAFE)."""
         t = time_module.localtime()
         minutes = t.tm_hour * 60 + t.tm_min
         if 630 < minutes <= 870:  # Mid-day
@@ -83,7 +77,6 @@ class VWAPProStrategy(EliteStrategy):
         return 0.9
 
     def _is_expiry_day(self) -> bool:
-        """Weekly expiry tightening (Thursday)."""
         return time_module.localtime().tm_wday == 3
 
     # ------------------------------------------------------------------ #
@@ -97,88 +90,81 @@ class VWAPProStrategy(EliteStrategy):
         current_price: float,
         position: Any | None = None,
     ) -> EliteSignal | None:
-
         try:
             now = time_module.time()
-
             expiry = self._extract_expiry(symbol)
             is_ce = "CE" in symbol.upper()
             direction = "CE" if is_ce else "PE"
 
             lock_key = f"NIFTY:{expiry}:{direction}"
             cooldown_key = f"{expiry}:{direction}"
+            acc_key = f"{symbol}_{direction}_accept"
 
-            # -------------------------------
-            # 🔐 Strike Lock Management
-            # -------------------------------
+            if acc_key not in self._vwap_acceptance_tracker:
+                self._vwap_acceptance_tracker[acc_key] = 0
+
+            # 🔐 ISSUE 3 FIX: Reset acceptance on Strike Lock violation
             if position is not None and getattr(position, "quantity", 0) > 0:
                 self._strike_lock[lock_key] = symbol
             else:
                 self._strike_lock.pop(lock_key, None)
 
             if lock_key in self._strike_lock and self._strike_lock[lock_key] != symbol:
+                self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
-            # -------------------------------
-            # ⏳ Cooldown (expiry+side scoped)
-            # -------------------------------
+            # ⏳ ISSUE 2 FIX: Reset acceptance on Cooldown skip
             last_fire = self._signal_cooldown_tracker.get(cooldown_key, 0.0)
             if (now - last_fire) < self.COOLDOWN_SECONDS:
                 self._telemetry["skipped_cooldown"] += 1
+                self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
-            # -------------------------------
-            # 📊 Indicator Extraction
-            # -------------------------------
+            # 📊 ISSUE 1 FIX: Hard-block on missing Futures VWAP (No spot fallback)
             vwap = float(indicators.get("vwap") or 0.0)
-            vwap_std = float(indicators.get("vwap_std") or 0.0)
-            vwap_15m = float(indicators.get("vwap_15m") or vwap)
             atr = float(indicators.get("atr") or max(current_price * 0.015, 1.0))
             entropy = float(indicators.get("entropy_5") or 0.5)
 
-            index_ltp = float(indicators.get("nifty_index_ltp") or 0.0)
-            index_vwap = float(indicators.get("nifty_index_vwap") or 0.0)
+            index_ltp = float(indicators.get("nifty_fut_ltp") or indicators.get("nifty_index_ltp") or 0.0)
+            index_vwap = float(indicators.get("nifty_fut_vwap") or 0.0)
+
+            if index_ltp <= 0 or index_vwap <= 0:
+                if not self._index_bias_missing_logged:
+                    LOGGER.error("INVALID INDEX DATA — blocking signal", extra={"symbol": symbol})
+                    self._index_bias_missing_logged = True
+                self._vwap_acceptance_tracker[acc_key] = 0
+                return None
+
+            self._index_bias_missing_logged = False
+
+            # 🧭 Bias Gates & Acceptance Resets
+            if (is_ce and index_ltp < index_vwap) or (not is_ce and index_ltp > index_vwap):
+                self._vwap_acceptance_tracker[acc_key] = 0
+                return None
 
             if current_price <= 0 or vwap <= 0:
+                self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
-            # -------------------------------
-            # 🧭 Index Bias (CE/PE suppression)
-            # -------------------------------
-            if index_ltp > 0 and index_vwap > 0:
-                self._index_bias_missing_logged = False
-                if is_ce and index_ltp < index_vwap:
-                    return None
-                if not is_ce and index_ltp > index_vwap:
-                    return None
-
-            else:
-                if not self._index_bias_missing_logged:
-                    LOGGER.warning(
-                        "Index bias unavailable — proceeding without index confirmation",
-                        extra={
-                            "event": "index_bias_missing",
-                            "symbol": symbol,
-                            "index_ltp": index_ltp,
-                            "index_vwap": index_vwap,
-                        },
-                    )
-                    self._index_bias_missing_logged = True
-
-            # -------------------------------
-            # 📐 VWAP Acceptance (2 bars)
-            # -------------------------------
-            acc_key = f"{symbol}_accept"
-            if acc_key not in self._vwap_acceptance_tracker:
-                self._vwap_acceptance_tracker[acc_key] = 0
-
-            if is_ce and current_price < vwap:
+            if (is_ce and current_price < vwap) or (not is_ce and current_price > vwap):
                 self._telemetry["skipped_vwap"] += 1
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
-            if not is_ce and current_price > vwap:
-                self._telemetry["skipped_vwap"] += 1
+            # 📏 Over-extension filter
+            vwap_std = float(indicators.get("vwap_std") or 0.0)
+            if vwap_std > 0:
+                z = abs(current_price - vwap) / vwap_std
+                if z > 2.2:
+                    self._telemetry["skipped_overextended"] += 1
+                    self._vwap_acceptance_tracker[acc_key] = 0
+                    return None
+
+            # 🔊 ISSUE 4 FIX: Reset acceptance on Volume rejection
+            vol = float(indicators.get("volume") or 0.0)
+            avg_vol = float(indicators.get("avg_volume") or 1.0)
+            if vol < avg_vol * self._dynamic_volume_threshold():
+                self._telemetry["skipped_volume"] += 1
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -186,62 +172,37 @@ class VWAPProStrategy(EliteStrategy):
             if self._vwap_acceptance_tracker[acc_key] < self.VWAP_ACCEPTANCE_BARS:
                 return None
 
-            # -------------------------------
-            # 📏 Over-extension filter
-            # -------------------------------
-            if vwap_std > 0:
-                z = abs(current_price - vwap) / vwap_std
-                if z > 2.2:
-                    self._telemetry["skipped_overextended"] += 1
-                    return None
-
-            # -------------------------------
-            # 🔊 Volume Filter
-            # -------------------------------
-            vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("avg_volume") or 1.0)
-            if vol < avg_vol * self._dynamic_volume_threshold():
-                self._telemetry["skipped_volume"] += 1
-                return None
-
-            # -------------------------------
-            # 🎯 Quantity (LOT SAFE)
-            # -------------------------------
-            base_qty = int(self._vwap_config.quantity or 1)
-            confidence = 0.85 if entropy < 0.7 else 0.65
-
-            # Strategy emits intent, execution layer enforces lot sizing
-            qty = max(1, int(base_qty * confidence))
-
-            # -------------------------------
-            # 🛑 SL / 🎯 TP (Expiry aware)
-            # -------------------------------
+            # 🛑 CRITICAL ISSUE 1 FIX: Direction-Safe SL / TP
             sl_mult = (1.2 if self._is_expiry_day() else 1.5) * (0.85 if entropy > 0.75 else 1.0)
-            tp1_mult = 1.5
             tp2_mult = 3.0
 
-            sl = current_price - (atr * sl_mult)
-            tp1 = current_price + (atr * tp1_mult)
-            tp2 = current_price + (atr * tp2_mult)
+            if is_ce:
+                sl = current_price - (atr * sl_mult)
+                tp2 = current_price + (atr * tp2_mult)
+            else:  # LONG PE: Profit on underlying price drop
+                sl = current_price + (atr * sl_mult)
+                tp2 = current_price - (atr * tp2_mult)
 
-            # -------------------------------
-            # ✅ Register State
-            # -------------------------------
-            self._signal_cooldown_tracker[cooldown_key] = now
-            self._strike_lock[lock_key] = symbol
-            self._telemetry["signals"] += 1
+            # 🛑 CRITICAL ISSUE 2 FIX: Direction-Aware Validation
+            if is_ce:
+                invalid = sl >= current_price or tp2 <= current_price
+            else:
+                invalid = sl <= current_price or tp2 >= current_price
 
-            if sl >= current_price or tp2 <= current_price:
-                LOGGER.error(
-                    "Invalid SL/TP computed",
-                    extra={
-                        "symbol": symbol,
-                        "entry": current_price,
-                        "sl": sl,
-                        "tp": tp,
-                    },
-                )
+            if invalid:
+                LOGGER.error("Invalid SL/TP logic", extra={"symbol": symbol, "entry": current_price, "sl": sl, "tp2": tp2})
+                self._vwap_acceptance_tracker[acc_key] = 0
                 return None
+
+            # 🎯 Final Signal Prep
+            base_qty = int(self._vwap_config.quantity or 1)
+            confidence = 0.85 if entropy < 0.7 else 0.65
+            qty = max(1, int(base_qty * confidence))
+
+            # 🏁 CRITICAL ISSUE 3 FIX: Reset acceptance after firing
+            self._vwap_acceptance_tracker[acc_key] = 0
+            self._signal_cooldown_tracker[cooldown_key] = now
+            self._telemetry["signals"] += 1
 
             return EliteSignal(
                 symbol=symbol,
@@ -253,20 +214,14 @@ class VWAPProStrategy(EliteStrategy):
                 quantity=qty,
                 strategy_name="VWAP_Pro_WorldClass",
                 metadata={
-                    # ---- Virtual Bracket Plan ----
                     "bracket_type": "VIRTUAL",
                     "sl_mode": "ATR_TRAIL",
                     "sl_atr_mult": sl_mult,
-                    "tp1_atr_mult": tp1_mult,
+                    "tp1_atr_mult": 1.5,
                     "tp2_atr_mult": tp2_mult,
                     "tp1_qty_pct": 0.5,
                     "runner_trail_after_tp1": True,
-                    # ---- Context ----
-                    "expiry": expiry,
                     "direction": direction,
-                    "expiry_day": self._is_expiry_day(),
-                    "index_bias": "FOLLOW",
-                    "entropy": round(entropy, 2),
                 },
             )
 
