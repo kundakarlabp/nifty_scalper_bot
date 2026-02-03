@@ -4469,44 +4469,79 @@ class OrderManager:
                     
                 status_icon = "✅" if raw_pnl > 0 else "🔻"
                 
-                # Match with Active Bracket (For SL/TP Context)
-                bracket = None
-                with self._lock:
-                    # Find the bracket managing this symbol
-                    for b in self._brackets.values():
-                        if b.symbol == symbol and b.remaining_position() > 0:
-                            bracket = b
-                            break
-                
+                # ═══════════════════════════════════════════════════════════════
+                # ✅ FIX: Query BracketManager (source of truth for virtual brackets)
+                # Fixed: Feb 3, 2026 - SITREP was looking in wrong dict
+                # ═══════════════════════════════════════════════════════════════
                 sl_info = "NONE ⚠️"
                 tp_info = "Open"
                 insight = "Monitoring..."
+                bracket = None
                 
-                if bracket:
-                    sl_val = bracket.stop_price
-                    tp_val = bracket.tp_primary_price
-                    sl_info = f"{sl_val:.2f}"
-                    tp_info = f"{tp_val:.2f}" if tp_val else "Moon 🚀"
-                    
-                    # --- GENERATE INSIGHTS ---
-                    if ltp > 0:
-                        # 1. Distance Analysis
-                        dist_to_sl = abs(ltp - sl_val)
-                        risk_gap = abs(entry - sl_val)
+                if self._bracket_manager:
+                    # Check if symbol is managed by BracketManager
+                    if self._bracket_manager.is_symbol_managed(symbol):
+                        # Get bracket via symbol lookup
+                        try:
+                            if hasattr(self._bracket_manager, 'get_bracket_by_symbol'):
+                                bracket = self._bracket_manager.get_bracket_by_symbol(symbol)
+                            else:
+                                # Fallback: Manual lookup via _symbol_map
+                                with self._bracket_manager._lock:
+                                    entry_ids = self._bracket_manager._symbol_map.get(symbol, [])
+                                    for entry_id in entry_ids:
+                                        b = self._bracket_manager._brackets.get(entry_id)
+                                        if b and b.remaining_quantity > 0:
+                                            bracket = b
+                                            break
+                        except Exception as e:
+                            self._logger.debug(f"Bracket lookup for {symbol}: {e}")
                         
-                        # 2. Determine "The Plan"
-                        if raw_pnl > 0:
-                            if tp_val and abs(tp_val - ltp) < (ltp * 0.001):
-                                insight = "🎯 Sniper Mode: Very close to Target!"
+                        if bracket:
+                            # ✅ Use correct BracketState attribute names
+                            sl_val = getattr(bracket, 'sl_trigger_price', 0) or 0
+                            tp_val = getattr(bracket, 'tp_trigger_price', 0) or 0
+                            
+                            sl_info = f"{sl_val:.2f}" if sl_val > 0 else "NONE ⚠️"
+                            tp_info = f"{tp_val:.2f}" if tp_val > 0 else "Open"
+                            
+                            # Generate insights
+                            is_active = getattr(bracket, 'active', False)
+                            highest = getattr(bracket, 'highest_ltp', 0)
+                            
+                            if ltp > 0 and sl_val > 0:
+                                dist_to_sl = abs(ltp - sl_val)
+                                risk_gap = abs(entry - sl_val) if entry > 0 else 1
+                                
+                                if raw_pnl > 0:
+                                    if tp_val > 0 and abs(tp_val - ltp) < (ltp * 0.01):
+                                        insight = "🎯 Sniper Mode: Near Target!"
+                                    elif is_active:
+                                        insight = f"🚀 Trailing Active | High: {highest:.2f}"
+                                    else:
+                                        insight = "🚀 Cruising: Holding for TP"
+                                else:
+                                    if risk_gap > 0 and dist_to_sl < (risk_gap * 0.25):
+                                        insight = "🚨 DANGER: Near Stop Loss!"
+                                    else:
+                                        insight = "🛡️ Defending: Structure holds"
                             else:
-                                insight = "🚀 Cruising: Trade is working. Holding for TP."
+                                insight = f"✅ Protected | Active: {is_active}"
                         else:
-                            if risk_gap > 0 and dist_to_sl < (risk_gap * 0.2):
-                                insight = "🚨 DANGER ZONE: Price is hammering the Stop Loss!"
-                            else:
-                                insight = "🛡️ Defending: Trade is against us, but structure holds."
+                            insight = "⚠️ Symbol managed but bracket unavailable"
+                    else:
+                        insight = "⚠️ ORPHAN TRADE: No bracket protection!"
                 else:
-                    insight = "⚠️ ORPHAN TRADE: No bracket found. Managing manually?"
+                    # Legacy fallback
+                    with self._lock:
+                        for b in self._brackets.values():
+                            if getattr(b, 'symbol', None) == symbol:
+                                sl_info = f"{getattr(b, 'stop_price', 0):.2f}"
+                                tp_info = f"{getattr(b, 'tp_primary_price', 0):.2f}"
+                                insight = "✅ Legacy bracket"
+                                break
+                        else:
+                            insight = "⚠️ BracketManager not available"
 
                 # Format the Block
                 line = (
