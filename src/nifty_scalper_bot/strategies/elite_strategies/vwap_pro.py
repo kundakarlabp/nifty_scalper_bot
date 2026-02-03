@@ -64,6 +64,7 @@ class VWAPProStrategy(EliteStrategy):
             "skipped_volume": 0,
             "skipped_overextended": 0,
         }
+        self._index_bias_missing_logged: bool = False
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -145,21 +146,24 @@ class VWAPProStrategy(EliteStrategy):
             # 🧭 Index Bias (CE/PE suppression)
             # -------------------------------
             if index_ltp > 0 and index_vwap > 0:
+                self._index_bias_missing_logged = False
                 if is_ce and index_ltp < index_vwap:
                     return None
                 if not is_ce and index_ltp > index_vwap:
                     return None
 
             else:
-                LOGGER.warning(
-                    "Index bias unavailable — proceeding without index confirmation",
-                    extra={
-                        "event": "index_bias_missing",
-                        "symbol": symbol,
-                        "index_ltp": index_ltp,
-                        "index_vwap": index_vwap,
-                    },
-                )
+                if not self._index_bias_missing_logged:
+                    LOGGER.warning(
+                        "Index bias unavailable — proceeding without index confirmation",
+                        extra={
+                            "event": "index_bias_missing",
+                            "symbol": symbol,
+                            "index_ltp": index_ltp,
+                            "index_vwap": index_vwap,
+                        },
+                    )
+                    self._index_bias_missing_logged = True
 
             # -------------------------------
             # 📐 VWAP Acceptance (2 bars)
