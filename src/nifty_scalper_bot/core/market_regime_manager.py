@@ -569,13 +569,72 @@ class MarketRegimeManager:
             allowed = True
             now = time.time()
             if snapshot is None:
-                allowed = False
-                reasons.append("regime_unavailable")
+                # ✅ FIX: Check for auto-bypass when regime data is unavailable
+                # This provides graceful degradation during API outages
+                auto_bypass = coalesce_bool(
+                    "REGIME_BYPASS_ON_UNAVAILABLE", 
+                    default=False
+                )
+                
+                if auto_bypass:
+                    # Log warning but allow trading with caution
+                    logger.warning(
+                        "⚠️ Regime unavailable - BYPASS ACTIVE (trading with reduced confidence)",
+                        extra={
+                            "event": "regime_unavailable_bypass",
+                            "action": "allow_with_caution",
+                        }
+                    )
+                    # Allow trading but record the bypass reason
+                    allowed = True
+                    reasons.append("regime_unavailable_bypassed")
+                    
+                    # ✅ Create a synthetic "cautious" regime decision
+                    decision = RegimeDecision(
+                        allowed=True,
+                        reasons=("regime_unavailable_bypassed",),
+                        bypassed=True,  # Mark as bypassed
+                        decided_at=time.time(),
+                        regime="unknown",
+                        confidence=0.5,  # Conservative confidence
+                    )
+                    self._stats["bypass"] = self._stats.get("bypass", 0) + 1
+                    self._record_decision(decision, record_decision)
+                    self._emit_decision_log(
+                        allowed=True,
+                        bypassed=True,
+                        reasons=("regime_unavailable_bypassed",),
+                        snapshot=None,
+                    )
+                    return True
+                else:
+                    # Original behavior: block trading
+                    allowed = False
+                    reasons.append("regime_unavailable")
             else:
                 age = max(0.0, now - float(snapshot.updated_at))
                 if age > self.stale_after_seconds:
-                    allowed = False
-                    reasons.append("regime_stale")
+                    # ✅ FIX: Check for stale bypass
+                    stale_bypass = coalesce_bool(
+                        "REGIME_BYPASS_ON_STALE",
+                        default=False
+                    )
+                    
+                    if stale_bypass and age < (self.stale_after_seconds * 3):
+                        # Allow if data is stale but not ancient (3x threshold)
+                        logger.warning(
+                            f"⚠️ Regime data stale ({age:.1f}s) - BYPASS ACTIVE",
+                            extra={
+                                "event": "regime_stale_bypass",
+                                "age_seconds": age,
+                                "threshold": self.stale_after_seconds,
+                            }
+                        )
+                        reasons.append("regime_stale_bypassed")
+                        # Don't set allowed=False, continue to other checks
+                    else:
+                        allowed = False
+                        reasons.append("regime_stale")
                 if snapshot.confidence < self.min_confidence:
                     allowed = False
                     reasons.append("confidence_below_floor")
