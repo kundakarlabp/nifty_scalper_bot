@@ -164,8 +164,7 @@ class _BurstDedupFilter(logging.Filter):
         if getattr(record, "bypass_filters", False):
             return True
         try:
-            if record.levelno >= logging.WARNING:
-                return True   # never suppress WARN / ERROR / CRITICAL
+            signature = f"{record.name}|{record.levelno}|{record.getMessage()}"
             now = time.monotonic()
             with self._lock:
                 last_emit = self._last_seen.get(signature, 0.0)
@@ -384,11 +383,7 @@ def setup_logging(level: str = "INFO") -> None:
                     datefmt="%Y-%m-%dT%H:%M:%S%z",
                 )
             )
-        root = logging.getLogger()
-        root.setLevel(numeric_level)
-
-        if not root.handlers:
-            root.addHandler(handler)
+        logging.basicConfig(handlers=[handler], level=numeric_level, force=True)
         LOGGER.info(
             "Condition met: logging_initialized",
             extra={
@@ -411,13 +406,11 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     """Return a named logger, defaulting to the package root."""
     target = name or _DEFAULT_LOGGER_NAME
     try:
-        
+        _install_filters_once()
         logger = logging.getLogger(target)
         # Avoid duplicate filters if get_logger is called repeatedly
         if not any(isinstance(flt, EventEnricher) for flt in logger.filters):
             logger.addFilter(EventEnricher())
-
-        _install_filters_once()
         return logger
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
@@ -546,8 +539,7 @@ def enable_business_logic_logging() -> None:
     # logging.getLogger("nifty_scalper_bot.execution").setLevel(logging.INFO)
     # logging.getLogger("nifty_scalper_bot.risk").setLevel(logging.INFO)
     # logging.getLogger("nifty_scalper_bot.lifecycle").setLevel(logging.INFO)
-    #pass
-    return
+    pass
 
 # =============================================================================
 # 7. MODULE INITIALIZATION
