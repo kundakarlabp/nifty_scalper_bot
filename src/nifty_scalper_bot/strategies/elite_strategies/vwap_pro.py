@@ -125,7 +125,7 @@ class VWAPProStrategy(EliteStrategy):
             atr = float(indicators.get("atr") or max(current_price * 0.015, 1.0))
             entropy = float(indicators.get("entropy_5") or 0.5)
 
-            indicators.get("nifty_fut_ltp") or indicators.get("nifty_index_ltp") or 0.0)
+            index_ltp = float(indicators.get("nifty_fut_ltp") or indicators.get("nifty_index_ltp") or 0.0)
             index_vwap = float(indicators.get("nifty_fut_vwap") or indicators.get("nifty_index_vwap") or 0.0)
 
             if index_ltp <= 0 or index_vwap <= 0:
