@@ -1347,6 +1347,12 @@ class StrategyManager:
                     # Also use futures LTP if index LTP unavailable
                     if not indicators.get("nifty_index_ltp") and fut_ltp and fut_ltp > 0:
                         indicators["nifty_index_ltp"] = fut_ltp * 0.998
+        
+            # ✅ FIX: Set BOTH key variants for strategy compatibility
+            if indicators.get("nifty_index_ltp"):
+                indicators["nifty_fut_ltp"] = indicators["nifty_index_ltp"]
+            if indicators.get("nifty_index_vwap"):
+                indicators["nifty_fut_vwap"] = indicators["nifty_index_vwap"]
             
             # Log for debugging
             if indicators.get("nifty_index_ltp") or indicators.get("nifty_index_vwap"):
