@@ -1529,11 +1529,15 @@ class OrderManager:
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
         """
         # ✅ FIX: Round Price/Trigger to 0.05 tick size BEFORE processing
-        # This fixes the "Invalid Tick Size" rejection (e.g. 65.14 -> 65.15)
+        # ═══════════════════════════════════════════════════════════════════════
         if price is not None and price > 0:
             price = self._round_to_tick(price)
         if trigger_price is not None and trigger_price > 0:
             trigger_price = self._round_to_tick(trigger_price)
+        if stop_loss is not None and stop_loss > 0:
+            stop_loss = self._round_to_tick(stop_loss)
+        if take_profit is not None and take_profit > 0:
+            take_profit = self._round_to_tick(take_profit)
         # ---------------------------------------------------------
         # 🛡️ CIRCUIT BREAKER CHECK
         # ---------------------------------------------------------
