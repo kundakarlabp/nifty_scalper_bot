@@ -125,8 +125,8 @@ class VWAPProStrategy(EliteStrategy):
             atr = float(indicators.get("atr") or max(current_price * 0.015, 1.0))
             entropy = float(indicators.get("entropy_5") or 0.5)
 
-            index_ltp = float(indicators.get("nifty_fut_ltp") or indicators.get("nifty_index_ltp") or 0.0)
-            index_vwap = float(indicators.get("nifty_fut_vwap") or 0.0)
+            indicators.get("nifty_fut_ltp") or indicators.get("nifty_index_ltp") or 0.0)
+            index_vwap = float(indicators.get("nifty_fut_vwap") or indicators.get("nifty_index_vwap") or 0.0)
 
             if index_ltp <= 0 or index_vwap <= 0:
                 if not self._index_bias_missing_logged:
@@ -172,25 +172,27 @@ class VWAPProStrategy(EliteStrategy):
             if self._vwap_acceptance_tracker[acc_key] < self.VWAP_ACCEPTANCE_BARS:
                 return None
 
-            # 🛑 CRITICAL ISSUE 1 FIX: Direction-Safe SL / TP
+            # ═══════════════════════════════════════════════════════════════════
+            # ✅ WORLD-CLASS FIX: SL/TP Based on OPTION PREMIUM Direction
+            # We trade OPTION PREMIUM, not the index.
+            # LONG any option (CE or PE) → profit when PREMIUM rises
+            # Therefore: SL below entry, TP above entry (ALWAYS for LONG)
+            # ═══════════════════════════════════════════════════════════════════
             sl_mult = (1.2 if self._is_expiry_day() else 1.5) * (0.85 if entropy > 0.75 else 1.0)
             tp2_mult = 3.0
 
-            if is_ce:
-                sl = current_price - (atr * sl_mult)
-                tp2 = current_price + (atr * tp2_mult)
-            else:  # LONG PE: Profit on underlying price drop
-                sl = current_price + (atr * sl_mult)
-                tp2 = current_price - (atr * tp2_mult)
+            # LONG position: SL below, TP above (regardless of CE/PE)
+            sl = current_price - (atr * sl_mult)
+            tp2 = current_price + (atr * tp2_mult)
 
-            # 🛑 CRITICAL ISSUE 2 FIX: Direction-Aware Validation
-            if is_ce:
-                invalid = sl >= current_price or tp2 <= current_price
-            else:
-                invalid = sl <= current_price or tp2 >= current_price
+            # Validation: LONG must have SL < entry < TP
+            invalid = sl >= current_price or tp2 <= current_price
 
             if invalid:
-                LOGGER.error("Invalid SL/TP logic", extra={"symbol": symbol, "entry": current_price, "sl": sl, "tp2": tp2})
+                LOGGER.error(
+                    "Invalid SL/TP for LONG",
+                    extra={"symbol": symbol, "entry": current_price, "sl": sl, "tp": tp2, "atr": atr}
+                )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
