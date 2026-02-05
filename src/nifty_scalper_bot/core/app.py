@@ -5099,6 +5099,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                         LOGGER.debug(f"Skip NFO instrument {key}: {e}")
                 
                 LOGGER.info(f"✅ Synced {synced_count}/{total_items} NFO instruments to resolver")
+                
+                # ✅ FIX #3: Populate _option_contracts from broker NFO instruments
+                if hasattr(ctx.instrument_resolver, 'sync_nfo_from_broker'):
+                    nfo_synced = ctx.instrument_resolver.sync_nfo_from_broker(list(nfo_instruments.values()) if isinstance(nfo_instruments, dict) else nfo_instruments)
+                    LOGGER.info(f"✅ Synced {nfo_synced} NFO options to resolver._option_contracts")
+                else:
+                    LOGGER.warning("⚠️ InstrumentResolver missing sync_nfo_from_broker method")
      
                 # ✅ FIX #1: DYNAMIC NFO Test Symbol Generation
                 # Generate test symbol for CURRENT/NEXT expiry (not hardcoded expired!)
