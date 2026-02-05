@@ -156,6 +156,45 @@ LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 
 _ComponentT = TypeVar("_ComponentT")
 
+def _get_current_nifty_futures_symbol() -> str:
+    """
+    Compute the current month's NIFTY futures symbol.
+    Auto-rolls to next month after monthly expiry (last Thursday).
+    
+    Returns:
+        str: Symbol like "NFO:NIFTY26FEBFUT"
+    """
+    from datetime import datetime, timedelta
+    import calendar
+    
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    
+    # Find last Thursday of current month (monthly expiry)
+    last_day = calendar.monthrange(year, month)[1]
+    expiry_date = datetime(year, month, last_day)
+    while expiry_date.weekday() != 3:  # Thursday = 3
+        expiry_date -= timedelta(days=1)
+    
+    # If we're past expiry, roll to next month
+    if now.date() > expiry_date.date():
+        if month == 12:
+            year += 1
+            month = 1
+        else:
+            month += 1
+    
+    # Format: NFO:NIFTY26FEBFUT
+    y_str = str(year)[-2:]
+    months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+              "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+    m_str = months[month - 1]
+    
+    symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
+    LOGGER.info(f"📅 Using futures symbol: {symbol}")
+    return symbol
+
 
 def _require_component(component: _ComponentT | None, name: str) -> _ComponentT:
     """Return *component* when present, otherwise raise ``RuntimeError``.
@@ -3545,7 +3584,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         risk_manager=risk_manager,
         order_manager=safe_order_manager,
         data_hub=data_hub,
-        futures_symbol="NIFTY",
+        futures_symbol=_get_current_nifty_futures_symbol(),
     )
     regime_bias_map: dict[str, dict[str, float]] = {}
     if elite_strategies:
@@ -3637,7 +3676,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         position_manager=position_manager,
         data_hub=data_hub,
         orchestrator=orchestrator,
-        futures_symbol="NIFTY",
+        futures_symbol=_get_current_nifty_futures_symbol(),
         score_weights=None,
         regime_signal_getter=_regime_signal_snapshot,
         regime_bias_map=regime_bias_map,
