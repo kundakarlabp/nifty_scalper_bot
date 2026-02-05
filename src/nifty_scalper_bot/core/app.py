@@ -5099,22 +5099,72 @@ async def startup_sequence(ctx: BotContext) -> None:
                         LOGGER.debug(f"Skip NFO instrument {key}: {e}")
                 
                 LOGGER.info(f"✅ Synced {synced_count}/{total_items} NFO instruments to resolver")
+     
+                # ✅ FIX #1: DYNAMIC NFO Test Symbol Generation
+                # Generate test symbol for CURRENT/NEXT expiry (not hardcoded expired!)
+                from datetime import datetime, timedelta
+                import calendar as _cal
                 
-                # Verify resolution now works
-                test_sym = "NFO:NIFTY26JAN25200CE"
+                _now = datetime.now()
+                _today = _now.date()
+                
+                # Find next Tuesday (weekly expiry)
+                _target_weekday = 1  # Tuesday
+                _days_ahead = _target_weekday - _today.weekday()
+                if _days_ahead < 0:
+                    _days_ahead += 7
+                if _days_ahead == 0 and _now.hour >= 16:  # After market close
+                    _days_ahead += 7
+                
+                _next_expiry = _today + timedelta(days=_days_ahead)
+                
+                # Check if monthly expiry (last Tuesday of month)
+                _last_day = _cal.monthrange(_next_expiry.year, _next_expiry.month)[1]
+                _potential_monthly = datetime(_next_expiry.year, _next_expiry.month, _last_day).date()
+                while _potential_monthly.weekday() != _target_weekday:
+                    _potential_monthly -= timedelta(days=1)
+                
+                _is_monthly = (_next_expiry == _potential_monthly)
+                
+                # Format expiry code (Zerodha convention)
+                if _is_monthly:
+                    _date_code = _next_expiry.strftime("%y%b").upper()  # "26FEB"
+                else:
+                    _y = _next_expiry.strftime("%y")  # "26"
+                    _d = _next_expiry.strftime("%d")  # "11"
+                    _m_map = {10: "O", 11: "N", 12: "D"}
+                    _m = _m_map.get(_next_expiry.month, str(_next_expiry.month))  # "2" for Feb
+                    _date_code = f"{_y}{_m}{_d}"  # "26211" for Feb 11, 2026
+                
+                # Use current ATM strike (approximate)
+                _atm_strike = 25600  # Default; ideally get from live NIFTY price
+                
+                # Generate dynamic test symbol
+                test_sym = f"NFO:NIFTY{_date_code}{_atm_strike}CE"
+                LOGGER.info(f"📝 Testing dynamic NFO symbol: {test_sym} (Expiry: {_next_expiry})")
+                
                 test_tok = ctx.instrument_resolver.resolve(test_sym)
                 if test_tok:
                     LOGGER.info(f"✅ NFO resolution test PASSED: {test_sym} -> {test_tok}")
                 else:
-                    LOGGER.error(f"🔴 NFO resolution test FAILED: {test_sym} -> None")
-                    LOGGER.error("🔴 Trying alternative symbol formats...")
+                    LOGGER.warning(f"⚠️ NFO resolution: {test_sym} -> None (trying variants)")
                     
-                    # Try without NFO prefix
-                    for alt_sym in ["NIFTY26JAN25200CE", "NIFTY2612725200CE"]:
+                    # Try PE variant and different strikes
+                    _test_variants = [
+                        test_sym.replace("CE", "PE"),
+                        f"NIFTY{_date_code}{_atm_strike}CE",  # Without NFO: prefix
+                        f"NFO:NIFTY{_date_code}{_atm_strike + 50}CE",
+                        f"NFO:NIFTY{_date_code}{_atm_strike - 50}PE",
+                    ]
+                    
+                    for alt_sym in _test_variants:
                         alt_tok = ctx.instrument_resolver.resolve(alt_sym)
                         if alt_tok:
-                            LOGGER.info(f"✅ Found with alternate format: {alt_sym} -> {alt_tok}")
+                            LOGGER.info(f"✅ Variant resolved: {alt_sym} -> {alt_tok}")
                             break
+                    else:
+                        LOGGER.warning(f"⚠️ No NFO variants resolved - check instrument sync")
+
                     
         except Exception as e:
             LOGGER.error(f"Instrument load failed: {e}", exc_info=True)
