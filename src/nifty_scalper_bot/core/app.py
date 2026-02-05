@@ -9,22 +9,19 @@ TLS certificate.
 
 from __future__ import annotations
 
-import threading
 import asyncio  # Required for startup reconciliation and background tasks
+from collections import OrderedDict
 from contextlib import suppress
-from dataclasses import dataclass, field, asdict, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from importlib import import_module
 import inspect
+import logging
 import os
 from pathlib import Path
-from nifty_scalper_bot.data.robust_provider import RobustDataProvider, CircuitBreakerConfig
-from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
-from nifty_scalper_bot.infra.watchdog import start_watchdog
-from collections import OrderedDict
 import random
-import pytz
 import sqlite3
+import threading
 import time as time_module
 from typing import (
     TYPE_CHECKING,
@@ -38,7 +35,15 @@ from typing import (
     TypeVar,
     cast,
 )
-import logging
+
+import pytz
+
+from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
+from nifty_scalper_bot.data.robust_provider import (
+    CircuitBreakerConfig,
+    RobustDataProvider,
+)
+from nifty_scalper_bot.infra.watchdog import start_watchdog
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 
@@ -51,12 +56,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
+from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
-from nifty_scalper_bot.core.message_bus import (
-    MessageBus, 
-    Message, 
-    MessageType
-)
 from nifty_scalper_bot.core.unified_manager import UnifiedManager
 from nifty_scalper_bot.data import (
     InstrumentResolver,
@@ -84,6 +85,7 @@ from nifty_scalper_bot.execution.execution_router import (
 from nifty_scalper_bot.execution.lifecycle_manager import LifecycleManager
 from nifty_scalper_bot.execution.order_execution_hub import OrderExecutionHub
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
+from nifty_scalper_bot.execution.order_processor import OrderProcessor
 from nifty_scalper_bot.execution.order_queue import OrderQueue
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.execution.position_manager import ActiveContract, PositionManager
@@ -143,8 +145,6 @@ from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 
-from nifty_scalper_bot.execution.order_processor import OrderProcessor
-
 if TYPE_CHECKING:
     from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
     from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
@@ -156,27 +156,28 @@ LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 
 _ComponentT = TypeVar("_ComponentT")
 
+
 def _get_current_nifty_futures_symbol() -> str:
     """
     Compute the current month's NIFTY futures symbol.
     Auto-rolls to next month after monthly expiry (last Thursday).
-    
+
     Returns:
         str: Symbol like "NFO:NIFTY26FEBFUT"
     """
-    from datetime import datetime, timedelta
     import calendar
-    
+    from datetime import datetime, timedelta
+
     now = datetime.now()
     year = now.year
     month = now.month
-    
+
     # Find last Thursday of current month (monthly expiry)
     last_day = calendar.monthrange(year, month)[1]
     expiry_date = datetime(year, month, last_day)
     while expiry_date.weekday() != 3:  # Thursday = 3
         expiry_date -= timedelta(days=1)
-    
+
     # If we're past expiry, roll to next month
     if now.date() > expiry_date.date():
         if month == 12:
@@ -184,13 +185,25 @@ def _get_current_nifty_futures_symbol() -> str:
             month = 1
         else:
             month += 1
-    
+
     # Format: NFO:NIFTY26FEBFUT
     y_str = str(year)[-2:]
-    months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-              "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+    months = [
+        "JAN",
+        "FEB",
+        "MAR",
+        "APR",
+        "MAY",
+        "JUN",
+        "JUL",
+        "AUG",
+        "SEP",
+        "OCT",
+        "NOV",
+        "DEC",
+    ]
     m_str = months[month - 1]
-    
+
     symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
     LOGGER.info(f"📅 Using futures symbol: {symbol}")
     return symbol
@@ -400,7 +413,7 @@ def _try_warm_instruments(
             logger.warning(
                 "Fallback resolver warm failed: %s",
                 fallback_exc,
-                extra={"event": "instrument_fallback_warm_failed"}
+                extra={"event": "instrument_fallback_warm_failed"},
             )
             fallback_tokens = 0
 
@@ -662,8 +675,11 @@ def _fetch_positions_with_retry(
     delay = max(backoff_min, 0.0)
     last_error: Exception | None = None
     start_time = time_module.monotonic()
-    
-    while attempt < max_attempts and (time_module.monotonic() - start_time) < total_timeout_sec:
+
+    while (
+        attempt < max_attempts
+        and (time_module.monotonic() - start_time) < total_timeout_sec
+    ):
         attempt += 1
         try:
             snapshot = get_positions()
@@ -688,7 +704,7 @@ def _fetch_positions_with_retry(
                     "attempt": attempt,
                 },
             )
-            
+
             if (time_module.monotonic() - start_time) + delay > total_timeout_sec:
                 LOGGER.error("Broker position sync timed out")
                 break
@@ -698,7 +714,7 @@ def _fetch_positions_with_retry(
             if jitter_amplitude > 0.0:
                 sleep_window += random.uniform(-jitter_amplitude, jitter_amplitude)
                 sleep_window = max(backoff_min, sleep_window)
-            
+
             LOGGER.info(
                 "Condition met: broker_position_sync_retry_scheduled",
                 extra={
@@ -824,10 +840,12 @@ class TradingSessionGuard:
             broker_session_valid = (
                 now - self._session_validated_at < self._session_max_age
             )
-            
+
             # [FIX] Auto-refresh stale session
             if not broker_session_valid:
-                LOGGER.warning(f"⚠️ Broker session stale (Age: {now - self._session_validated_at}). Attempting auto-refresh...")
+                LOGGER.warning(
+                    f"⚠️ Broker session stale (Age: {now - self._session_validated_at}). Attempting auto-refresh..."
+                )
                 try:
                     # Attempt to fetch profile to validate connectivity
                     ctx = get_latest_bot_context()
@@ -835,7 +853,7 @@ class TradingSessionGuard:
                         # Use internal broker reference if wrapped
                         client = getattr(ctx.broker_client, "client", ctx.broker_client)
                         if hasattr(client, "get_profile"):
-                            client.get_profile() # Will raise if failed
+                            client.get_profile()  # Will raise if failed
                             self.mark_session_valid()
                             broker_session_valid = True
                             LOGGER.info("✅ Session auto-refreshed successfully.")
@@ -864,7 +882,6 @@ class TradingSessionGuard:
         risk_snapshot: RiskSnapshot | None = None
         risk_fail_reason: str | None = None
 
-        
         if os.getenv("SKIP_APP_RISK", "").lower() == "true":
             risk_ok = True
             LOGGER.warning("⚠️ APP-LEVEL RISK CHECK BYPASSED via SKIP_APP_RISK")
@@ -882,7 +899,7 @@ class TradingSessionGuard:
             except Exception:
                 risk_ok = False
                 reasons.append("Risk manager unavailable")
-                
+
         if not risk_ok and "Risk manager unavailable" not in reasons:
             try:
                 risk_snapshot = self._risk_manager.snapshot()
@@ -988,32 +1005,33 @@ class TradingSessionGuard:
             clean = (value or "").strip()
             if not clean:
                 return fallback
-            
+
             if ":" not in clean:
                 raise ValueError(f"Invalid time format (missing colon): {clean}")
-            
+
             hour_str, minute_str = clean.split(":", 1)
             hour = int(hour_str)
             minute = int(minute_str)
-            
+
             if not (0 <= hour <= 23):
                 raise ValueError(f"Hour must be 0-23, got {hour}")
             if not (0 <= minute <= 59):
                 raise ValueError(f"Minute must be 0-59, got {minute}")
-            
+
             return time(hour, minute)
         except ValueError as exc:
             LOGGER.error(
                 f"Invalid time format '{value}': {exc}",
-                extra={"event": "parse_hhmm_invalid", "value": value}
+                extra={"event": "parse_hhmm_invalid", "value": value},
             )
             raise ConfigurationError(f"Invalid time format '{value}': {exc}")
         except Exception as exc:
             LOGGER.warning(
                 f"Unexpected error parsing time '{value}': {exc}",
-                extra={"event": "parse_hhmm_error", "value": value}
+                extra={"event": "parse_hhmm_error", "value": value},
             )
             return fallback
+
 
 def _resolve_session_reason(
     status: TradingSessionStatus, snapshot: RiskSnapshot | None
@@ -1050,14 +1068,15 @@ def _resolve_session_reason(
     )
     return reason if reason else "OK", soft_override
 
+
 def get_http_app() -> FastAPI:
     """Return the FastAPI application exposing inbound Telegram webhook."""
     global _HTTP_APP, _HTTP_NOTIFIER, _HTTP_CONTROLLER
-    
+
     # Thread-safe singleton pattern
     if _HTTP_APP is not None:
         return _HTTP_APP
-        
+
     settings = get_settings()
 
     telemetry_logger = get_logger("telegram.bootstrap")
@@ -1131,40 +1150,43 @@ def get_http_app() -> FastAPI:
     @app.get("/health", response_class=JSONResponse)
     async def http_health() -> JSONResponse:
         ctx = get_latest_bot_context()
-        
+
         # ✅ FIX 1: Handle Startup Gracefully (Return 200, not 503)
         # This prevents Railway from killing the bot while it initializes.
         # ✅ FIX: Return 200 during startup
         if not ctx:
             return JSONResponse(
-                status_code=200, 
+                status_code=200,
                 content={
-                    "status": "starting", 
-                    "ready": False, 
+                    "status": "starting",
+                    "ready": False,
                     "reason": "Context initializing...",
                 },
             )
 
         # ✅ FIX 2: Comprehensive Component Checks
         checks = {
-            "broker": ctx.broker_client is not None and ctx.broker_client.is_connected(),
+            "broker": ctx.broker_client is not None
+            and ctx.broker_client.is_connected(),
             "position_manager": ctx.position_manager is not None,
             "risk_manager": ctx.risk_manager is not None,
             "data_hub": ctx.data_hub is not None,
         }
-        
+
         # Optional: Check Risk Breaker if available
         if ctx.risk_manager:
             try:
                 # Assuming snapshot() or similar property exists
-                checks["risk_breaker_ok"] = not getattr(ctx.risk_manager, "breaker_tripped", False)
+                checks["risk_breaker_ok"] = not getattr(
+                    ctx.risk_manager, "breaker_tripped", False
+                )
             except Exception:
                 checks["risk_breaker_ok"] = False
 
         # ✅ FIX 3: Determine Status
         all_healthy = all(checks.values())
         status = "healthy" if all_healthy else "degraded"
-        
+
         # We return 200 even if degraded so we can see the status JSON.
         # Only return 503 if something catastrophic (like broker down) happens in Production mode.
         # For now, 200 is safer for stability.
@@ -1176,8 +1198,9 @@ def get_http_app() -> FastAPI:
                 "checks": checks,
                 "uptime_seconds": int(time_module.monotonic() - _START_TIME),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            },
         )
+
     @app.on_event("startup")
     async def _startup_webhook() -> None:
         telegram_logger = get_logger("telegram")
@@ -1263,22 +1286,24 @@ def get_http_app() -> FastAPI:
         Start Telegram Bot and send a rich startup notification.
         """
         # No import needed here; get_latest_bot_context is defined globally in app.py
-        
+
         try:
             ctx = get_latest_bot_context()
             if ctx and ctx.telegram_bot:
                 LOGGER.info("🚀 Triggering TelegramBot explicit startup...")
-                
+
                 # 1. Start the Bot (Connects to API)
                 await ctx.telegram_bot.start()
-                
+
                 # 2. Wait for connection stability (Critical for preventing send errors)
                 await asyncio.sleep(2.0)
-                
+
                 # 3. Determine Bot State details for the message
                 mode_icon = "🔴" if ctx.settings.enable_live else "🟡"
-                mode_text = "LIVE TRADING" if ctx.settings.enable_live else "PAPER / SHADOW"
-                
+                mode_text = (
+                    "LIVE TRADING" if ctx.settings.enable_live else "PAPER / SHADOW"
+                )
+
                 # 4. Construct Rich HTML Message
                 startup_msg = (
                     f"<b>{mode_icon} Nifty Scalper Bot Online</b>\n"
@@ -1289,21 +1314,22 @@ def get_http_app() -> FastAPI:
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<i>Waiting for market data...</i>"
                 )
-                
+
                 # 5. Send Message using the internal application
                 if ctx.telegram_bot._app:
                     await ctx.telegram_bot._app.bot.send_message(
                         chat_id=ctx.settings.notifications.chat_id,
                         text=startup_msg,
-                        parse_mode="HTML"
+                        parse_mode="HTML",
                     )
                     LOGGER.info("✅ Startup message sent to Telegram.")
 
         except Exception as exc:
             # We log this but don't crash the app if Telegram fails
-            LOGGER.error(f"❌ Failed to start Telegram/Send Message: {exc}", exc_info=True)
-            
-            
+            LOGGER.error(
+                f"❌ Failed to start Telegram/Send Message: {exc}", exc_info=True
+            )
+
     @app.on_event("shutdown")
     async def _stop_telegram_bot_service() -> None:
         """Ensure clean shutdown of Telegram Bot."""
@@ -1314,9 +1340,11 @@ def get_http_app() -> FastAPI:
                 await ctx.telegram_bot.stop()
         except Exception:
             pass
+
     # ----------------------------------------------------------------
 
     app.include_router(selftest_router)
+
     # Ensure the instrument resolver is warmed from any broker dump / csv
     # when the FastAPI app starts. This guarantees resolver lookups (symbols→tokens)
     # work before handlers or external probes rely on the resolver.
@@ -1333,8 +1361,10 @@ def get_http_app() -> FastAPI:
                 return
 
             # [FIX] Initialize variable safely
-            resolver = getattr(ctx, "instrument_resolver", None) or getattr(ctx, "resolver", None)
-            
+            resolver = getattr(ctx, "instrument_resolver", None) or getattr(
+                ctx, "resolver", None
+            )
+
             if resolver is None:
                 LOGGER.debug("Resolver warm skipped: no resolver found")
                 return
@@ -1345,8 +1375,8 @@ def get_http_app() -> FastAPI:
 
             tokens = len(getattr(resolver, "_symbol_by_token", {}))
             LOGGER.info(
-                f"✅ Instrument Resolver Ready. Active Tokens: {tokens}", 
-                extra={"event": "instrument_warm_complete", "tokens": tokens}
+                f"✅ Instrument Resolver Ready. Active Tokens: {tokens}",
+                extra={"event": "instrument_warm_complete", "tokens": tokens},
             )
 
         except Exception as exc:
@@ -1414,13 +1444,16 @@ class BotContext:
     underlying_spot_prices: OrderedDict[str, float] = field(
         default_factory=lambda: OrderedDict()
     )
-    
-    def update_spot_price(self, underlying: str, price: float, max_size: int = 100) -> None:
+
+    def update_spot_price(
+        self, underlying: str, price: float, max_size: int = 100
+    ) -> None:
         """Update spot price with LRU eviction."""
         self.underlying_spot_prices[underlying] = price
         # Evict oldest entry if exceeds limit
         while len(self.underlying_spot_prices) > max_size:
             self.underlying_spot_prices.popitem(last=False)
+
 
 class PersistentHeartbeatFlusher:
     """Flush :class:`PersistentStateManager` data on heartbeat cadence.
@@ -1637,7 +1670,7 @@ class RuntimeSelfChecker:
             if "NIFTY" in s and "NSE" in s:
                 symbol = s
                 break
-        
+
         # Fallback to any available symbol if index not found
         if symbol is None:
             symbol = symbols[0]
@@ -1646,11 +1679,7 @@ class RuntimeSelfChecker:
         # Adaptive threshold: 2.5x poll interval, clamped 2s-5s
         adaptive_ms = max(2000, min(5000, int(float(interval) * 1000.0 * 2.5)))
 
-        ok, detail, meta = assess_datahub_fresh(
-            hub,
-            symbol,
-            freshness_ms=adaptive_ms
-        )
+        ok, detail, meta = assess_datahub_fresh(hub, symbol, freshness_ms=adaptive_ms)
 
         payload = cast(dict[str, object], dict(meta or {}))
         payload["symbol_checked"] = symbol
@@ -1760,7 +1789,7 @@ class RuntimeSelfChecker:
                     return candidate_str
         if isinstance(symbols, (str, bytes)) and symbols:
             return str(symbols)
-        
+
         # ✅ FIX: Return the standard Zerodha format
         return "256265"
 
@@ -1786,24 +1815,35 @@ def _configure_rate_limiter(cfg: Any) -> RateLimiter:
     )
     return limiter
 
+
 def get_nifty_expiry() -> str:
     """Return the current month's Nifty expiry code (e.g., 25NOV)."""
     from datetime import datetime
+
     now = datetime.now()
     # Get 2-digit year and upper-case short month (e.g., 25NOV)
     return now.strftime("%y%b").upper()
+
 
 def get_nifty_atm_strike(nifty_spot):
     """Round to nearest 50 or 100, as in your option chain tokens."""
     return round(nifty_spot / 50) * 50
 
-def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str = "CE") -> str | None:
+
+def _find_existing_nifty_option_symbol(
+    expiry: str, strike: int, opt_type: str = "CE"
+) -> str | None:
     """
     Return a best-effort matching tradingsymbol (without exchange prefix) present
     in the warmed instrument resolver. Checks both NFO-prefixed and unprefixed keys.
     """
     # try to locate a resolver instance on globals or import fallback
-    possible_names = ("instrument_resolver", "resolver", "InstrumentResolverInstance", "instrumentResolver")
+    possible_names = (
+        "instrument_resolver",
+        "resolver",
+        "InstrumentResolverInstance",
+        "instrumentResolver",
+    )
     resolver = None
     for n in possible_names:
         resolver = globals().get(n)
@@ -1812,7 +1852,10 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
     if resolver is None:
         try:
             from nifty_scalper_bot.data import instruments as _instr_mod  # type: ignore
-            resolver = getattr(_instr_mod, "instrument_resolver", None) or getattr(_instr_mod, "resolver", None)
+
+            resolver = getattr(_instr_mod, "instrument_resolver", None) or getattr(
+                _instr_mod, "resolver", None
+            )
         except Exception:
             resolver = None
 
@@ -1839,7 +1882,13 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
             if callable(lookup_fn):
                 return lookup_fn(key)
             # some use dict-like accessors with exchange prefix "NFO:"
-            for attr in ("_by_symbol", "symbols", "symbol_map", "_symbol_map", "_symbol_by_token"):
+            for attr in (
+                "_by_symbol",
+                "symbols",
+                "symbol_map",
+                "_symbol_map",
+                "_symbol_by_token",
+            ):
                 m = getattr(resolver, attr, None)
                 if isinstance(m, dict) and key in m:
                     return m[key]
@@ -1875,7 +1924,9 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
                 if not s_up.endswith(want_ot):
                     continue
                 if want_exp in s_up and want_str in s_up:
-                    return s_up if not s_up.startswith("NFO:") else s_up.split(":", 1)[-1]
+                    return (
+                        s_up if not s_up.startswith("NFO:") else s_up.split(":", 1)[-1]
+                    )
     except Exception:
         pass
 
@@ -1885,18 +1936,18 @@ def _find_existing_nifty_option_symbol(expiry: str, strike: int, opt_type: str =
 def _get_symbols(
     config: AppConfig,
     resolver: InstrumentResolver | None = None,
-    broker: Any | None = None
+    broker: Any | None = None,
 ) -> list[str]:
     """
     Return validated option symbols for trading.
-    
+
     PRODUCTION FIX v2.0:
     - Fixed 'contracts' undefined bug
     - Guaranteed option symbol generation
     - Robust price fetching with multiple fallbacks
     """
-    import datetime
     import calendar
+    import datetime
     from datetime import timedelta
 
     LOGGER.info("=" * 60)
@@ -2036,7 +2087,9 @@ def _get_symbols(
             if hasattr(resolver, "option_contracts"):
                 try:
                     contracts = resolver.option_contracts("NIFTY") or []
-                    LOGGER.info(f"📦 Got {len(contracts)} contracts from option_contracts()")
+                    LOGGER.info(
+                        f"📦 Got {len(contracts)} contracts from option_contracts()"
+                    )
                 except Exception as e:
                     LOGGER.debug(f"option_contracts() failed: {e}")
                     contracts = []
@@ -2047,7 +2100,9 @@ def _get_symbols(
                     for c_list in raw.values():
                         if isinstance(c_list, list):
                             contracts.extend(c_list)
-                    LOGGER.info(f"📦 Got {len(contracts)} contracts from _option_contracts")
+                    LOGGER.info(
+                        f"📦 Got {len(contracts)} contracts from _option_contracts"
+                    )
                 except Exception as e:
                     LOGGER.debug(f"_option_contracts access failed: {e}")
 
@@ -2060,11 +2115,11 @@ def _get_symbols(
                         pass
 
         if contract_map and get_next_valid_symbols:
-            LOGGER.info(f"🔍 Trying smart resolution with {len(contract_map)} contracts")
+            LOGGER.info(
+                f"🔍 Trying smart resolution with {len(contract_map)} contracts"
+            )
             results = get_next_valid_symbols(
-                strikes_to_fetch,
-                opt_types=("CE", "PE"),
-                instrument_map=contract_map
+                strikes_to_fetch, opt_types=("CE", "PE"), instrument_map=contract_map
             )
             for inst in results:
                 ts = inst.get("tradingsymbol") or inst.get("symbol")
@@ -2073,7 +2128,9 @@ def _get_symbols(
                     final_symbols.append(f"{prefix}{ts}")
 
             if final_symbols:
-                LOGGER.info(f"✅ Smart resolution found {len(final_symbols)} symbols: {final_symbols}")
+                LOGGER.info(
+                    f"✅ Smart resolution found {len(final_symbols)} symbols: {final_symbols}"
+                )
 
     except Exception as exc:
         LOGGER.warning(f"Smart resolution skipped: {exc}")
@@ -2097,11 +2154,13 @@ def _get_symbols(
 
         # Check if monthly expiry (last Tuesday of month)
         last_day_of_month = calendar.monthrange(next_expiry.year, next_expiry.month)[1]
-        potential_monthly = datetime.date(next_expiry.year, next_expiry.month, last_day_of_month)
+        potential_monthly = datetime.date(
+            next_expiry.year, next_expiry.month, last_day_of_month
+        )
         while potential_monthly.weekday() != target_weekday:
             potential_monthly -= timedelta(days=1)
 
-        is_monthly = (next_expiry == potential_monthly)
+        is_monthly = next_expiry == potential_monthly
 
         # Format expiry code (Zerodha convention)
         if is_monthly:
@@ -2113,7 +2172,9 @@ def _get_symbols(
             m = m_map.get(next_expiry.month, str(next_expiry.month))
             date_code = f"{y}{m}{d}"
 
-        LOGGER.info(f"📅 Expiry: {next_expiry} | Type: {'Monthly' if is_monthly else 'Weekly'} | Code: {date_code}")
+        LOGGER.info(
+            f"📅 Expiry: {next_expiry} | Type: {'Monthly' if is_monthly else 'Weekly'} | Code: {date_code}"
+        )
 
         for strike in strikes_to_fetch:
             for kind in ("CE", "PE"):
@@ -2126,9 +2187,10 @@ def _get_symbols(
     LOGGER.info("=" * 60)
     return final_symbols
 
+
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
     """Build strategy runner configuration with environment overrides.
-    
+
     Environment Variables:
         MIN_INDICATOR_BARS: Number of bars required before signal generation (default: 10)
         SIGNAL_COOLDOWN_SECONDS: Cooldown between signals (default: 3.0)
@@ -2137,19 +2199,19 @@ def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
     cfg = getattr(config, "strategy_config", None)
     if isinstance(cfg, StrategyRunnerConfig):
         return cfg
-    
+
     # Allow environment override for warmup bars (CRITICAL for faster startup)
     warmup_bars_default = 10  # Changed from 50 to 10 for faster signal generation
     warmup_bars = int(os.getenv("MIN_INDICATOR_BARS", str(warmup_bars_default)))
-    
+
     signal_cooldown = float(os.getenv("SIGNAL_COOLDOWN_SECONDS", "3.0"))
     trade_cooldown = float(os.getenv("TRADE_COOLDOWN_SECONDS", "10.0"))
-    
+
     LOGGER.info(
         f"Strategy config: warmup_bars={warmup_bars}, signal_cooldown={signal_cooldown}s, "
         f"trade_cooldown={trade_cooldown}s"
     )
-    
+
     return StrategyRunnerConfig(
         signal_cooldown_seconds=float(
             getattr(cfg, "signal_cooldown_seconds", signal_cooldown) or signal_cooldown
@@ -2170,7 +2232,7 @@ def _bind_ws_mdm(ctx: BotContext) -> None:
     mdm = getattr(ctx, "market_data_manager", None)
     if ws is None or mdm is None:
         return
-    
+
     def _on_connect() -> None:
         try:
             mdm.set_ws_connected(True)
@@ -2178,27 +2240,26 @@ def _bind_ws_mdm(ctx: BotContext) -> None:
         except Exception as exc:
             LOGGER.warning(
                 f"Failed to set WS connected state: {exc}",
-                extra={"event": "ws_mdm_connect_failed"}
+                extra={"event": "ws_mdm_connect_failed"},
             )
-    
+
     def _on_disconnect() -> None:
         try:
             mdm.set_ws_connected(False)
         except Exception as exc:
             LOGGER.warning(
                 f"Failed to set WS disconnected state: {exc}",
-                extra={"event": "ws_mdm_disconnect_failed"}
+                extra={"event": "ws_mdm_disconnect_failed"},
             )
-    
+
     try:
         ws.set_callbacks(on_connect=_on_connect, on_disconnect=_on_disconnect)
     except Exception as exc:
         LOGGER.error(
             f"Failed to bind WS callbacks: {exc}",
             extra={"event": "ws_mdm_bind_failed"},
-            exc_info=True
+            exc_info=True,
         )
-
 
 
 async def reconcile_positions_on_startup(
@@ -2398,82 +2459,111 @@ def parse_nifty_option_symbol(symbol: str) -> dict | None:
     """
     Parse NIFTY option symbol to extract strike, expiry, and option type.
     """
-    import re
-    from datetime import datetime, timedelta, timezone # Ensure timezone is imported
     import calendar
-    
+    from datetime import datetime, timedelta, timezone  # Ensure timezone is imported
+    import re
+
     symbol = symbol.replace("NFO:", "").strip()
-    
+
     # Monthly/Far Weekly Pattern: NIFTY25NOV25950CE
-    monthly_match = re.match(r'NIFTY(\d{2})([A-Z]{3})(\d+)(CE|PE)', symbol)
+    monthly_match = re.match(r"NIFTY(\d{2})([A-Z]{3})(\d+)(CE|PE)", symbol)
     if monthly_match:
         year, month_str, strike, opt_type = monthly_match.groups()
-        month_names = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6, 'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
+        month_names = {
+            "JAN": 1,
+            "FEB": 2,
+            "MAR": 3,
+            "APR": 4,
+            "MAY": 5,
+            "JUN": 6,
+            "JUL": 7,
+            "AUG": 8,
+            "SEP": 9,
+            "OCT": 10,
+            "NOV": 11,
+            "DEC": 12,
+        }
         month = month_names.get(month_str)
         if month:
             year_full = 2000 + int(year)
-            
+
             # Find last Thursday of the month (Standard Monthly Expiry Logic)
             last_day = calendar.monthrange(year_full, month)[1]
             expiry = datetime(year_full, month, last_day)
-            while expiry.weekday() != 3: # Thursday is 3
+            while expiry.weekday() != 3:  # Thursday is 3
                 expiry = expiry - timedelta(days=1)
-            
+
             # Use total_seconds for float days_to_expiry
-            days_to_expiry = (expiry - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds() / 86400.0
-            
+            days_to_expiry = (
+                expiry - datetime.now(timezone.utc).replace(tzinfo=None)
+            ).total_seconds() / 86400.0
+
             return {
                 "strike": int(strike),
                 "expiry": expiry,
                 "days_to_expiry": max(days_to_expiry, 0.001),
                 "option_type": opt_type,
-                "symbol_type": "Monthly"
+                "symbol_type": "Monthly",
             }
-    
+
     # Simple pattern match for weekly/other (can be expanded)
-    weekly_match = re.match(r'NIFTY(\d{2})([A-Z])(\d{2})(\d+)(CE|PE)', symbol)
+    weekly_match = re.match(r"NIFTY(\d{2})([A-Z])(\d{2})(\d+)(CE|PE)", symbol)
     if weekly_match:
         # Placeholder logic, needs proper date mapping for weeks
-        return {"strike": int(weekly_match.groups()[3]), "expiry": datetime.now(), "days_to_expiry": 3.0, "option_type": weekly_match.groups()[4], "symbol_type": "Weekly (Approx)"}
+        return {
+            "strike": int(weekly_match.groups()[3]),
+            "expiry": datetime.now(),
+            "days_to_expiry": 3.0,
+            "option_type": weekly_match.groups()[4],
+            "symbol_type": "Weekly (Approx)",
+        }
 
     return None
+
 
 def calculate_greeks_simple(
     spot: float,
     strike: float,
     days_to_expiry: float,
     option_type: str,
-    volatility: float = 0.20, # 20% IV assumption
+    volatility: float = 0.20,  # 20% IV assumption
 ) -> dict:
     """
     Simple Greeks approximation (using Black-Scholes principles).
     """
     import math
-    
+
     if days_to_expiry <= 0.0:
-        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "days_to_expiry": 0.0, "moneyness": spot/strike}
-    
-    t = days_to_expiry / 365.25 # Time in years
+        return {
+            "delta": 0.0,
+            "gamma": 0.0,
+            "theta": 0.0,
+            "vega": 0.0,
+            "days_to_expiry": 0.0,
+            "moneyness": spot / strike,
+        }
+
+    t = days_to_expiry / 365.25  # Time in years
     moneyness = spot / strike
-    
+
     # Simple delta approximation (ATMs are 0.5/-0.5)
     delta = 0.5
     if option_type.upper() in ["CE", "CALL"]:
-        delta = 0.5 + min(0.49, max(0, moneyness - 1.0)) 
+        delta = 0.5 + min(0.49, max(0, moneyness - 1.0))
     else:  # PUT
-        delta = -0.5 - min(0.49, max(0, 1.0 - moneyness)) 
-    
+        delta = -0.5 - min(0.49, max(0, 1.0 - moneyness))
+
     # Gamma (peaks at ATM)
     gamma = 0.01 / (abs(moneyness - 1) + 0.01) * math.sqrt(1 / max(t, 0.01))
     gamma = min(gamma, 0.05)
-    
+
     # Theta (time decay)
     theta_base = spot * volatility / (2 * math.sqrt(max(t, 0.01))) / 365.25
     theta = -1.0 * theta_base
-    
+
     # Vega (volatility sensitivity)
     vega = spot * math.sqrt(max(t, 0.01)) * 0.01
-    
+
     return {
         "delta": round(delta, 4),
         "gamma": round(gamma, 6),
@@ -2483,14 +2573,17 @@ def calculate_greeks_simple(
         "moneyness": round(moneyness, 3),
     }
 
+
 def _setup_telegram(ctx: BotContext) -> None:
     """Wire the Telegram controller with full access to bot components."""
     settings = ctx.settings.notifications
-    
+
     # 1. Extract Credentials
     bot_token = settings.token
     # Handle Set[int] -> Single ID conversion safely
-    chat_id = next(iter(settings.whitelist_chat_ids)) if settings.whitelist_chat_ids else None
+    chat_id = (
+        next(iter(settings.whitelist_chat_ids)) if settings.whitelist_chat_ids else None
+    )
 
     # 2. Validation with Explicit Logging
     if not bot_token or not chat_id:
@@ -2527,10 +2620,11 @@ def _setup_telegram(ctx: BotContext) -> None:
 
     except Exception as e:
         LOGGER.error(f"❌ Telegram setup failed: {e}", exc_info=True)
-        
+
+
 def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
-    
+
     import threading
 
     ensure_multiproc_dir(clear_stale=True)
@@ -2557,8 +2651,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     message_bus = MessageBus()
 
     from nifty_scalper_bot.data.robust_provider import (
-    RobustDataProvider,
-    CircuitBreakerConfig
+        CircuitBreakerConfig,
+        RobustDataProvider,
     )
 
     broker_client = ZerodhaKiteClient(
@@ -2569,17 +2663,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     robust_provider = RobustDataProvider(
         broker_client=broker_client,
-        circuit_config=CircuitBreakerConfig(
-            failure_threshold=5,
-            timeout_seconds=60.0
-        ),
+        circuit_config=CircuitBreakerConfig(failure_threshold=5, timeout_seconds=60.0),
         notifier=lambda event, data: asyncio.create_task(
             notifier.send_event(event, data) if notifier else asyncio.sleep(0)
-        )
+        ),
     )
-    
-    
-    
+
     broker_client.preload_instruments()
 
     instrument_resolver = InstrumentResolver(broker_client)
@@ -2710,9 +2799,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     use_polling = (not websocket_enabled) or streaming_mode in {"polling", "poll", ""}
     # [FIX] Container for direct wiring
     strategy_runner_ref: dict[str, Any] = {}
-    
+
     # [FIX 1/2] Container to hold strategy runner reference for direct tick injection
-    strategy_runner_ref: dict[str, Any] = {} 
+    strategy_runner_ref: dict[str, Any] = {}
 
     if not poll_enabled and not websocket_enabled:
         raise ConfigurationError(
@@ -2738,25 +2827,33 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             None,
             resolver=instrument_resolver,
         )
-        
+
         # [FIX] Start Health Monitor (Watchdog) for Polling Mode
         # This prevents "Zombie Mode" by killing the process if data stops for 3 mins
         def _monitor_data_health():
-            import logging, time, os, threading
+            import logging
+            import os
+            import threading
+            import time
+
             logger = logging.getLogger("nifty_scalper_bot.watchdog")
             logger.info("✅ Data Health Monitor Started (Polling Mode)")
-            
+
             while True:
-                time.sleep(60) # Check every minute
-                
+                time.sleep(60)  # Check every minute
+
                 # Check if data is flowing
                 last_tick = getattr(market_data_manager, "last_tick_time", 0)
-                
+
                 # If we have received data before (>0) but it's now stale (>180s)
-                if last_tick > 0 and (time.time() - last_tick > 180): 
-                    logger.critical(f"🚨 FATAL: No data for {int(time.time() - last_tick)}s. Zombie Mode detected. Exiting.")
-                    os._exit(1) # Kill process -> Railway auto-restarts -> Connection restored
-                    
+                if last_tick > 0 and (time.time() - last_tick > 180):
+                    logger.critical(
+                        f"🚨 FATAL: No data for {int(time.time() - last_tick)}s. Zombie Mode detected. Exiting."
+                    )
+                    os._exit(
+                        1
+                    )  # Kill process -> Railway auto-restarts -> Connection restored
+
         health_thread = threading.Thread(target=_monitor_data_health, daemon=True)
         health_thread.start()
         try:
@@ -2764,7 +2861,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             LOGGER.info("✅ Data Health Monitor (Watchdog) started")
         except Exception as exc:
             LOGGER.warning(f"Failed to start watchdog: {exc}")
-            
+
         data_hub = DataHub(
             market_data_manager,
             instrument_resolver,
@@ -2778,12 +2875,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # ------------------------------------------------------------------
     # [FIX] Polling Tick Handler & Throttling Helper
     # ------------------------------------------------------------------
-    
+
     # 1. Define the throttling cache and helper locally to guarantee existence.
     #    This fixes the "NameError: name 'log_throttled' is not defined".
     _log_throttling_cache: dict[str, float] = {}
 
-    def log_throttled(logger: Any, key: str, msg: str, interval_sec: float = 60.0) -> None:
+    def log_throttled(
+        logger: Any, key: str, msg: str, interval_sec: float = 60.0
+    ) -> None:
         """
         Thread-safe helper to log messages only once per interval.
         Prevents log file flooding during high-frequency tick updates.
@@ -2792,7 +2891,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             # Use the global time_module alias defined at top of file
             now = time_module.time()
             last_time = _log_throttling_cache.get(key, 0.0)
-            
+
             if now - last_time >= interval_sec:
                 logger.info(msg)
                 _log_throttling_cache[key] = now
@@ -2827,14 +2926,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         elif "vwap" not in t:
             # Ensure key exists even if source is missing
             t["vwap"] = 0.0
-        
+
         # 2. Volume: Ensure Integer
         if "volume" in t:
             try:
                 t["volume"] = int(float(t["volume"]))
             except (ValueError, TypeError):
                 t["volume"] = 0
-                
+
         # 3. OI: Map 'oi' -> 'open_interest'
         if "oi" in t and "open_interest" not in t:
             t["open_interest"] = t["oi"]
@@ -2846,7 +2945,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             LOGGER,
             "poll_tick_callback_entry",
             f"🔔 _on_poll_tick | keys={len(t.keys())} | avg_p={t.get('average_price')}",
-            interval_sec=30.0
+            interval_sec=30.0,
         )
 
         # 2. Token Normalization
@@ -2862,16 +2961,18 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if token_value and not t.get("symbol"):
             mapped = None
             token_int = int(token_value)
-            
+
             # Try Resolver
             if instrument_resolver:
                 try:
-                    mapped = getattr(instrument_resolver, "_symbol_by_token", {}).get(token_int)
+                    mapped = getattr(instrument_resolver, "_symbol_by_token", {}).get(
+                        token_int
+                    )
                     if not mapped:
                         mapped = instrument_resolver.format_token_as_symbol(token_int)
                 except Exception:
                     pass
-            
+
             # Try MDM
             if not mapped and market_data_manager:
                 mapped = market_data_manager._symbol_by_token.get(token_int)
@@ -2879,12 +2980,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             if mapped:
                 t["symbol"] = mapped
             else:
-                log_throttled(LOGGER, f"map_fail_{token_value}", f"⚠️ UNMAPPED TOKEN: {token_value}", 60.0)
+                log_throttled(
+                    LOGGER,
+                    f"map_fail_{token_value}",
+                    f"⚠️ UNMAPPED TOKEN: {token_value}",
+                    60.0,
+                )
 
         # 4. Extract Critical Data (Ensure LTP exists)
         sym = t.get("symbol")
         ltp = t.get("ltp") or t.get("last_price") or t.get("close")
-        
+
         if ltp is not None:
             try:
                 t["ltp"] = float(ltp)
@@ -2897,7 +3003,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 LOGGER,
                 f"tick_received_{sym}",
                 f"📡 TICK: {sym} | LTP: {t.get('ltp')} | VWAP: {t.get('vwap')}",
-                interval_sec=30.0
+                interval_sec=30.0,
             )
 
         # 5. Inject Timestamp
@@ -2909,12 +3015,19 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             runner = strategy_runner_ref.get("instance")
             if runner:
                 try:
-                    if hasattr(runner, "_on_tick_safe") and callable(runner._on_tick_safe):
+                    if hasattr(runner, "_on_tick_safe") and callable(
+                        runner._on_tick_safe
+                    ):
                         runner._on_tick_safe(t)
                     elif hasattr(runner, "_on_tick") and callable(runner._on_tick):
                         runner._on_tick(sym, t)
                 except Exception as e:
-                    log_throttled(LOGGER, f"strat_error_{sym}", f"❌ Strategy Error {sym}: {e}", 5.0)
+                    log_throttled(
+                        LOGGER,
+                        f"strat_error_{sym}",
+                        f"❌ Strategy Error {sym}: {e}",
+                        5.0,
+                    )
 
         # 7. DataHub Ingestion
         if data_hub is not None:
@@ -2922,14 +3035,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 loop = asyncio.get_running_loop()
                 loop.create_task(data_hub.ingest_tick(t))
             except (RuntimeError, Exception):
-                pass 
+                pass
 
         # 8. Feed BracketManager
         _safe_ctx = get_latest_bot_context()
         _bm_ref = None
         if _safe_ctx and _safe_ctx.order_manager:
             _bm_ref = getattr(_safe_ctx.order_manager, "_bracket_manager", None)
-        
+
         if _bm_ref is not None and sym and t.get("ltp"):
             try:
                 _bm_ref.on_tick(str(sym), float(t["ltp"]))
@@ -2942,17 +3055,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 market_data_manager.last_tick_time = time_module.time()
 
             market_data_manager._handle_tick(t)
-            
-            if hasattr(streamer, '_consecutive_errors'):
+
+            if hasattr(streamer, "_consecutive_errors"):
                 streamer._consecutive_errors = 0
 
         except Exception as exc:
-            if not hasattr(streamer, '_consecutive_errors'):
+            if not hasattr(streamer, "_consecutive_errors"):
                 streamer._consecutive_errors = 0
             streamer._consecutive_errors += 1
             if streamer._consecutive_errors > 10:
                 log_throttled(LOGGER, "mdm_fail", f"MDM Tick Failed: {exc}", 10.0)
-        
+
         finally:
             if stream_supervisor is not None:
                 stream_supervisor.on_tick(t)
@@ -2963,7 +3076,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     use_websockets = os.getenv("USE_WEBSOCKETS", "false").lower() == "true"
     if use_websockets:
         LOGGER.info("Initializing WebSocket Streamer...")
-        
+
         def _sanitize_ws_token(value: str | None) -> str:
             token = (value or "").strip()
             if ":" in token:
@@ -3018,14 +3131,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         # Initialize WebSocket Streamer
         from nifty_scalper_bot.streaming.websocket_streamer import WebSocketStreamer
+
         streamer = WebSocketStreamer(
             api_key=config.broker.api_key,
             access_token_provider=_resolve_ws_token,
-            on_tick=lambda tick: None, # Handled via managers below
+            on_tick=lambda tick: None,  # Handled via managers below
             subscriptions=set(),
             reconnect_interval=5.0,
         )
-        
+
         # Wire up WebSocket handlers
         market_data_manager = MarketDataManager(
             broker_client,
@@ -3040,24 +3154,28 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             store=hub_store,
             message_bus=message_bus,
         )
-        
+
         # Register Callbacks
         websocket_manager.on_tick = market_data_manager._handle_tick
-        streamer.register_handler(market_data_manager._handle_tick) # Redundant but safe
-        streamer.register_handler(lambda tick: asyncio.create_task(data_hub.ingest_tick(tick)))
+        streamer.register_handler(
+            market_data_manager._handle_tick
+        )  # Redundant but safe
+        streamer.register_handler(
+            lambda tick: asyncio.create_task(data_hub.ingest_tick(tick))
+        )
 
     else:
         LOGGER.info("Initializing Polling Streamer...")
-        
+
         # ✅ FIX: Initialize Managers for Polling Mode FIRST
         # Note: WebSocketManager is None in polling mode
         market_data_manager = MarketDataManager(
             broker_client,
-            None, 
+            None,
             settings=settings,
             resolver=instrument_resolver,
         )
-        
+
         # ✅ FIX: Create DataHub BEFORE PollingStreamer so it's not None
         data_hub = DataHub(
             market_data_manager,
@@ -3067,7 +3185,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             message_bus=message_bus,
         )
         LOGGER.info(f"✅ DataHub created: {data_hub is not None}")
-        
+
         # ✅ FIX: NOW Initialize Polling Streamer with valid data_hub
         streamer = PollingStreamer(
             broker_client=broker_client,
@@ -3132,18 +3250,22 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     # Wire Regime Detector to Stream
     try:
-        if hasattr(data_hub, "subscribe_ticks") and hasattr(market_regime_detector, "ingest_tick"):
+        if hasattr(data_hub, "subscribe_ticks") and hasattr(
+            market_regime_detector, "ingest_tick"
+        ):
             callback = cast(
                 Callable[[dict[str, Any]], None],
                 market_regime_detector.ingest_tick,
             )
             data_hub.subscribe_ticks(regime_symbol, callback)
             LOGGER.info(f"Regime detector subscribed via DataHub to {regime_symbol}")
-            
-        elif hasattr(streamer, "register_handler") and hasattr(market_regime_detector, "ingest_tick"):
+
+        elif hasattr(streamer, "register_handler") and hasattr(
+            market_regime_detector, "ingest_tick"
+        ):
             streamer.register_handler(market_regime_detector.ingest_tick)
             LOGGER.info(f"Regime detector subscribed via Streamer to {regime_symbol}")
-            
+
     except Exception as exc:
         LOGGER.error(
             "Regime detector tick subscription failed",
@@ -3277,7 +3399,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 meta = instrument_resolver.lookup(symbol)
                 if meta and "lot_size" in meta:
                     return int(meta["lot_size"])
-            
+
             # B. Fallback Defaults
             sym_upper = symbol.upper()
             if "NIFTY" in sym_upper:
@@ -3290,7 +3412,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             if "NIFTY" in symbol.upper():
                 return 75
             return 1
-    
+
     # Always attach the provider
     risk_manager.set_lot_size_provider(_lot_size_lookup)
     LOGGER.info("✅ Wired Lot Size Provider to Risk Manager (NIFTY=75)")
@@ -3367,27 +3489,25 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if settings.execution.enable_bracket_manager:
         try:
             LOGGER.debug("Initializing BracketManager...")
-            
+
             bracket_manager = BracketManager(
                 order_manager=order_manager,
                 indicator_engine=indicator_engine,
-                market_data=market_data_manager
+                market_data=market_data_manager,
             )
-            
+
             # Configure
             bracket_manager._auto_reduce_sl = settings.execution.bracket_auto_reduce_sl
-            bracket_manager._stale_cleanup_age = getattr(settings.execution, "bracket_stale_cleanup_seconds", 86400)
-            
+            bracket_manager._stale_cleanup_age = getattr(
+                settings.execution, "bracket_stale_cleanup_seconds", 86400
+            )
+
             # Attach to OrderManager
             order_manager.set_bracket_manager(bracket_manager=bracket_manager)
             LOGGER.info("✅ BracketManager initialized and attached.")
 
         except Exception as exc:
             LOGGER.error(f"Failed to initialize BracketManager: {exc}")
-  
-
-    
-    
 
     if risk_state is not None:
 
@@ -3459,7 +3579,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         risk_symbol = coalesce_str(
             "RISK_STATE_SYMBOL",
             "RISK_STATE__SYMBOL",
-           default="NSE:NIFTY 50",
+            default="NSE:NIFTY 50",
         )
         attach = getattr(risk_state, "attach_data_hub", None)
         if callable(attach):
@@ -3507,7 +3627,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         get_str("DATA__TIME_FILTER_END", default_close) or default_close
     )
     session_guard.set_trading_window(trading_window_start, trading_window_end)
-    
+
     # ----------------------------------------------------------------------
     # 6. Build Elite Strategies (Corrected)
     # ----------------------------------------------------------------------
@@ -3516,7 +3636,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # ✅ FIX: Pass 'indicator_engine' to the builder
         elite_strategies = build_elite_strategies(
             settings.elite,  # Verify if this is settings.elite or settings.strategies in your config
-            indicator_engine
+            indicator_engine,
         )
 
         # Inject DataHub into strategies that need it (e.g. OrderFlow, Gamma)
@@ -3527,9 +3647,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         strategy.set_data_hub(data_hub)
                     except Exception as exc:
                         LOGGER.warning(
-                            "Failed to inject DataHub into %s: %s", 
-                            getattr(strategy, "name", "unknown"), 
-                            exc
+                            "Failed to inject DataHub into %s: %s",
+                            getattr(strategy, "name", "unknown"),
+                            exc,
                         )
 
     except Exception as exc:  # noqa: BLE001
@@ -3554,7 +3674,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             LOGGER.warning(
                 "No elite strategies enabled; trading will be disabled",
                 extra={"event": "elite_strategies_missing"},
-                    )
+            )
 
         # Ensure DataHub is injected into strategies that need complex metrics (IV/Greeks)
         if elite_strategies and data_hub:
@@ -3564,9 +3684,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         strategy.set_data_hub(data_hub)
                         LOGGER.debug(f"Injected DataHub into {strategy.name}")
                     except Exception as exc:
-                        LOGGER.warning(f"Failed to inject DataHub into {strategy.name}: {exc}")
-        
-          
+                        LOGGER.warning(
+                            f"Failed to inject DataHub into {strategy.name}: {exc}"
+                        )
+
     strategy_instances: list[Any] = list(elite_strategies)
     # Ensure DataHub is injected into all strategies that need enriched data (IV/Greeks).
     if strategy_instances and data_hub:
@@ -3579,7 +3700,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 except Exception as exc:
                     LOGGER.warning(
                         f"Failed to inject DataHub into {strategy.name}: {exc}"
-                    )    
+                    )
     orchestrator = StrategyOrchestrator(
         risk_manager=risk_manager,
         order_manager=safe_order_manager,
@@ -3594,7 +3715,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if raw_pct < 15.0:
             LOGGER.warning(
                 f"⚠️ FORCE-BOOSTING Position Size from {raw_pct}% to 15.0% to cover Orphans",
-                extra={"event": "elite_fraction_boosted", "original": raw_pct}
+                extra={"event": "elite_fraction_boosted", "original": raw_pct},
             )
             raw_pct = 15.0
 
@@ -3613,7 +3734,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             "trend": {},
             "chop": {},
             "volcrush": {},
-            "event": {}, 
+            "event": {},
         }
         for strategy in elite_strategies:
             tags = tag_lookup.get(strategy.name, ("elite",))
@@ -3858,6 +3979,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             "notifications_enabled": settings.notifications.enabled,
         },
     )
+
     # Reconcile positions on startup: schedule if loop running, otherwise run synchronously.
     async def _reconcile_with_timeout():
         """Wrapper to add timeout protection"""
@@ -3869,20 +3991,20 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     order_manager=order_manager,
                     logger=LOGGER,
                 ),
-                timeout=30.0  # 30 second timeout
+                timeout=30.0,  # 30 second timeout
             )
         except asyncio.TimeoutError:
             LOGGER.error(
                 "Position reconciliation timed out after 30s",
-                extra={"event": "reconcile_timeout"}
+                extra={"event": "reconcile_timeout"},
             )
         except Exception as exc:
             LOGGER.error(
                 f"Position reconciliation failed: {exc}",
                 extra={"event": "reconcile_failed"},
-                exc_info=True
+                exc_info=True,
             )
-    
+
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -3900,9 +4022,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     position_manager=position_manager,
                     order_manager=order_manager,
                     logger=LOGGER,
-                )    
+                )
             )
-            LOGGER.info("Completed reconcile_positions_on_startup (blocking run)", extra={"event": "reconcile_positions_completed"})
+            LOGGER.info(
+                "Completed reconcile_positions_on_startup (blocking run)",
+                extra={"event": "reconcile_positions_completed"},
+            )
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
             "Startup reconciliation failed - will retry in background",
@@ -3918,12 +4043,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    loop.create_task(reconcile_positions_on_startup(
-                        broker_client=broker_client,
-                        position_manager=position_manager,
-                        order_manager=order_manager,
-                        logger=LOGGER,
-                    ))
+                    loop.create_task(
+                        reconcile_positions_on_startup(
+                            broker_client=broker_client,
+                            position_manager=position_manager,
+                            order_manager=order_manager,
+                            logger=LOGGER,
+                        )
+                    )
             except Exception:
                 pass
 
@@ -4106,6 +4233,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             snapshot["orders"] = {"error": str(exc)}
 
         return snapshot
+
     def _notify(event: str, payload: Mapping[str, object] | None = None) -> None:
         if notifier is None:
             return
@@ -4118,6 +4246,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             )
             return
         loop.create_task(notifier.send_event(event, payload))
+
     def _emit_health_snapshot(trigger: str, detail: str | None = None) -> None:
         """Dispatch a health snapshot notification for high-impact events.
 
@@ -4147,7 +4276,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         }
         _notify("HEALTH_SNAPSHOT", payload)
 
-    
     shadow_trader: ShadowPaperTrader | None = None
     if settings.shadow.drift_threshold_pct > 0:
 
@@ -4280,12 +4408,16 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         _setup_telegram(ctx)
         # ✅ FIX: Only log success if the bot object was actually created
         if ctx.telegram_bot:
-            LOGGER.info("✅ Telegram Bot initialized", extra={"event": "telegram_ready"})
+            LOGGER.info(
+                "✅ Telegram Bot initialized", extra={"event": "telegram_ready"}
+            )
         else:
             # This explains why you might see "Initialized" but get no messages
             LOGGER.warning("⚠️ Telegram Bot NOT initialized (Check Token/Chat ID)")
     except Exception as telegram_exc:
-        LOGGER.error(f"❌ Telegram initialization failed: {telegram_exc}", exc_info=True)
+        LOGGER.error(
+            f"❌ Telegram initialization failed: {telegram_exc}", exc_info=True
+        )
 
     if _HTTP_APP is not None:
         try:
@@ -4670,9 +4802,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if controller is None and settings.notifications.enabled:
         # Create a minimal controller if the HTTP app wasn't started
         try:
-            from nifty_scalper_bot.notifications.telegram_controller import TelegramWebhookController
+            from nifty_scalper_bot.notifications.telegram_controller import (
+                TelegramWebhookController,
+            )
+
             notifier = ctx.telegram_notifier
-            if notifier and hasattr(notifier, 'bot'):
+            if notifier and hasattr(notifier, "bot"):
                 controller = TelegramWebhookController(
                     bot=notifier.bot,
                     settings=settings.notifications,
@@ -4950,6 +5085,8 @@ def _validate_config(config: AppConfig) -> None:
     if config.ratelimit.orders.capacity <= 0:
         raise ValueError("Order rate limit capacity must be positive")
     LOGGER.debug("Configuration validated successfully")
+
+
 def force_enable_trading_override() -> str:
     """
     Emergency override to force enable trading by resetting all guards.
@@ -4960,7 +5097,7 @@ def force_enable_trading_override() -> str:
         return "❌ No Bot Context found."
 
     logs = []
-    
+
     # 1. Force Session Valid
     if ctx.session_guard:
         ctx.session_guard.mark_session_valid()
@@ -4985,6 +5122,7 @@ def force_enable_trading_override() -> str:
     LOGGER.critical(f"🚨 MANUAL OVERRIDE ACTIVATED: {', '.join(logs)}")
     return "\n".join(logs)
 
+
 async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration and Option-Only Trading."""
 
@@ -4994,6 +5132,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     # Create Data Directory
     # =========================================================
     import os
+
     try:
         os.makedirs("data", exist_ok=True)
         LOGGER.info("✅ Verified/Created 'data/' directory.")
@@ -5049,72 +5188,87 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info("📦 Loading NSE instruments...")
             await asyncio.to_thread(inner.load_instruments, "NSE")
             LOGGER.info("✅ NSE instruments loaded")
-            
+
             LOGGER.info("📦 Loading NFO instruments...")
             await asyncio.to_thread(inner.load_instruments, "NFO")
             LOGGER.info("✅ NFO instruments loaded")
-            
+
             # ✅ CRITICAL FIX: Sync loaded instruments to InstrumentResolver
             # The resolver was warmed BEFORE instruments were loaded, so we must update it now
             if ctx.instrument_resolver:
                 LOGGER.info("🔄 Syncing NFO instruments to InstrumentResolver...")
                 synced_count = 0
-                
+
                 # Get instruments from broker cache
                 broker_ref = getattr(ctx.broker_client, "_broker", ctx.broker_client)
                 nfo_cache = getattr(broker_ref, "_instrument_cache", {}).get("NFO", {})
-                
+
                 if not nfo_cache:
                     # Fallback: try list_instruments
                     list_fn = getattr(broker_ref, "list_instruments", None)
                     if callable(list_fn):
                         all_instruments = list_fn()
                         nfo_cache = {
-                            row.get("tradingsymbol", ""): row 
-                            for row in all_instruments 
+                            row.get("tradingsymbol", ""): row
+                            for row in all_instruments
                             if row.get("exchange") == "NFO"
                         }
-                
+
                 total_items = len(nfo_cache)
                 LOGGER.info(f"📊 NFO cache has {total_items} items to sync")
-                
+
                 for idx, (key, row) in enumerate(nfo_cache.items(), 1):
                     try:
                         token = row.get("instrument_token")
                         ts = row.get("tradingsymbol") or row.get("symbol")
                         exchange = row.get("exchange", "NFO")
-                        
+
                         if token and ts:
                             # Add to resolver's internal caches
                             # Note: upsert now logs at DEBUG level (not INFO)
-                            ctx.instrument_resolver.upsert(ts, int(token), exchange=exchange)
+                            ctx.instrument_resolver.upsert(
+                                ts, int(token), exchange=exchange
+                            )
                             synced_count += 1
-                        
+
                         # Progress logging every 1000 instruments to show activity
                         if idx % 1000 == 0:
                             LOGGER.info(f"📥 NFO sync progress: {idx}/{total_items}")
-                            
+
                     except Exception as e:
                         # Log failures at debug level to avoid spam
                         LOGGER.debug(f"Skip NFO instrument {key}: {e}")
-                
-                LOGGER.info(f"✅ Synced {synced_count}/{total_items} NFO instruments to resolver")
-                
+
+                LOGGER.info(
+                    f"✅ Synced {synced_count}/{total_items} NFO instruments to resolver"
+                )
+
                 # ✅ FIX #3: Populate _option_contracts from broker NFO instruments
-                if hasattr(ctx.instrument_resolver, 'sync_nfo_from_broker'):
-                    nfo_synced = ctx.instrument_resolver.sync_nfo_from_broker(list(nfo_instruments.values()) if isinstance(nfo_instruments, dict) else nfo_instruments)
-                    LOGGER.info(f"✅ Synced {nfo_synced} NFO options to resolver._option_contracts")
+                if hasattr(ctx.instrument_resolver, "sync_nfo_from_broker"):
+                    nfo_payload = (
+                        list(nfo_cache.values())
+                        if isinstance(nfo_cache, dict)
+                        else list(nfo_cache)
+                    )
+                    nfo_synced = ctx.instrument_resolver.sync_nfo_from_broker(
+                        nfo_payload
+                    )
+                    LOGGER.info(
+                        f"✅ Synced {nfo_synced} NFO options to resolver._option_contracts"
+                    )
                 else:
-                    LOGGER.warning("⚠️ InstrumentResolver missing sync_nfo_from_broker method")
-     
+                    LOGGER.warning(
+                        "⚠️ InstrumentResolver missing sync_nfo_from_broker method"
+                    )
+
                 # ✅ FIX #1: DYNAMIC NFO Test Symbol Generation
                 # Generate test symbol for CURRENT/NEXT expiry (not hardcoded expired!)
-                from datetime import datetime, timedelta
                 import calendar as _cal
-                
+                from datetime import datetime, timedelta
+
                 _now = datetime.now()
                 _today = _now.date()
-                
+
                 # Find next Tuesday (weekly expiry)
                 _target_weekday = 1  # Tuesday
                 _days_ahead = _target_weekday - _today.weekday()
@@ -5122,17 +5276,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                     _days_ahead += 7
                 if _days_ahead == 0 and _now.hour >= 16:  # After market close
                     _days_ahead += 7
-                
+
                 _next_expiry = _today + timedelta(days=_days_ahead)
-                
+
                 # Check if monthly expiry (last Tuesday of month)
                 _last_day = _cal.monthrange(_next_expiry.year, _next_expiry.month)[1]
-                _potential_monthly = datetime(_next_expiry.year, _next_expiry.month, _last_day).date()
+                _potential_monthly = datetime(
+                    _next_expiry.year, _next_expiry.month, _last_day
+                ).date()
                 while _potential_monthly.weekday() != _target_weekday:
                     _potential_monthly -= timedelta(days=1)
-                
-                _is_monthly = (_next_expiry == _potential_monthly)
-                
+
+                _is_monthly = _next_expiry == _potential_monthly
+
                 # Format expiry code (Zerodha convention)
                 if _is_monthly:
                     _date_code = _next_expiry.strftime("%y%b").upper()  # "26FEB"
@@ -5140,22 +5296,30 @@ async def startup_sequence(ctx: BotContext) -> None:
                     _y = _next_expiry.strftime("%y")  # "26"
                     _d = _next_expiry.strftime("%d")  # "11"
                     _m_map = {10: "O", 11: "N", 12: "D"}
-                    _m = _m_map.get(_next_expiry.month, str(_next_expiry.month))  # "2" for Feb
+                    _m = _m_map.get(
+                        _next_expiry.month, str(_next_expiry.month)
+                    )  # "2" for Feb
                     _date_code = f"{_y}{_m}{_d}"  # "26211" for Feb 11, 2026
-                
+
                 # Use current ATM strike (approximate)
                 _atm_strike = 25600  # Default; ideally get from live NIFTY price
-                
+
                 # Generate dynamic test symbol
                 test_sym = f"NFO:NIFTY{_date_code}{_atm_strike}CE"
-                LOGGER.info(f"📝 Testing dynamic NFO symbol: {test_sym} (Expiry: {_next_expiry})")
-                
+                LOGGER.info(
+                    f"📝 Testing dynamic NFO symbol: {test_sym} (Expiry: {_next_expiry})"
+                )
+
                 test_tok = ctx.instrument_resolver.resolve(test_sym)
                 if test_tok:
-                    LOGGER.info(f"✅ NFO resolution test PASSED: {test_sym} -> {test_tok}")
+                    LOGGER.info(
+                        f"✅ NFO resolution test PASSED: {test_sym} -> {test_tok}"
+                    )
                 else:
-                    LOGGER.warning(f"⚠️ NFO resolution: {test_sym} -> None (trying variants)")
-                    
+                    LOGGER.warning(
+                        f"⚠️ NFO resolution: {test_sym} -> None (trying variants)"
+                    )
+
                     # Try PE variant and different strikes
                     _test_variants = [
                         test_sym.replace("CE", "PE"),
@@ -5163,19 +5327,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                         f"NFO:NIFTY{_date_code}{_atm_strike + 50}CE",
                         f"NFO:NIFTY{_date_code}{_atm_strike - 50}PE",
                     ]
-                    
+
                     for alt_sym in _test_variants:
                         alt_tok = ctx.instrument_resolver.resolve(alt_sym)
                         if alt_tok:
                             LOGGER.info(f"✅ Variant resolved: {alt_sym} -> {alt_tok}")
                             break
                     else:
-                        LOGGER.warning(f"⚠️ No NFO variants resolved - check instrument sync")
+                        LOGGER.warning(
+                            f"⚠️ No NFO variants resolved - check instrument sync"
+                        )
 
-                    
         except Exception as e:
             LOGGER.error(f"Instrument load failed: {e}", exc_info=True)
-            
+
     # ---------------------------------------------------------
     # 3. Symbol resolution + HYDRATION (FIXED)
     # ---------------------------------------------------------
@@ -5188,8 +5353,8 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
 
             # ---------- Futures rollover logic (unchanged) ----------
-            from datetime import datetime, timedelta
             import calendar
+            from datetime import datetime, timedelta
 
             now = datetime.now()
             year, month = now.year, now.month
@@ -5199,7 +5364,11 @@ async def startup_sequence(ctx: BotContext) -> None:
             while expiry_date.weekday() != 1:  # Tuesday
                 expiry_date -= timedelta(days=1)
 
-            target_date = expiry_date + timedelta(days=7) if now.date() > expiry_date.date() else now
+            target_date = (
+                expiry_date + timedelta(days=7)
+                if now.date() > expiry_date.date()
+                else now
+            )
             y_str = target_date.strftime("%y")
             m_str = target_date.strftime("%b").upper()
             future_symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
@@ -5207,9 +5376,13 @@ async def startup_sequence(ctx: BotContext) -> None:
             if ctx.instrument_resolver:
                 fut_token = ctx.instrument_resolver.resolve(future_symbol)
                 if fut_token:
-                    LOGGER.info(f"✅ Resolved Futures (Data Only): {future_symbol} -> {fut_token}")
+                    LOGGER.info(
+                        f"✅ Resolved Futures (Data Only): {future_symbol} -> {fut_token}"
+                    )
                     targets.append(future_symbol)
-                    if ctx.strategy_manager and hasattr(ctx.strategy_manager, "orchestrator"):
+                    if ctx.strategy_manager and hasattr(
+                        ctx.strategy_manager, "orchestrator"
+                    ):
                         ctx.strategy_manager.orchestrator.futures_symbol = future_symbol
                 else:
                     LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
@@ -5247,18 +5420,28 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                         for c in records:
                             # 2. Robust Parsing
-                            if isinstance(c, dict): 
+                            if isinstance(c, dict):
                                 ts = c.get("date")
-                                o, h, l, c_p, v = c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume", 0)
-                            elif isinstance(c, list): 
+                                o, h, l, c_p, v = (
+                                    c.get("open"),
+                                    c.get("high"),
+                                    c.get("low"),
+                                    c.get("close"),
+                                    c.get("volume", 0),
+                                )
+                            elif isinstance(c, list):
                                 ts, o, h, l, c_p, v = c[0], c[1], c[2], c[3], c[4], c[5]
-                            else: 
+                            else:
                                 continue
-                            
+
                             # 3. Timestamp Normalization
                             if isinstance(ts, str):
-                                try: ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                                except: pass
+                                try:
+                                    ts = datetime.fromisoformat(
+                                        ts.replace("Z", "+00:00")
+                                    )
+                                except:
+                                    pass
 
                             # 4. Feed The Runner (The Missing Link)
                             if runner and hasattr(runner, "ingest_historical_bar"):
@@ -5269,19 +5452,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     "low": float(l),
                                     "close": float(c_p),
                                     "volume": float(v),
-                                    "timestamp": ts
+                                    "timestamp": ts,
                                 }
                                 runner.ingest_historical_bar(bar_data)
-                            
+
                             count += 1
 
                         LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
-                       
+
                     await asyncio.sleep(HYDRATION_DELAY_SEC)
 
                 except Exception as e:
                     if "rate limit" in str(e).lower():
-                        LOGGER.warning(f"⚠️ Rate limit hit for {sym}, skipping hydration")
+                        LOGGER.warning(
+                            f"⚠️ Rate limit hit for {sym}, skipping hydration"
+                        )
                     else:
                         LOGGER.warning(f"❌ Failed to hydrate {sym}: {e}")
 
@@ -5295,7 +5480,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             if runner:
                 # 1. Collect symbols we attempted to hydrate
                 hydrated_symbols = list(targets)
-                
+
                 # 2. Commit the state
                 if hasattr(runner, "mark_ready"):
                     runner.mark_ready(hydrated_symbols)
@@ -5307,7 +5492,6 @@ async def startup_sequence(ctx: BotContext) -> None:
             # -------------------------------------------------
             ctx.market_regime_manager.indicators_ready = True
             LOGGER.info("🧠 Indicators fully hydrated and READY at startup")
-
 
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
@@ -5335,9 +5519,13 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                 ctx.strategy_runner.add_symbol(sym)
 
-            LOGGER.info(f"📊 Resolution summary: {resolved_count}/{len(targets)} resolved")
+            LOGGER.info(
+                f"📊 Resolution summary: {resolved_count}/{len(targets)} resolved"
+            )
             if unresolved_symbols:
-                LOGGER.error(f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}")
+                LOGGER.error(
+                    f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}"
+                )
             LOGGER.info(f"✅ tokens_to_poll has {len(tokens_to_poll)} tokens")
 
             if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
@@ -5413,8 +5601,11 @@ async def startup_sequence(ctx: BotContext) -> None:
     # ---------------------------------------------------------
     # 6. Greeks monitoring (UNCHANGED, SAFE)
     # ---------------------------------------------------------
-    if ctx.strategy_runner and hasattr(ctx.strategy_runner, "calculate_portfolio_greeks"):
-        import threading, time as time_module
+    if ctx.strategy_runner and hasattr(
+        ctx.strategy_runner, "calculate_portfolio_greeks"
+    ):
+        import threading
+        import time as time_module
 
         runner = ctx.strategy_runner
 
@@ -5429,7 +5620,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                     break
                 try:
                     greeks = runner.calculate_portfolio_greeks()
-                    if abs(greeks.get("net_delta", 0)) > 1.0 or greeks.get("net_theta", 0) < -1.0:
+                    if (
+                        abs(greeks.get("net_delta", 0)) > 1.0
+                        or greeks.get("net_theta", 0) < -1.0
+                    ):
                         LOGGER.info(
                             f"📊 Greeks: Delta={greeks['net_delta']:.1f} "
                             f"Theta={greeks['net_theta']:.1f}/day",
@@ -5446,7 +5640,9 @@ async def startup_sequence(ctx: BotContext) -> None:
         threading.Thread(target=_log_greeks_periodically, daemon=True).start()
         LOGGER.info("✅ Portfolio Greeks monitoring enabled")
 
-    await _notify("BOT_STARTED", {"mode": "LIVE" if not ctx.shadow_mode_enabled else "SHADOW"})
+    await _notify(
+        "BOT_STARTED", {"mode": "LIVE" if not ctx.shadow_mode_enabled else "SHADOW"}
+    )
 
     # ----------------------------------------------------------------
     # ✅ FIX: Enable Persistence & Background Services
@@ -5479,7 +5675,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     # ✅ FIX: Wire DataHub -> Bracket Manager (Corrected Attribute Name)
     # ----------------------------------------------------------------
     # CHANGE: ctx.market_data -> ctx.market_data_manager
-    if ctx.bracket_manager and ctx.market_data_manager: 
+    if ctx.bracket_manager and ctx.market_data_manager:
         try:
             # 1. Define the tick handler using the fully loaded 'ctx'
             def _feed_ticks_to_bracket_safe(sym, tick):
@@ -5490,13 +5686,18 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             # 2. Subscribe to the DataHub
             # CHANGE: ctx.market_data -> ctx.market_data_manager
-            if hasattr(ctx.market_data_manager, "data_hub") and ctx.market_data_manager.data_hub:
-                ctx.market_data_manager.data_hub.subscribe("bracket_feed", _feed_ticks_to_bracket_safe)
+            if (
+                hasattr(ctx.market_data_manager, "data_hub")
+                and ctx.market_data_manager.data_hub
+            ):
+                ctx.market_data_manager.data_hub.subscribe(
+                    "bracket_feed", _feed_ticks_to_bracket_safe
+                )
                 LOGGER.info("✅ Wired DataHub ticks to BracketManager")
-                
+
         except Exception as e:
             LOGGER.error(f"Failed to wire bracket ticks: {e}")
-            
+
     LOGGER.info("✅ Startup sequence fully complete.")
 
 
@@ -5592,6 +5793,7 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
 
     LOGGER.info("Bot shutdown complete")
 
+
 async def _reconcile_state(ctx: BotContext) -> None:
     """
     Syncs local state with Broker (Orders & Positions).
@@ -5610,7 +5812,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
             # A. Fetch Broker Positions (REQUIRED STEP)
             raw_data = await ctx.broker_client.get_positions()
             broker_positions = []
-            
+
             # Robust Parsing of Broker Data
             if isinstance(raw_data, list):
                 broker_positions = [p for p in raw_data if isinstance(p, Mapping)]
@@ -5624,48 +5826,52 @@ async def _reconcile_state(ctx: BotContext) -> None:
 
             # B. Sync Broker Positions (Pass data to Manager)
             # We run this in a thread to keep the bot responsive
-            await asyncio.to_thread(ctx.position_manager.synchronize_with_broker, broker_positions)
+            await asyncio.to_thread(
+                ctx.position_manager.synchronize_with_broker, broker_positions
+            )
 
             # C. Auto-Guard Orphans (CRITICAL SAFETY LOGIC)
             if ctx.order_manager and ctx.order_manager._bracket_manager:
                 om = ctx.order_manager
                 bm = ctx.order_manager._bracket_manager
-                
+
                 from nifty_scalper_bot.data.data_hub import DataHub
 
                 # Iterate through the FRESHLY synced open positions
                 for pos in ctx.position_manager.get_open_positions():
-                    if pos.quantity == 0: 
+                    if pos.quantity == 0:
                         continue
 
                     # 1. Normalize Symbol
                     raw_symbol = pos.symbol
                     norm_symbol = DataHub.normalize(raw_symbol) or raw_symbol
-                    
+
                     # 2. Check if this symbol is actively managed
                     is_managed = bm.is_symbol_managed(norm_symbol)
-                    
+
                     # 3. If NOT managed, it is an Orphan -> Guard it!
                     if not is_managed:
                         LOGGER.warning(
                             f"⚠️ ORPHAN DETECTED: {norm_symbol} (Qty: {pos.quantity}). Auto-Guarding...",
-                            extra={"event": "orphan_detected", "symbol": norm_symbol}
+                            extra={"event": "orphan_detected", "symbol": norm_symbol},
                         )
-                        
+
                         avg_price = float(
-                            getattr(pos, "average_price", 0.0) or 
-                            getattr(pos, "buy_price", 0.0) or 
-                            getattr(pos, "last_price", 0.0) or 
-                            0.0
+                            getattr(pos, "average_price", 0.0)
+                            or getattr(pos, "buy_price", 0.0)
+                            or getattr(pos, "last_price", 0.0)
+                            or 0.0
                         )
 
                         # Call the Master Guard Method
-                        signed_qty = pos.quantity if pos.side == "LONG" else -pos.quantity
+                        signed_qty = (
+                            pos.quantity if pos.side == "LONG" else -pos.quantity
+                        )
                         om.guard_orphan_position(
                             symbol=norm_symbol,
                             quantity=signed_qty,  # ✅ Now negative for SHORT
                             average_price=avg_price,
-                            position_side=pos.side
+                            position_side=pos.side,
                         )
 
             # =================================================================
@@ -5678,16 +5884,17 @@ async def _reconcile_state(ctx: BotContext) -> None:
                 # Accessing protected member safely for reconciliation
                 if hasattr(bm, "_symbol_map"):
                     managed_symbols = set(bm._symbol_map.keys())
-                    
+
                     # 2. Get symbols that actually have open positions (Real Broker State)
                     real_positions = {
-                        p.symbol for p in ctx.position_manager.get_open_positions() 
+                        p.symbol
+                        for p in ctx.position_manager.get_open_positions()
                         if p.quantity != 0
                     }
-                    
+
                     # 3. Identify Ghosts (Managed but no Position)
                     ghosts = managed_symbols - real_positions
-                    
+
                     for ghost_sym in ghosts:
                         # Double check if it actually has active brackets inside
                         if bm.is_symbol_managed(ghost_sym):
@@ -5696,7 +5903,9 @@ async def _reconcile_state(ctx: BotContext) -> None:
                                 "Performing Safety Cleanup..."
                             )
                             # Force kill the bracket so it doesn't misfire and open a new trade
-                            bm.manual_override_close(ghost_sym, reason="State Reconciliation (Ghost)")
+                            bm.manual_override_close(
+                                ghost_sym, reason="State Reconciliation (Ghost)"
+                            )
 
         except Exception as exc:
             LOGGER.error(f"Position Sync/Adoption Failed: {exc}", exc_info=True)
@@ -5704,6 +5913,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
     # 3. SITUATION REPORT
     if ctx.order_manager:
         ctx.order_manager._log_status_report()
+
 
 def _close_all_positions(ctx: BotContext, *, reason: str) -> None:
     position_manager = _require_component(ctx.position_manager, "position_manager")
@@ -5747,7 +5957,7 @@ def _alert_overnight_exposure(ctx: BotContext) -> None:
         LOGGER.error(
             "Failure in _alert_overnight_exposure positions",
             extra={"error": str(exc)},
-            exc_info=True
+            exc_info=True,
         )
         return
     if not positions:
@@ -6010,11 +6220,14 @@ class NiftyScalperApp:
         # ------------------------------------------------------------------
         application = self._ctx.telegram_application
         controller = _HTTP_CONTROLLER
-        
+
         # 1. Telegram App
         if application is not None:
             # Check if Webhook is actually configured
-            if self.settings.notifications.webhook_enabled and self.settings.notifications.public_base_url:
+            if (
+                self.settings.notifications.webhook_enabled
+                and self.settings.notifications.public_base_url
+            ):
                 try:
                     await application.initialize()
                     await application.start()
@@ -6024,7 +6237,7 @@ class NiftyScalperApp:
                     LOGGER.info("telegram_application_started (Webhook)")
                 except Exception as exc:
                     LOGGER.exception("telegram_application_start_failed")
-            
+
             # ✅ FIX: Fallback to Polling if Webhook is NOT enabled
             elif self._ctx.telegram_bot:
                 LOGGER.info("🚀 Starting Telegram Polling (Background)...")
@@ -6244,20 +6457,27 @@ class NiftyScalperApp:
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
                             "Periodic state reconciliation failed",
-                            extra={"event": "state_reconcile_failed_periodic", "error": str(exc)},
-                            exc_info=True
+                            extra={
+                                "event": "state_reconcile_failed_periodic",
+                                "error": str(exc),
+                            },
+                            exc_info=True,
                         )
                     try:
                         _alert_overnight_exposure(self._ctx)
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
                             "Overnight exposure check failed",
-                            extra={"event": "overnight_exposure_check_failed", "error": str(exc)},
-                            exc_info=True
+                            extra={
+                                "event": "overnight_exposure_check_failed",
+                                "error": str(exc),
+                            },
+                            exc_info=True,
                         )
                     last_heavy = now
                 continue
             break
+
 
 # ----------------------------------------------------------------
 # ✅ NEW HELPER: Background ATR Feed
