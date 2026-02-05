@@ -1367,12 +1367,12 @@ class StrategyManager:
                         fut_quote = data_hub.get_quote(fut_sym)
                         if fut_quote:
                             working_symbol = fut_sym
-                            if not getattr(self, '_futures_vwap_logged', False):
+                            if not getattr(self, '_vwap_source_logged', False):
                                 self._logger.info(
                                     f"✅ Futures VWAP source resolved: {fut_sym}",
                                     extra={"event": "futures_vwap_resolved", "symbol": fut_sym}
                                 )
-                                self._futures_vwap_logged = True
+                                self._vwap_source_logged = True
                             break
                             
                     except Exception as e:
