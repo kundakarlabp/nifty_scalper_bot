@@ -5664,7 +5664,8 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         om.guard_orphan_position(
                             symbol=norm_symbol,
                             quantity=signed_qty,  # ✅ Now negative for SHORT
-                            average_price=avg_price
+                            average_price=avg_price,
+                            position_side=pos.side
                         )
 
             # =================================================================
