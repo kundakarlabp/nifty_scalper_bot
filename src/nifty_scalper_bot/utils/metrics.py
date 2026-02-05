@@ -184,16 +184,32 @@ def Gauge(name: str, doc: str, labels: Iterable[str] | None = None) -> Any:
     if _PGauge is None:
         return _Noop()
     label_key = tuple(labels or ())
-    cache_key = ("gauge", name, label_key)
+    cache_key = ('gauge', name, label_key)
     metric = _METRIC_CACHE.get(cache_key)
     if metric is None:
         ensure_multiproc_dir()
         try:
-            metric = _PGauge(name, doc, list(label_key))
+            multiproc_mode = (
+                'livesum'
+                if os.environ.get('PROMETHEUS_MULTIPROC_DIR')
+                else None
+            )
+            if multiproc_mode:
+                try:
+                    metric = _PGauge(
+                        name,
+                        doc,
+                        list(label_key),
+                        multiprocess_mode=multiproc_mode,
+                    )
+                except TypeError:
+                    metric = _PGauge(name, doc, list(label_key))
+            else:
+                metric = _PGauge(name, doc, list(label_key))
         except Exception as exc:  # pragma: no cover - defensive fallback
             LOGGER.warning(
-                "Prometheus Gauge init failed; using no-op",
-                extra={"metric_name": name, "error": str(exc)},
+                'Prometheus Gauge init failed; using no-op',
+                extra={'metric_name': name, 'error': str(exc)},
             )
             metric = _Noop()
         _METRIC_CACHE[cache_key] = metric
