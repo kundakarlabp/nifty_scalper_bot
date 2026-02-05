@@ -5,10 +5,10 @@ This module provides guardrails around the underlying order manager.
 
 from __future__ import annotations
 
-import threading
-import time
 from collections import deque
 from dataclasses import dataclass, field
+import threading
+import time
 from typing import Any, Callable, Deque, Literal, Mapping
 
 from nifty_scalper_bot.config.settings import OrderSettings
@@ -655,6 +655,146 @@ class SafeOrderManager:
                 },
             )
         return order_id
+
+    def place_bracket_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        quantity: int,
+        entry_price: float | None,
+        stop_loss: float,
+        take_profit: float,
+        product: str | None = None,
+        tag: str | None = None,
+        trailing_spec: Any | None = None,
+        tp1_price: float | None = None,
+        tp1_qty: int | None = None,
+        trailing_atr_mult: float | None = None,
+    ) -> tuple[str, str, str]:
+        """Submit bracket order via SafeOrderManager. Args: symbol, side, quantity, entry_price, stop_loss, take_profit, product, tag, trailing_spec, tp1_price, tp1_qty, trailing_atr_mult. Returns: tuple[str, str, str]. Raises: OrderPlacementError."""
+
+        self._logger.debug(
+            "Entered SafeOrderManager.place_bracket_order",
+            extra={
+                "event": "safe_bracket_place_enter",
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+            },
+        )
+        allowed, reasons = self._regime_gate_decision(
+            symbol=symbol,
+            side=side,
+            context={
+                "quantity": quantity,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+            },
+        )
+        if not allowed:
+            reason_text = ", ".join(reasons) if reasons else "regime_gate_block"
+            primary_reason = reasons[0] if reasons else "regime_gate"
+            self._logger.info(
+                "Condition met: safe_bracket_regime_block",
+                extra={
+                    "event": "safe_bracket_regime_block",
+                    "symbol": symbol,
+                    "side": side,
+                    "reasons": list(reasons),
+                },
+            )
+            self._propagate_skip_reason(primary_reason)
+            self._record_rejection(symbol, reason_text)
+            raise OrderPlacementError(f"Regime gate blocked order: {reason_text}")
+
+        if not self.settings.enable_live:
+            self._logger.info(
+                "Condition met: bracket_skip_live_disabled",
+                extra={
+                    "event": "bracket_skip_live_disabled",
+                    "symbol": symbol,
+                    "side": side,
+                },
+            )
+            self._throttled += 1
+            try:
+                self._m_throttled.inc()
+            except Exception:  # pragma: no cover - optional metrics
+                pass
+            self._record_rejection(symbol, "live trading disabled")
+            raise OrderPlacementError("Live trading disabled")
+
+        spacing = max(self.settings.min_spacing_seconds, 0.0)
+        with self._lock:
+            if spacing > 0:
+                wait = spacing - (time.time() - self._last_order_at)
+                if wait > 0:
+                    time.sleep(wait)
+                self._last_order_at = time.time()
+            now = time.time()
+            if not self._check_throttle(now):
+                self._throttled += 1
+                try:
+                    self._m_throttled.inc()
+                except Exception:  # pragma: no cover - optional metrics
+                    pass
+                self._logger.info(
+                    "Condition met: bracket_skip_throttle",
+                    extra={
+                        "event": "bracket_skip_throttle",
+                        "symbol": symbol,
+                        "side": side,
+                    },
+                )
+                self._record_rejection(symbol, "throttle limit reached")
+                raise OrderPlacementError("Order throttled")
+
+        try:
+            result = self.order_manager.place_bracket_order(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                entry_price=entry_price or 0.0,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                product=product,
+                tag=tag,
+                trailing_spec=trailing_spec,
+                tp1_price=tp1_price,
+                tp1_qty=tp1_qty,
+                trailing_atr_mult=trailing_atr_mult,
+            )
+            self._logger.info(
+                "Condition met: safe_bracket_order_submitted",
+                extra={
+                    "event": "safe_bracket_order_submitted",
+                    "symbol": symbol,
+                    "side": side,
+                },
+            )
+            return result
+        except OrderPlacementError as exc:
+            self._logger.error(
+                "Failure in place_bracket_order: %s",
+                exc,
+                extra={"event": "safe_bracket_order_error", "symbol": symbol},
+                exc_info=exc,
+            )
+            self._record_rejection(symbol, str(exc))
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in place_bracket_order: %s",
+                exc,
+                extra={"event": "safe_bracket_order_error", "symbol": symbol},
+                exc_info=exc,
+            )
+            self._record_rejection(symbol, "bracket order failure")
+            raise OrderPlacementError("Bracket order failed") from exc
 
     # ------------------------------------------------------------------
     def _chase_fill(self, order_id: str, side: OrderSide, price: float) -> None:

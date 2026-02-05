@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import math
 import random
 import threading
 import time
-from contextlib import suppress
 from typing import Any, Callable, Iterable, Sequence
 
 # [FIX] Use centralized logging utilities
@@ -48,9 +48,15 @@ class PollingStreamer:
         # Metrics
         self._m_poll_ok = Counter("polling_success_total", "Successful poll cycles")
         self._m_poll_fail = Counter("polling_failure_total", "Failed poll cycles")
-        self._m_ticks_ingested = Counter("polling_ticks_total", "Ticks ingested via polling")
-        self._m_last_success = Gauge("polling_last_success_timestamp", "Last successful poll epoch")
-        self._m_last_tick = Gauge("polling_last_tick_timestamp", "Last tick ingestion epoch")
+        self._m_ticks_ingested = Counter(
+            "polling_ticks_total", "Ticks ingested via polling"
+        )
+        self._m_last_success = Gauge(
+            "polling_last_success_timestamp", "Last successful poll epoch"
+        )
+        self._m_last_tick = Gauge(
+            "polling_last_tick_timestamp", "Last tick ingestion epoch"
+        )
 
     def start(self) -> None:
         """Start the background polling thread."""
@@ -58,7 +64,9 @@ class PollingStreamer:
             if self._thread and self._thread.is_alive():
                 return
             self._stop.clear()
-            self._thread = threading.Thread(target=self._run, name="polling_streamer", daemon=True)
+            self._thread = threading.Thread(
+                target=self._run, name="polling_streamer", daemon=True
+            )
             self._thread.start()
             LOGGER.info(
                 "🚀 Scout Polling Started. Target Interval: %.1fs",
@@ -72,10 +80,12 @@ class PollingStreamer:
             if not self._thread:
                 return
             self._stop.set()
-        
+
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-            LOGGER.info("🛑 Polling Streamer Stopped", extra={"event": "polling_stopped"})
+            LOGGER.info(
+                "🛑 Polling Streamer Stopped", extra={"event": "polling_stopped"}
+            )
 
     def set_kite_streamer(self, kite_streamer) -> None:
         """Set optional KiteTicker streamer reference for health monitoring."""
@@ -83,9 +93,9 @@ class PollingStreamer:
 
     def subscribe(self, tokens: Sequence[int]) -> None:
         """Add tokens to the polling list and seed DataHub immediately.
-        
+
         Args:
-            tokens: Sequence of integer instrument tokens. 
+            tokens: Sequence of integer instrument tokens.
                    Strings will be validated and converted if numeric.
         """
         # ✅ CRITICAL FIX: Validate and convert tokens to integers
@@ -110,22 +120,29 @@ class PollingStreamer:
                     LOGGER.warning(
                         "PollingStreamer.subscribe: invalid token type %s",
                         type(token).__name__,
-                        extra={"event": "polling_subscribe_invalid_type", "token_type": type(token).__name__},
+                        extra={
+                            "event": "polling_subscribe_invalid_type",
+                            "token_type": type(token).__name__,
+                        },
                     )
             except (ValueError, TypeError) as e:
                 LOGGER.warning(
                     "PollingStreamer.subscribe: cannot convert token %r: %s",
-                    token, e,
-                    extra={"event": "polling_subscribe_convert_error", "token": str(token)},
+                    token,
+                    e,
+                    extra={
+                        "event": "polling_subscribe_convert_error",
+                        "token": str(token),
+                    },
                 )
-        
+
         if not valid_tokens:
             LOGGER.warning(
                 "PollingStreamer.subscribe: no valid tokens provided",
                 extra={"event": "polling_subscribe_empty"},
             )
             return
-        
+
         with self._lock:
             initial_count = len(self._tokens)
             self._tokens.update(valid_tokens)
@@ -141,6 +158,7 @@ class PollingStreamer:
         # Seed DataHub immediately
         if self._data_hub:
             import time
+
             for token in valid_tokens:
                 symbol = self._resolve_instrument(token)
                 if symbol:
@@ -150,7 +168,7 @@ class PollingStreamer:
                             "instrument_token": token,
                             "last_price": None,
                             "timestamp": int(time.time() * 1000),
-                            "source": "rest"
+                            "source": "rest",
                         },
                         source="rest",
                         seed=True,
@@ -175,18 +193,18 @@ class PollingStreamer:
         Executed in a background thread.
         """
         backoff = self._interval_s
-        
+
         # 🟢 Initialize health timestamp (outside loop)
         # This tracks the last time we saw 'ideal' (NFO) data
         last_healthy_ts = time.monotonic()
-        
+
         while not self._stop.is_set():
             started = time.monotonic()
             try:
                 # Copy token list under lock
                 with self._lock:
                     tokens = list(self._tokens)
-                
+
                 # Track data quality for this specific poll cycle
                 seen_nfo_this_cycle = False
                 seen_any_tick_this_cycle = False
@@ -196,20 +214,20 @@ class PollingStreamer:
                     for batch in self._chunks(tokens, self._batch_size):
                         # Safe Fetch (Uses the corrected _fetch_ticks)
                         ticks = self._fetch_ticks(batch)
-                        
+
                         # Trace logging for empty batches
                         if not ticks:
-                             log_throttled(
+                            log_throttled(
                                 LOGGER,
                                 "poll_empty_batch",
                                 f"[POLL-TRACE] Empty ticks returned for batch {batch[:5]}...",
-                                level=10, 
-                                interval_sec=60.0
+                                level=10,
+                                interval_sec=60.0,
                             )
                         else:
                             # ✅ CRITICAL FIX 1: Mark that we saw *some* data (even if just NSE)
                             seen_any_tick_this_cycle = True
-                        
+
                         # Check for NFO data in this batch (without resetting timestamp yet)
                         if not seen_nfo_this_cycle:
                             for t in ticks:
@@ -217,47 +235,53 @@ class PollingStreamer:
                                 if sym and str(sym).startswith("NFO:"):
                                     seen_nfo_this_cycle = True
                                     break
-                        
+
                         for tick in ticks:
                             # 1. Validate Payload Structure
-                            if "instrument_token" not in tick or "last_price" not in tick:
+                            if (
+                                "instrument_token" not in tick
+                                or "last_price" not in tick
+                            ):
                                 continue
 
                             # 2. Tag Source as REST
                             tick["source"] = "rest"
-                            
+
                             # 3. Get Symbol (Already resolved in _fetch_ticks)
                             symbol = tick.get("symbol")
-                            if not symbol: continue
-                            
+                            if not symbol:
+                                continue
+
                             # 4. Seed DataHub (Synchronous)
                             if self._data_hub:
-                                self._data_hub.store_quote(symbol, tick, source="rest", seed=True)
+                                self._data_hub.store_quote(
+                                    symbol, tick, source="rest", seed=True
+                                )
 
                             # 5. Update Metrics
                             try:
                                 self._m_last_tick.set(int(time.time() * 1000))
                             except Exception as metric_err:
                                 LOGGER.debug(f"Metric update error: {metric_err}")
-                            
+
                             # 6. Async Handoff (Strategy Pipeline)
                             try:
                                 self._on_tick(tick)
                                 self._m_ticks_ingested.inc()
-                                
+
                                 # ✅ DIAGNOSTIC: Confirm callback was invoked
                                 log_throttled(
                                     LOGGER,
                                     f"tick_callback_{symbol}",
                                     f"✅ CALLBACK INVOKED: {symbol} | LTP={tick.get('last_price')}",
                                     interval_sec=60.0,
-                                    level=10  # DEBUG
+                                    level=10,  # DEBUG
                                 )
                             except Exception as callback_err:
                                 # ❌ CRITICAL: Log the actual error instead of suppressing!
                                 LOGGER.error(
                                     f"❌ TICK CALLBACK FAILED for {symbol}: {callback_err}",
-                                    exc_info=True
+                                    exc_info=True,
                                 )
 
                 # --------------------------------------------------
@@ -286,10 +310,10 @@ class PollingStreamer:
                 # 3. WebSocket is NOT healthy (WS is dead).
                 # 4. NFO data has been stale for > 30s (Long term starvation).
                 #
-                # NOTE: If 'seen_any_tick_this_cycle' is True (e.g. NSE Index ticks), 
-                # we do NOT kill the bot, even if 'last_healthy_ts' is old. 
+                # NOTE: If 'seen_any_tick_this_cycle' is True (e.g. NSE Index ticks),
+                # we do NOT kill the bot, even if 'last_healthy_ts' is old.
                 # This prevents "Quiet Market" suicide.
-                
+
                 if tokens and not seen_any_tick_this_cycle and not ws_healthy:
                     if time.monotonic() - last_healthy_ts > 30.0:
                         LOGGER.critical(
@@ -304,44 +328,44 @@ class PollingStreamer:
                     self._m_poll_ok.inc()
                 with suppress(Exception):
                     self._m_last_success.set(int(time.time() * 1000))
-                
+
                 backoff = self._interval_s
 
             except Exception as exc:  # noqa: BLE001
                 # Failure: Adaptive Backoff
                 with suppress(Exception):
                     self._m_poll_fail.inc()
-                
+
                 backoff = min(backoff * 1.5, 10.0)
                 log_throttled(
                     LOGGER,
                     "poll_loop_error",
                     f"Polling loop error: {exc}",
                     level=40,
-                    interval_sec=10.0
+                    interval_sec=10.0,
                 )
 
             # Smart Sleep
             elapsed = time.monotonic() - started
             sleep_time = max(0.1, backoff - elapsed)
             time.sleep(sleep_time)
-            
+
     # ----------------------------------------------------------------
     # ✅ FIX: Thread-Safe Fetch with Timeout (Prevents Zombie Hangs)
     # ----------------------------------------------------------------
     def _fetch_ticks(self, batch: list[int]) -> list[dict[str, Any]]:
         """
         Fetch quotes using exchange:tradingsymbol format for FULL quote data.
-        
-        ✅ CRITICAL FIX: Zerodha returns VWAP/Volume ONLY when symbols are 
+
+        ✅ CRITICAL FIX: Zerodha returns VWAP/Volume ONLY when symbols are
         passed as "exchange:tradingsymbol" format, NOT integer tokens!
-        
+
         When you pass integer tokens like [15018242, 15017730], Zerodha returns:
         - ✅ last_price
-        - ✅ instrument_token  
+        - ✅ instrument_token
         - ❌ average_price = 0 (MISSING!)
         - ❌ volume = 0 (MISSING!)
-        
+
         When you pass symbols like ["NFO:NIFTY26JAN25000CE"], Zerodha returns:
         - ✅ last_price
         - ✅ instrument_token
@@ -361,13 +385,13 @@ class PollingStreamer:
 
             if not tokens:
                 return []
-            
+
             # ✅ CRITICAL FIX: Convert tokens to "exchange:tradingsymbol" format
             # Zerodha returns average_price (VWAP) ONLY for this format!
             symbols_for_api = []
             token_to_symbol_map = {}
             symbol_to_token_map = {}
-            
+
             for token in tokens:
                 symbol = self._resolve_instrument(token)
                 if symbol:
@@ -378,7 +402,7 @@ class PollingStreamer:
                             symbol = f"NFO:{symbol}"
                         else:
                             symbol = f"NSE:{symbol}"
-                    
+
                     symbols_for_api.append(symbol)
                     token_to_symbol_map[token] = symbol
                     symbol_to_token_map[symbol] = token
@@ -390,48 +414,57 @@ class PollingStreamer:
                         LOGGER,
                         f"resolve_fail_{token}",
                         f"⚠️ Cannot resolve token {token} to symbol",
-                        interval_sec=120.0
+                        interval_sec=120.0,
                     )
-            
+
             if not symbols_for_api:
-                LOGGER.warning("[POLL] No symbols resolved from tokens - check instrument resolver")
+                LOGGER.warning(
+                    "[POLL] No symbols resolved from tokens - check instrument resolver"
+                )
                 return []
-            
+
             # Diagnostic Log - show what we're sending to API
             log_throttled(
                 LOGGER,
                 "quote_symbol_fetch",
                 f"📡 Fetching {len(symbols_for_api)} symbols (NOT tokens): {symbols_for_api[:3]}...",
-                interval_sec=60.0
+                interval_sec=60.0,
             )
-            
+
             # ✅ API CALL: Pass symbols as "exchange:tradingsymbol" strings
             # This is the KEY FIX - passing symbols instead of integer tokens
             quote_map = self._broker.quote(symbols_for_api)
-            
+
             if not quote_map:
-                LOGGER.warning(f"[POLL] Empty quote_map returned for symbols: {symbols_for_api[:3]}...")
+                LOGGER.warning(
+                    f"[POLL] Empty quote_map returned for symbols: {symbols_for_api[:3]}..."
+                )
                 return []
-            
+
             # ✅ DIAGNOSTIC: Check if we got VWAP data
             sample_quote = next(iter(quote_map.values()), {})
-            has_vwap = sample_quote.get("average_price", 0) and float(sample_quote.get("average_price", 0)) > 0
-            has_volume = sample_quote.get("volume", 0) and int(sample_quote.get("volume", 0)) > 0
-            
+            has_vwap = (
+                sample_quote.get("average_price", 0)
+                and float(sample_quote.get("average_price", 0)) > 0
+            )
+            has_volume = (
+                sample_quote.get("volume", 0) and int(sample_quote.get("volume", 0)) > 0
+            )
+
             log_throttled(
                 LOGGER,
                 "quote_quality_check",
                 f"📊 QUOTE QUALITY: VWAP={'✅' if has_vwap else '❌'} | Volume={'✅' if has_volume else '❌'} | Keys={list(sample_quote.keys())[:8]}",
-                interval_sec=60.0
+                interval_sec=60.0,
             )
 
             ticks = []
             for key, quote in quote_map.items():
                 try:
                     lp = float(quote.get("last_price") or 0.0)
-                    if lp <= 0: 
+                    if lp <= 0:
                         continue
-                    
+
                     # Get token from our map or from quote
                     token = quote.get("instrument_token")
                     if not token:
@@ -441,30 +474,30 @@ class PollingStreamer:
                             # Try base symbol without exchange
                             base_key = key.split(":", 1)[-1] if ":" in str(key) else key
                             token = symbol_to_token_map.get(base_key)
-                    
+
                     if not token:
                         LOGGER.debug(f"[POLL] Cannot determine token for key: {key}")
                         continue
-                        
+
                     token_int = int(token)
-                    
+
                     # ✅ CRITICAL: Extract VWAP (average_price) and Volume
-                    avg_price = quote.get("average_price")
+                    avg_price = quote.get("average_price") or quote.get("vwap")
                     volume = quote.get("volume")
                     oi = quote.get("oi")
-                    
+
                     # Convert to proper types with safe defaults
                     avg_price_float = float(avg_price) if avg_price is not None else 0.0
                     volume_int = int(volume) if volume is not None else 0
                     oi_int = int(oi) if oi is not None else 0
-                    
+
                     # ✅ DIAGNOSTIC: Log if VWAP is missing (but don't spam)
                     if avg_price_float == 0:
                         log_throttled(
                             LOGGER,
                             f"vwap_zero_{key}",
                             f"⚠️ VWAP=0 for {key} | This prevents VWAP strategy from triggering",
-                            interval_sec=300.0  # Only log every 5 minutes
+                            interval_sec=300.0,  # Only log every 5 minutes
                         )
 
                     # Handle timestamp
@@ -485,25 +518,29 @@ class PollingStreamer:
                         "average_price": avg_price_float,  # ✅ VWAP
                         "oi": oi_int,
                         "depth": quote.get("depth"),
-                        "symbol": key if ":" in str(key) else self._resolve_instrument(token_int),
-                        "source": "rest"
+                        "symbol": (
+                            key
+                            if ":" in str(key)
+                            else self._resolve_instrument(token_int)
+                        ),
+                        "source": "rest",
                     }
-                    
+
                     # ✅ LOG SUCCESS when we have VWAP (throttled)
                     if avg_price_float > 0:
                         log_throttled(
                             LOGGER,
                             f"full_quote_{key}",
                             f"✅ FULL QUOTE: {key} | LTP={lp:.2f} | VWAP={avg_price_float:.2f} | Vol={volume_int}",
-                            interval_sec=120.0
+                            interval_sec=120.0,
                         )
-                    
+
                     ticks.append(tick)
-                    
+
                 except Exception as e:
                     LOGGER.debug(f"[POLL] Error processing quote {key}: {e}")
                     continue
-            
+
             # ✅ Summary log
             if ticks:
                 vwap_count = sum(1 for t in ticks if t.get("average_price", 0) > 0)
@@ -511,29 +548,33 @@ class PollingStreamer:
                     LOGGER,
                     "fetch_summary",
                     f"📈 FETCH COMPLETE: {len(ticks)} ticks | {vwap_count} with VWAP",
-                    interval_sec=60.0
+                    interval_sec=60.0,
                 )
-            
+
             return ticks
-            
+
         except Exception as e:
             LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}", exc_info=True)
             return []
-            
+
     # ----------------------------------------------------------------
     # ✅ HELPERS (Inlined to ensure stability)
     # ----------------------------------------------------------------
-    def _try_quote_bulk(self, batch: list[int], timestamp_ms: int) -> list[dict[str, Any]]:
+    def _try_quote_bulk(
+        self, batch: list[int], timestamp_ms: int
+    ) -> list[dict[str, Any]]:
         """Fetch full quotes with proper token handling."""
         try:
             if not batch:
                 return []
-            
+
             # Build symbol list with token mapping
             symbols_to_fetch = []
             token_to_symbol_map = {}
-            symbol_to_token_map = {}  # Reverse map for extracting tokens from API response
-            
+            symbol_to_token_map = (
+                {}
+            )  # Reverse map for extracting tokens from API response
+
             for token in batch:
                 # ✅ DEFENSIVE: Ensure token is integer
                 try:
@@ -541,7 +582,7 @@ class PollingStreamer:
                 except (ValueError, TypeError):
                     LOGGER.warning(f"[POLL] Skipping non-integer in batch: {token!r}")
                     continue
-                
+
                 symbol = self._resolve_instrument(token_int)
                 if symbol:
                     symbols_to_fetch.append(symbol)
@@ -555,21 +596,21 @@ class PollingStreamer:
                     symbols_to_fetch.append(str(token_int))
                     token_to_symbol_map[str(token_int)] = token_int
                     symbol_to_token_map[str(token_int)] = token_int
-            
+
             if not symbols_to_fetch:
                 LOGGER.warning("[POLL] No symbols resolved from tokens")
                 return []
-            
+
             log_throttled(
                 LOGGER,
                 "quote_fetch_attempt",
                 f"📡 Fetching quotes for {len(symbols_to_fetch)} symbols: {symbols_to_fetch[:3]}...",
-                interval_sec=60.0
+                interval_sec=60.0,
             )
-            
+
             # Call Zerodha API
             quote_map = self._broker.quote(symbols_to_fetch)
-            
+
             if not quote_map:
                 LOGGER.warning("[POLL] Empty quote_map returned from broker")
                 return []
@@ -580,10 +621,10 @@ class PollingStreamer:
                     lp = float(quote.get("last_price") or 0.0)
                     if lp <= 0:
                         continue
-                    
+
                     # ✅ FIX: Get token from quote data first, then from our map
                     token = quote.get("instrument_token")
-                    
+
                     if not token:
                         # Try to find token from our reverse map
                         token = symbol_to_token_map.get(key)
@@ -592,7 +633,7 @@ class PollingStreamer:
                         if not token:
                             # Try without spaces
                             token = symbol_to_token_map.get(str(key).replace(" ", ""))
-                    
+
                     # ✅ FIX: DON'T try int(key) if key is a symbol string!
                     # Only convert if token is still numeric-looking
                     if token is None:
@@ -604,14 +645,16 @@ class PollingStreamer:
                             if len(batch) == 1:
                                 token = batch[0]
                             else:
-                                LOGGER.warning(f"[POLL] Cannot determine token for key: {key}")
+                                LOGGER.warning(
+                                    f"[POLL] Cannot determine token for key: {key}"
+                                )
                                 continue
-                    
+
                     # Ensure token is integer
                     token_int = int(token) if token else None
                     if not token_int:
                         continue
-                    
+
                     # Build timestamp
                     q_ts = quote.get("timestamp")
                     if q_ts and hasattr(q_ts, "timestamp"):
@@ -627,26 +670,28 @@ class PollingStreamer:
                         "average_price": quote.get("average_price", 0.0),
                         "oi": quote.get("oi", 0),
                         "depth": quote.get("depth"),
-                        "symbol": key if ":" in str(key) else None
+                        "symbol": key if ":" in str(key) else None,
                     }
                     ticks.append(tick)
-                    
+
                 except Exception as e:
                     LOGGER.debug(f"[POLL] Error processing quote {key}: {e}")
                     continue
-            
+
             return ticks
-            
+
         except Exception as e:
             LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}")
             return []
 
-    def _try_ltp_bulk(self, batch: list[int], timestamp_ms: int) -> list[dict[str, Any]]:
+    def _try_ltp_bulk(
+        self, batch: list[int], timestamp_ms: int
+    ) -> list[dict[str, Any]]:
         """Helper: Fetch LTP only (fallback)."""
         try:
             str_tokens = [str(t) for t in batch]
             ltp_map = self._broker.ltp(str_tokens)
-            
+
             if not ltp_map:
                 return []
 
@@ -655,12 +700,13 @@ class PollingStreamer:
                 try:
                     # Normalize nested structure
                     if isinstance(data, dict):
-                         lp = float(data.get("last_price") or data.get("ltp") or 0.0)
+                        lp = float(data.get("last_price") or data.get("ltp") or 0.0)
                     else:
-                         lp = float(data or 0.0)
-                         
-                    if lp <= 0: continue
-                    
+                        lp = float(data or 0.0)
+
+                    if lp <= 0:
+                        continue
+
                     # ✅ FIX: API returns keys as "exchange:symbol", need to map back to token
                     # First check if token_str is actually numeric
                     if str(token_str).isdigit():
@@ -671,17 +717,21 @@ class PollingStreamer:
                             inst_token = batch[0]
                         else:
                             # Can't determine token from LTP response key
-                            LOGGER.debug(f"[POLL-LTP] Cannot map key to token: {token_str}")
+                            LOGGER.debug(
+                                f"[POLL-LTP] Cannot map key to token: {token_str}"
+                            )
                             continue
-                    
-                    ticks.append({
-                        "instrument_token": inst_token,
-                        "last_price": lp,
-                        "timestamp": timestamp_ms,
-                        "volume": 0,
-                        "average_price": 0.0,
-                        "symbol": token_str if ":" in str(token_str) else None
-                    })
+
+                    ticks.append(
+                        {
+                            "instrument_token": inst_token,
+                            "last_price": lp,
+                            "timestamp": timestamp_ms,
+                            "volume": 0,
+                            "average_price": 0.0,
+                            "symbol": token_str if ":" in str(token_str) else None,
+                        }
+                    )
                 except Exception:
                     continue
             return ticks
@@ -696,12 +746,12 @@ class PollingStreamer:
 
     def _resolve_instrument(self, token: int) -> str | None:
         """Resolve instrument token to exchange:tradingsymbol format.
-        
+
         Returns format like 'NSE:NIFTY 50' or 'NFO:NIFTY2612025700CE'.
         """
         if token is None:
             return None
-        
+
         try:
             # ✅ FIX: Handle case where token is already a symbol string
             if isinstance(token, str):
@@ -711,13 +761,13 @@ class PollingStreamer:
                 token_int = int(token.strip())
             else:
                 token_int = int(token)
-            
+
             # 1. Try format_token_as_symbol (best method - uses CANONICAL_TOKENS)
             if hasattr(self._resolver, "format_token_as_symbol"):
                 result = self._resolver.format_token_as_symbol(token_int)
                 if result and result != str(token_int):
                     return result
-            
+
             # 2. Try lookup method
             if hasattr(self._resolver, "lookup"):
                 info = self._resolver.lookup(token_int)
@@ -731,7 +781,7 @@ class PollingStreamer:
                         elif symbol in ("BANKNIFTY", "NIFTY BANK"):
                             return "NSE:NIFTY BANK"
                         return f"{exchange}:{symbol}"
-            
+
             # 3. Try direct cache access with exchange lookup
             if hasattr(self._resolver, "_symbol_by_token"):
                 symbol = self._resolver._symbol_by_token.get(token_int)
@@ -739,16 +789,18 @@ class PollingStreamer:
                     # Get exchange from cache
                     exchange = "NSE"
                     if hasattr(self._resolver, "_exchange_by_token"):
-                        exchange = self._resolver._exchange_by_token.get(token_int, "NSE")
-                    
+                        exchange = self._resolver._exchange_by_token.get(
+                            token_int, "NSE"
+                        )
+
                     # Handle NIFTY special case
                     if symbol in ("NIFTY", "NIFTY 50"):
                         return "NSE:NIFTY 50"
                     elif symbol in ("BANKNIFTY", "NIFTY BANK"):
                         return "NSE:NIFTY BANK"
-                    
+
                     return f"{exchange}:{symbol}"
-            
+
             # 4. Well-known token fallback
             WELL_KNOWN_TOKENS = {
                 256265: "NSE:NIFTY 50",
@@ -756,8 +808,8 @@ class PollingStreamer:
             }
             if token_int in WELL_KNOWN_TOKENS:
                 return WELL_KNOWN_TOKENS[token_int]
-                
+
         except Exception as e:
             LOGGER.debug(f"[POLL] Symbol resolution error for token {token}: {e}")
-        
+
         return None

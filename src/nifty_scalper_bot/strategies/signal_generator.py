@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import math
-import hashlib
-import dataclasses
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, time
+import hashlib
+import math
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -77,11 +77,11 @@ class Signal:
         Logic: HASH(Strategy + Symbol + Action + MinuteTimestamp)
         """
         ts_raw = self.metadata.get("timestamp")
-        
+
         if isinstance(ts_raw, str):
-            ts_str = ts_raw[:16] 
+            ts_str = ts_raw[:16]
         elif isinstance(ts_raw, (int, float)):
-            ts_str = str(int(ts_raw / 60)) 
+            ts_str = str(int(ts_raw / 60))
         elif isinstance(ts_raw, datetime):
             ts_str = ts_raw.strftime("%Y%m%d%H%M")
         else:
@@ -112,10 +112,14 @@ class Signal:
     @staticmethod
     def _sanitize_for_json(data: Any) -> Any:
         """Recursively sanitize data for JSON serialization."""
-        if data is None: return None
-        if isinstance(data, (str, int, float, bool)): return data
-        if isinstance(data, datetime): return data.isoformat()
-        if hasattr(data, "item"): return float(data) # numpy scalar support
+        if data is None:
+            return None
+        if isinstance(data, (str, int, float, bool)):
+            return data
+        if isinstance(data, datetime):
+            return data.isoformat()
+        if hasattr(data, "item"):
+            return float(data)  # numpy scalar support
         if isinstance(data, dict):
             return {str(k): Signal._sanitize_for_json(v) for k, v in data.items()}
         if isinstance(data, (list, tuple)):
@@ -243,7 +247,9 @@ class RSIMeanReversionStrategy(Strategy):
         rsi_raw = indicators.get("rsi")
         atr_raw = indicators.get("atr")
         if rsi_raw is None or atr_raw is None:
-            logger.debug(f"SKIP {self.name}: data_missing (rsi={rsi_raw}, atr={atr_raw}) | {symbol}")
+            logger.debug(
+                f"SKIP {self.name}: data_missing (rsi={rsi_raw}, atr={atr_raw}) | {symbol}"
+            )
             return None
         rsi = float(rsi_raw)
         atr = float(atr_raw)
@@ -251,7 +257,7 @@ class RSIMeanReversionStrategy(Strategy):
         oversold = float(self._parameters["oversold_threshold"])
         overbought = float(self._parameters["overbought_threshold"])
         qty = int(self._parameters.get("default_quantity", 1))
-        
+
         swing_low = float(indicators.get("swing_low") or (current_price - atr))
         swing_high = float(indicators.get("swing_high") or (current_price + atr))
 
@@ -297,9 +303,11 @@ class RSIMeanReversionStrategy(Strategy):
                 "BUY", current_price, stop, desired_rr=2.0
             )
             if stop_loss is None:
-                logger.debug(f"SKIP {self.name}: risk_invalid (SL calculation failed) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: risk_invalid (SL calculation failed) | {symbol}"
+                )
                 return None
-            
+
             confidence = self._bounded_confidence((oversold - rsi) / oversold)
             reason = f"RSI {rsi:.1f} below {oversold}, mean reversion long"
             logger.info(f"SIGNAL {self.name}: BUY | {reason}")
@@ -320,10 +328,14 @@ class RSIMeanReversionStrategy(Strategy):
                 "SELL", current_price, stop, desired_rr=2.0
             )
             if stop_loss is None:
-                logger.debug(f"SKIP {self.name}: risk_invalid (SL calculation failed) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: risk_invalid (SL calculation failed) | {symbol}"
+                )
                 return None
-            
-            confidence = self._bounded_confidence((rsi - overbought) / (100 - overbought))
+
+            confidence = self._bounded_confidence(
+                (rsi - overbought) / (100 - overbought)
+            )
             reason = f"RSI {rsi:.1f} above {overbought}, mean reversion short"
             logger.info(f"SIGNAL {self.name}: SELL | {reason}")
             return Signal(
@@ -377,7 +389,13 @@ class EMACrossoverStrategy(Strategy):
         slow_prev = indicators.get("ema_slow_prev")
         atr = indicators.get("atr")
 
-        if (fast is None or slow is None or fast_prev is None or slow_prev is None or atr is None):
+        if (
+            fast is None
+            or slow is None
+            or fast_prev is None
+            or slow_prev is None
+            or atr is None
+        ):
             logger.debug(f"SKIP {self.name}: data_missing | {symbol}")
             return None
 
@@ -404,37 +422,74 @@ class EMACrossoverStrategy(Strategy):
                 confidence = self._bounded_confidence(abs(fast - slow) / atr)
                 reason = "EMA death cross detected, exit long"
                 logger.info(f"SIGNAL {self.name}: CLOSE_LONG | {reason}")
-                return Signal("CLOSE_LONG", symbol, position.quantity, confidence, reason, None, None, metadata)
-            
+                return Signal(
+                    "CLOSE_LONG",
+                    symbol,
+                    position.quantity,
+                    confidence,
+                    reason,
+                    None,
+                    None,
+                    metadata,
+                )
+
             if position.side == "SHORT" and crossed_up:
                 confidence = self._bounded_confidence(abs(fast - slow) / atr)
                 reason = "EMA golden cross detected, exit short"
                 logger.info(f"SIGNAL {self.name}: CLOSE_SHORT | {reason}")
-                return Signal("CLOSE_SHORT", symbol, position.quantity, confidence, reason, None, None, metadata)
+                return Signal(
+                    "CLOSE_SHORT",
+                    symbol,
+                    position.quantity,
+                    confidence,
+                    reason,
+                    None,
+                    None,
+                    metadata,
+                )
 
         if crossed_up and (position is None or position.side != "LONG"):
             stop = slow
-            stop_loss, take_profit = self._ensure_rr("BUY", current_price, stop, desired_rr)
+            stop_loss, take_profit = self._ensure_rr(
+                "BUY", current_price, stop, desired_rr
+            )
             if stop_loss is None:
-                logger.debug(f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}"
+                )
                 return None
-            
+
             confidence = self._bounded_confidence(abs(fast - slow) / max(atr, 1e-6))
             reason = "Fast EMA crossed above slow EMA"
             logger.info(f"SIGNAL {self.name}: BUY | {reason}")
-            return Signal("BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata)
+            return Signal(
+                "BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata
+            )
 
         if crossed_down and (position is None or position.side != "SHORT"):
             stop = slow
-            stop_loss, take_profit = self._ensure_rr("SELL", current_price, stop, desired_rr)
+            stop_loss, take_profit = self._ensure_rr(
+                "SELL", current_price, stop, desired_rr
+            )
             if stop_loss is None:
-                logger.debug(f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}"
+                )
                 return None
-            
+
             confidence = self._bounded_confidence(abs(fast - slow) / max(atr, 1e-6))
             reason = "Fast EMA crossed below slow EMA"
             logger.info(f"SIGNAL {self.name}: SELL | {reason}")
-            return Signal("SELL", symbol, qty, confidence, reason, stop_loss, take_profit, metadata)
+            return Signal(
+                "SELL",
+                symbol,
+                qty,
+                confidence,
+                reason,
+                stop_loss,
+                take_profit,
+                metadata,
+            )
 
         logger.debug(f"SKIP {self.name}: neutral (no cross) | {symbol}")
         return None
@@ -472,9 +527,14 @@ class MACDStrategy(Strategy):
 
     def get_required_indicators(self) -> list[str]:
         return [
-            "macd", "macd_signal", "macd_hist",
-            "macd_prev", "macd_signal_prev",
-            "atr", "support", "resistance",
+            "macd",
+            "macd_signal",
+            "macd_hist",
+            "macd_prev",
+            "macd_signal_prev",
+            "atr",
+            "support",
+            "resistance",
         ]
 
     def generate_signal(
@@ -493,8 +553,14 @@ class MACDStrategy(Strategy):
         signal_prev = indicators.get("macd_signal_prev")
         atr = indicators.get("atr")
 
-        if (macd is None or signal_line is None or histogram is None or 
-            macd_prev is None or signal_prev is None or atr is None):
+        if (
+            macd is None
+            or signal_line is None
+            or histogram is None
+            or macd_prev is None
+            or signal_prev is None
+            or atr is None
+        ):
             logger.debug(f"SKIP {self.name}: data_missing | {symbol}")
             return None
 
@@ -516,42 +582,83 @@ class MACDStrategy(Strategy):
 
         if position:
             if position.side == "LONG" and crossed_down:
-                confidence = self._bounded_confidence(abs(macd - signal_line) / max(abs(histogram), 1e-6))
+                confidence = self._bounded_confidence(
+                    abs(macd - signal_line) / max(abs(histogram), 1e-6)
+                )
                 reason = "MACD bearish crossover, exit long"
                 logger.info(f"SIGNAL {self.name}: CLOSE_LONG | {reason}")
-                return Signal("CLOSE_LONG", symbol, position.quantity, confidence, reason, None, None, metadata)
-            
+                return Signal(
+                    "CLOSE_LONG",
+                    symbol,
+                    position.quantity,
+                    confidence,
+                    reason,
+                    None,
+                    None,
+                    metadata,
+                )
+
             if position.side == "SHORT" and crossed_up:
-                confidence = self._bounded_confidence(abs(macd - signal_line) / max(abs(histogram), 1e-6))
+                confidence = self._bounded_confidence(
+                    abs(macd - signal_line) / max(abs(histogram), 1e-6)
+                )
                 reason = "MACD bullish crossover, exit short"
                 logger.info(f"SIGNAL {self.name}: CLOSE_SHORT | {reason}")
-                return Signal("CLOSE_SHORT", symbol, position.quantity, confidence, reason, None, None, metadata)
+                return Signal(
+                    "CLOSE_SHORT",
+                    symbol,
+                    position.quantity,
+                    confidence,
+                    reason,
+                    None,
+                    None,
+                    metadata,
+                )
 
         if crossed_up and (position is None or position.side != "LONG"):
             stop = min(support, current_price - atr)
-            stop_loss, take_profit = self._ensure_rr("BUY", current_price, stop, desired_rr=2.0)
+            stop_loss, take_profit = self._ensure_rr(
+                "BUY", current_price, stop, desired_rr=2.0
+            )
             if stop_loss is None:
-                logger.debug(f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}"
+                )
                 return None
-            
+
             momentum = abs(histogram) / max(abs(signal_line), 1e-6)
             confidence = self._bounded_confidence(0.5 + 0.5 * min(momentum, 1.0))
             reason = "MACD bullish crossover confirmed"
             logger.info(f"SIGNAL {self.name}: BUY | {reason}")
-            return Signal("BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata)
+            return Signal(
+                "BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata
+            )
 
         if crossed_down and (position is None or position.side != "SHORT"):
             stop = max(resistance, current_price + atr)
-            stop_loss, take_profit = self._ensure_rr("SELL", current_price, stop, desired_rr=2.0)
+            stop_loss, take_profit = self._ensure_rr(
+                "SELL", current_price, stop, desired_rr=2.0
+            )
             if stop_loss is None:
-                logger.debug(f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}"
+                )
                 return None
-            
+
             momentum = abs(histogram) / max(abs(signal_line), 1e-6)
             confidence = self._bounded_confidence(0.5 + 0.5 * min(momentum, 1.0))
             reason = "MACD bearish crossover confirmed"
             logger.info(f"SIGNAL {self.name}: SELL | {reason}")
-            return Signal("SELL", symbol, qty, confidence, reason, stop_loss, take_profit, metadata)
+            return Signal(
+                "SELL",
+                symbol,
+                qty,
+                confidence,
+                reason,
+                stop_loss,
+                take_profit,
+                metadata,
+            )
 
         logger.debug(f"SKIP {self.name}: neutral (no cross) | {symbol}")
         return None
@@ -601,7 +708,13 @@ class BollingerBandStrategy(Strategy):
         rsi = indicators.get("rsi")
         atr = indicators.get("atr")
 
-        if (upper is None or lower is None or middle is None or rsi is None or atr is None):
+        if (
+            upper is None
+            or lower is None
+            or middle is None
+            or rsi is None
+            or atr is None
+        ):
             logger.debug(f"SKIP {self.name}: data_missing | {symbol}")
             return None
 
@@ -612,46 +725,104 @@ class BollingerBandStrategy(Strategy):
         atr = float(atr)
 
         qty = int(self._parameters.get("default_quantity", 1))
-        metadata = {"strategy": self.name, "bb_upper": upper, "bb_lower": lower, "rsi": rsi}
+        metadata = {
+            "strategy": self.name,
+            "bb_upper": upper,
+            "bb_lower": lower,
+            "rsi": rsi,
+        }
 
         if position:
             if position.side == "LONG" and current_price >= middle:
-                confidence = self._bounded_confidence((current_price - middle) / max(atr, 1e-6))
+                confidence = self._bounded_confidence(
+                    (current_price - middle) / max(atr, 1e-6)
+                )
                 reason = "Price reverted to middle band, closing long"
                 logger.info(f"SIGNAL {self.name}: CLOSE_LONG | {reason}")
-                return Signal("CLOSE_LONG", symbol, position.quantity, confidence, reason, None, None, metadata)
-            
+                return Signal(
+                    "CLOSE_LONG",
+                    symbol,
+                    position.quantity,
+                    confidence,
+                    reason,
+                    None,
+                    None,
+                    metadata,
+                )
+
             if position.side == "SHORT" and current_price <= middle:
-                confidence = self._bounded_confidence((middle - current_price) / max(atr, 1e-6))
+                confidence = self._bounded_confidence(
+                    (middle - current_price) / max(atr, 1e-6)
+                )
                 reason = "Price reverted to middle band, closing short"
                 logger.info(f"SIGNAL {self.name}: CLOSE_SHORT | {reason}")
-                return Signal("CLOSE_SHORT", symbol, position.quantity, confidence, reason, None, None, metadata)
+                return Signal(
+                    "CLOSE_SHORT",
+                    symbol,
+                    position.quantity,
+                    confidence,
+                    reason,
+                    None,
+                    None,
+                    metadata,
+                )
 
-        if current_price <= lower and rsi < 40 and (position is None or position.side != "LONG"):
+        if (
+            current_price <= lower
+            and rsi < 40
+            and (position is None or position.side != "LONG")
+        ):
             stop = min(lower - 0.5 * atr, current_price - atr)
-            stop_loss, take_profit = self._ensure_rr("BUY", current_price, stop, desired_rr=2.0)
+            stop_loss, take_profit = self._ensure_rr(
+                "BUY", current_price, stop, desired_rr=2.0
+            )
             if stop_loss is None:
-                logger.debug(f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}"
+                )
                 return None
-            
+
             distance = lower - current_price
-            confidence = self._bounded_confidence(0.5 + 0.5 * min(abs(distance) / max(atr, 1e-6), 1.0))
+            confidence = self._bounded_confidence(
+                0.5 + 0.5 * min(abs(distance) / max(atr, 1e-6), 1.0)
+            )
             reason = "Price at lower band with oversold RSI"
             logger.info(f"SIGNAL {self.name}: BUY | {reason}")
-            return Signal("BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata)
+            return Signal(
+                "BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata
+            )
 
-        if current_price >= upper and rsi > 60 and (position is None or position.side != "SHORT"):
+        if (
+            current_price >= upper
+            and rsi > 60
+            and (position is None or position.side != "SHORT")
+        ):
             stop = max(upper + 0.5 * atr, current_price + atr)
-            stop_loss, take_profit = self._ensure_rr("SELL", current_price, stop, desired_rr=2.0)
+            stop_loss, take_profit = self._ensure_rr(
+                "SELL", current_price, stop, desired_rr=2.0
+            )
             if stop_loss is None:
-                logger.debug(f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: risk_invalid (SL {stop:.2f}) | {symbol}"
+                )
                 return None
-            
+
             distance = current_price - upper
-            confidence = self._bounded_confidence(0.5 + 0.5 * min(abs(distance) / max(atr, 1e-6), 1.0))
+            confidence = self._bounded_confidence(
+                0.5 + 0.5 * min(abs(distance) / max(atr, 1e-6), 1.0)
+            )
             reason = "Price at upper band with overbought RSI"
             logger.info(f"SIGNAL {self.name}: SELL | {reason}")
-            return Signal("SELL", symbol, qty, confidence, reason, stop_loss, take_profit, metadata)
+            return Signal(
+                "SELL",
+                symbol,
+                qty,
+                confidence,
+                reason,
+                stop_loss,
+                take_profit,
+                metadata,
+            )
 
         logger.debug(f"SKIP {self.name}: neutral | {symbol}")
         return None
@@ -680,10 +851,15 @@ class OpeningRangeBreakoutStrategy(Strategy):
 
     def get_required_indicators(self) -> list[str]:
         return [
-            "orb_high", "orb_low", "orb_ready",
-            "nr7", "nr7_range", "nr7_min_range",
+            "orb_high",
+            "orb_low",
+            "orb_ready",
+            "nr7",
+            "nr7_range",
+            "nr7_min_range",
             "futures_volume_ratio",
-            "minutes_since_open", "minutes_until_close",
+            "minutes_since_open",
+            "minutes_until_close",
             "atr",
         ]
 
@@ -706,16 +882,24 @@ class OpeningRangeBreakoutStrategy(Strategy):
             minutes_since_open = indicators.get("minutes_since_open")
             minutes_until_close = indicators.get("minutes_until_close")
 
-            if (orb_high is None or orb_low is None or not bool(orb_ready) or atr is None
-                or minutes_since_open is None or minutes_until_close is None):
+            if (
+                orb_high is None
+                or orb_low is None
+                or not bool(orb_ready)
+                or atr is None
+                or minutes_since_open is None
+                or minutes_until_close is None
+            ):
                 logger.debug(f"SKIP {self.name}: data_missing | {symbol}")
                 return None
 
             parameters = self._parameters
             min_volume_ratio = float(parameters["volume_spike_ratio"])
-            
+
             if volume_ratio is None or float(volume_ratio) < min_volume_ratio:
-                logger.debug(f"SKIP {self.name}: volume_filter ({volume_ratio} < {min_volume_ratio}) | {symbol}")
+                logger.debug(
+                    f"SKIP {self.name}: volume_filter ({volume_ratio} < {min_volume_ratio}) | {symbol}"
+                )
                 return None
             if not nr7_flag:
                 logger.debug(f"SKIP {self.name}: nr7_filter | {symbol}")
@@ -742,30 +926,59 @@ class OpeningRangeBreakoutStrategy(Strategy):
                 if position.side == "LONG" and current_price < float(orb_low):
                     reason = "Price lost opening range low"
                     logger.info(f"SIGNAL {self.name}: CLOSE_LONG | {reason}")
-                    return Signal("CLOSE_LONG", symbol, position.quantity, self._bounded_confidence(0.6), reason, None, None, metadata)
-                
+                    return Signal(
+                        "CLOSE_LONG",
+                        symbol,
+                        position.quantity,
+                        self._bounded_confidence(0.6),
+                        reason,
+                        None,
+                        None,
+                        metadata,
+                    )
+
                 if position.side == "SHORT" and current_price > float(orb_high):
                     reason = "Price reclaimed opening range high"
                     logger.info(f"SIGNAL {self.name}: CLOSE_SHORT | {reason}")
-                    return Signal("CLOSE_SHORT", symbol, position.quantity, self._bounded_confidence(0.6), reason, None, None, metadata)
+                    return Signal(
+                        "CLOSE_SHORT",
+                        symbol,
+                        position.quantity,
+                        self._bounded_confidence(0.6),
+                        reason,
+                        None,
+                        None,
+                        metadata,
+                    )
 
-            if current_price > float(orb_high) and (position is None or position.side != "LONG"):
+            if current_price > float(orb_high) and (
+                position is None or position.side != "LONG"
+            ):
                 distance = current_price - float(orb_high)
                 confidence = self._bounded_confidence(distance / max(atr_value, 1.0))
                 reason = "ORB breakout above opening high"
                 logger.info(f"SIGNAL {self.name}: BUY | {reason}")
-                return Signal("BUY", symbol, qty, confidence, reason, None, None, metadata)
+                return Signal(
+                    "BUY", symbol, qty, confidence, reason, None, None, metadata
+                )
 
-            if current_price < float(orb_low) and (position is None or position.side != "SHORT"):
+            if current_price < float(orb_low) and (
+                position is None or position.side != "SHORT"
+            ):
                 distance = float(orb_low) - current_price
                 confidence = self._bounded_confidence(distance / max(atr_value, 1.0))
                 reason = "ORB breakdown below opening low"
                 logger.info(f"SIGNAL {self.name}: SELL | {reason}")
-                return Signal("SELL", symbol, qty, confidence, reason, None, None, metadata)
+                return Signal(
+                    "SELL", symbol, qty, confidence, reason, None, None, metadata
+                )
 
         except Exception as exc:
-            logger.error(f"Failure in {self.name}.generate_signal: {exc}", extra={"symbol": symbol})
-        
+            logger.error(
+                f"Failure in {self.name}.generate_signal: {exc}",
+                extra={"symbol": symbol},
+            )
+
         logger.debug(f"SKIP {self.name}: neutral | {symbol}")
         return None
 
@@ -795,8 +1008,11 @@ class VWAPMeanReversionStrategy(Strategy):
 
     def get_required_indicators(self) -> list[str]:
         return [
-            "vwap", "rsi", "atr",
-            "minutes_until_close", "minutes_since_open",
+            "vwap",
+            "rsi",
+            "atr",
+            "minutes_until_close",
+            "minutes_since_open",
             "futures_volume_ratio",
         ]
 
@@ -816,8 +1032,13 @@ class VWAPMeanReversionStrategy(Strategy):
             minutes_until_close = indicators.get("minutes_until_close")
             minutes_since_open = indicators.get("minutes_since_open")
 
-            if (vwap is None or rsi is None or atr is None or 
-                minutes_until_close is None or minutes_since_open is None):
+            if (
+                vwap is None
+                or rsi is None
+                or atr is None
+                or minutes_until_close is None
+                or minutes_since_open is None
+            ):
                 logger.debug(f"SKIP {self.name}: data_missing | {symbol}")
                 return None
 
@@ -848,30 +1069,63 @@ class VWAPMeanReversionStrategy(Strategy):
                 if position.side == "LONG" and current_price >= float(vwap):
                     reason = "Price reverted to VWAP"
                     logger.info(f"SIGNAL {self.name}: CLOSE_LONG | {reason}")
-                    return Signal("CLOSE_LONG", symbol, position.quantity, self._bounded_confidence(0.55), reason, None, None, metadata)
-                
+                    return Signal(
+                        "CLOSE_LONG",
+                        symbol,
+                        position.quantity,
+                        self._bounded_confidence(0.55),
+                        reason,
+                        None,
+                        None,
+                        metadata,
+                    )
+
                 if position.side == "SHORT" and current_price <= float(vwap):
                     reason = "Price reverted to VWAP"
                     logger.info(f"SIGNAL {self.name}: CLOSE_SHORT | {reason}")
-                    return Signal("CLOSE_SHORT", symbol, position.quantity, self._bounded_confidence(0.55), reason, None, None, metadata)
+                    return Signal(
+                        "CLOSE_SHORT",
+                        symbol,
+                        position.quantity,
+                        self._bounded_confidence(0.55),
+                        reason,
+                        None,
+                        None,
+                        metadata,
+                    )
 
-            if current_price < lower_threshold and float(rsi) <= oversold and (position is None or position.side != "LONG"):
+            if (
+                current_price < lower_threshold
+                and float(rsi) <= oversold
+                and (position is None or position.side != "LONG")
+            ):
                 distance = float(vwap) - current_price
                 confidence = self._bounded_confidence(distance / max(atr_value, 1.0))
                 reason = "Price below VWAP with oversold RSI"
                 logger.info(f"SIGNAL {self.name}: BUY | {reason}")
-                return Signal("BUY", symbol, qty, confidence, reason, None, None, metadata)
+                return Signal(
+                    "BUY", symbol, qty, confidence, reason, None, None, metadata
+                )
 
-            if current_price > upper_threshold and float(rsi) >= overbought and (position is None or position.side != "SHORT"):
+            if (
+                current_price > upper_threshold
+                and float(rsi) >= overbought
+                and (position is None or position.side != "SHORT")
+            ):
                 distance = current_price - float(vwap)
                 confidence = self._bounded_confidence(distance / max(atr_value, 1.0))
                 reason = "Price above VWAP with overbought RSI"
                 logger.info(f"SIGNAL {self.name}: SELL | {reason}")
-                return Signal("SELL", symbol, qty, confidence, reason, None, None, metadata)
+                return Signal(
+                    "SELL", symbol, qty, confidence, reason, None, None, metadata
+                )
 
         except Exception as exc:
-            logger.error(f"Failure in {self.name}.generate_signal: {exc}", extra={"symbol": symbol})
-        
+            logger.error(
+                f"Failure in {self.name}.generate_signal: {exc}",
+                extra={"symbol": symbol},
+            )
+
         logger.debug(f"SKIP {self.name}: neutral | {symbol}")
         return None
 
@@ -888,7 +1142,7 @@ class StrategyManager:
         data_hub: Any | None = None,
         orchestrator: Any | None = None,
         futures_symbol: str | None = None,
-        config: Any | None = None
+        config: Any | None = None,
     ):
         self._strategies = strategies
         self._indicator_engine = indicator_engine
@@ -899,14 +1153,14 @@ class StrategyManager:
         self._orchestrator = orchestrator
         self._futures_symbol = (futures_symbol or "NIFTY").strip().upper()
         self._futures_volume_history: Deque[float] = deque(maxlen=120)
-        
+
         raw_config = config if config else (strategies[0].config if strategies else {})
         self._config = raw_config
         # ✅ FIX: Log which strategies are loaded
         strategy_names = [s.name for s in self._strategies]
         logger.info(
             f"🎯 StrategyManager initialized with {len(self._strategies)} strategies: {strategy_names}",
-            extra={"event": "strategy_manager_init", "strategies": strategy_names}
+            extra={"event": "strategy_manager_init", "strategies": strategy_names},
         )
 
         def get_cfg(key: str, default: Any) -> Any:
@@ -952,15 +1206,21 @@ class StrategyManager:
 
         # 2. Gather All Required Indicators
         required_indicators = {
-            "volume", "avg_volume", "minutes_since_open", "minutes_until_close",
-            "bar_count", "vix"
+            "volume",
+            "avg_volume",
+            "minutes_since_open",
+            "minutes_until_close",
+            "bar_count",
+            "vix",
         }
         for strat in self._strategies:
             required_indicators.update(strat.get_required_indicators())
-        
+
         # Fetch from Engine
-        indicators = self._indicator_engine.get_indicators(symbol, list(required_indicators))
-        
+        indicators = self._indicator_engine.get_indicators(
+            symbol, list(required_indicators)
+        )
+
         # Basic Data Integrity Check
         if not indicators:
             logger.debug(f"SKIP {symbol}: No indicators returned from engine")
@@ -981,9 +1241,9 @@ class StrategyManager:
         all_signals: list[Signal] = []
         eval_count = 0
         skip_count = 0
-        
-        bar_count = int(float(indicators.get('bar_count', 0)))
-        vix = float(indicators.get('vix') or 15.0)
+
+        bar_count = int(float(indicators.get("bar_count", 0)))
+        vix = float(indicators.get("vix") or 15.0)
         regime_factor = self._get_regime_modifier(vix)
 
         for strategy in self._strategies:
@@ -991,36 +1251,38 @@ class StrategyManager:
                 # ✅ Log entry into each strategy evaluation
                 self._logger.info(
                     f"🔍 Evaluating: {strategy.name} | {symbol}",
-                    extra={"event": "strategy_eval_start", "strategy": strategy.name}
+                    extra={"event": "strategy_eval_start", "strategy": strategy.name},
                 )
-                
+
                 # Gating: Min Bars
-                strategy_min_bars = getattr(strategy, 'MIN_BARS_REQUIRED', 3)
+                strategy_min_bars = getattr(strategy, "MIN_BARS_REQUIRED", 3)
                 if bar_count < strategy_min_bars:
                     self._logger.info(
                         f"⏭️ SKIP {strategy.name}: need {strategy_min_bars} bars, have {bar_count} | {symbol}",
-                        extra={"event": "strategy_skip_bars"}
+                        extra={"event": "strategy_skip_bars"},
                     )
                     skip_count += 1
                     continue
-                
+
                 # Gating: Missing Data
                 reqs = strategy.get_required_indicators()
                 missing = [k for k in reqs if indicators.get(k) is None]
-                
+
                 if missing:
                     self._logger.info(
                         f"⏭️ SKIP {strategy.name}: missing {missing} | {symbol}",
-                        extra={"event": "strategy_skip_indicators", "missing": missing}
+                        extra={"event": "strategy_skip_indicators", "missing": missing},
                     )
                     skip_count += 1
                     continue
 
                 # Gating: Low VIX filter for Momentum strategies
-                if vix < 12.0 and ("Breakout" in strategy.name or "ORB" in strategy.name):
+                if vix < 12.0 and (
+                    "Breakout" in strategy.name or "ORB" in strategy.name
+                ):
                     self._logger.info(
                         f"⏭️ SKIP {strategy.name}: low VIX={vix:.1f} | {symbol}",
-                        extra={"event": "strategy_skip_vix"}
+                        extra={"event": "strategy_skip_vix"},
                     )
                     skip_count += 1
                     continue
@@ -1028,14 +1290,16 @@ class StrategyManager:
                 eval_count += 1
                 self._logger.info(
                     f"✅ Calling {strategy.name}.generate_signal() | {symbol}",
-                    extra={"event": "strategy_call"}
+                    extra={"event": "strategy_call"},
                 )
-                
+
                 # ---------------------------------------------------------
                 # ⚡ CORE SIGNAL GENERATION & AUTO-FIX LOGIC
                 # ---------------------------------------------------------
-                signal = strategy.generate_signal(symbol, indicators, current_price, position)
-                
+                signal = strategy.generate_signal(
+                    symbol, indicators, current_price, position
+                )
+
                 if signal:
                     # 🛡️ FIX 1: ELITE SIGNAL TRANSLATOR (EliteSignal -> Signal)
                     # This prevents 'EliteSignal object has no attribute action' crash
@@ -1044,10 +1308,10 @@ class StrategyManager:
                         action_map = {"LONG": "BUY", "SHORT": "SELL"}
                         raw_action = getattr(signal, "signal", "HOLD")
                         final_action = action_map.get(raw_action, raw_action)
-                        
+
                         # Map 'target' (Elite) to 'take_profit' (Standard)
                         tp = getattr(signal, "target", None)
-                        
+
                         # Create a valid Standard Signal
                         signal = Signal(
                             action=final_action,
@@ -1057,29 +1321,31 @@ class StrategyManager:
                             reason=getattr(signal, "strategy_name", strategy.name),
                             stop_loss=getattr(signal, "stop_loss", None),
                             take_profit=tp,
-                            metadata=getattr(signal, "metadata", {})
+                            metadata=getattr(signal, "metadata", {}),
                         )
 
                     # 🛡️ FIX 2: SCORE NORMALIZER (0-100 -> 0.0-1.0)
                     # Automatically fix strategies returning 80.0 instead of 0.80
                     if signal.confidence > 1.0:
                         new_conf = signal.confidence / 100.0
-                        new_conf = min(new_conf, 0.99) # Cap at 0.99
+                        new_conf = min(new_conf, 0.99)  # Cap at 0.99
                         signal = dataclasses.replace(signal, confidence=new_conf)
 
                     # Apply regime factor (Low VIX penalty)
                     if regime_factor < 1.0:
                         signal = dataclasses.replace(
-                            signal, 
+                            signal,
                             confidence=signal.confidence * regime_factor,
                         )
-                    
+
                     # Tag metadata and collect
-                    all_signals.append(signal.with_metadata(
-                        indicators=indicators,
-                        source_strategy=strategy.name,
-                    ))
-                    
+                    all_signals.append(
+                        signal.with_metadata(
+                            indicators=indicators,
+                            source_strategy=strategy.name,
+                        )
+                    )
+
                     self._logger.info(
                         f"📊 Signal from {strategy.name}: {signal.action} | conf={signal.confidence:.2f} | {symbol}",
                         extra={
@@ -1087,15 +1353,18 @@ class StrategyManager:
                             "strategy": strategy.name,
                             "action": signal.action,
                             "confidence": signal.confidence,
-                        }
+                        },
                     )
                 else:
                     self._logger.info(
                         f"📭 {strategy.name} returned None | {symbol}",
-                        extra={"event": "strategy_no_signal", "strategy": strategy.name}
+                        extra={
+                            "event": "strategy_no_signal",
+                            "strategy": strategy.name,
+                        },
                     )
-                    
-            except Exception as exc: 
+
+            except Exception as exc:
                 self._logger.exception(f"❌ Strategy {strategy.name} FAILED: {exc}")
                 continue
 
@@ -1110,8 +1379,8 @@ class StrategyManager:
                 "evaluated": eval_count,
                 "skipped": skip_count,
                 "signals": len(all_signals),
-                "total_strategies": len(self._strategies)
-            }
+                "total_strategies": len(self._strategies),
+            },
         )
 
         if not all_signals:
@@ -1119,29 +1388,33 @@ class StrategyManager:
 
         # 5. Consensus / Ensemble Logic
         combined = self._combine_signals_ensemble(all_signals)
-        
+
         if not combined:
             return None
 
         # 6. Global Risk & Physics Filters
-        if ("CE" in symbol or "PE" in symbol) and not self._validate_option_physics(symbol, combined.action):
-            self._logger.info(f"⛔ Rejected {symbol}: Failed Physics Check (Greeks/Liq)")
+        if ("CE" in symbol or "PE" in symbol) and not self._validate_option_physics(
+            symbol, combined.action
+        ):
+            self._logger.info(
+                f"⛔ Rejected {symbol}: Failed Physics Check (Greeks/Liq)"
+            )
             return None
 
         if not combined.stop_loss or not combined.take_profit:
-            rr_levels = self._calculate_premium_risk(symbol, combined.action, current_price)
+            rr_levels = self._calculate_premium_risk(
+                symbol, combined.action, current_price
+            )
             if rr_levels:
                 combined = dataclasses.replace(
-                    combined, 
-                    stop_loss=rr_levels[0], 
-                    take_profit=rr_levels[1]
+                    combined, stop_loss=rr_levels[0], take_profit=rr_levels[1]
                 )
             else:
                 self._logger.info(
                     f"⛔ RISK REJECT: {symbol} | "
                     f"Invalid Risk/Reward Profile | "
                     f"SL={combined.stop_loss} | TP={combined.take_profit}",
-                    extra={"event": "signal_risk_reject", "symbol": symbol}
+                    extra={"event": "signal_risk_reject", "symbol": symbol},
                 )
                 return None
 
@@ -1149,11 +1422,13 @@ class StrategyManager:
         if self._filter_signal(combined):
             if self._orchestrator:
                 try:
-                    combined = self._orchestrator.filter_signal(combined, indicators, self._position_manager)
+                    combined = self._orchestrator.filter_signal(
+                        combined, indicators, self._position_manager
+                    )
                 except Exception as exc:
                     self._logger.error("Failure in orchestrator.filter_signal: %s", exc)
                     return None
-            
+
             if combined:
                 self._logger.info(
                     "✅ Signal Validated & Locked",
@@ -1162,7 +1437,7 @@ class StrategyManager:
                         "symbol": symbol,
                         "action": combined.action,
                         "conf": combined.confidence,
-                        "sl": combined.stop_loss
+                        "sl": combined.stop_loss,
                     },
                 )
                 return combined
@@ -1171,36 +1446,36 @@ class StrategyManager:
             self._logger.info(
                 f"⛔ FILTER REJECT: {symbol} | "
                 f"Action={combined.action} | Conf={combined.confidence:.2f}",
-                extra={"event": "signal_filter_reject", "symbol": symbol}
+                extra={"event": "signal_filter_reject", "symbol": symbol},
             )
-        
+
         return None
 
     def _combine_signals_ensemble(self, signals: list[Signal]) -> Signal | None:
         """
         ✅ NEW: Combine multiple strategy signals using weighted voting.
-        
+
         Ensures all strategies get fair consideration instead of VWAP dominance.
         """
         if not signals:
             return None
-        
+
         if len(signals) == 1:
             return signals[0]
-        
+
         # Separate by action
         buy_signals = [s for s in signals if s.action == "BUY"]
         sell_signals = [s for s in signals if s.action == "SELL"]
-        
+
         # Calculate weighted votes
         buy_weight = sum(s.confidence for s in buy_signals)
         sell_weight = sum(s.confidence for s in sell_signals)
-        
+
         logger.info(
             f"📊 Ensemble: BUY={len(buy_signals)} ({buy_weight:.1f}), "
             f"SELL={len(sell_signals)} ({sell_weight:.1f})"
         )
-        
+
         # Determine winner
         if buy_weight > sell_weight and buy_signals:
             # Use the highest confidence BUY signal as base
@@ -1208,53 +1483,61 @@ class StrategyManager:
             # Average confidence across all BUY signals
             avg_conf = buy_weight / len(buy_signals)
             return dataclasses.replace(
-                best, 
+                best,
                 confidence=min(avg_conf, 99.0),
                 metadata={
                     **(best.metadata or {}),
                     "ensemble_count": len(buy_signals),
                     "ensemble_weight": round(buy_weight, 2),
-                }
+                },
             )
         elif sell_signals:
             best = max(sell_signals, key=lambda s: s.confidence)
             avg_conf = sell_weight / len(sell_signals)
             return dataclasses.replace(
-                best, 
+                best,
                 confidence=min(avg_conf, 99.0),
                 metadata={
                     **(best.metadata or {}),
                     "ensemble_count": len(sell_signals),
                     "ensemble_weight": round(sell_weight, 2),
-                }
+                },
             )
-        
+
         return None
-        
 
     def _get_regime_modifier(self, vix: float) -> float:
-        if vix > 24.0: return 0.8
-        if vix < 11.0: return 0.9
+        if vix > 24.0:
+            return 0.8
+        if vix < 11.0:
+            return 0.9
         return 1.0
 
     def _validate_option_physics(self, symbol: str, action: str) -> bool:
         """Rejects 'Garbage Options' based on Greeks, Spread, and Liquidity."""
         quote = self._indicator_engine.get_indicators(symbol, ["bid", "ask"])
         if quote:
-            bid = float(quote.get('bid', 0) or 0)
-            ask = float(quote.get('ask', 0) or 0)
+            bid = float(quote.get("bid", 0) or 0)
+            ask = float(quote.get("ask", 0) or 0)
             if bid > 0:
                 spread = ((ask - bid) / bid) * 100
                 if spread > self.max_spread_pct:
-                    logger.debug(f"Physics REJECT {symbol}: Spread {spread:.2f}% > {self.max_spread_pct}%")
+                    logger.debug(
+                        f"Physics REJECT {symbol}: Spread {spread:.2f}% > {self.max_spread_pct}%"
+                    )
                     return False
 
-        greeks = self._indicator_engine.get_indicators(symbol, ["delta", "theta", "iv_percentile"])
-        if not greeks: return True
+        greeks = self._indicator_engine.get_indicators(
+            symbol, ["delta", "theta", "iv_percentile"]
+        )
+        if not greeks:
+            return True
 
         delta = abs(float(greeks.get("delta") or 0.5))
         if delta < self.min_delta:
-            logger.debug(f"Physics REJECT {symbol}: Delta {delta:.2f} < {self.min_delta}")
+            logger.debug(
+                f"Physics REJECT {symbol}: Delta {delta:.2f} < {self.min_delta}"
+            )
             return False
 
         theta = float(greeks.get("theta") or 0.0)
@@ -1264,16 +1547,19 @@ class StrategyManager:
 
         return True
 
-    def _calculate_premium_risk(self, symbol: str, side: str, price: float) -> tuple[float, float] | None:
-        if price <= 0: return None
-        
+    def _calculate_premium_risk(
+        self, symbol: str, side: str, price: float
+    ) -> tuple[float, float] | None:
+        if price <= 0:
+            return None
+
         if side == "BUY":
             sl = round(price * (1 - self.sl_pct), 2)
             tp = round(price * (1 + self.tp_pct), 2)
         else:
             sl = round(price * (1 + self.sl_pct), 2)
             tp = round(price * (1 - self.tp_pct), 2)
-            
+
         if abs(price - sl) < (price * 0.05):
             logger.debug(f"Risk REJECT {symbol}: SL too close (<5%)")
             return None
@@ -1282,7 +1568,7 @@ class StrategyManager:
     def _augment_futures_metrics(self, indicators: MutableMapping[str, Any]) -> None:
         """
         Augment indicators with futures and index data.
-        
+
         ✅ PRODUCTION FIX: Now includes nifty_index_ltp and nifty_index_vwap
         """
         indicators.setdefault("futures_volume", None)
@@ -1290,30 +1576,34 @@ class StrategyManager:
         indicators.setdefault("futures_volume_ratio", None)
         indicators.setdefault("nifty_index_ltp", None)  # ✅ NEW
         indicators.setdefault("nifty_index_vwap", None)  # ✅ NEW
-        
+
         data_hub = self._data_hub
-        if data_hub is None: 
+        if data_hub is None:
             return
-        
+
         # ═══════════════════════════════════════════════════════════
         # 1. FUTURES VOLUME DATA
         # ═══════════════════════════════════════════════════════════
         try:
             quote = data_hub.get_quote(self._futures_symbol)
-        except Exception: 
+        except Exception:
             quote = None
-        
+
         if quote:
-            volume = self._extract_float(quote, ("volume_traded_today", "volume", "last_quantity"))
+            volume = self._extract_float(
+                quote, ("volume_traded_today", "volume", "last_quantity")
+            )
             if volume is not None:
                 self._futures_volume_history.append(volume)
                 indicators["futures_volume"] = volume
                 if self._futures_volume_history:
-                    avg = sum(self._futures_volume_history) / len(self._futures_volume_history)
+                    avg = sum(self._futures_volume_history) / len(
+                        self._futures_volume_history
+                    )
                     indicators["futures_volume_avg"] = avg
-                    if avg > 0: 
+                    if avg > 0:
                         indicators["futures_volume_ratio"] = volume / avg
-        
+
         # ═══════════════════════════════════════════════════════════
         # ✅ 2. INDEX LTP AND VWAP DATA (NEW)
         # ═══════════════════════════════════════════════════════════
@@ -1321,29 +1611,32 @@ class StrategyManager:
             # Try NIFTY 50 spot index first
             index_quote = data_hub.get_quote("NSE:NIFTY 50")
             if index_quote:
-                index_ltp = self._extract_float(index_quote, ("last_price", "ltp", "close"))
+                index_ltp = self._extract_float(
+                    index_quote, ("last_price", "ltp", "close")
+                )
                 index_vwap = self._extract_float(index_quote, ("vwap", "average_price"))
-                
+
                 if index_ltp and index_ltp > 0:
                     indicators["nifty_index_ltp"] = index_ltp
-                
+
                 if index_vwap and index_vwap > 0:
                     indicators["nifty_index_vwap"] = index_vwap
-            
+
             # ═══════════════════════════════════════════════════════
             # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
             # ═══════════════════════════════════════════════════════
             if not indicators.get("nifty_index_vwap"):
                 from datetime import datetime
+
                 now = datetime.now()
                 y_str = now.strftime("%y")
                 m_str = now.strftime("%b").upper()
-                
+
                 # Build list of symbols to try (in order of preference)
                 symbols_to_try = [
                     f"NFO:NIFTY{y_str}{m_str}FUT",  # Current month: NFO:NIFTY26FEBFUT
                 ]
-                
+
                 # Add configured symbol and variations
                 if self._futures_symbol:
                     if self._futures_symbol not in symbols_to_try:
@@ -1358,37 +1651,56 @@ class StrategyManager:
                             fut_pattern = f"NFO:{self._futures_symbol}FUT"
                             if fut_pattern not in symbols_to_try:
                                 symbols_to_try.append(fut_pattern)
-                
+
                 fut_quote = None
                 working_symbol = None
-                
+
                 for fut_sym in symbols_to_try:
                     try:
                         fut_quote = data_hub.get_quote(fut_sym)
                         if fut_quote:
                             working_symbol = fut_sym
-                            if not getattr(self, '_vwap_source_logged', False):
+                            if not getattr(self, "_vwap_source_logged", False):
                                 self._logger.info(
                                     f"✅ Futures VWAP source resolved: {fut_sym}",
-                                    extra={"event": "futures_vwap_resolved", "symbol": fut_sym}
+                                    extra={
+                                        "event": "futures_vwap_resolved",
+                                        "symbol": fut_sym,
+                                    },
                                 )
                                 self._vwap_source_logged = True
                             break
-                            
+
                     except Exception as e:
                         self._logger.debug(f"Futures symbol {fut_sym} failed: {e}")
                         continue
-                
+
                 if not fut_quote:
                     self._logger.error(
                         f"❌ CRITICAL: Could not get futures quote from any symbol: {symbols_to_try}",
-                        extra={"event": "futures_vwap_fallback_failed", "symbols_tried": symbols_to_try}
+                        extra={
+                            "event": "futures_vwap_fallback_failed",
+                            "symbols_tried": symbols_to_try,
+                        },
                     )
-                
+
                 if fut_quote:
                     fut_vwap = self._extract_float(fut_quote, ("vwap", "average_price"))
-                    fut_ltp = self._extract_float(fut_quote, ("last_price", "ltp", "close"))
-                    
+                    fut_ltp = self._extract_float(
+                        fut_quote, ("last_price", "ltp", "close")
+                    )
+
+                    if (not fut_vwap or fut_vwap <= 0) and fut_ltp and fut_ltp > 0:
+                        fut_vwap = fut_ltp
+                        self._logger.info(
+                            "Condition met: futures_vwap_proxy_used",
+                            extra={
+                                "event": "futures_vwap_proxy_used",
+                                "symbol": working_symbol,
+                                "ltp": fut_ltp,
+                            },
+                        )
+
                     if fut_vwap and fut_vwap > 0:
                         # Adjust for basis (futures typically trades at ~0.2% premium)
                         basis_adjustment = 0.998
@@ -1396,35 +1708,44 @@ class StrategyManager:
                         self._logger.debug(
                             f"📊 Set nifty_index_vwap={indicators['nifty_index_vwap']:.2f} from {working_symbol}"
                         )
-                    
+
                     # Also use futures LTP if index LTP unavailable
-                    if not indicators.get("nifty_index_ltp") and fut_ltp and fut_ltp > 0:
+                    if (
+                        not indicators.get("nifty_index_ltp")
+                        and fut_ltp
+                        and fut_ltp > 0
+                    ):
                         indicators["nifty_index_ltp"] = fut_ltp * 0.998
-        
+
             # ✅ FIX: Set BOTH key variants for strategy compatibility
             if indicators.get("nifty_index_ltp"):
                 indicators["nifty_fut_ltp"] = indicators["nifty_index_ltp"]
             if indicators.get("nifty_index_vwap"):
                 indicators["nifty_fut_vwap"] = indicators["nifty_index_vwap"]
-            
+
             # Log for debugging
             if indicators.get("nifty_index_ltp") or indicators.get("nifty_index_vwap"):
                 self._logger.debug(
                     f"📊 Index data: LTP={indicators.get('nifty_index_ltp')}, "
                     f"VWAP={indicators.get('nifty_index_vwap')}"
                 )
-                
+
         except Exception as e:
             self._logger.debug(f"Index data augment failed: {e}")
 
     @staticmethod
-    def _extract_float(payload: Mapping[str, Any] | None, keys: Iterable[str]) -> float | None:
-        if payload is None: return None
+    def _extract_float(
+        payload: Mapping[str, Any] | None, keys: Iterable[str]
+    ) -> float | None:
+        if payload is None:
+            return None
         for key in keys:
             val = payload.get(key)
             if val is not None:
-                try: return float(val)
-                except (TypeError, ValueError): continue
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    continue
         return None
 
     def _combine_signals(self, signals: list[Signal]) -> Signal | None:
@@ -1444,7 +1765,9 @@ class StrategyManager:
         for exit_act in ("CLOSE_LONG", "CLOSE_SHORT"):
             if exit_act in by_action:
                 chosen = max(by_action[exit_act], key=lambda s: s.confidence)
-                logger.debug(f"Exit signal selected: {exit_act} @ {chosen.confidence:.2f}")
+                logger.debug(
+                    f"Exit signal selected: {exit_act} @ {chosen.confidence:.2f}"
+                )
                 return chosen
 
         # 2️⃣ BUY vs SELL conflict resolution
@@ -1486,13 +1809,13 @@ class StrategyManager:
 
         reasons = ", ".join(s.reason for s in selected_list if s.reason)
         meta = dict(best_signal.metadata or {})
-        
+
         # Safely extract confirming strategies
         confirming = []
         for s in selected_list:
             if s.metadata and "strategy" in s.metadata:
                 confirming.append(s.metadata["strategy"])
-        
+
         if confirming:
             meta["confirming_strategies"] = confirming
 
@@ -1508,22 +1831,34 @@ class StrategyManager:
             reason=f"Consensus: {reasons}" if reasons else "Consensus signal",
             metadata=meta,
         )
+
     def _filter_signal(self, signal: Signal) -> bool:
         if signal.confidence < self._min_confidence:
-            logger.debug(f"Filter REJECT {signal.symbol}: Low Confidence ({signal.confidence:.2f} < {self._min_confidence})")
+            logger.debug(
+                f"Filter REJECT {signal.symbol}: Low Confidence ({signal.confidence:.2f} < {self._min_confidence})"
+            )
             return False
 
-        indicators = signal.metadata.get("indicators", {}) if isinstance(signal.metadata, dict) else {}
+        indicators = (
+            signal.metadata.get("indicators", {})
+            if isinstance(signal.metadata, dict)
+            else {}
+        )
 
         vol = indicators.get("volume")
         avg_vol = indicators.get("avg_volume")
-        if isinstance(vol, (int, float)) and isinstance(avg_vol, (int, float)) and avg_vol > 0:
+        if (
+            isinstance(vol, (int, float))
+            and isinstance(avg_vol, (int, float))
+            and avg_vol > 0
+        ):
             if float(vol) < 0.75 * float(avg_vol):
                 logger.debug(f"Filter REJECT {signal.symbol}: Low Volume")
                 return False
 
         m_time = indicators.get("market_time")
-        if isinstance(m_time, datetime): m_time = m_time.time()
+        if isinstance(m_time, datetime):
+            m_time = m_time.time()
         if isinstance(m_time, time):
             if m_time < time(9, 30) or m_time > time(15, 15):
                 logger.debug(f"Filter REJECT {signal.symbol}: Time Window")
