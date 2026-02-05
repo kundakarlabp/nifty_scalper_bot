@@ -1334,7 +1334,54 @@ class StrategyManager:
             # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
             # ═══════════════════════════════════════════════════════
             if not indicators.get("nifty_index_vwap"):
-                fut_quote = data_hub.get_quote(self._futures_symbol)
+                from datetime import datetime
+                now = datetime.now()
+                y_str = now.strftime("%y")
+                m_str = now.strftime("%b").upper()
+                
+                # Build list of symbols to try (in order of preference)
+                symbols_to_try = [
+                    f"NFO:NIFTY{y_str}{m_str}FUT",  # Current month: NFO:NIFTY26FEBFUT
+                ]
+                
+                # Add configured symbol and variations
+                if self._futures_symbol:
+                    if self._futures_symbol not in symbols_to_try:
+                        symbols_to_try.append(self._futures_symbol)
+                    # Try with NFO: prefix if not present
+                    if not self._futures_symbol.startswith("NFO:"):
+                        prefixed = f"NFO:{self._futures_symbol}"
+                        if prefixed not in symbols_to_try:
+                            symbols_to_try.append(prefixed)
+                        # Also try NFO:NIFTY{symbol}FUT pattern
+                        if "FUT" not in self._futures_symbol.upper():
+                            fut_pattern = f"NFO:{self._futures_symbol}FUT"
+                            if fut_pattern not in symbols_to_try:
+                                symbols_to_try.append(fut_pattern)
+                
+                fut_quote = None
+                working_symbol = None
+                
+                for fut_sym in symbols_to_try:
+                    try:
+                        fut_quote = data_hub.get_quote(fut_sym)
+                        if fut_quote:
+                            working_symbol = fut_sym
+                            self._logger.info(
+                                f"✅ Futures VWAP source resolved: {fut_sym}",
+                                extra={"event": "futures_vwap_resolved", "symbol": fut_sym}
+                            )
+                            break
+                    except Exception as e:
+                        self._logger.debug(f"Futures symbol {fut_sym} failed: {e}")
+                        continue
+                
+                if not fut_quote:
+                    self._logger.error(
+                        f"❌ CRITICAL: Could not get futures quote from any symbol: {symbols_to_try}",
+                        extra={"event": "futures_vwap_fallback_failed", "symbols_tried": symbols_to_try}
+                    )
+                
                 if fut_quote:
                     fut_vwap = self._extract_float(fut_quote, ("vwap", "average_price"))
                     fut_ltp = self._extract_float(fut_quote, ("last_price", "ltp", "close"))
@@ -1343,6 +1390,9 @@ class StrategyManager:
                         # Adjust for basis (futures typically trades at ~0.2% premium)
                         basis_adjustment = 0.998
                         indicators["nifty_index_vwap"] = fut_vwap * basis_adjustment
+                        self._logger.debug(
+                            f"📊 Set nifty_index_vwap={indicators['nifty_index_vwap']:.2f} from {working_symbol}"
+                        )
                     
                     # Also use futures LTP if index LTP unavailable
                     if not indicators.get("nifty_index_ltp") and fut_ltp and fut_ltp > 0:
