@@ -5660,9 +5660,10 @@ async def _reconcile_state(ctx: BotContext) -> None:
                         )
 
                         # Call the Master Guard Method
+                        signed_qty = pos.quantity if pos.side == "LONG" else -pos.quantity
                         om.guard_orphan_position(
                             symbol=norm_symbol,
-                            quantity=pos.quantity,
+                            quantity=signed_qty,  # ✅ Now negative for SHORT
                             average_price=avg_price
                         )
 
