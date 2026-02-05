@@ -9607,6 +9607,7 @@ class OrderManager:
         symbol: str, 
         quantity: int, 
         average_price: float, 
+        position_side: str = None,
         consume_existing: bool = False
     ) -> bool:
         """
@@ -9619,6 +9620,12 @@ class OrderManager:
         """
         if not self._bracket_manager or quantity == 0:
             return False
+
+        # ✅ Use explicit side if provided, else infer from quantity
+        if position_side:
+            side = position_side
+        else:
+            side = "BUY" if quantity > 0 else "SELL"
 
         # --- STEP 0: ENSURE DATA FLOW (CRITICAL FIX) ---
         # We must subscribe immediately. If we fail price check later, 
