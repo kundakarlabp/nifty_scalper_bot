@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from src.nifty_scalper_bot.streaming.polling_streamer import PollingStreamer
+
+
+class FakeResolver:
+    """Simple resolver for mapping tokens to symbols."""
+
+    def format_token_as_symbol(self, token: int) -> str:
+        """Return symbol. Args: token. Returns: symbol. Raises: None."""
+        return 'NSE:NIFTY 50'
+
+
+def test_fetch_ticks_falls_back_to_ohlc_close_for_vwap() -> None:
+    """Test VWAP fallback. Args: None. Returns: None. Raises: None."""
+
+    class QuoteBroker:
+        def quote(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+            """Return quote payload. Args: symbols. Returns: quote map. Raises: None."""
+            return {
+                symbols[0]: {
+                    'last_price': 123.45,
+                    'instrument_token': 101,
+                    'average_price': 0.0,
+                    'volume': 0,
+                    'ohlc': {'close': 122.0},
+                }
+            }
+
+    broker = QuoteBroker()
+    resolver = FakeResolver()
+    streamer = PollingStreamer(
+        broker_client=broker,
+        on_tick=lambda t: None,
+        instrument_resolver=resolver,
+    )
+    ticks = streamer._fetch_ticks([101])
+    assert len(ticks) == 1
+    assert ticks[0]['average_price'] == pytest.approx(122.0)

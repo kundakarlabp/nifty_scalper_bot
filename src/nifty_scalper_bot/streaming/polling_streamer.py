@@ -482,26 +482,53 @@ class PollingStreamer:
                     token_int = int(token)
 
                     # ✅ CRITICAL: Extract VWAP (average_price) and Volume
-                    avg_price = quote.get("average_price") or quote.get("vwap")
-                    volume = quote.get("volume")
-                    oi = quote.get("oi")
+                    avg_price = quote.get('average_price') or quote.get('vwap')
+                    volume = quote.get('volume')
+                    oi = quote.get('oi')
+                    ohlc = quote.get('ohlc') or {}
 
                     # Convert to proper types with safe defaults
                     avg_price_float = float(avg_price) if avg_price is not None else 0.0
                     volume_int = int(volume) if volume is not None else 0
                     oi_int = int(oi) if oi is not None else 0
 
-                    # ✅ DIAGNOSTIC: Log if VWAP is missing (but don't spam)
-                    if avg_price_float == 0:
+                    used_vwap_fallback = False
+                    if avg_price_float <= 0:
+                        ohlc_close = ohlc.get('close')
+                        if ohlc_close is not None:
+                            try:
+                                avg_price_float = float(ohlc_close)
+                                used_vwap_fallback = avg_price_float > 0
+                            except (TypeError, ValueError) as exc:
+                                LOGGER.debug(
+                                    '[POLL] VWAP fallback conversion failed: %s',
+                                    exc,
+                                )
+
+                    if used_vwap_fallback:
                         log_throttled(
                             LOGGER,
-                            f"vwap_zero_{key}",
-                            f"⚠️ VWAP=0 for {key} | This prevents VWAP strategy from triggering",
+                            f'vwap_fallback_{key}',
+                            (
+                                'Condition met: vwap_fallback_ohlc '
+                                f'for {key} (close={avg_price_float:.2f})'
+                            ),
+                            interval_sec=300.0,
+                        )
+                    elif avg_price_float == 0:
+                        # ✅ DIAGNOSTIC: Log if VWAP is missing (but don't spam)
+                        log_throttled(
+                            LOGGER,
+                            f'vwap_zero_{key}',
+                            (
+                                f'⚠️ VWAP=0 for {key} | This prevents VWAP '
+                                'strategy from triggering'
+                            ),
                             interval_sec=300.0,  # Only log every 5 minutes
                         )
 
                     # Handle timestamp
-                    q_ts = quote.get("timestamp")
+                    q_ts = quote.get('timestamp')
                     if q_ts and hasattr(q_ts, "timestamp"):
                         ts = int(q_ts.timestamp() * 1000)
                     elif q_ts and isinstance(q_ts, (int, float)):
@@ -511,19 +538,19 @@ class PollingStreamer:
 
                     # Build tick with ALL available data
                     tick = {
-                        "instrument_token": token_int,
-                        "last_price": lp,
-                        "timestamp": ts,
-                        "volume": volume_int,
-                        "average_price": avg_price_float,  # ✅ VWAP
-                        "oi": oi_int,
-                        "depth": quote.get("depth"),
-                        "symbol": (
+                        'instrument_token': token_int,
+                        'last_price': lp,
+                        'timestamp': ts,
+                        'volume': volume_int,
+                        'average_price': avg_price_float,  # ✅ VWAP
+                        'oi': oi_int,
+                        'depth': quote.get('depth'),
+                        'symbol': (
                             key
                             if ":" in str(key)
                             else self._resolve_instrument(token_int)
                         ),
-                        "source": "rest",
+                        'source': 'rest',
                     }
 
                     # ✅ LOG SUCCESS when we have VWAP (throttled)
