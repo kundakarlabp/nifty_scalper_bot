@@ -49,15 +49,46 @@ class MessageBus:
         LOGGER.info("MessageBus initialized with max_queue_size=%s", max_queue_size)
 
     async def publish(self, message: Message) -> None:
-        """Publish message to appropriate queue with Lifecycle Safety."""
-        # 🛡️ SAFETY GUARD
+        """Publish message to appropriate queue with pre-start buffering.
+        
+        ✅ FIX #2: Instead of dropping messages before start(), buffer TICK 
+        messages so they're processed when the bus starts. This prevents
+        losing initial market data during startup.
+        """
         if not self._running:
-            LOGGER.error(
-                f"🚨 CRITICAL: MessageBus published '{message.type.value}' BEFORE start()! Message DROPPED.",
-                extra={"event": "bus_not_running", "type": message.type.value}
-            )
-            return
-
+            # Buffer tick messages for later dispatch
+            if message.type == MessageType.TICK:
+                try:
+                    # Use put_nowait to avoid blocking - queue will buffer
+                    self.queues[message.type].put_nowait(message)
+                    LOGGER.debug(
+                        f"⏳ Buffered pre-start tick for {message.data.get('symbol', 'unknown')}",
+                        extra={"event": "tick_buffered", "type": message.type.value}
+                    )
+                except asyncio.QueueFull:
+                    # Only log occasionally to avoid spam
+                    if not hasattr(self, '_buffer_warn_count'):
+                        self._buffer_warn_count = 0
+                    self._buffer_warn_count += 1
+                    if self._buffer_warn_count % 100 == 1:
+                        LOGGER.warning(
+                            f"⚠️ Pre-start tick buffer full (dropped {self._buffer_warn_count} ticks)",
+                            extra={"event": "buffer_full"}
+                        )
+                return
+            else:
+                # Non-tick messages before start are logged but not dropped
+                LOGGER.warning(
+                    f"⚠️ MessageBus received '{message.type.value}' before start() - queuing",
+                    extra={"event": "pre_start_message", "type": message.type.value}
+                )
+                try:
+                    self.queues[message.type].put_nowait(message)
+                except asyncio.QueueFull:
+                    LOGGER.error(f"Queue full for pre-start {message.type.value}")
+                return
+        
+        # Normal publish (bus is running)
         try:
             await self.queues[message.type].put(message)
         except asyncio.QueueFull:
@@ -66,7 +97,7 @@ class MessageBus:
                 extra={"event": "message_drop", "type": message.type.value}
             )
         except KeyError:
-             LOGGER.error(f"Attempted to publish unknown message type: {message.type.value}")
+            LOGGER.error(f"Attempted to publish unknown message type: {message.type.value}")
 
     def subscribe(
         self,
