@@ -2,8 +2,9 @@
 
 from dataclasses import dataclass
 from time import time
-import threading
 import math
+import re
+import threading
 from nifty_scalper_bot.utils.logging import get_logger
 
 @dataclass
@@ -37,16 +38,7 @@ class SafeATRProvider:
         self._error_log_interval = 60.0  # Log errors once per minute per symbol
     
     def get_atr(self, symbol: str, *, fallback: float | None = None) -> ATRSnapshot | None:
-        """
-        Fetch ATR with validation and staleness checks.
-        
-        Args:
-            symbol: Trading symbol
-            fallback: Optional static fallback value if ATR unavailable
-            
-        Returns:
-            ATRSnapshot if valid, None if stale/unavailable
-        """
+        """Args: symbol, fallback. Returns: ATRSnapshot or None. Raises: None."""
         with self._lock:
             # 1. Try cache first
             if symbol in self._cache:
@@ -63,20 +55,47 @@ class SafeATRProvider:
                 snapshot = ATRSnapshot(
                     value=float(raw_atr),
                     timestamp=time(),
-                    source="live"
+                    source='live',
                 )
                 self._cache[symbol] = snapshot
                 return snapshot
                 
             except Exception as exc:
+                self._logger.debug(
+                    'atr_compute_failed',
+                    extra={'event': 'atr_compute_failed', 'symbol': symbol},
+                    exc_info=True,
+                )
+                base_symbol = self._resolve_underlying_symbol(symbol)
+                if base_symbol and base_symbol != symbol:
+                    try:
+                        raw_atr = self._engine.compute_atr(base_symbol)
+                        if raw_atr is not None and raw_atr > 0 and math.isfinite(raw_atr):
+                            snapshot = ATRSnapshot(
+                                value=float(raw_atr),
+                                timestamp=time(),
+                                source='underlying',
+                            )
+                            self._cache[symbol] = snapshot
+                            return snapshot
+                    except Exception as exc:
+                        self._logger.debug(
+                            'atr_underlying_compute_failed',
+                            extra={
+                                'event': 'atr_underlying_compute_failed',
+                                'symbol': symbol,
+                                'base_symbol': base_symbol,
+                            },
+                            exc_info=True,
+                        )
                 # ✅ FIX: Rate-limited error logging
                 now = time()
                 last_log = self._error_log_times.get(symbol, 0)
                 
                 if now - last_log > self._error_log_interval:
                     self._logger.warning(
-                        f"ATR unavailable for {symbol} (will use fallback)",
-                        extra={"event": "atr_fetch_warning", "symbol": symbol}
+                        f'ATR unavailable for {symbol} (will use fallback)',
+                        extra={'event': 'atr_fetch_warning', 'symbol': symbol},
                     )
                     self._error_log_times[symbol] = now
                 
@@ -85,12 +104,12 @@ class SafeATRProvider:
                     return ATRSnapshot(
                         value=fallback,
                         timestamp=time(),
-                        source="fallback"
+                        source='fallback',
                     )
                 
                 # 4. ✅ NEW: Try to compute fallback from price
                 try:
-                    hist = self._engine._histories.get(symbol)
+                    hist = self._resolve_history(symbol)
                     if hist:
                         closes = hist.get_closes(1)
                         if closes and closes[0] > 0:
@@ -98,12 +117,52 @@ class SafeATRProvider:
                             return ATRSnapshot(
                                 value=estimated,
                                 timestamp=time(),
-                                source="estimated"
+                                source='estimated',
                             )
                 except Exception:
                     pass
                 
                 return None
+
+    def _resolve_underlying_symbol(self, symbol: str) -> str:
+        """Args: symbol. Returns: Underlying symbol. Raises: None."""
+        try:
+            if not symbol:
+                return ''
+            if symbol.startswith('NIFTY') and not symbol.startswith('NIFTYFUT'):
+                return 'NIFTY'
+            if symbol.startswith('BANKNIFTY'):
+                return 'BANKNIFTY'
+            if symbol.startswith('FINNIFTY'):
+                return 'FINNIFTY'
+            match = re.match(r'^([A-Z]+)', symbol)
+            if match:
+                return match.group(1)
+            return symbol
+        except Exception as exc:
+            self._logger.debug(
+                'atr_underlying_resolve_failed',
+                extra={'event': 'atr_underlying_resolve_failed', 'symbol': symbol},
+                exc_info=True,
+            )
+            return symbol or ''
+
+    def _resolve_history(self, symbol: str) -> object | None:
+        """Args: symbol. Returns: Price history or None. Raises: None."""
+        try:
+            hist = self._engine._histories.get(symbol)
+            if hist:
+                return hist
+            base_symbol = self._resolve_underlying_symbol(symbol)
+            if base_symbol and base_symbol != symbol:
+                return self._engine._histories.get(base_symbol)
+        except Exception as exc:
+            self._logger.debug(
+                'atr_history_lookup_failed',
+                extra={'event': 'atr_history_lookup_failed', 'symbol': symbol},
+                exc_info=True,
+            )
+        return None
     
     def clear_cache(self, symbol: str | None = None) -> None:
         """Clear cached ATR data."""
