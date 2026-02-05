@@ -752,6 +752,95 @@ class InstrumentResolver:
         # return shallow copy to avoid accidental external mutation
         return [dict(item) for item in lst]
 
+    def sync_nfo_from_broker(self, instruments: list) -> int:
+        """
+        Sync NFO instruments from broker API response into _option_contracts.
+        
+        This fixes the "📦 Got 0 contracts from option_contracts()" issue by 
+        populating the internal cache from broker.list_instruments("NFO").
+        
+        Args:
+            instruments: List of instrument dicts from broker.list_instruments("NFO")
+            
+        Returns:
+            Count of option contracts synced
+        """
+        synced = 0
+        skipped = 0
+        
+        with self._lock:
+            for inst in instruments:
+                try:
+                    # Extract fields with multiple fallback names
+                    name = (inst.get("name") or inst.get("underlying") or 
+                            inst.get("tradingsymbol", "")[:5] or "")
+                    segment = inst.get("segment") or inst.get("exchange") or ""
+                    inst_type = inst.get("instrument_type") or ""
+                    
+                    # Determine base index
+                    base = name.upper().replace(" ", "").replace("INDEX", "")
+                    
+                    # Check if this is a NIFTY/BANKNIFTY option
+                    is_nifty_option = (
+                        base in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY") and
+                        inst_type in ("CE", "PE")
+                    )
+                    
+                    if not is_nifty_option:
+                        skipped += 1
+                        continue
+                    
+                    # Build contract dict
+                    token = inst.get("instrument_token")
+                    ts = inst.get("tradingsymbol", "")
+                    
+                    if not token or not ts:
+                        skipped += 1
+                        continue
+                    
+                    contract = {
+                        "instrument_token": token,
+                        "tradingsymbol": ts,
+                        "name": base,
+                        "expiry": inst.get("expiry"),
+                        "strike": inst.get("strike", 0),
+                        "instrument_type": inst_type,
+                        "lot_size": inst.get("lot_size", 25),
+                        "exchange": "NFO",
+                    }
+                    
+                    # Add to option_contracts cache
+                    self._option_contracts.setdefault(base, []).append(contract)
+                    
+                    # Also add to symbol resolution caches for fast lookup
+                    nfo_symbol = f"NFO:{ts}"
+                    self._by_symbol[nfo_symbol] = token
+                    self._by_symbol[ts] = token  # Also without prefix
+                    
+                    self._by_token[token] = {
+                        "tradingsymbol": ts,
+                        "exchange": "NFO",
+                        "segment": "NFO-OPT",
+                        **contract
+                    }
+                    
+                    synced += 1
+                    
+                except Exception as e:
+                    skipped += 1
+                    continue
+        
+        # Log summary
+        if synced > 0:
+            # Log contract counts per base
+            with self._lock:
+                for base, contracts in self._option_contracts.items():
+                    if contracts:
+                        LOGGER.debug(f"  {base}: {len(contracts)} contracts")
+        
+        return synced
+        
+
     def get_lot_size(self, symbol_or_base: str) -> Optional[int]:
         """
         Return a reasonable lot size for a given symbol or base index.
