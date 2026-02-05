@@ -588,17 +588,16 @@ class PersistentStateDB:
         return orders
 
     def save_bracket(self, bracket: BracketDict) -> None:
-        """Persist *bracket* metadata.
-
-        Args:
-            bracket: Serialised bracket state with ``entry_id`` key.
-
-        Returns:
-            None.
-
-        Raises:
-            RuntimeError: If persistence fails.
-        """
+        """Save bracket with defensive order_id handling."""
+        # ✅ FIX: Ensure order_id exists
+        if "order_id" not in bracket or not bracket.get("order_id"):
+            # Try alternate field names
+            bracket["order_id"] = (
+                bracket.get("id") or 
+                bracket.get("entry_id") or 
+                bracket.get("bracket_id") or
+                f"auto_{bracket.get('symbol', 'unknown')}_{int(time.time())}"
+            )
 
         self._logger.debug(
             "Entered PersistentStateDB.save_bracket",
