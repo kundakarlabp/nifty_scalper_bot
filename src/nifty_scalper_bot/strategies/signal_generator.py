@@ -1692,14 +1692,22 @@ class StrategyManager:
 
                     if (not fut_vwap or fut_vwap <= 0) and fut_ltp and fut_ltp > 0:
                         fut_vwap = fut_ltp
-                        self._logger.info(
-                            "Condition met: futures_vwap_proxy_used",
-                            extra={
-                                "event": "futures_vwap_proxy_used",
-                                "symbol": working_symbol,
-                                "ltp": fut_ltp,
-                            },
+                        proxy_logged = getattr(
+                            self, "_vwap_proxy_logged_symbols", None
                         )
+                        if proxy_logged is None:
+                            proxy_logged = set()
+                            self._vwap_proxy_logged_symbols = proxy_logged
+                        if working_symbol not in proxy_logged:
+                            self._logger.info(
+                                'Condition met: futures_vwap_proxy_used',
+                                extra={
+                                    'event': 'futures_vwap_proxy_used',
+                                    'symbol': working_symbol,
+                                    'ltp': fut_ltp,
+                                },
+                            )
+                            proxy_logged.add(working_symbol)
 
                     if fut_vwap and fut_vwap > 0:
                         # Adjust for basis (futures typically trades at ~0.2% premium)
