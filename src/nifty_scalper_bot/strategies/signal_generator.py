@@ -1566,16 +1566,16 @@ class StrategyManager:
         return (sl, tp)
 
     def _augment_futures_metrics(self, indicators: MutableMapping[str, Any]) -> None:
-        """
-        Augment indicators with futures and index data.
-
-        ✅ PRODUCTION FIX: Now includes nifty_index_ltp and nifty_index_vwap
-        """
-        indicators.setdefault("futures_volume", None)
-        indicators.setdefault("futures_volume_avg", None)
-        indicators.setdefault("futures_volume_ratio", None)
-        indicators.setdefault("nifty_index_ltp", None)  # ✅ NEW
-        indicators.setdefault("nifty_index_vwap", None)  # ✅ NEW
+        '''Augment metrics. Args: indicators. Returns: None. Raises: NA.'''
+        self._logger.debug(
+            'Entered StrategyManager._augment_futures_metrics',
+            extra={'event': 'augment_futures_metrics'},
+        )
+        indicators.setdefault('futures_volume', None)
+        indicators.setdefault('futures_volume_avg', None)
+        indicators.setdefault('futures_volume_ratio', None)
+        indicators.setdefault('nifty_index_ltp', None)  # ✅ NEW
+        indicators.setdefault('nifty_index_vwap', None)  # ✅ NEW
 
         data_hub = self._data_hub
         if data_hub is None:
@@ -1586,23 +1586,59 @@ class StrategyManager:
         # ═══════════════════════════════════════════════════════════
         try:
             quote = data_hub.get_quote(self._futures_symbol)
-        except Exception:
+        except Exception as exc:
+            self._logger.error(
+                'Failure in StrategyManager._augment_futures_metrics futures quote: %s',
+                exc,
+                extra={'event': 'futures_quote_error', 'symbol': self._futures_symbol},
+            )
             quote = None
 
         if quote:
             volume = self._extract_float(
-                quote, ("volume_traded_today", "volume", "last_quantity")
+                quote,
+                ('volume_traded_today', 'volume_traded', 'volume', 'last_quantity'),
             )
             if volume is not None:
-                self._futures_volume_history.append(volume)
-                indicators["futures_volume"] = volume
+                last_volume = getattr(self, '_last_futures_volume', None)
+                if last_volume is None:
+                    volume_delta = volume
+                elif volume < last_volume:
+                    volume_delta = volume
+                    self._logger.info(
+                        'Condition met: futures_volume_reset',
+                        extra={
+                            'event': 'futures_volume_reset',
+                            'symbol': self._futures_symbol,
+                            'last_volume': last_volume,
+                            'current_volume': volume,
+                        },
+                    )
+                else:
+                    volume_delta = volume - last_volume
+
+                self._last_futures_volume = volume
+                if volume_delta >= 0:
+                    self._futures_volume_history.append(volume_delta)
+
+                indicators['futures_volume'] = volume
                 if self._futures_volume_history:
                     avg = sum(self._futures_volume_history) / len(
                         self._futures_volume_history
                     )
-                    indicators["futures_volume_avg"] = avg
+                    indicators['futures_volume_avg'] = avg
                     if avg > 0:
-                        indicators["futures_volume_ratio"] = volume / avg
+                        indicators['futures_volume_ratio'] = volume_delta / avg
+                        self._logger.info(
+                            'Condition met: futures_volume_ratio_updated',
+                            extra={
+                                'event': 'futures_volume_ratio_updated',
+                                'symbol': self._futures_symbol,
+                                'volume_delta': volume_delta,
+                                'volume_avg': avg,
+                                'volume_ratio': indicators['futures_volume_ratio'],
+                            },
+                        )
 
         # ═══════════════════════════════════════════════════════════
         # ✅ 2. INDEX LTP AND VWAP DATA (NEW)
@@ -1692,19 +1728,17 @@ class StrategyManager:
 
                     if (not fut_vwap or fut_vwap <= 0) and fut_ltp and fut_ltp > 0:
                         fut_vwap = fut_ltp
-                        proxy_logged = getattr(
-                            self, "_vwap_proxy_logged_symbols", None
-                        )
+                        proxy_logged = getattr(self, "_vwap_proxy_logged_symbols", None)
                         if proxy_logged is None:
                             proxy_logged = set()
                             self._vwap_proxy_logged_symbols = proxy_logged
                         if working_symbol not in proxy_logged:
                             self._logger.info(
-                                'Condition met: futures_vwap_proxy_used',
+                                "Condition met: futures_vwap_proxy_used",
                                 extra={
-                                    'event': 'futures_vwap_proxy_used',
-                                    'symbol': working_symbol,
-                                    'ltp': fut_ltp,
+                                    "event": "futures_vwap_proxy_used",
+                                    "symbol": working_symbol,
+                                    "ltp": fut_ltp,
                                 },
                             )
                             proxy_logged.add(working_symbol)
@@ -1739,7 +1773,11 @@ class StrategyManager:
                 )
 
         except Exception as e:
-            self._logger.debug(f"Index data augment failed: {e}")
+            self._logger.error(
+                'Failure in StrategyManager._augment_futures_metrics index augment: %s',
+                e,
+                extra={'event': 'index_data_augment_failed'},
+            )
 
     @staticmethod
     def _extract_float(
