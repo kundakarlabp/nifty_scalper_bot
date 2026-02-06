@@ -7,6 +7,7 @@ Refactored for Push-Based Architecture (Zero-Latency).
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+import time as time_module 
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
@@ -27,9 +28,10 @@ class SMCStrategy(EliteStrategy):
     Enters on Rejection Candles where price pierces a level (Bollinger Band) but closes back inside.
     """
     MIN_BARS_REQUIRED = 15
+    COOLDOWN_SECONDS = 120
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
-    __slots__ = ("_smc_config",)
+    __slots__ = ("_smc_config", "_cooldown_tracker", "_last_sweep_key")  # ✅ Added trackers
 
     def __init__(self, config: SMCStrategyConfig, indicator_engine: Any) -> None:
         """
@@ -41,6 +43,8 @@ class SMCStrategy(EliteStrategy):
         """
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._smc_config = config
+        self._cooldown_tracker: Dict[str, float] = {}       # ✅ symbol → last_fire_time
+        self._last_sweep_key: Dict[str, str] = {} 
 
     def get_required_indicators(self) -> set[str]:
         """
@@ -139,20 +143,27 @@ class SMCStrategy(EliteStrategy):
                 tp2 = upper
                 
             elif bearish_sweep:
-                signal_side = "SELL"
-                sweep_level = high
-                # SL above the sweep wick
-                stop_loss = high + buffer
-                # TP1: VWAP
-                tp1 = vwap
-                # TP2: Lower Band
-                tp2 = lower
+                # In options buying mode, bearish sweep = skip (can't short options)
+                # A bearish sweep means price pierced upper band and reversed DOWN.
+                # This is a SHORT signal — not actionable in long-only mode.
+                LOGGER.debug(
+                    f"SMC bearish sweep SKIPPED (long-only): {symbol} | Wick: {high}",
+                    extra={"event": "smc_bearish_skip", "symbol": symbol},
+                )
+                return None 
 
             # 5. Confidence Scoring
             # Base confidence 75%, +15% if volume is massive (>2x avg)
             confidence = 0.75
             if vol_ratio > 2.0:
                 confidence += 0.15
+
+            # ✅ FIX B5: Set cooldown and dedup
+            sweep_key = f"{symbol}:{signal_side}:{sweep_level:.1f}"
+            if self._last_sweep_key.get(symbol) == sweep_key:
+                return None  # ✅ Exact same sweep, skip
+            self._cooldown_tracker[symbol] = now              # ✅ Set 120s cooldown
+            self._last_sweep_key[symbol] = sweep_key 
 
             LOGGER.info(
                 f"🚀 SMC Sweep Detected: {symbol} {signal_side} | Vol: {vol_ratio:.1f}x | Wick: {sweep_level}",
