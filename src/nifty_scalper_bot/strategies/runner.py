@@ -1958,13 +1958,17 @@ class StrategyRunner:
         source = tick.get("source", "unknown")
 
         # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
-        volume = raw_volume
+        volume = 0 
         if raw_volume > 0:
-            last_cum = self._last_cumulative_volume.get(symbol, 0)
-            if last_cum > 0 and raw_volume >= last_cum:
-                volume = raw_volume - last_cum
-            elif last_cum > 0 and raw_volume < last_cum:
-                volume = raw_volume  # Day reset
+            last_cum = self._last_cumulative_volume.get(symbol, -1)  # ✅ Sentinel -1 (not 0)
+            if last_cum < 0:                                    # ✅ First tick detected by sentinel
+                # FIRST tick for this symbol — store baseline, DON'T use as bar volume
+                volume = 0                                      # ✅ Bar 1 gets volume=0, not 318M
+            elif raw_volume >= last_cum:
+                volume = raw_volume - last_cum                  # Normal delta
+            else:
+                # Volume reset (new day or data glitch) — small safe value
+                volume = min(raw_volume, 1000)                  # ✅ Capped reset
             self._last_cumulative_volume[symbol] = raw_volume
 
         # =================================================================
