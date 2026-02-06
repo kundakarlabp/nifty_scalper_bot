@@ -335,6 +335,11 @@ class IndicatorEngine:
         history = self._histories.get(symbol)
         if history is None or len(history) < period:
             return None
+        # ✅ FIX S6: Use available bars if < period (graceful degradation)
+        effective_period = min(period, len(history))
+        if effective_period < 3:
+            return None  # Need at least 3 bars for meaningful VWAP
+        
         last_timestamp = history.last_timestamp
         if last_timestamp is None:
             return None
