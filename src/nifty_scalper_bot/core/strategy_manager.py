@@ -967,6 +967,13 @@ class StrategyManager(_BaseStrategyManager):
         self._last_regime_gate: tuple[bool, tuple[str, ...]] | None = None
         self._last_regime_gate_at: float = 0.0
         self._regime_gate_cooldown = 10.0
+        required: set[str] = set()
+        for strategy in strategies:
+            required.update(strategy.get_required_indicators())
+        required.update(
+            {"volume", "avg_volume", "minutes_since_open", "minutes_until_close"}
+        )
+        self._required_indicators: set[str] = required
 
     def record_trade_result(
         self,
@@ -1618,22 +1625,21 @@ class StrategyManager(_BaseStrategyManager):
         ):
             adjustments = dict(regime_snapshot.adjustments)
         score_map = self._recompute_scores()
-        required: set[str] = set()
-        for strategy in self._strategies:
-            required.update(strategy.get_required_indicators())
-        required.update(
-            {"volume", "avg_volume", "minutes_since_open", "minutes_until_close"}
+        indicators_raw = self._indicator_engine.get_indicators(
+            symbol, self._required_indicators
         )
-
-        indicators_raw = self._indicator_engine.get_indicators(symbol, required)
         indicators: dict[str, t.Any] = dict(indicators_raw)
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
         position = self._position_manager.get_position(symbol)
 
         signals: list[Signal] = []
+        disabled: list[str] = []
+        empty: list[str] = []
+        errors: list[str] = []
         for strategy in self._strategies:
             if strategy.name in self._disabled_strategies:
+                disabled.append(strategy.name)
                 log.info(
                     "Condition met: strategy_disabled_skipped",
                     extra={
@@ -1648,6 +1654,7 @@ class StrategyManager(_BaseStrategyManager):
                     symbol, indicators, current_price, position
                 )
             except Exception as exc:  # noqa: BLE001
+                errors.append(strategy.name)
                 log.error(
                     "Failure in strategy generate for %s: %s",
                     strategy.name,
@@ -1656,6 +1663,7 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             if base_signal is None:
+                empty.append(strategy.name)
                 continue
             entry = score_map.get(strategy.name)
             adjusted = self._apply_weighted_confidence(
@@ -1664,6 +1672,23 @@ class StrategyManager(_BaseStrategyManager):
             signals.append(adjusted)
 
         if not signals:
+            missing = sorted(
+                name for name in self._required_indicators if indicators.get(name) is None
+            )
+            log.info(
+                "Condition met: strategy_manager_no_signal",
+                extra={
+                    "event": "strategy_manager_no_signal",
+                    "symbol": symbol,
+                    "disabled_strategies": disabled,
+                    "no_signal_strategies": empty[:8],
+                    "no_signal_count": len(empty),
+                    "error_strategies": errors,
+                    "missing_indicators": missing,
+                    "volume": indicators.get("volume"),
+                    "avg_volume": indicators.get("avg_volume"),
+                },
+            )
             return None
 
         combined = self._combine_signals(signals)
@@ -1692,6 +1717,21 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
                 return combined
+        elif combined is None:
+            log.info(
+                "Condition met: strategy_manager_no_combined_signal",
+                extra={"event": "strategy_manager_no_combined_signal", "symbol": symbol},
+            )
+        else:
+            log.info(
+                "Condition met: strategy_manager_filtered_signal",
+                extra={
+                    "event": "strategy_manager_filtered_signal",
+                    "symbol": symbol,
+                    "action": combined.action,
+                    "confidence": combined.confidence,
+                },
+            )
         return None
 
     def _bounded_confidence(self, candidate: float | None) -> float:
