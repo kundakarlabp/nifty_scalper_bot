@@ -219,10 +219,14 @@ class IndicatorEngine:
                 indicators.setdefault("low", float(lows[-1]))
             if opens:
                 indicators.setdefault("open", float(opens[-1]))
-        if names is None:
-            return indicators
-        requested: dict[str, float | tuple[float, float, float] | None] = {}
-        for name in names:
+        _always_include = {"vwap", "atr", "volume", "avg_volume", "rsi",
+                           "high", "low", "close", "open",
+                           "bollinger_upper", "bollinger_lower", "bollinger_middle",
+                           "minutes_since_open", "minutes_until_close",
+                           "volume_spike_ratio", "bar_range"}
+        all_names = set(names) | _always_include
+        requested: dict = {}
+        for name in all_names:
             key = str(name)
             if key in indicators:
                 requested[key] = indicators[key]
