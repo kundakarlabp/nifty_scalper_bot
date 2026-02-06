@@ -183,7 +183,7 @@ class StrategyRunnerConfig:
 
     signal_cooldown_seconds: float = 3.0
     trade_cooldown_seconds: float = 10.0
-    min_indicator_bars: int = 5
+    min_indicator_bars: int = 20
     max_trade_history: int = 100
     fetch_history_on_startup: bool = True
 
@@ -447,6 +447,7 @@ class StrategyRunner:
         self._order_in_flight_timeout: float = 30.0  # seconds
         self._recently_closed: dict[str, float] = {}  # ✅ FIX: Track recently exited symbols
         self._entry_lock = threading.Lock()  # Atomic entry lock
+        self._last_cumulative_volume: dict[str, int] = {}
         self._post_exit_cooldown_seconds: float = float(
             os.getenv("POST_EXIT_COOLDOWN_SECONDS", "60.0")
         )
@@ -1953,8 +1954,18 @@ class StrategyRunner:
         tick_age = (now - timestamp).total_seconds()
         price = _extract_float(tick, "ltp", "last_price", "close", "price")
         broker_vwap = _extract_float(tick, "average_price", "vwap")
-        volume = _extract_int(tick, "volume", "volume_traded")
+        raw_volume = _extract_int(tick, "volume", "volume_traded")
         source = tick.get("source", "unknown")
+
+        # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
+        volume = raw_volume
+        if raw_volume > 0:
+            last_cum = self._last_cumulative_volume.get(symbol, 0)
+            if last_cum > 0 and raw_volume >= last_cum:
+                volume = raw_volume - last_cum
+            elif last_cum > 0 and raw_volume < last_cum:
+                volume = raw_volume  # Day reset
+            self._last_cumulative_volume[symbol] = raw_volume
 
         # =================================================================
         # PHASE 2: DATA VALIDATION
