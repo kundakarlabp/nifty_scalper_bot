@@ -102,6 +102,11 @@ class VWAPProStrategy(EliteStrategy):
         current_price: float,
         position: Any | None = None,
     ) -> EliteSignal | None:
+        """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
+        LOGGER.debug(
+            'Entered VWAPProStrategy._evaluate_signal',
+            extra={'event': 'vwap_pro_signal_enter', 'symbol': symbol},
+        )
         try:
             now = time_module.time()
             expiry = self._extract_expiry(symbol)
@@ -204,7 +209,7 @@ class VWAPProStrategy(EliteStrategy):
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
-            if (is_ce and current_price < vwap) or (not is_ce and current_price > vwap):
+            if current_price < vwap:
                 self._telemetry["skipped_vwap"] += 1
                 if self._telemetry["skipped_vwap"] <= 3 or self._telemetry["skipped_vwap"] % self.TELEMETRY_LOG_EVERY == 0:
                     LOGGER.info(
@@ -287,6 +292,18 @@ class VWAPProStrategy(EliteStrategy):
             self._vwap_acceptance_tracker[acc_key] = 0
             self._signal_cooldown_tracker[cooldown_key] = now
             self._telemetry["signals"] += 1
+
+            LOGGER.info(
+                'Condition met: vwap_pro_signal_ready',
+                extra={
+                    'event': 'vwap_pro_signal_ready',
+                    'symbol': symbol,
+                    'direction': direction,
+                    'entry': current_price,
+                    'sl': sl,
+                    'tp2': tp2,
+                },
+            )
 
             return EliteSignal(
                 symbol=symbol,

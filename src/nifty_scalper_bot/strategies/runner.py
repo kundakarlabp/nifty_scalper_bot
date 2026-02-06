@@ -2745,7 +2745,11 @@ class StrategyRunner:
         trade_price: float,
         timestamp: datetime,
     ) -> None:
-        """Inner implementation of entry signal handling (lock already held)."""
+        """Args: signal, base_symbol, trade_symbol, trade_price, timestamp. Returns: None. Raises: Exception."""
+        self._logger.debug(
+            'Entered StrategyRunner._handle_entry_signal_inner',
+            extra={'event': 'entry_signal_inner', 'symbol': base_symbol},
+        )
 
         # ═══════════════════════════════════════════════════════════════
         # 🛡️ GUARD 0.5: ORDER IN-FLIGHT CHECK
@@ -3104,17 +3108,120 @@ class StrategyRunner:
             )
             unique_tag = f"{strat_name[:3]}_{int(timestamp.timestamp())}"
 
-            order_id = self._order_manager.place_order(
-                symbol=trade_symbol,
-                side=entry_side,
-                quantity=int(sized_qty),
-                order_type=OrderType.LIMIT,
-                price=execution_price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
-                signal_id=unique_tag,
-                tag=unique_tag,
+            bracket_meta = signal.metadata if isinstance(signal.metadata, dict) else {}
+            bracket_type = str(bracket_meta.get('bracket_type') or '').upper()
+            use_virtual_bracket = (
+                bracket_type == 'VIRTUAL'
+                and hasattr(self._order_manager, 'place_bracket_order')
+                and signal.stop_loss
+                and signal.take_profit
             )
+            tp1_price: float | None = None
+            tp1_qty: int | None = None
+            trailing_atr_mult: float | None = None
+            effective_tp: float | None = signal.take_profit
+
+            if use_virtual_bracket:
+                try:
+                    sl_atr_mult = float(bracket_meta.get('sl_atr_mult') or 0.0)
+                    tp1_atr_mult = float(bracket_meta.get('tp1_atr_mult') or 0.0)
+                    tp2_atr_mult = float(bracket_meta.get('tp2_atr_mult') or 0.0)
+                    tp1_qty_pct = float(bracket_meta.get('tp1_qty_pct') or 0.0)
+
+                    if tp1_atr_mult > 0 and atr_val > 0:
+                        if entry_side == 'BUY':
+                            tp1_price = execution_price + (atr_val * tp1_atr_mult)
+                        else:
+                            tp1_price = execution_price - (atr_val * tp1_atr_mult)
+
+                    if (
+                        tp2_atr_mult > 0
+                        and atr_val > 0
+                        and (effective_tp is None or effective_tp <= 0)
+                    ):
+                        if entry_side == 'BUY':
+                            effective_tp = execution_price + (atr_val * tp2_atr_mult)
+                        else:
+                            effective_tp = execution_price - (atr_val * tp2_atr_mult)
+
+                    if 0 < tp1_qty_pct < 1:
+                        tp1_qty = max(1, int(round(int(sized_qty) * tp1_qty_pct)))
+                        if tp1_qty >= int(sized_qty):
+                            tp1_qty = None
+
+                    runner_trail = bool(bracket_meta.get('runner_trail_after_tp1'))
+                    sl_mode = str(bracket_meta.get('sl_mode') or '')
+                    if runner_trail or sl_mode == 'ATR_TRAIL':
+                        trailing_atr_mult = float(
+                            bracket_meta.get('trailing_atr_mult')
+                            or sl_atr_mult
+                            or 1.5
+                        )
+                        if trailing_atr_mult <= 0:
+                            trailing_atr_mult = None
+
+                    self._logger.info(
+                        'Condition met: virtual_bracket_ready',
+                        extra={
+                            'event': 'virtual_bracket_ready',
+                            'symbol': trade_symbol,
+                            'tp1_price': tp1_price,
+                            'tp1_qty': tp1_qty,
+                            'tp2_price': effective_tp,
+                            'trailing_atr_mult': trailing_atr_mult,
+                        },
+                    )
+                except Exception as exc:
+                    self._logger.error(
+                        'Failure in StrategyRunner._handle_entry_signal_inner bracket setup: %s',
+                        exc,
+                        extra={
+                            'event': 'virtual_bracket_setup_failed',
+                            'symbol': trade_symbol,
+                        },
+                        exc_info=exc,
+                    )
+                    use_virtual_bracket = False
+
+            order_id = None
+            if use_virtual_bracket:
+                try:
+                    order_id = self._order_manager.place_bracket_order(
+                        symbol=trade_symbol,
+                        side=entry_side,
+                        quantity=int(sized_qty),
+                        entry_price=execution_price,
+                        stop_loss=signal.stop_loss,
+                        take_profit=effective_tp or signal.take_profit,
+                        tp1_price=tp1_price,
+                        tp1_qty=tp1_qty,
+                        trailing_atr_mult=trailing_atr_mult,
+                        tag=unique_tag,
+                    )
+                except Exception as exc:
+                    self._logger.error(
+                        'Failure in StrategyRunner._handle_entry_signal_inner virtual bracket: %s',
+                        exc,
+                        extra={
+                            'event': 'virtual_bracket_submit_failed',
+                            'symbol': trade_symbol,
+                        },
+                        exc_info=exc,
+                    )
+                    order_id = None
+
+            if not order_id:
+                order_id = self._order_manager.place_order(
+                    symbol=trade_symbol,
+                    side=entry_side,
+                    quantity=int(sized_qty),
+                    order_type=OrderType.LIMIT,
+                    price=execution_price,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    signal_id=unique_tag,
+                    tag=unique_tag,
+                )
             if order_id:
                 self._mark_order_in_flight(trade_symbol, base_symbol)
 
