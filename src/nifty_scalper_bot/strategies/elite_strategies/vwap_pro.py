@@ -53,11 +53,16 @@ class VWAPProStrategy(EliteStrategy):
         self._last_expiry: str | None = None
 
         self._telemetry: Dict[str, int] = {
+            "evaluations": 0,
             "signals": 0,
             "skipped_cooldown": 0,
+            "skipped_strike_lock": 0,
+            "skipped_bias": 0,
+            "skipped_no_vwap": 0,
             "skipped_vwap": 0,
             "skipped_volume": 0,
             "skipped_overextended": 0,
+            "skipped_acceptance": 0,
         }
         self._index_bias_missing_logged: bool = False
 
@@ -103,6 +108,24 @@ class VWAPProStrategy(EliteStrategy):
             is_ce = "CE" in symbol.upper()
             direction = "CE" if is_ce else "PE"
 
+            # ✅ FIX B6: Periodic telemetry dump
+            self._telemetry["evaluations"] += 1
+            _evals = self._telemetry["evaluations"]
+            if _evals == 1 or _evals % self.TELEMETRY_LOG_EVERY == 0:
+                LOGGER.info(
+                    f"📊 VWAPPro TELEMETRY [{symbol}]: evals={_evals} "
+                    f"signals={self._telemetry['signals']} "
+                    f"cool={self._telemetry['skipped_cooldown']} "
+                    f"lock={self._telemetry['skipped_strike_lock']} "
+                    f"bias={self._telemetry['skipped_bias']} "
+                    f"vwap0={self._telemetry['skipped_no_vwap']} "
+                    f"vwap={self._telemetry['skipped_vwap']} "
+                    f"vol={self._telemetry['skipped_volume']} "
+                    f"overext={self._telemetry['skipped_overextended']} "
+                    f"accept={self._telemetry['skipped_acceptance']}",
+                    extra={"event": "vwap_pro_telemetry", "symbol": symbol},
+                )
+
             lock_key = f"NIFTY:{expiry}:{direction}"
             cooldown_key = f"{expiry}:{direction}"
             acc_key = f"{symbol}_{direction}_accept"
@@ -117,13 +140,24 @@ class VWAPProStrategy(EliteStrategy):
                 self._strike_lock.pop(lock_key, None)
 
             if lock_key in self._strike_lock and self._strike_lock[lock_key] != symbol:
+                self._telemetry["skipped_strike_lock"] += 1
+                if self._telemetry["skipped_strike_lock"] <= 3:
+                    LOGGER.info(
+                        f"🔐 STRIKE LOCK: {symbol} blocked | Active={self._strike_lock[lock_key]}",
+                        extra={"event": "vwap_pro_strike_lock", "symbol": symbol},
+                    )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
-            # ⏳ ISSUE 2 FIX: Reset acceptance on Cooldown skip
             last_fire = self._signal_cooldown_tracker.get(cooldown_key, 0.0)
             if (now - last_fire) < self.COOLDOWN_SECONDS:
                 self._telemetry["skipped_cooldown"] += 1
+                if self._telemetry["skipped_cooldown"] <= 3:
+                    LOGGER.info(
+                        f"⏳ COOLDOWN: {symbol} {direction} | "
+                        f"Remaining={self.COOLDOWN_SECONDS - (now - last_fire):.0f}s",
+                        extra={"event": "vwap_pro_cooldown", "symbol": symbol},
+                    )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -148,17 +182,36 @@ class VWAPProStrategy(EliteStrategy):
 
             self._index_bias_missing_logged = False
 
-            # 🧭 Bias Gates & Acceptance Resets
             if (is_ce and index_ltp < index_vwap) or (not is_ce and index_ltp > index_vwap):
+                self._telemetry["skipped_bias"] += 1
+                if self._telemetry["skipped_bias"] <= 3 or self._telemetry["skipped_bias"] % self.TELEMETRY_LOG_EVERY == 0:
+                    LOGGER.info(
+                        f"🧭 BIAS GATE: {symbol} {direction} blocked | "
+                        f"IdxLTP={index_ltp:.2f} IdxVWAP={index_vwap:.2f} "
+                        f"Need={'BULL' if is_ce else 'BEAR'}",
+                        extra={"event": "vwap_pro_bias_reject", "symbol": symbol},
+                    )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
             if current_price <= 0 or vwap <= 0:
+                self._telemetry["skipped_no_vwap"] += 1
+                if self._telemetry["skipped_no_vwap"] <= 5:
+                    LOGGER.warning(
+                        f"⚠️ VWAP ZERO: {symbol} | price={current_price:.2f} vwap={vwap:.2f}",
+                        extra={"event": "vwap_pro_zero_block", "symbol": symbol},
+                    )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
             if (is_ce and current_price < vwap) or (not is_ce and current_price > vwap):
                 self._telemetry["skipped_vwap"] += 1
+                if self._telemetry["skipped_vwap"] <= 3 or self._telemetry["skipped_vwap"] % self.TELEMETRY_LOG_EVERY == 0:
+                    LOGGER.info(
+                        f"📏 OPT VWAP: {symbol} {direction} | "
+                        f"Price={current_price:.2f} VWAP={vwap:.2f}",
+                        extra={"event": "vwap_pro_opt_vwap_reject", "symbol": symbol},
+                    )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -168,6 +221,12 @@ class VWAPProStrategy(EliteStrategy):
                 z = abs(current_price - vwap) / vwap_std
                 if z > 2.2:
                     self._telemetry["skipped_overextended"] += 1
+                    if self._telemetry["skipped_overextended"] <= 3:
+                        LOGGER.info(
+                            f"📐 OVEREXT: {symbol} | z={z:.2f} > 2.2 | "
+                            f"Price={current_price:.2f} VWAP={vwap:.2f} Std={vwap_std:.2f}",
+                            extra={"event": "vwap_pro_overext_reject", "symbol": symbol},
+                        )
                     self._vwap_acceptance_tracker[acc_key] = 0
                     return None
 
@@ -177,16 +236,22 @@ class VWAPProStrategy(EliteStrategy):
             vol_thresh = self._dynamic_volume_threshold()
             if vol < avg_vol * vol_thresh:
                 self._telemetry["skipped_volume"] += 1
-                if self._telemetry["skipped_volume"] <= 5 or self._telemetry["skipped_volume"] % 200 == 0:
+                if self._telemetry["skipped_volume"] <= 5 or self._telemetry["skipped_volume"] % self.TELEMETRY_LOG_EVERY == 0:
                     LOGGER.info(
                         f"🔊 VOL GATE: {symbol} | vol={vol:.0f} < avg={avg_vol:.0f}×{vol_thresh}={avg_vol*vol_thresh:.0f}",
-                        extra={"event": "vwap_pro_vol_reject"},
+                        extra={"event": "vwap_pro_vol_reject", "symbol": symbol},
                     )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
             self._vwap_acceptance_tracker[acc_key] += 1
             if self._vwap_acceptance_tracker[acc_key] < self.VWAP_ACCEPTANCE_BARS:
+                self._telemetry["skipped_acceptance"] += 1
+                LOGGER.info(
+                    f"⏳ ACCEPTANCE: {symbol} {direction} | "
+                    f"Bar {self._vwap_acceptance_tracker[acc_key]}/{self.VWAP_ACCEPTANCE_BARS}",
+                    extra={"event": "vwap_pro_acceptance", "symbol": symbol},
+                )
                 return None
 
             # ═══════════════════════════════════════════════════════════════════
