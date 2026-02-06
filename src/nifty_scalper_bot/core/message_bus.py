@@ -150,7 +150,7 @@ class MessageBus:
         LOGGER.info("Component subscribed to %s", message_type.value)
 
     async def _dispatch_loop(self, message_type: MessageType) -> None:
-        """Dispatch queue to subscribers. Args: message_type. Returns: None. Raises: None."""
+        """Dispatch messages from a queue to its subscribers."""
         queue = self.queues[message_type]
         handlers = self.subscribers[message_type]
         
