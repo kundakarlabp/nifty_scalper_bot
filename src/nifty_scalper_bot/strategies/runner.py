@@ -445,6 +445,7 @@ class StrategyRunner:
         self._persistent_state: PersistentStateManager | None = None
         self._orders_in_flight: dict[str, float] = {}  # symbol -> timestamp
         self._order_in_flight_timeout: float = 30.0  # seconds
+        self._recently_closed: dict[str, float] = {}  # ✅ FIX: Track recently exited symbols
         self._entry_lock = threading.Lock()  # Atomic entry lock
         self._post_exit_cooldown_seconds: float = float(
             os.getenv("POST_EXIT_COOLDOWN_SECONDS", "60.0")
@@ -1681,6 +1682,15 @@ class StrategyRunner:
             base_symbol: The underlying symbol
             timestamp: When the exit occurred
         """
+        # ✅ FIX (6 Feb 2026): Also track in _recently_closed for re-entry prevention
+        import time as _t
+        if hasattr(self, "_recently_closed"):
+            self._recently_closed[base_symbol] = _t.time()
+            self._logger.info(
+                f"🛡️ EXIT RECORDED: {base_symbol} | Re-entry blocked for "
+                f"{os.getenv('EXIT_REENTRY_COOLDOWN_SEC', '300')}s"
+            )
+
         with self._lock:
             state = self._symbol_state.get(base_symbol)
             if state:
@@ -1700,7 +1710,6 @@ class StrategyRunner:
                         "cooldown_seconds": self._post_exit_cooldown_seconds,
                     },
                 )
-
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
         # [MODIFIED] Using defined helper correctly
@@ -1869,7 +1878,8 @@ class StrategyRunner:
         # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
         # =================================================================
 
-        # 1. Orphan Guard (Logic we added previously)
+        # 1. Orphan Guard — adopt but DO NOT return (tick must still flow to bracket manager)
+        # ✅ FIX (6 Feb 2026): Removed early `return` that blocked SL/TP execution for orphans
         if self._position_manager:
             active_pos = self._position_manager.get_active_contract(symbol)
             if active_pos:
@@ -1878,14 +1888,13 @@ class StrategyRunner:
                     log_throttled(
                         self._logger,
                         f"orphan_guard_{symbol}",
-                        f"🛡️ ORPHAN GUARD: {symbol} is unmanaged. Attempting adoption...",
+                        f"🛡️ ORPHAN GUARD: {symbol} is unmanaged. Adopting (tick continues)...",
                         interval_sec=30.0,
                         level=logging.WARNING,
                     )
-                    # Try to adopt (ensure self._adopt_orphan_positions exists)
                     if hasattr(self, "_adopt_orphan_positions"):
                         self._adopt_orphan_positions()
-                    return
+                    # ✅ DO NOT return — tick must continue flowing for bracket SL/TP monitoring
 
         # 2. Market Time Check (Now 'now' is valid!)
         if not self._is_market_open(now):
@@ -2756,7 +2765,25 @@ class StrategyRunner:
                     return
 
         # -----------------------------------------------------------
-        # 🛡️ GUARD 2: Position Check (No Pyramiding)
+        # 🛡️ GUARD 1.5: Recently Closed Check (Anti Re-Entry)
+        # ✅ FIX (6 Feb 2026): Prevents bot from re-entering manually exited trades
+        # -----------------------------------------------------------
+        import time as _time_mod
+        _exit_cooldown_sec = float(os.getenv("EXIT_REENTRY_COOLDOWN_SEC", "300"))  # 5 min default
+        _last_exit_time = self._recently_closed.get(base_symbol, 0)
+        if _last_exit_time and (_time_mod.time() - _last_exit_time) < _exit_cooldown_sec:
+            _remaining = _exit_cooldown_sec - (_time_mod.time() - _last_exit_time)
+            self._logger.info(
+                f"🛡️ REENTRY COOLDOWN: {base_symbol} | "
+                f"Exited {_time_mod.time() - _last_exit_time:.0f}s ago | "
+                f"Wait {_remaining:.0f}s more",
+                extra={"event": "signal_reentry_cooldown", "symbol": base_symbol},
+            )
+            return
+
+        # -----------------------------------------------------------
+        # 🛡️ GUARD 2: Position Check (No Pyramiding + Cross-Strike)
+        # ✅ FIX (6 Feb 2026): Also blocks same-underlying different-strike entries
         # -----------------------------------------------------------
         if self._position_manager:
             active_contract = self._position_manager.get_active_contract(base_symbol)
@@ -2767,7 +2794,31 @@ class StrategyRunner:
                     f"Pyramiding Disabled",
                     extra={"event": "signal_pyramid_reject", "symbol": base_symbol},
                 )
-                # Update signal timer to prevent log spam
+                with self._lock:
+                    if state:
+                        state.last_signal_at = timestamp
+                return
+
+            # ✅ FIX (6 Feb 2026): Cross-strike check — block if ANY NIFTY option is active
+            _max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
+            _all_positions = (
+                list(self._position_manager.get_open_positions())
+                if hasattr(self._position_manager, "get_open_positions")
+                else []
+            )
+            _nifty_active = [
+                p for p in _all_positions
+                if "NIFTY" in getattr(p, "symbol", "").upper()
+                and abs(getattr(p, "quantity", 0) or 0) > 0
+            ]
+            if len(_nifty_active) >= _max_nifty_positions:
+                self._logger.info(
+                    f"🛡️ CROSS-STRIKE REJECT: {base_symbol} | "
+                    f"Already {len(_nifty_active)} NIFTY positions active "
+                    f"(max={_max_nifty_positions}) | "
+                    f"Active: {[getattr(p, 'symbol', '?') for p in _nifty_active]}",
+                    extra={"event": "signal_cross_strike_reject", "symbol": base_symbol},
+                )
                 with self._lock:
                     if state:
                         state.last_signal_at = timestamp
