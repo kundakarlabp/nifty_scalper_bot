@@ -1675,8 +1675,11 @@ class StrategyManager(_BaseStrategyManager):
             missing = sorted(
                 name for name in self._required_indicators if indicators.get(name) is None
             )
-            log.info(
-                "Condition met: strategy_manager_no_signal",
+            log_throttled(
+                log,
+                key=f"strategy_manager_no_signal:{symbol}",
+                msg="Condition met: strategy_manager_no_signal",
+                interval_sec=10.0,
                 extra={
                     "event": "strategy_manager_no_signal",
                     "symbol": symbol,
