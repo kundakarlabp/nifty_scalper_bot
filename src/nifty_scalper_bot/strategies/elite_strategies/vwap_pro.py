@@ -128,7 +128,11 @@ class VWAPProStrategy(EliteStrategy):
                 return None
 
             # 📊 ISSUE 1 FIX: Hard-block on missing Futures VWAP (No spot fallback)
-            vwap = float(indicators.get("vwap") or 0.0)
+            # ✅ BONUS: Prefer exchange VWAP (full-session, from broker) over rolling VWAP
+            _exch_vwap = indicators.get("exchange_vwap")
+            _rolling_vwap = indicators.get("vwap")
+            vwap = float(_exch_vwap or _rolling_vwap or 0.0)  # ✅ Exchange > Rolling > 0
+            
             atr = float(indicators.get("atr") or max(current_price * 0.015, 1.0))
             entropy = float(indicators.get("entropy_5") or 0.5)
 
@@ -170,8 +174,14 @@ class VWAPProStrategy(EliteStrategy):
             # 🔊 ISSUE 4 FIX: Reset acceptance on Volume rejection
             vol = float(indicators.get("volume") or 0.0)
             avg_vol = float(indicators.get("avg_volume") or 1.0)
-            if vol < avg_vol * self._dynamic_volume_threshold():
+            vol_thresh = self._dynamic_volume_threshold()
+            if vol < avg_vol * vol_thresh:
                 self._telemetry["skipped_volume"] += 1
+                if self._telemetry["skipped_volume"] <= 5 or self._telemetry["skipped_volume"] % 200 == 0:
+                    LOGGER.info(
+                        f"🔊 VOL GATE: {symbol} | vol={vol:.0f} < avg={avg_vol:.0f}×{vol_thresh}={avg_vol*vol_thresh:.0f}",
+                        extra={"event": "vwap_pro_vol_reject"},
+                    )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
