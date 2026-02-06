@@ -9,7 +9,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Any, Dict, Set, Optional, Mapping
+from typing import Any, Dict, Mapping
 
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
@@ -95,8 +95,18 @@ class EliteStrategy(Strategy):
         else:
             LOGGER.debug(f"🚀 {self.name}: Running in Modern Mode (Push-Based)")
 
-    def get_required_indicators(self) -> Set[str]:
-        return set()
+    def get_required_indicators(self) -> list[str]:
+        """Args: none. Returns: list[str]. Raises: Exception."""
+        LOGGER.debug('Entered EliteStrategy.get_required_indicators')
+        try:
+            LOGGER.info(
+                'Condition met: using base indicator set',
+                extra={'event': 'elite_strategy_required_indicators', 'strategy': self.name},
+            )
+            return []
+        except Exception as exc:
+            LOGGER.error('Failure in get_required_indicators: %s', exc, exc_info=exc)
+            return []
 
     def generate_signal(
         self, 
@@ -105,58 +115,131 @@ class EliteStrategy(Strategy):
         current_price: float, 
         position: Any | None = None
     ) -> Signal | None:
-        """
-        ✅ THE BRIDGE: Satisfies abstract requirement of parent class.
-        """
-        if not self._config.enabled:
-            return None
-
-        # ✅ Early exit if capital is exhausted (prevents wasted computation)
-        if hasattr(self, '_orchestrator') and self._orchestrator:
-            if not self._orchestrator._has_capital_headroom_quick():
+        """Args: symbol, indicators, price, pos. Returns: Signal|None. Raises: Err."""
+        LOGGER.debug('Entered EliteStrategy.generate_signal')
+        try:
+            if not self._config.enabled:
+                LOGGER.info(
+                    'Condition met: strategy disabled',
+                    extra={'event': 'elite_strategy_disabled', 'strategy': self.name},
+                )
                 return None
 
-        elite_signal = self._evaluate_signal(
-            symbol=symbol, 
-            indicators=indicators, 
-            current_price=current_price, 
-            position=position
-        )
+            if not symbol:
+                LOGGER.info(
+                    'Condition met: missing symbol',
+                    extra={'event': 'elite_strategy_missing_symbol', 'strategy': self.name},
+                )
+                return None
 
-        if elite_signal:
-            return self._process_signal(elite_signal)
-            
+            if current_price <= 0:
+                LOGGER.info(
+                    'Condition met: invalid current price',
+                    extra={
+                        'event': 'elite_strategy_invalid_price',
+                        'strategy': self.name,
+                        'price': current_price,
+                    },
+                )
+                return None
+
+            if indicators is None:
+                LOGGER.info(
+                    'Condition met: missing indicators payload',
+                    extra={'event': 'elite_strategy_missing_indicators', 'strategy': self.name},
+                )
+                return None
+
+            # ✅ Early exit if capital is exhausted (prevents wasted computation)
+            if hasattr(self, '_orchestrator') and self._orchestrator:
+                if not self._orchestrator._has_capital_headroom_quick():
+                    LOGGER.info(
+                        'Condition met: capital headroom exhausted',
+                        extra={'event': 'elite_strategy_no_capital', 'strategy': self.name},
+                    )
+                    return None
+
+            indicators_payload: dict[str, Any] = dict(indicators)
+            elite_signal = self._evaluate_signal(
+                symbol=symbol,
+                indicators=indicators_payload,
+                current_price=current_price,
+                position=position,
+            )
+
+            if elite_signal:
+                LOGGER.info(
+                    'Condition met: elite signal generated',
+                    extra={'event': 'elite_strategy_signal', 'strategy': self.name},
+                )
+                return self._process_signal(elite_signal)
+
+            LOGGER.debug(
+                'No signal generated',
+                extra={'event': 'elite_strategy_no_signal', 'strategy': self.name},
+            )
+        except Exception as exc:
+            LOGGER.error('Failure in generate_signal: %s', exc, exc_info=exc)
+
         return None
 
     def evaluate(self) -> Signal | None:
-        """Fallback for polling execution."""
-        if not self._config.enabled:
-            return None
-
-        if self._last_signal_at:
-            elapsed = (datetime.now(timezone.utc) - self._last_signal_at).total_seconds()
-            if elapsed < self._config.cooldown_seconds:
+        """Args: none. Returns: Signal|None. Raises: Exception."""
+        LOGGER.debug('Entered EliteStrategy.evaluate')
+        try:
+            if not self._config.enabled:
+                LOGGER.info(
+                    'Condition met: strategy disabled',
+                    extra={'event': 'elite_strategy_disabled_poll', 'strategy': self.name},
+                )
                 return None
 
-        try:
-            if self._is_legacy_signature:
-                elite_signal = self._evaluate_signal() # type: ignore
-                if elite_signal:
-                    return self._process_signal(elite_signal)
-            else:
-                symbol = getattr(self._config, "symbol", None)
-                if not symbol:
+            if self._last_signal_at:
+                elapsed = (datetime.now(timezone.utc) - self._last_signal_at).total_seconds()
+                if elapsed < self._config.cooldown_seconds:
+                    LOGGER.info(
+                        'Condition met: cooldown active',
+                        extra={
+                            'event': 'elite_strategy_cooldown',
+                            'strategy': self.name,
+                            'elapsed': elapsed,
+                        },
+                    )
                     return None
-                
-                req_inds = self.get_required_indicators()
-                indicators = self._indicator_engine.get_indicators(symbol, list(req_inds))
-                ltp = float(indicators.get("ltp") or 0.0)
-                
-                return self.generate_signal(symbol, indicators, ltp)
 
-        except Exception as e:
-            LOGGER.error(f"Error evaluating {self.name}: {e}", exc_info=True)
-        
+            if self._is_legacy_signature:
+                elite_signal = self._evaluate_signal()  # type: ignore
+                if elite_signal:
+                    LOGGER.info(
+                        'Condition met: legacy signal generated',
+                        extra={
+                            'event': 'elite_strategy_legacy_signal',
+                            'strategy': self.name,
+                        },
+                    )
+                    return self._process_signal(elite_signal)
+                LOGGER.debug(
+                    'No legacy signal generated',
+                    extra={'event': 'elite_strategy_legacy_no_signal', 'strategy': self.name},
+                )
+                return None
+
+            symbol = getattr(self._config, 'symbol', None)
+            if not symbol:
+                LOGGER.info(
+                    'Condition met: missing symbol',
+                    extra={'event': 'elite_strategy_missing_symbol', 'strategy': self.name},
+                )
+                return None
+
+            req_inds = self.get_required_indicators()
+            indicators = self._indicator_engine.get_indicators(symbol, list(req_inds))
+            ltp = float(indicators.get('ltp') or 0.0)
+
+            return self.generate_signal(symbol, indicators, ltp)
+        except Exception as exc:
+            LOGGER.error('Failure in evaluate: %s', exc, exc_info=exc)
+
         return None
 
     def _evaluate_signal(
