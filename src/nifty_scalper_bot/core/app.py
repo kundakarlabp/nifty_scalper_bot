@@ -2201,7 +2201,7 @@ def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
         return cfg
 
     # Allow environment override for warmup bars (CRITICAL for faster startup)
-    warmup_bars_default = 10  # Changed from 50 to 10 for faster signal generation
+    warmup_bars_default = 20  # Changed from 50 to 10 for faster signal generation
     warmup_bars = int(os.getenv("MIN_INDICATOR_BARS", str(warmup_bars_default)))
 
     signal_cooldown = float(os.getenv("SIGNAL_COOLDOWN_SECONDS", "3.0"))
