@@ -1631,6 +1631,18 @@ class StrategyManager(_BaseStrategyManager):
         indicators: dict[str, t.Any] = dict(indicators_raw)
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
+        # ✅ FIX S3: Inject exchange VWAP for options
+        if self._data_hub is not None:
+            try:
+                opt_quote = self._data_hub.get_quote(symbol)
+                if opt_quote:
+                    _exch_vwap = self._extract_float(opt_quote, ("vwap", "average_price"))
+                    if _exch_vwap and _exch_vwap > 0:
+                        indicators["exchange_vwap"] = _exch_vwap
+                        if not indicators.get("vwap") or indicators["vwap"] is None:
+                            indicators["vwap"] = _exch_vwap
+            except Exception:
+                pass
         position = self._position_manager.get_position(symbol)
 
         signals: list[Signal] = []
