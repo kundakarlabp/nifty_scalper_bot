@@ -49,6 +49,20 @@ METRICS_AVAILABLE = False
 METRICS = None
 
 LOGGER = get_logger(__name__)
+
+def _normalize_bracket_side(side: str) -> str:
+    """Normalize side to 'BUY'/'SELL' for consistent bracket comparisons.
+
+    CRITICAL FIX (6 Feb 2026): attach_orphan_position stored 'LONG'/'SHORT'
+    but _evaluate_exit_fast compared against 'BUY'/'SELL', causing SL to NEVER trigger.
+    """
+    s = side.strip().upper()
+    if s in ("BUY", "LONG"):
+        return "BUY"
+    if s in ("SELL", "SHORT"):
+        return "SELL"
+    raise ValueError(f"Invalid bracket side: {side!r}. Must be BUY/LONG or SELL/SHORT.")
+
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
 _CANCELLED_STATUSES = {"CANCELLED", "REJECTED", "CANCELED"}
 
@@ -237,7 +251,7 @@ class BracketManager:
         self.register_virtual_bracket(
             order_id=entry_order_id,
             symbol=symbol,
-            side=side,
+            side=_normalize_bracket_side(side),
             qty=quantity,
             price=price,
             sl=stop_loss,
@@ -1793,7 +1807,7 @@ class BracketManager:
         self.register_virtual_bracket(
             order_id=oid,
             symbol=symbol,
-            side="LONG" if is_long else "SHORT",
+            side="BUY" if is_long else "SELL",
             qty=abs(qty),
             price=entry_price,
             sl=sl,
@@ -1854,7 +1868,7 @@ class BracketManager:
         import time
         
         # Normalize side to LONG/SHORT
-        normalized_side = side.upper().strip()
+        normalized_side = _normalize_bracket_side(side)
         if normalized_side == "BUY":
             normalized_side = "LONG"
         elif normalized_side == "SELL":
@@ -1873,11 +1887,11 @@ class BracketManager:
         # Validate SL/TP (use defaults if invalid)
         if stop_loss <= 0:
             LOGGER.warning(f"⚠️ create_bracket: Invalid SL={stop_loss}, using 5% default")
-            stop_loss = entry_price * 0.95 if normalized_side == "LONG" else entry_price * 1.05
+            stop_loss = entry_price * 0.95 if normalized_side == "BUY" else entry_price * 1.05
             
         if take_profit <= 0:
             LOGGER.warning(f"⚠️ create_bracket: Invalid TP={take_profit}, using 10% default")
-            take_profit = entry_price * 1.10 if normalized_side == "LONG" else entry_price * 0.90
+            take_profit = entry_price * 1.10 if normalized_side == "BUY" else entry_price * 0.90
         
         # Register the bracket
         self.register_virtual_bracket(
