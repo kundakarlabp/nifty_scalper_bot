@@ -352,7 +352,7 @@ class IndicatorEngine:
     def get_vwap(self, symbol: str, period: int = 20) -> float | None:
         """Calculate VWAP. Returns None if insufficient data."""
         history = self._histories.get(symbol)
-        if history is None or len(history) < period:
+        if history is None or len(history) == 0:
             return None
         # ✅ FIX S6: Use available bars if < period (graceful degradation)
         effective_period = min(period, len(history))
@@ -362,12 +362,12 @@ class IndicatorEngine:
         last_timestamp = history.last_timestamp
         if last_timestamp is None:
             return None
-        cache_key = f"vwap_{period}"
+        cache_key = f"vwap_{effective_period}"
         cached = self._get_cached(symbol, cache_key, last_timestamp)
         if cached is not None:
             return cached  # type: ignore[return-value]
-        prices = history.get_closes(period)
-        volumes = history.get_volumes(period)
+        prices = history.get_closes(effective_period) 
+        volumes = history.get_volumes(effective_period)
         value = self._calculate_vwap(prices, volumes)
         if value is not None:
             self._set_cache(symbol, cache_key, value, last_timestamp)
