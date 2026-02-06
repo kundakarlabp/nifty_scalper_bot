@@ -140,6 +140,7 @@ pytest
 | `BROKER_ACCESS_TOKEN` | Optional session token | `None` |
 | `BROKER_BASE_URL` | REST endpoint base | `https://api.example.com` |
 | `BROKER_WS_URL` | WebSocket endpoint | `wss://ws.example.com/stream` |
+| `BROKER_REST_CACHE_TTL_SEC` | Broker REST cache TTL for positions/margins fallback | `15.0` |
 | `BROKER_MARGIN_SEGMENT` | Zerodha margin segment to inspect (`equity` or `commodity`) | `equity` |
 | `LOG_LEVEL` | Logging level | `INFO` |
 | `RISK_MAX_DAILY_TRADES` | Daily trade cap | `20` |

@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import csv
+from dataclasses import dataclass
+from datetime import datetime
 import io
 import json
 import logging
-import uuid
 import os
+from pathlib import Path
 import threading
 import time
-from contextlib import suppress
-from datetime import datetime
-from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -25,6 +25,7 @@ from typing import (
     TypeVar,
     cast,
 )
+import uuid
 
 import httpx
 
@@ -60,6 +61,27 @@ from nifty_scalper_bot.utils.retry import (
 T = TypeVar("T")
 
 LOGGER = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _RestCacheEntry:
+    payload: Any
+    updated_at: float
+
+    def is_fresh(self, ttl_sec: float, now: float) -> bool:
+        """Check cache freshness. Args: ttl_sec, now. Returns: bool. Raises: None."""
+
+        return now - self.updated_at <= ttl_sec
+
+
+def _copy_cache_payload(payload: Any) -> Any:
+    """Copy cache payload safely. Args: payload. Returns: Any. Raises: None."""
+
+    if isinstance(payload, list):
+        return list(payload)
+    if isinstance(payload, dict):
+        return dict(payload)
+    return payload
 
 
 def _sanitize_access_token(token: str) -> str:
@@ -193,6 +215,38 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._last_log_margins = 0.0
         self._last_log_balance = 0.0
         self._last_log_instrument_load = 0.0
+        self._rest_cache_ttl = max(
+            1.0, get_float("BROKER_REST_CACHE_TTL_SEC", default=15.0)
+        )
+        self._positions_cache: _RestCacheEntry | None = None
+        self._margins_cache: dict[str, _RestCacheEntry] = {}
+
+    def _load_rest_cache(
+        self, cache: _RestCacheEntry | None, *, label: str
+    ) -> Any | None:
+        """Load cached payload if fresh. Args: cache, label. Returns: Any | None. Raises: None."""
+
+        if cache is None:
+            return None
+        now = self._log_time_fn()
+        age = now - cache.updated_at
+        if cache.is_fresh(self._rest_cache_ttl, now):
+            LOGGER.info(
+                "Condition met: zerodha_rest_cache_fallback",
+                extra={
+                    "event": "zerodha_rest_cache_fallback",
+                    "label": label,
+                    "age": age,
+                },
+            )
+            return _copy_cache_payload(cache.payload)
+        LOGGER.debug(
+            "zerodha_rest_cache_stale label=%s age=%0.1fs",
+            label,
+            age,
+            extra={"event": "zerodha_rest_cache_stale", "label": label, "age": age},
+        )
+        return None
 
     def quote_any(self, items: Sequence[object]) -> Mapping[str, Any] | None:
         """Fetch Zerodha quote payloads for mixed identifiers.
@@ -471,13 +525,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
         Place order with Robust Idempotency, Symbol Parsing & Type Mapping.
         """
         import uuid
-        
+
         # 1. Construct Param Dictionary
         params = kwargs.copy()
         # [FIX] Ensure variety is never empty
-        variety = variety or "regular" 
+        variety = variety or "regular"
         params["variety"] = variety
-        
+
         # [FIX] Automatic Symbol Resolution
         if "symbol" in params:
             raw_sym = params.pop("symbol")
@@ -499,30 +553,35 @@ class ZerodhaKiteClient(BaseBrokerClient):
             raw_ot = params["order_type"]
             ot_str = getattr(raw_ot, "value", str(raw_ot)).upper()
             mapping = {
-                "STOP_LOSS_MARKET": "SL-M", "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
-                "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL", "SL-M": "SL-M"
+                "STOP_LOSS_MARKET": "SL-M",
+                "STOP_LOSS_LIMIT": "SL",
+                "STOP_LOSS": "SL",
+                "MARKET": "MARKET",
+                "LIMIT": "LIMIT",
+                "SL": "SL",
+                "SL-M": "SL-M",
             }
             params["order_type"] = mapping.get(ot_str, ot_str)
 
         # 2. Generate Safe Unique Tag (Idempotency Key)
         # [FIX] Use client_order_id if provided by OrderManager to ensure Retries don't duplicate
         client_id = kwargs.get("client_order_id") or kwargs.get("tag")
-        
+
         if client_id:
             # Use the deterministic ID provided by the caller
-            final_tag = str(client_id)[:20] # Zerodha tag limit is 20 chars
+            final_tag = str(client_id)[:20]  # Zerodha tag limit is 20 chars
         else:
             # Fallback to random if not provided (Legacy behavior)
             unique_id = uuid.uuid4().hex[:8]
             raw_tag = str(tag or "bot").strip()
-            safe_prefix = raw_tag[:11] 
+            safe_prefix = raw_tag[:11]
             final_tag = f"{safe_prefix}_{unique_id}"
-            
+
         params["tag"] = final_tag
 
         if hasattr(self, "_acquire_bucket") and hasattr(self, "_ORDER_BUCKET"):
             self._acquire_bucket(self._ORDER_BUCKET)
-        
+
         # [FIX] Filter out None values
         clean_params = {k: v for k, v in params.items() if v is not None}
         if clean_params.get("order_type") == "MARKET":
@@ -540,23 +599,27 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     operation_label="orders.place",
                 )
             )
-            
+
             data = response.get("data", {})
             return {
                 "order_id": data.get("order_id"),
                 "status": response.get("status", "success"),
                 "message": response.get("message", ""),
-                "tag": final_tag
+                "tag": final_tag,
             }
-            
+
         except Exception as e:
             # [FIX] Add specific logging for 405 errors
             if "405" in str(e):
-                self._logger.critical(f"🛑 Zerodha 405 Error (Bad URL/Method). URL: /orders/{variety}, Method: POST")
-            
+                self._logger.critical(
+                    f"🛑 Zerodha 405 Error (Bad URL/Method). URL: /orders/{variety}, Method: POST"
+                )
+
             # [FIX] Fail Fast Logic
             from nifty_scalper_bot.utils.errors import OrderPlacementError
+
             raise OrderPlacementError(f"Order placement failed: {e}")
+
     # Additional Kite-specific methods
     def get_ltp(self, symbols: list[str]) -> dict[str, float]:
         """Get last traded price for multiple symbols."""
@@ -592,9 +655,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
         # When POLL_REQUIRE_DEPTH is enabled we prefer the /quote endpoint (depth)
         # so that polling mode retrieves full quote payloads (bid/ask/depth) rather
         # than LTP-only. This helps decision gates that rely on spread/orderbook.
-        require_depth = (
-            os.getenv("POLL_REQUIRE_DEPTH", "false").strip().lower() in {"1", "true", "yes"}
-        )
+        require_depth = os.getenv("POLL_REQUIRE_DEPTH", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         if require_depth:
             try:
                 # get_quote_bulk already honors rate limiting and symbol resolution.
@@ -607,11 +672,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
                         last_price = float(payload.get("last_price", 0.0) or 0.0)
                     except (TypeError, ValueError):
                         continue
-                    
+
                     # [CORRECTED] Indentation fixed to be inside the for loop
                     if last_price > 0:
                         out[token] = last_price
-                
+
                 # [CORRECTED] Logic for returning data if found (inside try)
                 if out:
                     now = time.time()
@@ -661,7 +726,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 continue
             if last_price > 0:
                 out[token] = last_price
-        
+
         now = time.time()
         if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
             LOGGER.info(
@@ -673,7 +738,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             self._last_log_ltp_bulk = now
         return out
-
 
     def get_quote_by_token(self, token: int) -> dict[str, Any]:
         """Return a Zerodha quote payload for the given instrument token."""
@@ -693,29 +757,34 @@ class ZerodhaKiteClient(BaseBrokerClient):
             payload["last_price"] = 0.0
         return payload
 
-    def get_quote_bulk(self, tokens: list[int] | list[str]) -> dict[str, dict[str, Any]]:
+    def get_quote_bulk(
+        self, tokens: list[int] | list[str]
+    ) -> dict[str, dict[str, Any]]:
         """Return mapping of symbols to Zerodha quote payloads.
-        
+
         ✅ PRODUCTION FIX: Now accepts both integer tokens AND symbol strings.
         Returns dict keyed by symbol string for consistency with Zerodha API response.
-        
+
         Args:
             tokens: List of integer tokens OR symbol strings (e.g., ["NSE:NIFTY 50"])
-            
+
         Returns:
             Dict mapping symbol strings to quote payloads
         """
         if not tokens:
             return {}
-            
+
         symbols, symbol_map = self._tokens_to_symbols(tokens)
         if not symbols:
             LOGGER.warning(
                 "Token-to-symbol mapping empty",
-                extra={"event": "quote_bulk_mapping_empty", "tokens": str(tokens)[:100]}
+                extra={
+                    "event": "quote_bulk_mapping_empty",
+                    "tokens": str(tokens)[:100],
+                },
             )
             return {}
-            
+
         self._acquire_bucket(self._QUOTE_BUCKET)
         try:
             response = self._ensure_json(
@@ -725,12 +794,15 @@ class ZerodhaKiteClient(BaseBrokerClient):
             LOGGER.error(
                 "Quote bulk request failed: %s",
                 exc,
-                extra={"event": "quote_bulk_request_error", "symbols_count": len(symbols)}
+                extra={
+                    "event": "quote_bulk_request_error",
+                    "symbols_count": len(symbols),
+                },
             )
             return {}
-            
+
         data = cast(dict[str, Any], response.get("data", {}))
-        
+
         # ✅ FIX: Return keyed by symbol (not token) for consistency
         out: dict[str, dict[str, Any]] = {}
         for symbol, payload in data.items():
@@ -742,17 +814,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 if token_from_map:
                     payload["instrument_token"] = token_from_map
             out[symbol] = payload
-            
+
         return out
 
     def quote(self, instruments: list[str] | list[int] | str | int) -> dict[str, Any]:
         """Standard KiteConnect compliant alias for quote fetching.
-        
+
         ✅ PRODUCTION FIX: Now accepts both symbol strings AND integer tokens.
-        
+
         Args:
             instruments: List of symbols (e.g., ["NSE:NIFTY 50"]) OR tokens OR single value
-            
+
         Returns:
             Dict mapping symbol strings to quote payloads
         """
@@ -783,13 +855,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
         return cast(list[dict], data.get("candles", []))
 
     def historical_data(
-        self, 
-        instrument_token: int, 
-        from_date: datetime | str, 
-        to_date: datetime | str, 
-        interval: str, 
-        continuous: bool = False, 
-        oi: bool = False
+        self,
+        instrument_token: int,
+        from_date: datetime | str,
+        to_date: datetime | str,
+        interval: str,
+        continuous: bool = False,
+        oi: bool = False,
     ) -> list[dict[str, Any]]:
         """
         KiteConnect-compatible historical data fetcher.
@@ -806,7 +878,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             "from": from_date,
             "to": to_date,
             "continuous": 1 if continuous else 0,
-            "oi": 1 if oi else 0
+            "oi": 1 if oi else 0,
         }
 
         # 3. Execute Request (Using your native infrastructure)
@@ -818,7 +890,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 params=params,
             )
         )
-        
+
         # 4. Return standard list of candles
         data = cast(dict[str, Any], response.get("data", {}))
         return cast(list[dict], data.get("candles", []))
@@ -879,23 +951,31 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
     def get_orders(self) -> list[dict]:
         """Get all Zerodha orders for the trading day (Log-Silent if empty)."""
-        LOGGER.debug("Entered ZerodhaKiteClient.get_orders", extra={"event": "zerodha_get_orders_start"})
+        LOGGER.debug(
+            "Entered ZerodhaKiteClient.get_orders",
+            extra={"event": "zerodha_get_orders_start"},
+        )
         label = "orders.fetch"
         should_retry, on_retry = self._build_retry_handlers(endpoint="/orders")
 
         def _operation() -> list[dict]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             payload = self._ensure_json(
-                self._make_request("GET", "/orders", operation_label=label, with_retry=False)
+                self._make_request(
+                    "GET", "/orders", operation_label=label, with_retry=False
+                )
             )
             orders = cast(list[dict], payload.get("data", []))
-            
+
             # [FIX] Only log INFO if we actually have orders, otherwise DEBUG
             if orders:
                 LOGGER.info(
                     "zerodha_orders_fetch_success count=%d",
                     len(orders),
-                    extra={"event": "zerodha_orders_fetch_success", "count": len(orders)},
+                    extra={
+                        "event": "zerodha_orders_fetch_success",
+                        "count": len(orders),
+                    },
                 )
             else:
                 LOGGER.debug("zerodha_orders_fetch_success count=0")
@@ -910,12 +990,19 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 on_retry=on_retry,
             )
         except Exception as exc:
-            LOGGER.error("Failure in ZerodhaKiteClient.get_orders: %s", exc, extra={"event": "zerodha_get_orders_error"})
+            LOGGER.error(
+                "Failure in ZerodhaKiteClient.get_orders: %s",
+                exc,
+                extra={"event": "zerodha_get_orders_error"},
+            )
             raise
 
     def get_positions(self) -> list[dict[str, Any]]:
         """Return Zerodha positions (Log-Silent if empty)."""
-        LOGGER.debug("Entered ZerodhaKiteClient.get_positions", extra={"event": "zerodha_get_positions_start"})
+        LOGGER.debug(
+            "Entered ZerodhaKiteClient.get_positions",
+            extra={"event": "zerodha_get_positions_start"},
+        )
         label = "positions.fetch"
         endpoint = "/portfolio/positions"
         should_retry, on_retry = self._build_retry_handlers(endpoint=endpoint)
@@ -923,7 +1010,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
         def _operation() -> list[dict[str, Any]]:
             self._acquire_bucket(self._GENERAL_BUCKET)
             response = self._ensure_json(
-                self._make_request("GET", endpoint, operation_label=label, with_retry=False)
+                self._make_request(
+                    "GET", endpoint, operation_label=label, with_retry=False
+                )
             )
             payload = response.get("data")
             normalized: list[dict[str, Any]] = []
@@ -934,9 +1023,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     positions = payload.get(key)
                     if isinstance(positions, list):
                         normalized = cast(list[dict[str, Any]], positions)
-                        if normalized: # If found valid list, stop looking
+                        if normalized:  # If found valid list, stop looking
                             break
-            
+
             # Case B: Payload is a List (direct)
             elif isinstance(payload, list):
                 normalized = cast(list[dict[str, Any]], payload)
@@ -946,10 +1035,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 LOGGER.info(
                     "zerodha_positions_fetch_success count=%d",
                     len(normalized),
-                    extra={"event": "zerodha_positions_fetch_success", "count": len(normalized)},
+                    extra={
+                        "event": "zerodha_positions_fetch_success",
+                        "count": len(normalized),
+                    },
                 )
             else:
                 LOGGER.debug("zerodha_positions_fetch_success count=0")
+            self._positions_cache = _RestCacheEntry(
+                payload=list(normalized),
+                updated_at=self._log_time_fn(),
+            )
 
             return normalized
 
@@ -962,7 +1058,15 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 on_retry=on_retry,
             )
         except Exception as exc:
-            LOGGER.error("Failure in ZerodhaKiteClient.get_positions: %s", exc, extra={"event": "zerodha_get_positions_error"})
+            LOGGER.error(
+                "Failure in ZerodhaKiteClient.get_positions: %s",
+                exc,
+                extra={"event": "zerodha_get_positions_error"},
+                exc_info=exc,
+            )
+            cached = self._load_rest_cache(self._positions_cache, label=label)
+            if cached is not None:
+                return cast(list[dict[str, Any]], cached)
             raise
 
     def get_holdings(self) -> list[dict]:
@@ -1030,6 +1134,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     "keys": sorted(payload.keys()),
                 },
             )
+            self._margins_cache[normalized_segment] = _RestCacheEntry(
+                payload=dict(payload),
+                updated_at=self._log_time_fn(),
+            )
             return payload
 
         try:
@@ -1050,6 +1158,12 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 },
                 exc_info=exc,
             )
+            cached = self._load_rest_cache(
+                self._margins_cache.get(normalized_segment),
+                label=label,
+            )
+            if cached is not None:
+                return cast(dict[str, Any], cached)
             raise
 
     def get_margins(self, segment: str = "equity") -> dict[str, Any]:
@@ -1087,7 +1201,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 cast(Mapping[str, Any] | None, raw_payload),
                 segment=segment,
             )
-            
+
             # [CORRECTED] Aligned correctly
             now = time.time()
             if now - self._last_log_margins >= self._log_throttle_interval:
@@ -1102,7 +1216,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 )
                 self._last_log_margins = now
             return payload
-
 
         try:
             return self._execute_with_retry(
@@ -1155,7 +1268,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             raise
 
         summary = self._normalize_margin_payload(payload, segment=segment)
-        
+
         # [CORRECTED] Aligned correctly
         now = time.time()
         if now - self._last_log_margins >= self._log_throttle_interval:
@@ -1171,7 +1284,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             self._last_log_margins = now
         return summary
-
 
     def get_available_balance(self, segment: str = "equity") -> float:
         """Return available margin balance for a Zerodha segment.
@@ -1291,18 +1403,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
         # [CORRECTED] Aligned correctly and placed before return
         now = time.time()
         if now - self._last_log_balance >= self._log_throttle_interval:
-                # [FIX] Keep as INFO, throttled by _log_throttle_interval (default 60s)
-                LOGGER.info(
-                    "zerodha_available_balance_success",
-                    extra={
-                        "event": "zerodha_available_balance_success",
-                        "segment": normalized_segment,
-                        "available": available,
-                    },
-                )
-                self._last_log_balance = now
+            # [FIX] Keep as INFO, throttled by _log_throttle_interval (default 60s)
+            LOGGER.info(
+                "zerodha_available_balance_success",
+                extra={
+                    "event": "zerodha_available_balance_success",
+                    "segment": normalized_segment,
+                    "available": available,
+                },
+            )
+            self._last_log_balance = now
         return available
-
 
     def _resolve_balance_fallback(self) -> float:
         """Return environment configured fallback balance figure.
@@ -1698,7 +1809,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
             LOGGER.error(
                 "Failure in ZerodhaKiteClient.load_instruments: %s",
                 exc,
-                extra={"event": "zerodha.load_instruments.parse_error", "exchange": normalized_exchange},
+                extra={
+                    "event": "zerodha.load_instruments.parse_error",
+                    "exchange": normalized_exchange,
+                },
                 exc_info=exc,
             )
             raise BrokerError("Instrument parse failed") from exc
@@ -1727,7 +1841,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             cache[base] = row
 
         self._instrument_cache[normalized_exchange] = cache
-        
+
         # [CORRECTED] Aligned correctly
         now = time.time()
         if now - self._last_log_instrument_load >= self._log_throttle_interval:
@@ -1741,7 +1855,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             self._last_log_instrument_load = now
         return instruments
-
 
     def list_instruments(self) -> list[dict[str, Any]]:
         """Return cached instrument rows across all exchanges.
@@ -1923,7 +2036,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 if token:
                     return int(token)
             except Exception:
-                LOGGER.debug("resolver.resolve_symbol_to_token failed for %s", symbol, exc_info=True)
+                LOGGER.debug(
+                    "resolver.resolve_symbol_to_token failed for %s",
+                    symbol,
+                    exc_info=True,
+                )
 
         raise BrokerError(f"Instrument token not found for {symbol}")
 
@@ -1936,28 +2053,28 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self, tokens: Iterable[int | str]
     ) -> tuple[list[str], dict[str, int]]:
         """Map instrument tokens OR symbol strings to ``EXCHANGE:SYMBOL`` identifiers.
-        
+
         ✅ PRODUCTION FIX: Now handles both integer tokens AND symbol strings.
         This supports the PollingStreamer which resolves tokens to symbols before calling.
-        
+
         Args:
             tokens: Sequence of integer tokens OR symbol strings (e.g., "NSE:NIFTY 50")
-            
+
         Returns:
             Tuple of (symbols list, symbol->token mapping)
         """
         resolver = self._resolver
         symbols: list[str] = []
         symbol_map: dict[str, int] = {}
-        
+
         if resolver is None:
             return symbols, symbol_map
-            
+
         for token in tokens:
             # ✅ CRITICAL FIX: Handle symbol strings directly
             if isinstance(token, str):
                 token_str = token.strip()
-                
+
                 # Check if it's already a valid symbol (contains ":")
                 if ":" in token_str:
                     symbols.append(token_str)
@@ -1974,7 +2091,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     except Exception:
                         pass  # Token lookup failed, but we can still use the symbol
                     continue
-                    
+
                 # Check if it's a numeric string (token as string)
                 if token_str.isdigit():
                     try:
@@ -1991,12 +2108,12 @@ class ZerodhaKiteClient(BaseBrokerClient):
                         continue
                     except (ValueError, TypeError):
                         pass
-                
+
                 # Non-numeric string without ":" - prefix with default exchange
                 formatted = f"{self._default_exchange}:{token_str}"
                 symbols.append(formatted)
                 continue
-            
+
             # Handle integer tokens (original behavior)
             try:
                 token_int = int(token)
@@ -2005,7 +2122,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 continue
             except Exception:
                 formatted = ""
-                
+
             if not formatted:
                 # last resort: use numeric token string
                 try:
@@ -2015,7 +2132,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 except (ValueError, TypeError):
                     continue
                 continue
-                
+
             # ensure canonical form contains exchange prefix
             if ":" not in formatted:
                 formatted = f"{self._default_exchange}:{formatted}"
@@ -2024,7 +2141,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 symbol_map[formatted] = int(token)
             except (ValueError, TypeError):
                 pass
-                
+
         return symbols, symbol_map
 
     def _configure_rate_limits(self) -> None:
@@ -2056,7 +2173,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
             raise BrokerError(
                 f"Rate limit exceeded for bucket={bucket} | snapshot={snapshot}"
             ) from exc
-
 
     def _format_symbol(self, symbol: str) -> str:
         if ":" in symbol:
@@ -2155,7 +2271,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
             LOGGER.error(
                 "Failure in ZerodhaKiteClient._execute_with_retry: %s",
                 exc,
-                extra={"event": "zerodha_execute_with_retry_start", "label": label, "note": "rate_limit_must_be_acquired_outside",},
+                extra={
+                    "event": "zerodha_execute_with_retry_start",
+                    "label": label,
+                    "note": "rate_limit_must_be_acquired_outside",
+                },
             )
             raise BrokerError(error_message) from (exc.context.error or exc)
 
@@ -2227,7 +2347,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                             delay_hint=0.3,
                         ),
                     )
-                
+
                 try:
                     payload = response.json()
                 except json.JSONDecodeError as exc:
@@ -2303,7 +2423,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             error = OrderPlacementError(message)
 
         if status == 400:
-        # LOG THE FULL PAYLOAD IF POSSIBLE
+            # LOG THE FULL PAYLOAD IF POSSIBLE
             LOGGER.error(f"🛑 Zerodha 400 Bad Request: {message}")
         elif status == 401:
             error = ConfigurationError("Zerodha authentication failed")
