@@ -204,6 +204,21 @@ class IndicatorEngine:
         indicators["volatility_index"] = self.get_volatility_index(symbol)
         indicators["vwap"] = self.get_vwap(symbol)
         self._augment_session_metrics(symbol, indicators)
+        # ✅ FIX S1: Expose latest-bar OHLC for strategies that need it
+        history = self._histories.get(symbol)
+        if history and len(history) > 0:
+            closes = history.get_closes(1)
+            highs = history.get_highs(1)
+            lows = history.get_lows(1)
+            opens = history.get_opens(1) if hasattr(history, 'get_opens') else closes
+            if closes:
+                indicators.setdefault("close", float(closes[-1]))
+            if highs:
+                indicators.setdefault("high", float(highs[-1]))
+            if lows:
+                indicators.setdefault("low", float(lows[-1]))
+            if opens:
+                indicators.setdefault("open", float(opens[-1]))
         if names is None:
             return indicators
         requested: dict[str, float | tuple[float, float, float] | None] = {}
