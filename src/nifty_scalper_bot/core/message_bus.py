@@ -210,7 +210,7 @@ class MessageBus:
         LOGGER.info("Message bus stopped.")
 
     async def _await_cancellation(self, task: asyncio.Task) -> None:
-        """Await task cancellation. Args: task. Returns: None. Raises: None."""
+        """Safely await a task during cancellation, suppressing CancelledError."""
         try:
             with suppress(asyncio.CancelledError):
                 await task
