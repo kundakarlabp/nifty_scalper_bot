@@ -52,7 +52,7 @@ class MessageBus:
         LOGGER.info("MessageBus initialized with max_queue_size=%s", max_queue_size)
 
     async def publish(self, message: Message) -> None:
-        """Publish message to queue. Args: message. Returns: None. Raises: None."""
+        """Publish a message, with pre-start buffering for TICK messages."""
         if not self._running:
             # Buffer tick messages for later dispatch
             if message.type == MessageType.TICK:
