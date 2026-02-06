@@ -91,6 +91,67 @@ class BrokerError(Exception):
     """Generic broker/resolver error sentinel."""
 
 
+def atm_strike_for_spot(spot: float, step: int) -> int:
+    """Return the nearest ATM strike for a spot price (Args/Returns/Raises)."""
+    try:
+        if spot <= 0:
+            raise ValueError("spot must be positive")
+        if step <= 0:
+            raise ValueError("step must be positive")
+        return int(round(spot / step) * step)
+    except Exception as exc:
+        LOGGER.error("Failure in atm_strike_for_spot: %s", exc)
+        raise
+
+
+def strike_for_delta(
+    spot: float,
+    vol: float,
+    ttm: float,
+    target_delta: float,
+    *,
+    call: bool = True,
+    rate: float = 0.06,
+    max_iterations: int = 60,
+) -> float:
+    """Return an approximate strike that matches a target delta (Args/Returns/Raises)."""
+    try:
+        if spot <= 0:
+            raise ValueError("spot must be positive")
+        if vol <= 0:
+            raise ValueError("vol must be positive")
+        if ttm <= 0:
+            raise ValueError("ttm must be positive")
+        if not (0 < target_delta < 1):
+            raise ValueError("target_delta must be between 0 and 1")
+
+        from nifty_scalper_bot.utils.options_math import black_scholes_greeks
+
+        low = spot * 0.5
+        high = spot * 1.5
+
+        for _ in range(max_iterations):
+            mid = (low + high) / 2.0
+            greeks = black_scholes_greeks(spot, mid, ttm, rate, vol, is_call=call)
+            delta = abs(greeks["delta"]) if not call else greeks["delta"]
+
+            if call:
+                if delta > target_delta:
+                    low = mid
+                else:
+                    high = mid
+            else:
+                if delta > target_delta:
+                    high = mid
+                else:
+                    low = mid
+
+        return (low + high) / 2.0
+    except Exception as exc:
+        LOGGER.error("Failure in strike_for_delta: %s", exc)
+        raise
+
+
 # --- InstrumentResolver ----------------------------------------------------
 class InstrumentResolver:
     """
