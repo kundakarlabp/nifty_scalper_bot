@@ -65,6 +65,13 @@ class VWAPProStrategy(EliteStrategy):
     # Helpers
     # ------------------------------------------------------------------ #
 
+    def get_required_indicators(self) -> set[str]:
+        """Declare ALL indicators VWAPPro needs."""
+        return {
+            "vwap", "atr", "volume", "avg_volume",
+            "rsi",  # for potential future use
+        }
+    
     def _extract_expiry(self, symbol: str) -> str:
         digits = "".join(c for c in symbol if c.isdigit())
         return digits[:5] if len(digits) >= 5 else "UNK"
