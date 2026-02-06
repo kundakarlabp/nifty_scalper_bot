@@ -63,6 +63,10 @@ class StrategyOrchestrator:
         self._last_signal_time: float = 0.0
         self._pending_underlyings: dict[str, float] = {}
         self._skip_reason: str = ""
+        # ✅ FIX (6 Feb 2026): Direction conflict guard — only one direction at a time
+        self._active_direction: str | None = None  # "CE" or "PE" or None
+        self._active_direction_symbol: str = ""
+        self._direction_lock_time: float = 0.0
 
     def register_strategy(
         self, name: str, *, capital_fraction: float, correlation_tags: Iterable[str]
@@ -176,6 +180,44 @@ class StrategyOrchestrator:
                 self._set_skip_reason("sell_blocked_long_only")
                 return None
         
+        # ═══════════════════════════════════════════════════════════
+        # 🛡️ FIX 6: DIRECTION CONFLICT GUARD (No simultaneous CE+PE)
+        # ✅ Added 6 Feb 2026: Prevents bot from taking both CE and PE trades
+        # ═══════════════════════════════════════════════════════════
+        if action == "BUY":
+            import time as _t
+            _sym_upper = symbol.upper()
+            _direction = (
+                "CE" if _sym_upper.endswith("CE")
+                else ("PE" if _sym_upper.endswith("PE") else None)
+            )
+            _dir_cooldown = float(os.getenv("DIRECTION_LOCK_SECONDS", "600"))  # 10 min
+
+            if _direction and self._active_direction:
+                _time_since_lock = _t.time() - self._direction_lock_time
+                if (
+                    self._active_direction != _direction
+                    and _time_since_lock < _dir_cooldown
+                ):
+                    self._logger.info(
+                        f"🛡️ DIRECTION CONFLICT: {symbol} is {_direction} but "
+                        f"active direction is {self._active_direction} "
+                        f"({self._active_direction_symbol}) | "
+                        f"Wait {_dir_cooldown - _time_since_lock:.0f}s",
+                        extra={
+                            "event": "orchestrator_direction_conflict",
+                            "symbol": symbol,
+                        },
+                    )
+                    self._set_skip_reason("direction_conflict")
+                    return None
+
+            # Lock direction on signal pass
+            if _direction:
+                self._active_direction = _direction
+                self._active_direction_symbol = symbol
+                self._direction_lock_time = _t.time()
+
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX 4: SIGNAL FLOOD PREVENTION (Rate Limiting)
         # ✅ CHANGED: Default reduced from 5.0 to 2.0 seconds
@@ -320,8 +362,12 @@ class StrategyOrchestrator:
             return
         with self._lock:
             self._active.pop(normalized, None)
-            # Also clear rate limit for this underlying
             self._pending_underlyings.pop(normalized, None)
+            # ✅ FIX (6 Feb 2026): Clear direction lock on exit
+            self._active_direction = None
+            self._active_direction_symbol = ""
+            self._direction_lock_time = 0.0
+            self._logger.info(f"🔓 Direction lock cleared on exit: {normalized}")
         self._logger.info(
             "Condition met: orchestrator_release",
             extra={"event": "orchestrator_release", "underlying": normalized},
