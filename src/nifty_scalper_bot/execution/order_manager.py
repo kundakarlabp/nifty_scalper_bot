@@ -838,7 +838,17 @@ class OrderManager:
             )
 
     def set_bracket_manager(self, bracket_manager: BracketManager | None) -> None:
-        """Attach bracket manager responsible for OCO coordination."""
+        """Attach bracket manager responsible for OCO coordination.
+
+        Args:
+            bracket_manager: Bracket manager instance or ``None`` to clear.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
 
         self._logger.debug(
             "Entered set_bracket_manager",
@@ -848,19 +858,21 @@ class OrderManager:
             self._bracket_manager = bracket_manager
             if bracket_manager is None:
                 self._logger.info(
-                    "Condition met: bracket manager dependency cleared",
-                    extra={"event": "order_manager.bracket_manager_cleared"},
+                    'Condition met: bracket manager dependency cleared',
+                    extra={'event': 'order_manager.bracket_manager_cleared'},
                 )
             else:
+                if hasattr(bracket_manager, 'set_notifier'):
+                    bracket_manager.set_notifier(self._notify_bracket_event)
                 self._logger.info(
-                    "Bracket manager attached to order manager",
-                    extra={"event": "order_manager.bracket_manager_attached"},
+                    'Bracket manager attached to order manager',
+                    extra={'event': 'order_manager.bracket_manager_attached'},
                 )
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
-                "Failure in set_bracket_manager: %s",
+                'Failure in set_bracket_manager: %s',
                 exc,
-                extra={"event": "order_manager.bracket_manager_set_failed"},
+                extra={'event': 'order_manager.bracket_manager_set_failed'},
                 exc_info=exc,
             )
             raise
@@ -2748,10 +2760,154 @@ class OrderManager:
         """
 
         self._logger.debug(
-            "Entered OrderManager.set_notifier",
-            extra={"event": "order_manager_set_notifier"},
+            'Entered OrderManager.set_notifier',
+            extra={'event': 'order_manager_set_notifier'},
         )
         self._notifier = notifier
+        bracket_manager = self._bracket_manager
+        if bracket_manager is not None and hasattr(bracket_manager, 'set_notifier'):
+            bracket_manager.set_notifier(self._notify_bracket_event)
+
+    def _notify_bracket_event(
+        self, event: str, payload: Mapping[str, object] | None = None
+    ) -> None:
+        """Send bracket lifecycle notifications through the Telegram notifier.
+
+        Args:
+            event: Event label describing the bracket lifecycle action.
+            payload: Optional payload to enrich the alert message.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        self._logger.debug(
+            'Entered _notify_bracket_event',
+            extra={'event': 'order_manager_bracket_notify_enter', 'label': event},
+        )
+        if self._notifier is None:
+            return
+        try:
+            parts: list[str] = []
+            if payload:
+                for key, value in payload.items():
+                    if value is None:
+                        continue
+                    if isinstance(value, float):
+                        parts.append(f'{key}={value:.2f}')
+                    else:
+                        parts.append(f'{key}={value}')
+            detail = ' | '.join(parts)
+            message = f'[{event}] {detail}' if detail else f'[{event}]'
+            self._notifier.send_alert(message)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                'Failure in _notify_bracket_event: %s',
+                exc,
+                extra={'event': 'order_manager_bracket_notify_failed', 'label': event},
+                exc_info=exc,
+            )
+
+    def _register_virtual_bracket_for_fill(
+        self, order: OrderDetails, *, source: str
+    ) -> None:
+        """Register a virtual bracket for a filled order when needed.
+
+        Args:
+            order: Filled order details to protect with a bracket.
+            source: Source label describing the fill origin.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        self._logger.debug(
+            'Entered _register_virtual_bracket_for_fill',
+            extra={
+                'event': 'order_manager_register_virtual_bracket',
+                'order_id': order.order_id,
+                'source': source,
+            },
+        )
+        if self._bracket_manager is None:
+            self._logger.warning(
+                'Bracket manager missing for filled order',
+                extra={
+                    'event': 'order_manager_bracket_missing',
+                    'order_id': order.order_id,
+                    'symbol': order.symbol,
+                    'source': source,
+                },
+            )
+            self._notify_bracket_event(
+                'BRACKET_MANAGER_MISSING',
+                {'symbol': order.symbol, 'order_id': order.order_id, 'source': source},
+            )
+            return
+        try:
+            entry_price = float(
+                order.fill_price or order.average_price or order.price or 0.0
+            )
+            qty = int(order.filled_quantity or order.quantity or 0)
+            if entry_price <= 0 or qty <= 0:
+                self._logger.warning(
+                    'Skipping bracket registration due to invalid fill data',
+                    extra={
+                        'event': 'order_manager_bracket_invalid_fill',
+                        'order_id': order.order_id,
+                        'symbol': order.symbol,
+                        'entry_price': entry_price,
+                        'qty': qty,
+                    },
+                )
+                return
+
+            sl_price = float(order.stop_loss or 0.0)
+            tp_price = float(order.take_profit or 0.0)
+            side = str(order.side).upper()
+            if sl_price <= 0:
+                sl_price = round(entry_price * (0.90 if side == 'BUY' else 1.10), 1)
+            if tp_price <= 0:
+                tp_price = round(entry_price * (1.20 if side == 'BUY' else 0.80), 1)
+
+            bracket_exists = self._bracket_manager.get_bracket(order.order_id)
+            if bracket_exists is None:
+                self._bracket_manager.register_virtual_bracket(
+                    order_id=order.order_id,
+                    symbol=order.symbol,
+                    side=side,
+                    qty=qty,
+                    price=entry_price,
+                    sl=sl_price,
+                    tp=tp_price,
+                    tag=order.tag or source,
+                )
+            self._bracket_manager.confirm_entry_fill(order.order_id, entry_price)
+            self._logger.info(
+                'Condition met: virtual bracket active for filled order',
+                extra={
+                    'event': 'order_manager_bracket_activated',
+                    'order_id': order.order_id,
+                    'symbol': order.symbol,
+                    'source': source,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                'Failure in _register_virtual_bracket_for_fill: %s',
+                exc,
+                extra={
+                    'event': 'order_manager_bracket_register_failed',
+                    'order_id': order.order_id,
+                    'symbol': order.symbol,
+                    'source': source,
+                },
+                exc_info=exc,
+            )
 
     def _handle_failed_bracket_entry(
         self,
@@ -3782,16 +3938,28 @@ class OrderManager:
             )  
 
     def on_order_update(self, order_update: dict) -> None:
+        """Handle broker order updates and follow-up workflows.
+
+        Args:
+            order_update: Raw broker order update payload.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
         """
-        🎯 CRITICAL: Central hub for broker order updates.
-        Handles state synchronization, auto-adopts unknown orders, and triggers brackets.
-        """
+        self._logger.debug(
+            'Entered on_order_update',
+            extra={'event': 'order_update_enter'},
+        )
         order_id = order_update.get("order_id")
         if not order_id:
             return
 
         # Normalize status to uppercase string
         status_raw = str(order_update.get("status", "")).upper()
+        adopted = False
 
         with self._lock:
             # 1. Try to retrieve the existing order
@@ -3832,20 +4000,30 @@ class OrderManager:
                     
                     # 1. Save to Memory (Stop "Unknown Order" warnings for future updates)
                     self._orders[order_id] = order
+                    adopted = True
                     
                     # [FIX] CRITICAL: Sync with PositionManager immediately
                     # This ensures the PositionManager knows this ID exists before we try to update it
-                    if hasattr(self._positions, "add_pending_order"):
-                         self._positions.add_pending_order(
+                    if hasattr(self._positions, 'add_pending_order'):
+                        self._positions.add_pending_order(
                             order_id=order.order_id,
                             symbol=order.symbol,
                             side=order.side,
                             qty=order.quantity,
                             price=order.price,
-                            order_type=details.order_type
+                            order_type=order.order_type,
                         )
-
+                    
                     self._logger.info(f"🆕 ADOPTED UNKNOWN ORDER: {order_id} [{order.symbol}]")
+                    self._notify_bracket_event(
+                        'ORDER_ADOPTED',
+                        {
+                            'symbol': order.symbol,
+                            'order_id': order_id,
+                            'status': status_raw,
+                            'source': 'manual_adoption',
+                        },
+                    )
                     
                     # 2. Persist to Disk Immediately (Survive Restarts)
                     if hasattr(self, "save_orders"):
@@ -3877,17 +4055,13 @@ class OrderManager:
             # -----------------------------------------------------
             is_filled = status_raw in ["COMPLETE", "FILLED"]
             
-            if is_filled and old_status != OrderStatus.FILLED:
+            if is_filled and (old_status != OrderStatus.FILLED or adopted):
                 self._logger.info(f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}")
 
                 # Update Bracket (Stop Loss / Target)
-                if self._bracket_manager:
-                    try:
-                        exec_px = order.fill_price if order.fill_price and order.fill_price > 0 else order.price
-                        self._bracket_manager.confirm_entry_fill(order_id, exec_px)
-                        self._logger.info(f"🎯 BRACKET ACTIVATED: {order.symbol}")
-                    except Exception as exc:
-                        self._logger.error(f"Bracket activation failed: {exc}")
+                self._register_virtual_bracket_for_fill(
+                    order, source='manual_adoption' if adopted else 'order_update'
+                )
 
                 # Update Positions (Critical for Dashboard accuracy)
                 if hasattr(self._positions, "update_from_order"):

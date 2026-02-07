@@ -220,6 +220,82 @@ def test_place_order_rounding_to_zero_skips(
     assert fake_broker.orders == {}
 
 
+def test_on_order_update_adopts_filled_manual_order(
+    order_manager: OrderManager,
+) -> None:
+    class _Notifier:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def send_alert(self, message: str) -> None:
+            self.messages.append(message)
+
+    class _BracketManager:
+        def __init__(self) -> None:
+            self.register_calls: list[dict[str, Any]] = []
+            self.confirm_calls: list[tuple[str, float]] = []
+            self.notifier: Any | None = None
+
+        def set_notifier(self, notifier: Any | None) -> None:
+            self.notifier = notifier
+
+        def get_bracket(self, _order_id: str) -> None:
+            return None
+
+        def register_virtual_bracket(
+            self,
+            *,
+            order_id: str,
+            symbol: str,
+            side: str,
+            qty: int,
+            price: float,
+            sl: float,
+            tp: float,
+            tag: str | None = None,
+        ) -> None:
+            self.register_calls.append(
+                {
+                    'order_id': order_id,
+                    'symbol': symbol,
+                    'side': side,
+                    'qty': qty,
+                    'price': price,
+                    'sl': sl,
+                    'tp': tp,
+                    'tag': tag,
+                }
+            )
+
+        def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
+            self.confirm_calls.append((order_id, fill_price))
+
+    notifier = _Notifier()
+    bracket_manager = _BracketManager()
+    order_manager.set_notifier(notifier)
+    order_manager.set_bracket_manager(bracket_manager)
+
+    order_manager.on_order_update(
+        {
+            'order_id': 'MAN-1',
+            'status': 'COMPLETE',
+            'filled_quantity': 75,
+            'average_price': 100.0,
+            'transaction_type': 'BUY',
+            'tradingsymbol': 'NFO:NIFTYTEST',
+            'price': 100.0,
+            'quantity': 75,
+        }
+    )
+
+    assert bracket_manager.register_calls
+    assert bracket_manager.confirm_calls == [('MAN-1', 100.0)]
+    register_call = bracket_manager.register_calls[0]
+    assert register_call['sl'] == 90.0
+    assert register_call['tp'] == 120.0
+    assert any('ORDER_ADOPTED' in message for message in notifier.messages)
+
+
 def test_sell_without_position_triggers_reduce_only(
     order_manager: OrderManager, fake_broker: FakeBrokerClient
 ) -> None:
