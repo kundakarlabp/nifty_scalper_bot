@@ -1452,57 +1452,105 @@ class StrategyManager:
         return None
 
     def _combine_signals_ensemble(self, signals: list[Signal]) -> Signal | None:
-        """
-        ✅ NEW: Combine multiple strategy signals using weighted voting.
-
-        Ensures all strategies get fair consideration instead of VWAP dominance.
-        """
-        if not signals:
-            return None
-
-        if len(signals) == 1:
-            return signals[0]
-
-        # Separate by action
-        buy_signals = [s for s in signals if s.action == "BUY"]
-        sell_signals = [s for s in signals if s.action == "SELL"]
-
-        # Calculate weighted votes
-        buy_weight = sum(s.confidence for s in buy_signals)
-        sell_weight = sum(s.confidence for s in sell_signals)
-
-        logger.info(
-            f"📊 Ensemble: BUY={len(buy_signals)} ({buy_weight:.1f}), "
-            f"SELL={len(sell_signals)} ({sell_weight:.1f})"
+        """Combine signals using confidence weights. Args: signals. Returns: Signal|None. Raises: None."""
+        self._logger.debug(
+            "Entered StrategyManager._combine_signals_ensemble",
+            extra={"event": "ensemble_enter", "count": len(signals)},
         )
+        try:
+            if not signals:
+                return None
 
-        # Determine winner
-        if buy_weight > sell_weight and buy_signals:
-            # Use the highest confidence BUY signal as base
-            best = max(buy_signals, key=lambda s: s.confidence)
-            # Average confidence across all BUY signals
-            avg_conf = buy_weight / len(buy_signals)
-            return dataclasses.replace(
-                best,
-                confidence=min(avg_conf, 99.0),
-                metadata={
-                    **(best.metadata or {}),
-                    "ensemble_count": len(buy_signals),
-                    "ensemble_weight": round(buy_weight, 2),
+            if len(signals) == 1:
+                return signals[0]
+
+            def _normalize_confidence(value: float) -> float:
+                scaled = float(value)
+                if scaled > 1.0:
+                    scaled /= 100.0
+                return max(0.0, min(1.0, scaled))
+
+            normalized: list[tuple[Signal, float]] = [
+                (signal, _normalize_confidence(signal.confidence))
+                for signal in signals
+            ]
+
+            buy_signals = [
+                (signal, conf)
+                for signal, conf in normalized
+                if signal.action == "BUY"
+            ]
+            sell_signals = [
+                (signal, conf)
+                for signal, conf in normalized
+                if signal.action == "SELL"
+            ]
+
+            buy_weight = sum(conf**2 for _, conf in buy_signals)
+            sell_weight = sum(conf**2 for _, conf in sell_signals)
+
+            suppressed = [
+                signal
+                for signal, conf in normalized
+                if conf < float(self._min_confidence)
+            ]
+
+            self._logger.info(
+                "Condition met: ensemble_weighted_vote",
+                extra={
+                    "event": "ensemble_weighted_vote",
+                    "buy_count": len(buy_signals),
+                    "sell_count": len(sell_signals),
+                    "buy_weight": round(buy_weight, 4),
+                    "sell_weight": round(sell_weight, 4),
+                    "suppressed": len(suppressed),
                 },
             )
-        elif sell_signals:
-            best = max(sell_signals, key=lambda s: s.confidence)
-            avg_conf = sell_weight / len(sell_signals)
-            return dataclasses.replace(
-                best,
-                confidence=min(avg_conf, 99.0),
-                metadata={
-                    **(best.metadata or {}),
-                    "ensemble_count": len(sell_signals),
-                    "ensemble_weight": round(sell_weight, 2),
-                },
+
+            if buy_weight > sell_weight and buy_signals:
+                best_signal, _ = max(buy_signals, key=lambda item: item[1])
+                weight_sum = sum(conf**2 for _, conf in buy_signals)
+                avg_conf = (
+                    sum(conf * (conf**2) for _, conf in buy_signals) / weight_sum
+                    if weight_sum > 0
+                    else 0.0
+                )
+                return dataclasses.replace(
+                    best_signal,
+                    confidence=min(avg_conf, 1.0),
+                    metadata={
+                        **(best_signal.metadata or {}),
+                        "ensemble_count": len(buy_signals),
+                        "ensemble_weight": round(buy_weight, 4),
+                        "ensemble_suppressed": len(suppressed),
+                    },
+                )
+            if sell_signals:
+                best_signal, _ = max(sell_signals, key=lambda item: item[1])
+                weight_sum = sum(conf**2 for _, conf in sell_signals)
+                avg_conf = (
+                    sum(conf * (conf**2) for _, conf in sell_signals) / weight_sum
+                    if weight_sum > 0
+                    else 0.0
+                )
+                return dataclasses.replace(
+                    best_signal,
+                    confidence=min(avg_conf, 1.0),
+                    metadata={
+                        **(best_signal.metadata or {}),
+                        "ensemble_count": len(sell_signals),
+                        "ensemble_weight": round(sell_weight, 4),
+                        "ensemble_suppressed": len(suppressed),
+                    },
+                )
+        except Exception as exc:
+            self._logger.error(
+                "Failure in StrategyManager._combine_signals_ensemble: %s",
+                exc,
+                extra={"event": "ensemble_error"},
+                exc_info=exc,
             )
+            return None
 
         return None
 
