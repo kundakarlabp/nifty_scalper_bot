@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+import logging
 import math
 import random
 import threading
@@ -453,9 +454,15 @@ class PollingStreamer:
 
             log_throttled(
                 LOGGER,
-                "quote_quality_check",
-                f"📊 QUOTE QUALITY: VWAP={'✅' if has_vwap else '❌'} | Volume={'✅' if has_volume else '❌'} | Keys={list(sample_quote.keys())[:8]}",
+                'quote_quality_check',
+                (
+                    '📊 QUOTE QUALITY: VWAP='
+                    f"{'✅' if has_vwap else '❌'} | Volume="
+                    f"{'✅' if has_volume else '❌'} | Keys="
+                    f'{list(sample_quote.keys())[:8]}'
+                ),
                 interval_sec=60.0,
+                level=logging.DEBUG,
             )
 
             ticks = []
@@ -557,9 +564,13 @@ class PollingStreamer:
                     if avg_price_float > 0:
                         log_throttled(
                             LOGGER,
-                            f"full_quote_{key}",
-                            f"✅ FULL QUOTE: {key} | LTP={lp:.2f} | VWAP={avg_price_float:.2f} | Vol={volume_int}",
+                            f'full_quote_{key}',
+                            (
+                                f'✅ FULL QUOTE: {key} | LTP={lp:.2f} | '
+                                f'VWAP={avg_price_float:.2f} | Vol={volume_int}'
+                            ),
                             interval_sec=120.0,
+                            level=logging.DEBUG,
                         )
 
                     ticks.append(tick)
@@ -573,9 +584,10 @@ class PollingStreamer:
                 vwap_count = sum(1 for t in ticks if t.get("average_price", 0) > 0)
                 log_throttled(
                     LOGGER,
-                    "fetch_summary",
-                    f"📈 FETCH COMPLETE: {len(ticks)} ticks | {vwap_count} with VWAP",
+                    'fetch_summary',
+                    f'📈 FETCH COMPLETE: {len(ticks)} ticks | {vwap_count} with VWAP',
                     interval_sec=60.0,
+                    level=logging.DEBUG,
                 )
 
             return ticks
