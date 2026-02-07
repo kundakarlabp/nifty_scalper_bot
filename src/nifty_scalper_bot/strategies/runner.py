@@ -1749,9 +1749,10 @@ class StrategyRunner:
         # [MODIFIED] Using defined helper correctly
         log_throttled(
             self._logger,
-            "msg_bus_tick",
-            f"🔔 MESSAGE BUS TICK: type={message.type}",
+            'msg_bus_tick',
+            f'🔔 MESSAGE BUS TICK: type={message.type}',
             interval_sec=60.0,
+            level=logging.DEBUG,
         )
         if not self._running or self._trading_paused:
             return
@@ -2082,7 +2083,7 @@ class StrategyRunner:
                 f'tick_accepted_{symbol}',
                 f'✅ TICK ACCEPTED: {symbol} | LTP={price:.2f} | Age={tick_age:.1f}s | Vol={volume}',
                 interval_sec=60.0,
-                level=logging.INFO,
+                level=logging.DEBUG,
             )
 
             # Grace period warmup logging
@@ -2197,7 +2198,7 @@ class StrategyRunner:
                         f'heartbeat_{symbol}',
                         f'💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}',
                         interval_sec=30.0,
-                        level=logging.INFO,
+                        level=logging.DEBUG,
                     )
 
                 # =============================================================

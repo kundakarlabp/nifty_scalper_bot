@@ -2885,7 +2885,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     _log_throttling_cache: dict[str, float] = {}
 
     def log_throttled(
-        logger: Any, key: str, msg: str, interval_sec: float = 60.0
+        logger: Any,
+        key: str,
+        msg: str,
+        interval_sec: float = 60.0,
+        level: int = logging.INFO,
     ) -> None:
         """
         Thread-safe helper to log messages only once per interval.
@@ -2897,7 +2901,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             last_time = _log_throttling_cache.get(key, 0.0)
 
             if now - last_time >= interval_sec:
-                logger.info(msg)
+                logger.log(level, msg)
                 _log_throttling_cache[key] = now
         except Exception:
             # Failsafe: Never crash the trading bot just because logging failed
@@ -2947,9 +2951,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # 🔍 ADDED: 'avg_p' to see the RAW value from Zerodha
         log_throttled(
             LOGGER,
-            "poll_tick_callback_entry",
-            f"🔔 _on_poll_tick | keys={len(t.keys())} | avg_p={t.get('average_price')}",
+            'poll_tick_callback_entry',
+            f'🔔 _on_poll_tick | keys={len(t.keys())} | avg_p={t.get("average_price")}',
             interval_sec=30.0,
+            level=logging.DEBUG,
         )
 
         # 2. Token Normalization
@@ -3005,9 +3010,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if sym:
             log_throttled(
                 LOGGER,
-                f"tick_received_{sym}",
-                f"📡 TICK: {sym} | LTP: {t.get('ltp')} | VWAP: {t.get('vwap')}",
+                f'tick_received_{sym}',
+                f'📡 TICK: {sym} | LTP: {t.get("ltp")} | VWAP: {t.get("vwap")}',
                 interval_sec=30.0,
+                level=logging.DEBUG,
             )
 
         # 5. Inject Timestamp
