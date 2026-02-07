@@ -448,6 +448,8 @@ class StrategyRunner:
         self._recently_closed: dict[str, float] = {}  # ✅ FIX: Track recently exited symbols
         self._entry_lock = threading.Lock()  # Atomic entry lock
         self._last_cumulative_volume: dict[str, int] = {}
+        self._last_valid_price: dict[str, float] = {}
+        self._last_valid_price_ts: dict[str, datetime] = {}
         self._post_exit_cooldown_seconds: float = float(
             os.getenv("POST_EXIT_COOLDOWN_SECONDS", "60.0")
         )
@@ -2050,6 +2052,70 @@ class StrategyRunner:
                     level=logging.WARNING,
                 )
                 return
+
+            price_source = 'ltp'
+            price_from_cache = False
+
+            if price <= 0:
+                best_bid = _extract_float(
+                    tick, 'best_bid', 'bid', 'best_bid_price', 'buy_price'
+                )
+                best_ask = _extract_float(
+                    tick, 'best_ask', 'ask', 'best_ask_price', 'sell_price'
+                )
+                if best_bid > 0 and best_ask > 0:
+                    price = (best_bid + best_ask) / 2.0
+                    price_source = 'book_mid'
+                elif best_bid > 0:
+                    price = best_bid
+                    price_source = 'book_bid'
+                elif best_ask > 0:
+                    price = best_ask
+                    price_source = 'book_ask'
+
+                if price > 0:
+                    log_throttled(
+                        self._logger,
+                        f'price_from_book_{symbol}',
+                        f'Condition met: tick_price_from_book ({price_source})',
+                        interval_sec=60.0,
+                        level=logging.INFO,
+                    )
+                else:
+                    last_price = self._last_valid_price.get(symbol)
+                    last_ts = self._last_valid_price_ts.get(symbol)
+                    if last_price and last_ts:
+                        max_age = 30.0 if source in ('rest', 'polling') else 5.0
+                        cache_age = (now - last_ts).total_seconds()
+                        if cache_age <= max_age:
+                            price = last_price
+                            price_source = 'cache'
+                            price_from_cache = True
+                            log_throttled(
+                                self._logger,
+                                f'price_from_cache_{symbol}',
+                                (
+                                    'Condition met: tick_price_cache_used '
+                                    f'age={cache_age:.1f}s'
+                                ),
+                                interval_sec=60.0,
+                                level=logging.INFO,
+                            )
+                        else:
+                            log_throttled(
+                                self._logger,
+                                f'price_cache_stale_{symbol}',
+                                (
+                                    'Condition met: tick_price_cache_stale '
+                                    f'age={cache_age:.1f}s'
+                                ),
+                                interval_sec=60.0,
+                                level=logging.WARNING,
+                            )
+
+            if price > 0 and not price_from_cache:
+                self._last_valid_price[symbol] = price
+                self._last_valid_price_ts[symbol] = now
 
             # Price validity check
             if price <= 0:
