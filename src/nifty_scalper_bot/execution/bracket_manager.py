@@ -16,7 +16,18 @@ from pathlib import Path
 _THREADING_MODULE = threading
 _RLOCK_CLASS = RLock
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, cast, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    cast,
+    runtime_checkable,
+)
 
 from nifty_scalper_bot.utils.logging import get_logger
 try:
@@ -214,6 +225,9 @@ class BracketManager:
         self._current_atr: Dict[str, float] = {}
         self._last_price_cache: Dict[str, float] = {}
         self._exit_cooldowns: Dict[str, float] = {}
+        self._notifier: Callable[[str, Mapping[str, object] | None], None] | None = None
+        self._trail_notify_at: Dict[str, float] = {}
+        self._trail_notify_sl: Dict[str, float] = {}
         self._lock = _RLOCK_CLASS()
         self._running = True
         
@@ -224,6 +238,114 @@ class BracketManager:
     # --------------------------------------------------------------------------
     # 1. CORE API (Backward Compatible & Enhanced)
     # --------------------------------------------------------------------------
+
+    def set_notifier(
+        self, notifier: Callable[[str, Mapping[str, object] | None], None] | None
+    ) -> None:
+        """Attach notifier callback for bracket lifecycle updates.
+
+        Args:
+            notifier: Callback accepting (event, payload) or ``None`` to clear.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        LOGGER.debug(
+            'Entered set_notifier',
+            extra={'event': 'bracket_manager_set_notifier_enter'},
+        )
+        try:
+            self._notifier = notifier
+            if notifier is None:
+                LOGGER.info(
+                    'Bracket notifier cleared',
+                    extra={'event': 'bracket_manager_notifier_cleared'},
+                )
+            else:
+                LOGGER.info(
+                    'Bracket notifier attached',
+                    extra={'event': 'bracket_manager_notifier_attached'},
+                )
+        except Exception as exc:
+            LOGGER.error(
+                'Failure in set_notifier: %s',
+                exc,
+                extra={'event': 'bracket_manager_notifier_failed'},
+                exc_info=exc,
+            )
+
+    def _notify_event(
+        self, event: str, payload: Mapping[str, object] | None = None
+    ) -> None:
+        """Emit a bracket lifecycle notification when configured.
+
+        Args:
+            event: Event name describing the lifecycle action.
+            payload: Optional metadata payload for the notifier.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        LOGGER.debug(
+            'Entered _notify_event',
+            extra={'event': 'bracket_manager_notify_enter', 'notify_event': event},
+        )
+        if self._notifier is None:
+            return
+        try:
+            self._notifier(event, payload)
+        except Exception as exc:
+            LOGGER.error(
+                'Failure in _notify_event: %s',
+                exc,
+                extra={'event': 'bracket_manager_notify_failed', 'notify_event': event},
+                exc_info=exc,
+            )
+
+    def _should_notify_trail(self, entry_id: str, new_sl: float, old_sl: float) -> bool:
+        """Decide if a trailing update should be notified.
+
+        Args:
+            entry_id: Bracket entry identifier for tracking cooldowns.
+            new_sl: Proposed updated stop-loss level.
+            old_sl: Previous stop-loss level before the update.
+
+        Returns:
+            ``True`` when a notification should be emitted.
+
+        Raises:
+            None.
+        """
+        try:
+            now = time.time()
+            last_ts = self._trail_notify_at.get(entry_id, 0.0)
+            last_sl = self._trail_notify_sl.get(entry_id, old_sl)
+            price_delta = abs(new_sl - last_sl)
+            pct_delta = (price_delta / last_sl * 100.0) if last_sl > 0 else 100.0
+            min_seconds = float(os.getenv('TRAIL_NOTIFY_COOLDOWN_SEC', '60'))
+            min_pct = float(os.getenv('TRAIL_NOTIFY_MIN_PCT', '0.5'))
+            if (now - last_ts) >= min_seconds or pct_delta >= min_pct:
+                self._trail_notify_at[entry_id] = now
+                self._trail_notify_sl[entry_id] = new_sl
+                return True
+            return False
+        except Exception as exc:
+            LOGGER.error(
+                'Failure in _should_notify_trail: %s',
+                exc,
+                extra={
+                    'event': 'bracket_manager_trail_notify_failed',
+                    'entry_id': entry_id,
+                },
+                exc_info=exc,
+            )
+            return False
 
     def place_bracket_order(
         self,
@@ -282,9 +404,27 @@ class BracketManager:
         trailing_atr_mult: float | None = None,
         activate_immediately: bool = True
     ) -> None:
-        """
-        Register a position for monitoring with full logic.
-        Includes defensive checks for 0.0 SL/TP to prevent 'Suicide Exits'.
+        """Register a position for virtual bracket monitoring.
+
+        Args:
+            order_id: Entry order identifier for the bracket.
+            symbol: Trading symbol for the bracket.
+            side: Trade direction ("BUY" or "SELL").
+            qty: Position size to monitor.
+            price: Entry price used for bracket tracking.
+            sl: Stop-loss trigger price.
+            tp: Take-profit trigger price.
+            tag: Optional strategy tag for auditing.
+            tp1_price: Optional first profit target price.
+            tp1_qty: Optional first profit target quantity.
+            trailing_atr_mult: Optional ATR-based trailing multiplier.
+            activate_immediately: Whether the bracket is active on registration.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
         """
         with self._lock:
             # 1. Deduplication: Update existing if found
@@ -395,6 +535,18 @@ class BracketManager:
                 f"🛡️ Bracket Registered for {symbol} (Qty: {qty}): "
                 f"Entry={price} | SL={sl} | TP={tp} {trail_msg} | Mode={status_mode}"
             )
+            self._notify_event(
+                'BRACKET_REGISTERED',
+                {
+                    'symbol': symbol,
+                    'side': side,
+                    'qty': abs(qty),
+                    'entry': round(price, 2),
+                    'sl': round(sl, 2) if sl else 0.0,
+                    'tp': round(tp, 2) if tp else 0.0,
+                    'mode': status_mode,
+                },
+            )
 
             # 8. Record metric & Persist
             if METRICS_AVAILABLE and METRICS:
@@ -406,11 +558,17 @@ class BracketManager:
             self.save_state()
 
     def confirm_entry_fill(self, order_id: str, fill_price: float) -> None:
-        """
-        Called when entry order is confirmed filled.
-        Activates the bracket for real-time monitoring.
-        
-        ✅ WORLD-CLASS: Immediate bracket activation
+        """Activate a bracket once entry fill is confirmed.
+
+        Args:
+            order_id: Entry order identifier for the bracket.
+            fill_price: Confirmed fill price from the broker.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
         """
         with self._lock:
             bracket = self._brackets.get(order_id)
@@ -457,6 +615,16 @@ class BracketManager:
                 f"🎯 BRACKET ACTIVATED: {bracket.symbol} | "
                 f"Entry={fill_price:.2f} | SL={bracket.sl_trigger_price:.2f} | "
                 f"TP={bracket.tp_trigger_price:.2f}"
+            )
+            self._notify_event(
+                'BRACKET_ACTIVATED',
+                {
+                    'symbol': bracket.symbol,
+                    'side': bracket.side,
+                    'entry': round(fill_price, 2),
+                    'sl': round(bracket.sl_trigger_price, 2),
+                    'tp': round(bracket.tp_trigger_price, 2),
+                },
             )
             
             # Persist state
@@ -684,10 +852,16 @@ class BracketManager:
         return None
 
     def _fire_exits_batch(self, exits: list) -> None:
-        """
-        Process exit queue with single lock acquisition.
-        
-        ✅ BATCH PROCESSING - Reduces lock contention
+        """Process exit queue with a single lock acquisition.
+
+        Args:
+            exits: Iterable of bracket/action tuples to execute.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
         """
         import time
         now = time.time()
@@ -747,12 +921,33 @@ class BracketManager:
                 f"⚡ EXIT FIRED: {bracket.symbol} | {exit_side} {qty} | "
                 f"Type: {exit_type} | Reason: {reason}"
             )
+            self._notify_event(
+                'BRACKET_EXIT_FIRED',
+                {
+                    'symbol': bracket.symbol,
+                    'side': exit_side,
+                    'qty': qty,
+                    'exit_type': exit_type,
+                    'reason': reason,
+                    'ltp': round(float(action.get('price', 0.0) or 0.0), 2),
+                },
+            )
             
             try:
                 # Use optimized exit with slippage protection
                 self._execute_exit_order(bracket, qty, exit_side, reason, is_partial)
             except Exception as e:
                 LOGGER.critical(f"🛑 EXIT ORDER FAILED: {e}")
+                self._notify_event(
+                    'BRACKET_EXIT_FAILED',
+                    {
+                        'symbol': bracket.symbol,
+                        'side': exit_side,
+                        'qty': qty,
+                        'exit_type': exit_type,
+                        'reason': reason,
+                    },
+                )
                 # Revert state
                 with self._lock:
                     bracket.remaining_quantity += qty
@@ -848,14 +1043,16 @@ class BracketManager:
         self._apply_trailing_math(bracket)
 
     def _apply_trailing_math(self, bracket: BracketState) -> None:
-        """
-        World-Class Adaptive Trailing Stop.
-        
-        ✅ FEATURES:
-        - Tiered protection based on profit level
-        - Momentum-aware trail tightness
-        - Automatic breakeven lock
-        - Profit protection at key levels
+        """Apply adaptive trailing rules for the bracket.
+
+        Args:
+            bracket: Active bracket state with the latest LTP snapshot.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
         """
         import os
         
@@ -910,6 +1107,19 @@ class BracketManager:
                         f"SL {old_sl:.2f} → {new_sl:.2f} | "
                         f"Profit: {profit_pct:.1f}% | LTP: {ltp:.2f}"
                     )
+                    if self._should_notify_trail(
+                        bracket.entry_order_id, bracket.sl_trigger_price, old_sl
+                    ):
+                        self._notify_event(
+                            'BRACKET_TRAIL_UPDATE',
+                            {
+                                'symbol': bracket.symbol,
+                                'side': bracket.side,
+                                'sl': round(bracket.sl_trigger_price, 2),
+                                'ltp': round(ltp, 2),
+                                'profit_pct': round(profit_pct, 2),
+                            },
+                        )
             else:  # SELL
                 if new_sl < current_sl:
                     old_sl = bracket.sl_trigger_price
@@ -921,6 +1131,19 @@ class BracketManager:
                         f"SL {old_sl:.2f} → {new_sl:.2f} | "
                         f"Profit: {profit_pct:.1f}% | LTP: {ltp:.2f}"
                     )
+                    if self._should_notify_trail(
+                        bracket.entry_order_id, bracket.sl_trigger_price, old_sl
+                    ):
+                        self._notify_event(
+                            'BRACKET_TRAIL_UPDATE',
+                            {
+                                'symbol': bracket.symbol,
+                                'side': bracket.side,
+                                'sl': round(bracket.sl_trigger_price, 2),
+                                'ltp': round(ltp, 2),
+                                'profit_pct': round(profit_pct, 2),
+                            },
+                        )
 
     def _calculate_tiered_trailing_sl(
         self,
@@ -1986,6 +2209,3 @@ class BracketManager:
             True if symbol has at least one active bracket with remaining quantity.
         """
         return self.is_symbol_managed(symbol)
-
-
-
