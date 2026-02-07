@@ -1866,544 +1866,577 @@ class StrategyRunner:
             )
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
-        """
-        Handle incoming tick safely, updating state and triggering strategies.
-        Includes robust data extraction, validation, and multi-tier strategy execution.
-        """
-        now = datetime.now(timezone.utc)
-
-        if "FUT" in symbol.upper():
-            return
-
-        # =================================================================
-        # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
-        # =================================================================
-
-        # 1. Orphan Guard — adopt but DO NOT return (tick must still flow to bracket manager)
-        # ✅ FIX (6 Feb 2026): Removed early `return` that blocked SL/TP execution for orphans
-        if self._position_manager:
-            active_pos = self._position_manager.get_active_contract(symbol)
-            if active_pos:
-                strat = getattr(active_pos, "strategy", "") or "unknown"
-                if "manual" in strat.lower() or "unknown" in strat.lower():
-                    log_throttled(
-                        self._logger,
-                        f"orphan_guard_{symbol}",
-                        f"🛡️ ORPHAN GUARD: {symbol} is unmanaged. Adopting (tick continues)...",
-                        interval_sec=30.0,
-                        level=logging.WARNING,
-                    )
-                    if hasattr(self, "_adopt_orphan_positions"):
-                        self._adopt_orphan_positions()
-                    # ✅ DO NOT return — tick must continue flowing for bracket SL/TP monitoring
-
-        # 2. Market Time Check (Now 'now' is valid!)
-        if not self._is_market_open(now):
-            return
-
-        # =================================================================
-        # PHASE 1: EXTRACT DATA FIRST (Must happen before any logging)
-        # =================================================================
-
-        now = datetime.now(timezone.utc)
-
-        # Helper: Extract timestamp for freshness check
-        def _extract_timestamp(t, fallback):
-            ts = t.get("timestamp") or t.get("exchange_timestamp")
-            if isinstance(ts, (int, float)):
-                if ts > 10_000_000_000:  # Detect milliseconds
-                    ts = ts / 1000.0
-                try:
-                    return datetime.fromtimestamp(ts, tz=timezone.utc)
-                except (ValueError, OSError, OverflowError):
-                    return fallback
-            if isinstance(ts, datetime):
-                return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-            return fallback
-
-        # Helper: Safely extract float
-        def _extract_float(d, *keys):
-            """Return first positive float for keys. Args: d, keys. Returns: float. Raises: None."""
-            for k in keys:
-                if d.get(k) is not None:
-                    try:
-                        value = float(d[k])
-                    except (ValueError, TypeError) as exc:
-                        self._logger.debug(
-                            "Failure in _extract_float: %s",
-                            exc,
-                            extra={"event": "tick_extract_float_error", "key": k},
-                        )
-                        continue
-                    if value > 0:
-                        return value
-            return 0.0
-
-        # Helper: Safely extract int
-        def _extract_int(d, *keys):
-            for k in keys:
-                if d.get(k) is not None:
-                    try:
-                        return int(float(d[k]))
-                    except (ValueError, TypeError):
-                        continue
-            return 0
-
-        # Extract all data FIRST
-        timestamp = _extract_timestamp(tick, now)
-        tick_age = (now - timestamp).total_seconds()
-        price = _extract_float(tick, "ltp", "last_price", "close", "price")
-        broker_vwap = _extract_float(tick, "average_price", "vwap")
-        raw_volume = _extract_int(tick, "volume", "volume_traded")
-        source = tick.get("source", "unknown")
-
-        # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
-        volume = 0 
-        if raw_volume > 0:
-            last_cum = self._last_cumulative_volume.get(symbol, -1)  # ✅ Sentinel -1 (not 0)
-            if last_cum < 0:                                    # ✅ First tick detected by sentinel
-                # FIRST tick for this symbol — store baseline, DON'T use as bar volume
-                volume = 0                                      # ✅ Bar 1 gets volume=0, not 318M
-            elif raw_volume >= last_cum:
-                volume = raw_volume - last_cum                  # Normal delta
-            else:
-                # Volume reset (new day or data glitch) — small safe value
-                volume = min(raw_volume, 1000)                  # ✅ Capped reset
-            self._last_cumulative_volume[symbol] = raw_volume
-
-        # =================================================================
-        # PHASE 2: DATA VALIDATION
-        # =================================================================
-
-        # Stale tick check (increased threshold for REST polling to prevent false positives)
-        stale_threshold = 30.0 if source in ("rest", "polling") else 10.0
-
-        if tick_age > stale_threshold:
-            log_throttled(
-                self._logger,
-                f"stale_tick_{symbol}",
-                f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)",
-                interval_sec=30.0,
-                level=logging.WARNING,
-            )
-            return
-
-        # Price validity check
-        if price <= 0:
-            log_throttled(
-                self._logger,
-                f"invalid_price_{symbol}",
-                f"⚠️ Invalid price ({price}) for {symbol}, skipping",
-                interval_sec=60.0,
-                level=logging.WARNING,
-            )
-            return
-
-        # Volume validity check (relaxed warnings for REST mode)
-        if volume < 0:
-            log_throttled(
-                self._logger,
-                f"invalid_vol_{symbol}",
-                f"⚠️ Invalid volume ({volume}) for {symbol}, skipping",
-                interval_sec=60.0,
-                level=logging.WARNING,
-            )
-            return
-
-        # =================================================================
-        # PHASE 3: DIAGNOSTIC LOGGING
-        # =================================================================
-
-        # Log successful tick acceptance (throttled)
-        log_throttled(
-            self._logger,
-            f"tick_accepted_{symbol}",
-            f"✅ TICK ACCEPTED: {symbol} | LTP={price:.2f} | Age={tick_age:.1f}s | Vol={volume}",
-            interval_sec=60.0,
-            level=logging.INFO,
+        """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
+        self._logger.debug(
+            'Entered StrategyRunner._on_tick',
+            extra={'event': 'tick_enter', 'symbol': symbol},
         )
+        try:
+            now = datetime.now(timezone.utc)
 
-        # Grace period warmup logging
-        startup_time = getattr(self, "_startup_timestamp", None)
-        if startup_time is None:
-            self._startup_timestamp = time.time()
-            startup_time = self._startup_timestamp
+            if 'FUT' in symbol.upper():
+                return
 
-        time_since_startup = time.time() - startup_time
-        in_warmup = time_since_startup < 15  # Fast 15s warmup
+            # =================================================================
+            # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
+            # =================================================================
 
-        if in_warmup:
+            # 1. Orphan Guard — adopt but DO NOT return (tick must still flow to bracket manager)
+            # ✅ FIX (6 Feb 2026): Removed early `return` that blocked SL/TP execution for orphans
+            if self._position_manager:
+                active_pos = self._position_manager.get_active_contract(symbol)
+                if active_pos:
+                    strat = getattr(active_pos, 'strategy', '') or 'unknown'
+                    if 'manual' in strat.lower() or 'unknown' in strat.lower():
+                        log_throttled(
+                            self._logger,
+                            f'orphan_guard_{symbol}',
+                            f'🛡️ ORPHAN GUARD: {symbol} is unmanaged. Adopting (tick continues)...',
+                            interval_sec=30.0,
+                            level=logging.WARNING,
+                        )
+                        if hasattr(self, '_adopt_orphan_positions'):
+                            self._adopt_orphan_positions()
+                        # ✅ DO NOT return — tick must continue flowing for bracket SL/TP monitoring
+
+            # 2. Market Time Check (Now 'now' is valid!)
+            if not self._is_market_open(now):
+                log_throttled(
+                    self._logger,
+                    f'market_closed_{symbol}',
+                    'Condition met: market_closed',
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                )
+                return
+
+            # =================================================================
+            # PHASE 1: EXTRACT DATA FIRST (Must happen before any logging)
+            # =================================================================
+
+            now = datetime.now(timezone.utc)
+
+            # Helper: Extract timestamp for freshness check
+            def _extract_timestamp(t, fallback):
+                ts = t.get('timestamp') or t.get('exchange_timestamp')
+                if isinstance(ts, (int, float)):
+                    if ts > 10_000_000_000:  # Detect milliseconds
+                        ts = ts / 1000.0
+                    try:
+                        return datetime.fromtimestamp(ts, tz=timezone.utc)
+                    except (ValueError, OSError, OverflowError):
+                        return fallback
+                if isinstance(ts, datetime):
+                    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                return fallback
+
+            # Helper: Safely extract float
+            def _extract_float(d, *keys):
+                """Return first positive float for keys. Args: d, keys. Returns: float. Raises: None."""
+                for k in keys:
+                    if d.get(k) is not None:
+                        try:
+                            value = float(d[k])
+                        except (ValueError, TypeError) as exc:
+                            self._logger.debug(
+                                'Failure in _extract_float: %s',
+                                exc,
+                                extra={'event': 'tick_extract_float_error', 'key': k},
+                            )
+                            continue
+                        if value > 0:
+                            return value
+                return 0.0
+
+            # Helper: Safely extract int
+            def _extract_int(d, *keys):
+                for k in keys:
+                    if d.get(k) is not None:
+                        try:
+                            return int(float(d[k]))
+                        except (ValueError, TypeError):
+                            continue
+                return 0
+
+            # Extract all data FIRST
+            timestamp = _extract_timestamp(tick, now)
+            tick_age = (now - timestamp).total_seconds()
+            price = _extract_float(tick, 'ltp', 'last_price', 'close', 'price')
+            broker_vwap = _extract_float(tick, 'average_price', 'vwap')
+            raw_volume = _extract_int(
+                tick, 'volume', 'volume_traded', 'volume_traded_today'
+            )
+            last_quantity = _extract_int(
+                tick,
+                'last_quantity',
+                'last_traded_quantity',
+                'last_trade_quantity',
+                'last_traded_qty',
+            )
+            source = tick.get('source', 'unknown')
+
+            # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
+            volume = 0
+            if raw_volume > 0:
+                last_cum = self._last_cumulative_volume.get(
+                    symbol, -1
+                )  # ✅ Sentinel -1 (not 0)
+                if last_cum < 0:  # ✅ First tick detected by sentinel
+                    # FIRST tick for this symbol — store baseline, DON'T use as bar volume
+                    volume = 0  # ✅ Bar 1 gets volume=0, not 318M
+                elif raw_volume >= last_cum:
+                    volume = raw_volume - last_cum  # Normal delta
+                else:
+                    # Volume reset (new day or data glitch) — small safe value
+                    volume = min(raw_volume, 1000)  # ✅ Capped reset
+                self._last_cumulative_volume[symbol] = raw_volume
+            elif last_quantity > 0:
+                volume = last_quantity
+                log_throttled(
+                    self._logger,
+                    f'tick_volume_fallback_{symbol}',
+                    'Condition met: tick_volume_last_quantity',
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                )
+
+            # =================================================================
+            # PHASE 2: DATA VALIDATION
+            # =================================================================
+
+            # Stale tick check (increased threshold for REST polling to prevent false positives)
+            stale_threshold = 30.0 if source in ('rest', 'polling') else 10.0
+
+            if tick_age > stale_threshold:
+                log_throttled(
+                    self._logger,
+                    f'stale_tick_{symbol}',
+                    f'⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)',
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
+                return
+
+            # Price validity check
+            if price <= 0:
+                log_throttled(
+                    self._logger,
+                    f'invalid_price_{symbol}',
+                    f'⚠️ Invalid price ({price}) for {symbol}, skipping',
+                    interval_sec=60.0,
+                    level=logging.WARNING,
+                )
+                return
+
+            # Volume validity check (relaxed warnings for REST mode)
+            if volume < 0:
+                log_throttled(
+                    self._logger,
+                    f'invalid_vol_{symbol}',
+                    f'⚠️ Invalid volume ({volume}) for {symbol}, skipping',
+                    interval_sec=60.0,
+                    level=logging.WARNING,
+                )
+                return
+
+            # =================================================================
+            # PHASE 3: DIAGNOSTIC LOGGING
+            # =================================================================
+
+            # Log successful tick acceptance (throttled)
             log_throttled(
                 self._logger,
-                "warmup_period",
-                f"⏳ WARMUP: {15 - time_since_startup:.0f}s remaining before trading enabled",
-                interval_sec=5.0,
+                f'tick_accepted_{symbol}',
+                f'✅ TICK ACCEPTED: {symbol} | LTP={price:.2f} | Age={tick_age:.1f}s | Vol={volume}',
+                interval_sec=60.0,
                 level=logging.INFO,
             )
 
-        # =================================================================
-        # PHASE 4: BAR BUILDING (Always process, even during warmup)
-        # =================================================================
+            # Grace period warmup logging
+            startup_time = getattr(self, '_startup_timestamp', None)
+            if startup_time is None:
+                self._startup_timestamp = time.time()
+                startup_time = self._startup_timestamp
 
-        builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
-        try:
-            completed_bar = builder.update(float(price), volume, timestamp)
-            if completed_bar is not None:
-                self._ingest_bar(symbol, completed_bar)
-        except ValueError as exc:
-            if getattr(builder, "_last_error_ts", 0) < now.timestamp() - 60:
-                self._logger.warning(f"Bar update issue for {symbol}: {exc}")
-                builder._last_error_ts = now.timestamp()
+            time_since_startup = time.time() - startup_time
+            in_warmup = time_since_startup < 15  # Fast 15s warmup
 
-        # =================================================================
-        # PHASE 5: POSITION MANAGER UPDATE
-        # =================================================================
+            if in_warmup:
+                log_throttled(
+                    self._logger,
+                    'warmup_period',
+                    f'⏳ WARMUP: {15 - time_since_startup:.0f}s remaining before trading enabled',
+                    interval_sec=5.0,
+                    level=logging.INFO,
+                )
 
-        if hasattr(self._position_manager, "update_position_price"):
+            # =================================================================
+            # PHASE 4: BAR BUILDING (Always process, even during warmup)
+            # =================================================================
+
+            builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
             try:
-                self._position_manager.update_position_price(symbol, price)
-            except Exception:
-                pass
+                completed_bar = builder.update(float(price), volume, timestamp)
+                if completed_bar is not None:
+                    self._ingest_bar(symbol, completed_bar)
+            except ValueError as exc:
+                if getattr(builder, '_last_error_ts', 0) < now.timestamp() - 60:
+                    self._logger.warning(f'Bar update issue for {symbol}: {exc}')
+                    builder._last_error_ts = now.timestamp()
 
-        # =================================================================
-        # PHASE 6: RISK CHECK (Block trading if risk conditions not met)
-        # =================================================================
+            # =================================================================
+            # PHASE 5: POSITION MANAGER UPDATE
+            # =================================================================
 
-        # Only check risk if not in warmup
-        if not in_warmup:
-            try:
-                is_allowed = False
-                rm = self._risk_manager
+            if hasattr(self._position_manager, 'update_position_price'):
+                try:
+                    self._position_manager.update_position_price(symbol, price)
+                except Exception:
+                    pass
 
-                if rm:
-                    if hasattr(rm, "can_trade"):
-                        is_allowed = rm.can_trade(symbol)
-                    elif hasattr(rm, "risk_gate_should_trade"):
-                        res = rm.risk_gate_should_trade()
-                        is_allowed = res[0] if isinstance(res, tuple) else bool(res)
-                    elif hasattr(rm, "can_trade_now"):
-                        res = rm.can_trade_now()
-                        is_allowed = res[0] if isinstance(res, tuple) else bool(res)
+            # =================================================================
+            # PHASE 6: RISK CHECK (Block trading if risk conditions not met)
+            # =================================================================
+
+            # Only check risk if not in warmup
+            if not in_warmup:
+                try:
+                    is_allowed = False
+                    rm = self._risk_manager
+
+                    if rm:
+                        if hasattr(rm, 'can_trade'):
+                            is_allowed = rm.can_trade(symbol)
+                        elif hasattr(rm, 'risk_gate_should_trade'):
+                            res = rm.risk_gate_should_trade()
+                            is_allowed = res[0] if isinstance(res, tuple) else bool(res)
+                        elif hasattr(rm, 'can_trade_now'):
+                            res = rm.can_trade_now()
+                            is_allowed = res[0] if isinstance(res, tuple) else bool(res)
+                        else:
+                            is_allowed = False
                     else:
-                        is_allowed = False
-                else:
-                    # No risk manager = allow trading
-                    is_allowed = True
+                        # No risk manager = allow trading
+                        is_allowed = True
 
-                if not is_allowed:
-                    log_throttled(
-                        self._logger,
-                        f"risk_block_{symbol}",
-                        f"⛔ Risk Block Active: {symbol}. Trading Halted.",
-                        interval_sec=30.0,
-                        level=logging.WARNING,
-                    )
+                    if not is_allowed:
+                        log_throttled(
+                            self._logger,
+                            f'risk_block_{symbol}',
+                            f'⛔ Risk Block Active: {symbol}. Trading Halted.',
+                            interval_sec=30.0,
+                            level=logging.WARNING,
+                        )
+                        return
+
+                except Exception as e:
+                    self._logger.error(f'Critical error in risk check for {symbol}: {e}')
                     return
 
-            except Exception as e:
-                self._logger.error(f"Critical error in risk check for {symbol}: {e}")
+            # =================================================================
+            # PHASE 7: STRATEGY PREPARATION (Skip during warmup)
+            # =================================================================
+
+            if in_warmup:
                 return
 
-        # =================================================================
-        # PHASE 7: STRATEGY PREPARATION (Skip during warmup)
-        # =================================================================
-
-        if in_warmup:
-            return
-
-        with self._lock:
-            # Auto-track new symbols
-            if symbol not in self._active_symbols:
-                self._logger.info(f"🆕 Auto-tracking symbol from feed: {symbol}")
-                self._active_symbols.add(symbol)
-                self._symbol_state[symbol] = SymbolState(
-                    symbol=symbol, history_limit=self._config.max_trade_history
-                )
-
-            state = self._symbol_state.get(symbol)
-            if state is None or not state.active:
-                return
-
-            # Update VWAP from broker
-            if broker_vwap and broker_vwap > 0:
-                state.vwap = broker_vwap
-
-            # Heartbeat logging for derivatives (confirms data flow)
-            if "NIFTY" in symbol and any(x in symbol for x in ["FUT", "CE", "PE"]):
-                log_throttled(
-                    self._logger,
-                    f"heartbeat_{symbol}",
-                    f"💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}",
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                )
-
-            # =============================================================
-            # PHASE 8: SIGNAL GENERATION
-            # =============================================================
-            generated_signal = None
-
-            # 8A. FORCED SIGNAL (Testing only)
-            force_signal_enabled = os.getenv("FORCE_SIGNAL", "").lower() == "true"
-            disable_early_forced = (
-                os.getenv("FEATURE_DISABLE_EARLY_FORCED_SIGNALS", "").lower() == "true"
-            )
-
-            if force_signal_enabled and not disable_early_forced:
-                generated_signal = Signal(
-                    action="BUY",
-                    symbol=symbol,
-                    quantity=1,
-                    confidence=1.0,
-                    reason="forced_signal_validation",
-                    stop_loss=None,
-                    take_profit=None,
-                    metadata={"source": "forced"},
-                )
-                self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
-
-            # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
-            vwap_crossover_enabled = (
-                os.getenv("ENABLE_VWAP_CROSSOVER", "false").lower() == "true"
-            )
-
-            if (
-                vwap_crossover_enabled
-                and generated_signal is None
-                and state.vwap
-                and state.vwap > 0
-                and "FUT" not in symbol.upper()
-            ):
-                prev_ltp = (
-                    _extract_float(state.last_tick, "ltp", "last_price")
-                    if state.last_tick
-                    else None
-                )
-                curr_vwap = state.vwap
-
-                if prev_ltp and curr_vwap and price > 0:
-                    threshold = curr_vwap * 0.0005  # 0.05% buffer
-                    is_cross_up = prev_ltp < (curr_vwap + threshold) and price > (
-                        curr_vwap + threshold
-                    )
-                    is_cross_down = prev_ltp > (curr_vwap - threshold) and price < (
-                        curr_vwap - threshold
-                    )
-
-                    # ✅ FIX: Calculate proper stop_loss and take_profit
-                    sl_pct = float(os.getenv("VWAP_SL_PCT", "1.5"))  # 1.5% SL
-                    tp_pct = float(
-                        os.getenv("VWAP_TP_PCT", "2.0")
-                    )  # 2.0% TP (1:1.33 RR)
-
-                    if is_cross_up:
-                        # BUY signal - SL below, TP above
-                        calculated_sl = price * (1 - sl_pct / 100)
-                        calculated_tp = price * (1 + tp_pct / 100)
-
-                        self._logger.info(
-                            f"⚡ VWAP CROSSOVER UP: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
-                            extra={"event": "vwap_crossover", "symbol": symbol},
-                        )
-                        generated_signal = Signal(
-                            action="BUY",
-                            symbol=symbol,
-                            quantity=1,
-                            confidence=0.75,
-                            reason="vwap_crossover_up",
-                            stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
-                            take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
-                            metadata={
-                                "strategy": "vwap_scalp",
-                                "vwap": curr_vwap,
-                                "tag": "vwap_scalp",
-                                "sl_pct": sl_pct,
-                                "tp_pct": tp_pct,
-                            },
-                        )
-                    elif is_cross_down:
-                        # SELL signal - SL above, TP below
-                        calculated_sl = price * (1 + sl_pct / 100)
-                        calculated_tp = price * (1 - tp_pct / 100)
-
-                        self._logger.info(
-                            f"⚡ VWAP CROSSOVER DOWN: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
-                            extra={"event": "vwap_crossover", "symbol": symbol},
-                        )
-                        generated_signal = Signal(
-                            action="SELL",
-                            symbol=symbol,
-                            quantity=1,
-                            confidence=0.75,
-                            reason="vwap_crossover_down",
-                            stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
-                            take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
-                            metadata={
-                                "strategy": "vwap_scalp",
-                                "vwap": curr_vwap,
-                                "tag": "vwap_scalp_short",
-                                "sl_pct": sl_pct,
-                                "tp_pct": tp_pct,
-                            },
-                        )
-
-            # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
-            if generated_signal is None and (not state.vwap or state.vwap == 0):
-                prev_ltp = (
-                    _extract_float(state.last_tick, "ltp", "last_price")
-                    if state.last_tick
-                    else None
-                )
-
-                if prev_ltp and prev_ltp > 0 and price > 0:
-                    price_change_pct = ((price - prev_ltp) / prev_ltp) * 100
-                    MOMENTUM_THRESHOLD_PCT = 0.15
-
-                    # ✅ FIX: Calculate proper stop_loss for momentum signals too
-                    sl_pct = float(os.getenv("MOMENTUM_SL_PCT", "2.0"))
-                    tp_pct = float(os.getenv("MOMENTUM_TP_PCT", "2.5"))
-
-                    if price_change_pct > MOMENTUM_THRESHOLD_PCT:
-                        calculated_sl = price * (1 - sl_pct / 100)
-                        calculated_tp = price * (1 + tp_pct / 100)
-
-                        self._logger.info(
-                            f"🚀 MOMENTUM FALLBACK BUY: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)",
-                            extra={"event": "momentum_fallback", "symbol": symbol},
-                        )
-                        generated_signal = Signal(
-                            action="BUY",
-                            symbol=symbol,
-                            quantity=1,
-                            confidence=0.60,
-                            reason="momentum_breakout_up",
-                            stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
-                            take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
-                            metadata={
-                                "strategy": "momentum_fallback",
-                                "price_change_pct": price_change_pct,
-                                "tag": "fallback_long",
-                            },
-                        )
-                    elif price_change_pct < -MOMENTUM_THRESHOLD_PCT:
-                        calculated_sl = price * (1 + sl_pct / 100)
-                        calculated_tp = price * (1 - tp_pct / 100)
-
-                        self._logger.info(
-                            f"🔻 MOMENTUM FALLBACK SELL: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)",
-                            extra={"event": "momentum_fallback", "symbol": symbol},
-                        )
-                        generated_signal = Signal(
-                            action="SELL",
-                            symbol=symbol,
-                            quantity=1,
-                            confidence=0.60,
-                            reason="momentum_breakout_down",
-                            stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
-                            take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
-                            metadata={
-                                "strategy": "momentum_fallback",
-                                "price_change_pct": price_change_pct,
-                                "tag": "fallback_short",
-                            },
-                        )
-
-            # Update last tick
-            state.last_tick = dict(tick)
-
-            # Check if trading is paused
-            if not self._running or getattr(self, "_trading_paused", False):
-                return
-
-            # Check cooldown
-            if state.cooldown_until and now < state.cooldown_until:
-                return
-
-        # =================================================================
-        # PHASE 9: SIGNAL SELECTION & STRATEGY MANAGER EVALUATION
-        # =================================================================
-
-        signal = generated_signal
-
-        # If no immediate signal, delegate to complex StrategyManager
-        if signal is None and self._config.min_indicator_bars:
-            should_evaluate = False
             with self._lock:
+                # Auto-track new symbols
+                if symbol not in self._active_symbols:
+                    self._logger.info(f'🆕 Auto-tracking symbol from feed: {symbol}')
+                    self._active_symbols.add(symbol)
+                    self._symbol_state[symbol] = SymbolState(
+                        symbol=symbol, history_limit=self._config.max_trade_history
+                    )
+
                 state = self._symbol_state.get(symbol)
-                if state:
-                    last_eval = getattr(state, "_last_strategy_eval", None)
-                    # Limit evaluation frequency (max 2 per second)
-                    if last_eval and (now - last_eval).total_seconds() < 0.5:
-                        return
-                    state._last_strategy_eval = now
-                    should_evaluate = True
+                if state is None or not state.active:
+                    return
 
-            if should_evaluate:
-                # ✅ DIAGNOSTIC LOG: Confirm evaluation is happening
-                log_throttled(
-                    self._logger,
-                    f"strategy_eval_{symbol}",
-                    f"🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._config.min_indicator_bars}",
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                )
+                # Update VWAP from broker
+                if broker_vwap and broker_vwap > 0:
+                    state.vwap = broker_vwap
 
-                is_ready = self._indicator_engine.is_ready(
-                    symbol, self._config.min_indicator_bars
-                )
-
-                if is_ready:
-                    # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
+                # Heartbeat logging for derivatives (confirms data flow)
+                if 'NIFTY' in symbol and any(x in symbol for x in ['FUT', 'CE', 'PE']):
                     log_throttled(
                         self._logger,
-                        f"indicators_ready_{symbol}",
-                        f"✅ INDICATORS READY: {symbol} | Calling StrategyManager...",
-                        interval_sec=60.0,
+                        f'heartbeat_{symbol}',
+                        f'💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}',
+                        interval_sec=30.0,
                         level=logging.INFO,
                     )
 
-                    signal = self._strategy_manager.generate_signal(symbol, price)
-                    if signal is None:
-                        log_throttled(
-                            self._logger,
-                            f"no_signal_manager_{symbol}",
-                            f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL",
-                            interval_sec=30.0,
-                            level=logging.INFO,
+                # =============================================================
+                # PHASE 8: SIGNAL GENERATION
+                # =============================================================
+                generated_signal = None
+
+                # 8A. FORCED SIGNAL (Testing only)
+                force_signal_enabled = os.getenv('FORCE_SIGNAL', '').lower() == 'true'
+                disable_early_forced = (
+                    os.getenv('FEATURE_DISABLE_EARLY_FORCED_SIGNALS', '').lower()
+                    == 'true'
+                )
+
+                if force_signal_enabled and not disable_early_forced:
+                    generated_signal = Signal(
+                        action='BUY',
+                        symbol=symbol,
+                        quantity=1,
+                        confidence=1.0,
+                        reason='forced_signal_validation',
+                        stop_loss=None,
+                        take_profit=None,
+                        metadata={'source': 'forced'},
+                    )
+                    self._logger.warning(f'⚠️ FORCED SIGNAL EMITTED for {symbol}')
+
+                # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
+                vwap_crossover_enabled = (
+                    os.getenv('ENABLE_VWAP_CROSSOVER', 'false').lower() == 'true'
+                )
+
+                if (
+                    vwap_crossover_enabled
+                    and generated_signal is None
+                    and state.vwap
+                    and state.vwap > 0
+                    and 'FUT' not in symbol.upper()
+                ):
+                    prev_ltp = (
+                        _extract_float(state.last_tick, 'ltp', 'last_price')
+                        if state.last_tick
+                        else None
+                    )
+                    curr_vwap = state.vwap
+
+                    if prev_ltp and curr_vwap and price > 0:
+                        threshold = curr_vwap * 0.0005  # 0.05% buffer
+                        is_cross_up = prev_ltp < (curr_vwap + threshold) and price > (
+                            curr_vwap + threshold
                         )
-                else:
-                    # ✅ DIAGNOSTIC LOG: Explain why no evaluation happened
-                    log_throttled(
-                        self._logger,
-                        f"not_ready_{symbol}",
-                        f"⏳ INDICATORS NOT READY: {symbol} (Need {self._config.min_indicator_bars} bars)",
-                        interval_sec=30.0,
-                        level=logging.WARNING,
+                        is_cross_down = prev_ltp > (curr_vwap - threshold) and price < (
+                            curr_vwap - threshold
+                        )
+
+                        # ✅ FIX: Calculate proper stop_loss and take_profit
+                        sl_pct = float(os.getenv('VWAP_SL_PCT', '1.5'))  # 1.5% SL
+                        tp_pct = float(
+                            os.getenv('VWAP_TP_PCT', '2.0')
+                        )  # 2.0% TP (1:1.33 RR)
+
+                        if is_cross_up:
+                            # BUY signal - SL below, TP above
+                            calculated_sl = price * (1 - sl_pct / 100)
+                            calculated_tp = price * (1 + tp_pct / 100)
+
+                            self._logger.info(
+                                f'⚡ VWAP CROSSOVER UP: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})',
+                                extra={'event': 'vwap_crossover', 'symbol': symbol},
+                            )
+                            generated_signal = Signal(
+                                action='BUY',
+                                symbol=symbol,
+                                quantity=1,
+                                confidence=0.75,
+                                reason='vwap_crossover_up',
+                                stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
+                                take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
+                                metadata={
+                                    'strategy': 'vwap_scalp',
+                                    'vwap': curr_vwap,
+                                    'tag': 'vwap_scalp',
+                                    'sl_pct': sl_pct,
+                                    'tp_pct': tp_pct,
+                                },
+                            )
+                        elif is_cross_down:
+                            # SELL signal - SL above, TP below
+                            calculated_sl = price * (1 + sl_pct / 100)
+                            calculated_tp = price * (1 - tp_pct / 100)
+
+                            self._logger.info(
+                                f'⚡ VWAP CROSSOVER DOWN: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})',
+                                extra={'event': 'vwap_crossover', 'symbol': symbol},
+                            )
+                            generated_signal = Signal(
+                                action='SELL',
+                                symbol=symbol,
+                                quantity=1,
+                                confidence=0.75,
+                                reason='vwap_crossover_down',
+                                stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
+                                take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
+                                metadata={
+                                    'strategy': 'vwap_scalp',
+                                    'vwap': curr_vwap,
+                                    'tag': 'vwap_scalp_short',
+                                    'sl_pct': sl_pct,
+                                    'tp_pct': tp_pct,
+                                },
+                            )
+
+                # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
+                if generated_signal is None and (not state.vwap or state.vwap == 0):
+                    prev_ltp = (
+                        _extract_float(state.last_tick, 'ltp', 'last_price')
+                        if state.last_tick
+                        else None
                     )
 
-        # =================================================================
-        # PHASE 10: EXECUTE SIGNAL
-        # =================================================================
+                    if prev_ltp and prev_ltp > 0 and price > 0:
+                        price_change_pct = ((price - prev_ltp) / prev_ltp) * 100
+                        MOMENTUM_THRESHOLD_PCT = 0.15
 
-        if signal and signal.action != "HOLD":
-            with self._lock:
-                state = self._symbol_state.get(symbol)
-                if state:
-                    if state.last_signal_at:
-                        elapsed = (now - state.last_signal_at).total_seconds()
-                        if elapsed < self._config.signal_cooldown_seconds:
+                        # ✅ FIX: Calculate proper stop_loss for momentum signals too
+                        sl_pct = float(os.getenv('MOMENTUM_SL_PCT', '2.0'))
+                        tp_pct = float(os.getenv('MOMENTUM_TP_PCT', '2.5'))
+
+                        if price_change_pct > MOMENTUM_THRESHOLD_PCT:
+                            calculated_sl = price * (1 - sl_pct / 100)
+                            calculated_tp = price * (1 + tp_pct / 100)
+
+                            self._logger.info(
+                                f'🚀 MOMENTUM FALLBACK BUY: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)',
+                                extra={'event': 'momentum_fallback', 'symbol': symbol},
+                            )
+                            generated_signal = Signal(
+                                action='BUY',
+                                symbol=symbol,
+                                quantity=1,
+                                confidence=0.60,
+                                reason='momentum_breakout_up',
+                                stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
+                                take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
+                                metadata={
+                                    'strategy': 'momentum_fallback',
+                                    'price_change_pct': price_change_pct,
+                                    'tag': 'fallback_long',
+                                },
+                            )
+                        elif price_change_pct < -MOMENTUM_THRESHOLD_PCT:
+                            calculated_sl = price * (1 + sl_pct / 100)
+                            calculated_tp = price * (1 - tp_pct / 100)
+
+                            self._logger.info(
+                                f'🔻 MOMENTUM FALLBACK SELL: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)',
+                                extra={'event': 'momentum_fallback', 'symbol': symbol},
+                            )
+                            generated_signal = Signal(
+                                action='SELL',
+                                symbol=symbol,
+                                quantity=1,
+                                confidence=0.60,
+                                reason='momentum_breakout_down',
+                                stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
+                                take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
+                                metadata={
+                                    'strategy': 'momentum_fallback',
+                                    'price_change_pct': price_change_pct,
+                                    'tag': 'fallback_short',
+                                },
+                            )
+
+                # Update last tick
+                state.last_tick = dict(tick)
+
+                # Check if trading is paused
+                if not self._running or getattr(self, '_trading_paused', False):
+                    return
+
+                # Check cooldown
+                if state.cooldown_until and now < state.cooldown_until:
+                    return
+
+            # =================================================================
+            # PHASE 9: SIGNAL SELECTION & STRATEGY MANAGER EVALUATION
+            # =================================================================
+
+            signal = generated_signal
+
+            # If no immediate signal, delegate to complex StrategyManager
+            if signal is None and self._config.min_indicator_bars:
+                should_evaluate = False
+                with self._lock:
+                    state = self._symbol_state.get(symbol)
+                    if state:
+                        last_eval = getattr(state, '_last_strategy_eval', None)
+                        # Limit evaluation frequency (max 2 per second)
+                        if last_eval and (now - last_eval).total_seconds() < 0.5:
                             return
+                        state._last_strategy_eval = now
+                        should_evaluate = True
 
-                    state.strategy_data["last_signal"] = {
-                        "action": signal.action,
-                        "reason": signal.reason,
-                        "timestamp": now.isoformat(),
-                    }
+                if should_evaluate:
+                    # ✅ DIAGNOSTIC LOG: Confirm evaluation is happening
+                    log_throttled(
+                        self._logger,
+                        f'strategy_eval_{symbol}',
+                        f'🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._config.min_indicator_bars}',
+                        interval_sec=30.0,
+                        level=logging.INFO,
+                    )
 
-            self._logger.info(
-                f"🚀 SIGNAL EXECUTING: {symbol} | Action={signal.action} | Reason={signal.reason}"
-            )
-            self._handle_signal(signal, price, now)
+                    is_ready = self._indicator_engine.is_ready(
+                        symbol, self._config.min_indicator_bars
+                    )
+
+                    if is_ready:
+                        # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
+                        log_throttled(
+                            self._logger,
+                            f'indicators_ready_{symbol}',
+                            f'✅ INDICATORS READY: {symbol} | Calling StrategyManager...',
+                            interval_sec=60.0,
+                            level=logging.INFO,
+                        )
+
+                        signal = self._strategy_manager.generate_signal(symbol, price)
+                        if signal is None:
+                            log_throttled(
+                                self._logger,
+                                f'no_signal_manager_{symbol}',
+                                f'📉 Strategy Manager evaluated {symbol}: NO SIGNAL',
+                                interval_sec=30.0,
+                                level=logging.INFO,
+                            )
+                    else:
+                        # ✅ DIAGNOSTIC LOG: Explain why no evaluation happened
+                        log_throttled(
+                            self._logger,
+                            f'not_ready_{symbol}',
+                            f'⏳ INDICATORS NOT READY: {symbol} (Need {self._config.min_indicator_bars} bars)',
+                            interval_sec=30.0,
+                            level=logging.WARNING,
+                        )
+
+            # =================================================================
+            # PHASE 10: EXECUTE SIGNAL
+            # =================================================================
+
+            if signal and signal.action != 'HOLD':
+                with self._lock:
+                    state = self._symbol_state.get(symbol)
+                    if state:
+                        if state.last_signal_at:
+                            elapsed = (now - state.last_signal_at).total_seconds()
+                            if elapsed < self._config.signal_cooldown_seconds:
+                                return
+
+                        state.strategy_data['last_signal'] = {
+                            'action': signal.action,
+                            'reason': signal.reason,
+                            'timestamp': now.isoformat(),
+                        }
+
+                self._logger.info(
+                    f'🚀 SIGNAL EXECUTING: {symbol} | Action={signal.action} | Reason={signal.reason}'
+                )
+                self._handle_signal(signal, price, now)
+        except Exception as e:
+            self._logger.error('Failure in _on_tick: %s', e, exc_info=True)
+            return
 
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
         """
