@@ -27,15 +27,18 @@ class GammaScalpingStrategy(EliteStrategy):
     Captures explosive moves where Gamma (Acceleration) justifies the Theta (Decay) cost.
     Entry: High Momentum + Positive Gamma Environment.
     """
+
     MIN_BARS_REQUIRED = 3
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
     __slots__ = ("_gamma_config",)
 
-    def __init__(self, config: GammaScalpingStrategyConfig, indicator_engine: Any) -> None:
+    def __init__(
+        self, config: GammaScalpingStrategyConfig, indicator_engine: Any
+    ) -> None:
         """
         Initialize strategy with configuration and engine.
-        
+
         Args:
             config: Strategy configuration dataclass.
             indicator_engine: Data provider.
@@ -49,42 +52,38 @@ class GammaScalpingStrategy(EliteStrategy):
         The StrategyManager will inject these into _evaluate_signal.
         """
         return {
-            "gamma", 
-            "theta", 
-            "delta", 
-            "ltp", 
-            "volume", 
+            "gamma",
+            "theta",
+            "delta",
+            "ltp",
+            "volume",
             "avg_volume",
-            "macd",         # Momentum Trigger
+            "macd",  # Momentum Trigger
             "macd_signal",  # Signal Line
-            "atr"           # Volatility for stops
+            "atr",  # Volatility for stops
         }
 
     def _evaluate_signal(
-        self, 
-        symbol: str, 
-        indicators: Dict[str, Any], 
-        current_price: float, 
-        position: Any | None = None
+        self,
+        symbol: str,
+        indicators: Dict[str, Any],
+        current_price: float,
+        position: Any | None = None,
     ) -> EliteSignal | None:
-        """
-        Modern Signature: Evaluates signal using injected data.
-        
-        Args:
-            symbol: Ticker symbol.
-            indicators: Dictionary containing pre-fetched indicators.
-            current_price: Latest LTP.
-            position: Current open position (if any).
-        """
+        """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
+        LOGGER.debug(
+            "Entered GammaScalpingStrategy._evaluate_signal",
+            extra={"event": "gamma_scalping_enter", "symbol": symbol},
+        )
         try:
             # 1. Safe Data Extraction (Fast Path)
             gamma = float(indicators.get("gamma") or 0.0)
             theta = float(indicators.get("theta") or 0.0)
             delta = float(indicators.get("delta") or 0.0)
-            
+
             macd = float(indicators.get("macd") or 0.0)
             signal_line = float(indicators.get("macd_signal") or 0.0)
-            
+
             atr = float(indicators.get("atr") or 0.0)
             vol = float(indicators.get("volume") or 0.0)
             avg_vol = float(indicators.get("avg_volume") or 1.0)
@@ -111,10 +110,10 @@ class GammaScalpingStrategy(EliteStrategy):
 
             # Bullish Crossover: MACD crosses above Signal
             bullish_momentum = (macd > signal_line) and (macd - signal_line) > 0.5
-            
+
             # Bearish Crossover: MACD crosses below Signal
             bearish_momentum = (macd < signal_line) and (signal_line - macd) > 0.5
-            
+
             # Skip if no momentum in either direction
             if not bullish_momentum and not bearish_momentum:
                 return None
@@ -122,15 +121,16 @@ class GammaScalpingStrategy(EliteStrategy):
             # 5. Logic: Volume Confirmation
             # Acceleration needs fuel.
             vol_ratio = vol / avg_vol
-            if vol_ratio < 1.0: # At least average volume
+            if vol_ratio < 1.0:  # At least average volume
                 return None
 
             # 6. Construct Signal (Buy Scalp)
             # 6. Construct Signal (Buy Scalp)
             # ✅ FIX: Options Long-Only Mode handling
             import os
+
             options_long_only = os.getenv("OPTIONS_LONG_ONLY", "true").lower() == "true"
-            
+
             option_type = None
             if bullish_momentum:
                 side = "BUY"
@@ -138,42 +138,73 @@ class GammaScalpingStrategy(EliteStrategy):
             else:
                 # Bearish momentum
                 if options_long_only:
-                    side = "BUY"      # BUY the PUT option
+                    side = "BUY"  # BUY the PUT option
                     option_type = "PE"  # Bearish = Put
                 else:
-                    side = "SELL"     # Only for futures/short-selling mode
-            
-            # Fallback ATR
-            if atr == 0: atr = current_price * 0.01
+                    side = "SELL"  # Only for futures/short-selling mode
 
-            # Tight Scalp Targets
-            # Stop Loss: Recent volatility (ATR)
-            stop_loss = current_price - (atr * 1.0)
-            
-            # Take Profit: Gamma moves are fast. 
-            # Target 2x ATR or a fixed Gamma spike
-            tp1 = current_price + (atr * 1.5)
-            tp2 = current_price + (atr * 3.0)
+            # Fallback ATR
+            if atr <= 0:
+                atr = current_price * 0.01
+
+            risk_mult = 1.0 if vol_ratio <= 1.5 else 1.2
+            risk = max(atr * risk_mult, current_price * 0.004)
+            rr_1 = 1.4
+            rr_2 = 2.8
+
+            if side == "BUY":
+                stop_loss = current_price - risk
+                tp1 = current_price + (risk * rr_1)
+                tp2 = current_price + (risk * rr_2)
+            else:
+                stop_loss = current_price + risk
+                tp1 = current_price - (risk * rr_1)
+                tp2 = current_price - (risk * rr_2)
+
+            if (
+                side == "BUY" and (stop_loss >= current_price or tp1 <= current_price)
+            ) or (
+                side == "SELL" and (stop_loss <= current_price or tp1 >= current_price)
+            ):
+                LOGGER.info(
+                    "Condition met: invalid gamma scalping brackets",
+                    extra={
+                        "event": "gamma_scalping_invalid_bracket",
+                        "symbol": symbol,
+                        "side": side,
+                        "entry": current_price,
+                        "stop_loss": stop_loss,
+                        "tp1": tp1,
+                        "tp2": tp2,
+                    },
+                )
+                return None
 
             # 7. Confidence Scoring
             # Base 65% (Scalping is noisy).
             confidence = 0.65
-            
+
             # Boost if Gamma is high (Acceleration is likely)
-            if gamma > 0.002: confidence += 0.15
-            
+            if gamma > 0.002:
+                confidence += 0.15
+
             # Boost if Volume is Absorbing (>2x)
-            if vol_ratio > 2.0: confidence += 0.10
+            if vol_ratio > 2.0:
+                confidence += 0.10
 
             LOGGER.info(
-                f"⚡ Gamma Scalp: {symbol} {side} | Gamma: {gamma:.4f} | Theta: {theta:.2f} | MACD Diff: {(macd-signal_line):.2f}",
+                "Condition met: gamma_scalping_signal",
                 extra={
                     "event": "gamma_scalping_signal",
                     "symbol": symbol,
                     "gamma": gamma,
                     "theta": theta,
-                    "vol_ratio": vol_ratio
-                }
+                    "vol_ratio": vol_ratio,
+                    "detail": (
+                        f"⚡ Gamma Scalp: {symbol} {side} | Gamma: {gamma:.4f} | "
+                        f"Theta: {theta:.2f} | MACD Diff: {(macd - signal_line):.2f}"
+                    ),
+                },
             )
 
             return EliteSignal(
@@ -182,7 +213,9 @@ class GammaScalpingStrategy(EliteStrategy):
                 confidence=min(confidence, 0.99),
                 entry_price=current_price,
                 stop_loss=stop_loss,
-                target=tp1,
+                target=tp2,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
                 quantity=self._gamma_config.quantity or 1,
                 strategy_name="Gamma_Scalp_Pro",
                 metadata={
@@ -191,7 +224,13 @@ class GammaScalpingStrategy(EliteStrategy):
                     "momentum": "MACD_Bullish",
                     "vol_ratio": round(vol_ratio, 2),
                     "option_type": option_type,
-                }
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "sl_atr_mult": risk_mult,
+                    "tp1_rr": rr_1,
+                    "tp2_rr": rr_2,
+                    "tp1_qty_pct": 0.5,
+                },
             )
 
         except Exception as e:

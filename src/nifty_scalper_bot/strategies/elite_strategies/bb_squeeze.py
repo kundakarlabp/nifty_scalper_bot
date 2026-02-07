@@ -26,6 +26,7 @@ class BBSqueezeStrategy(EliteStrategy):
     Trade volatility expansion following tight Bollinger compression.
     Detects 'Squeeze' (Low Volatility) -> 'Expansion' (High Volatility).
     """
+
     MIN_BARS_REQUIRED = 25
 
     # ✅ OPTIMIZATION: Use slots for memory efficiency
@@ -34,7 +35,7 @@ class BBSqueezeStrategy(EliteStrategy):
     def __init__(self, config: BBSqueezeStrategyConfig, indicator_engine: Any) -> None:
         """
         Initialize strategy with configuration and engine.
-        
+
         Args:
             config: Strategy configuration dataclass.
             indicator_engine: Data provider.
@@ -54,19 +55,21 @@ class BBSqueezeStrategy(EliteStrategy):
             "atr",
             "volume",
             "avg_volume",
-            "ltp"
+            "ltp",
         }
 
     def _evaluate_signal(
-        self, 
-        symbol: str, 
-        indicators: Dict[str, Any], 
-        current_price: float, 
-        position: Any | None = None
+        self,
+        symbol: str,
+        indicators: Dict[str, Any],
+        current_price: float,
+        position: Any | None = None,
     ) -> EliteSignal | None:
-        """
-        Modern Signature: Evaluates signal using injected data points.
-        """
+        """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
+        LOGGER.debug(
+            "Entered BBSqueezeStrategy._evaluate_signal",
+            extra={"event": "bb_squeeze_enter", "symbol": symbol},
+        )
         try:
             # 1. Safe Data Extraction
             upper = float(indicators.get("bollinger_upper") or 0.0)
@@ -82,12 +85,13 @@ class BBSqueezeStrategy(EliteStrategy):
 
             # 2. Calculate Bandwidth (The Squeeze Intensity)
             # Bandwidth tells us how "tight" the spring is coiled.
-            if mid == 0: return None
+            if mid == 0:
+                return None
             bandwidth_pct = ((upper - lower) / mid) * 100
 
             # Threshold from config (e.g., 0.5% width)
             squeeze_threshold = getattr(self._bb_config, "squeeze_threshold_pct", 0.5)
-            
+
             # If bands are wide, the squeeze has already resolved. Skip.
             # We allow up to 2x threshold to catch the very beginning of the expansion.
             if bandwidth_pct > (squeeze_threshold * 2.0):
@@ -99,45 +103,81 @@ class BBSqueezeStrategy(EliteStrategy):
                 side = "BUY"
             elif current_price < lower:
                 side = "SELL"
-            
+
             if not side:
                 return None
 
             # 4. Volume Confirmation (The "Fuel" Check)
             # A valid squeeze breakout MUST have expanding volume.
             vol_ratio = vol / avg_vol
-            if vol_ratio < 1.3: # Require 30% surge over average
+            if vol_ratio < 1.3:  # Require 30% surge over average
                 return None
 
             # 5. Dynamic Risk Management
             # Fallback ATR for stop calculation if missing
-            if atr == 0: atr = current_price * 0.005
+            if atr <= 0:
+                atr = current_price * 0.005
 
             # Stop Loss: The Middle Band (Mean)
             # In a true breakout, price should NOT return to the mean.
-            stop_loss = mid 
-            
             if side == "BUY":
-                # Targets based on volatility expansion
-                tp1 = current_price + (atr * 2.5)
-                tp2 = current_price + (atr * 5.0)
+                stop_loss = mid if mid < current_price else current_price - (atr * 1.2)
             else:
-                tp1 = current_price - (atr * 2.5)
-                tp2 = current_price - (atr * 5.0)
+                stop_loss = mid if mid > current_price else current_price + (atr * 1.2)
+
+            risk = abs(current_price - stop_loss)
+            if risk <= 0:
+                risk = atr * 1.2
+                stop_loss = (
+                    current_price - risk if side == "BUY" else current_price + risk
+                )
+            tp1 = (
+                current_price + (risk * 1.8)
+                if side == "BUY"
+                else current_price - (risk * 1.8)
+            )
+            tp2 = (
+                current_price + (risk * 3.6)
+                if side == "BUY"
+                else current_price - (risk * 3.6)
+            )
+            if (
+                side == "BUY" and (stop_loss >= current_price or tp1 <= current_price)
+            ) or (
+                side == "SELL" and (stop_loss <= current_price or tp1 >= current_price)
+            ):
+                LOGGER.info(
+                    "Condition met: invalid bb squeeze brackets",
+                    extra={
+                        "event": "bb_squeeze_invalid_bracket",
+                        "symbol": symbol,
+                        "side": side,
+                        "entry": current_price,
+                        "stop_loss": stop_loss,
+                        "tp1": tp1,
+                        "tp2": tp2,
+                    },
+                )
+                return None
 
             # 6. Confidence Scoring
             # Base 75%. +15% if volume is extreme (>2.5x)
             confidence = 0.75
-            if vol_ratio > 2.5: confidence += 0.15
+            if vol_ratio > 2.5:
+                confidence += 0.15
 
             LOGGER.info(
-                f"🚀 BB Squeeze Breakout: {symbol} {side} | Bandwidth: {bandwidth_pct:.2f}% | Vol: {vol_ratio:.1f}x",
+                "Condition met: bb_squeeze_signal",
                 extra={
                     "event": "bb_squeeze_signal",
                     "symbol": symbol,
                     "bandwidth": bandwidth_pct,
-                    "vol_ratio": vol_ratio
-                }
+                    "vol_ratio": vol_ratio,
+                    "detail": (
+                        f"🚀 BB Squeeze Breakout: {symbol} {side} | Bandwidth: "
+                        f"{bandwidth_pct:.2f}% | Vol: {vol_ratio:.1f}x"
+                    ),
+                },
             )
 
             return EliteSignal(
@@ -146,15 +186,21 @@ class BBSqueezeStrategy(EliteStrategy):
                 confidence=min(confidence, 0.99),
                 entry_price=current_price,
                 stop_loss=stop_loss,
-                target=tp1,
+                target=tp2,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
                 quantity=self._bb_config.quantity or 1,
                 strategy_name="BB_Squeeze_Pro",
                 metadata={
                     "type": "Volatility_Expansion",
                     "bandwidth_pct": round(bandwidth_pct, 3),
                     "volume_ratio": round(vol_ratio, 2),
-                    "mid_band_support": mid
-                }
+                    "mid_band_support": mid,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "tp1_rr": 1.8,
+                    "tp2_rr": 3.6,
+                },
             )
 
         except Exception as e:
