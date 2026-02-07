@@ -2733,8 +2733,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     websocket_enabled = bool(getattr(settings, "websocket_enabled", True))
     if websocket_disabled_env:
         websocket_enabled = False
-    stream_mode_raw = coalesce_str("STREAM__MODE", "STREAMING_MODE", default="poll")
-    streaming_mode = stream_mode_raw.strip().lower() or "poll"
+    stream_mode_raw = coalesce_str(
+        "STREAM__MODE",
+        "STREAMING_MODE",
+        default="websocket",
+    )
+    streaming_mode = stream_mode_raw.strip().lower() or "websocket"
     poll_enabled = coalesce_bool("POLLING__ENABLED", default=True)
     poll_interval_sec = coalesce_float("POLLING__INTERVAL_SEC", default=0.0)
     if poll_interval_sec > 10.0:
@@ -3073,7 +3077,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # ------------------------------------------------------------------
     # Streamer Selection Logic (Polling vs WebSocket)
     # ------------------------------------------------------------------
-    use_websockets = os.getenv("USE_WEBSOCKETS", "false").lower() == "true"
+    use_websockets = not use_polling
     if use_websockets:
         LOGGER.info("Initializing WebSocket Streamer...")
 

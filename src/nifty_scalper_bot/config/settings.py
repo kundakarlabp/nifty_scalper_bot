@@ -1320,7 +1320,7 @@ def get_settings() -> Settings:
     """
 
     app_config = load_from_env()
-    # Streaming defaults: poll by default, WS opt-in via WEBSOCKET__DISABLED=false
+    # Streaming defaults: websocket by default, poll via STREAM__MODE=poll
     session_allow_out_of_hours = _env_bool(
         "SESSION_ALLOW_OUT_OF_HOURS",
         "SESSION__ALLOW_OUT_OF_HOURS",
@@ -1338,7 +1338,7 @@ def get_settings() -> Settings:
         notifications=_build_notification_settings(app_config),
         session_allow_out_of_hours=session_allow_out_of_hours,
         websocket_enabled=not _env_bool(
-            "WEBSOCKET__DISABLED", "WEBSOCKET_DISABLED", default=True
+            "WEBSOCKET__DISABLED", "WEBSOCKET_DISABLED", default=False
         ),
         telemetry_tags=_env_csv_strs("TELEMETRY_TAGS", "TELEMETRY__TAGS"),
         regime=_build_regime_config(),
