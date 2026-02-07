@@ -2650,7 +2650,6 @@ class StrategyRunner:
         ✅ WORLD CLASS FIX: Better handling of market hours and volume.
         """
         from datetime import datetime
-        import os
         from zoneinfo import ZoneInfo
 
         # Check session override for testing
@@ -2812,119 +2811,139 @@ class StrategyRunner:
         timestamp: datetime,
     ) -> None:
         """Args: signal, base_symbol, trade_symbol, trade_price, timestamp. Returns: None. Raises: Exception."""
-        self._logger.debug(
-            'Entered StrategyRunner._handle_entry_signal_inner',
-            extra={'event': 'entry_signal_inner', 'symbol': base_symbol},
-        )
-
-        # ═══════════════════════════════════════════════════════════════
-        # 🛡️ GUARD 0.5: ORDER IN-FLIGHT CHECK
-        # Prevents duplicate submissions before order fills
-        # ═══════════════════════════════════════════════════════════════
-        if self._is_order_in_flight(trade_symbol or base_symbol, base_symbol):
-            self._logger.info(
-                f"🛡️ ORDER IN-FLIGHT REJECT: {base_symbol} | "
-                "Waiting for pending order to complete",
-                extra={"event": "order_in_flight_reject", "symbol": base_symbol},
+        try:
+            self._logger.debug(
+                'Entered StrategyRunner._handle_entry_signal_inner',
+                extra={'event': 'entry_signal_inner', 'symbol': base_symbol},
             )
-            return
-        # -----------------------------------------------------------
-        # 🛡️ GUARD 1: Signal Debounce (Anti-Whipsaw)
-        # -----------------------------------------------------------
-        with self._lock:
-            state = self._symbol_state.get(base_symbol)
-            if state and state.last_signal_at:
-                delta = (timestamp - state.last_signal_at).total_seconds()
-                debounce_limit = self._risk_manager.settings.signal_debounce_seconds
 
-                if delta < debounce_limit:
+            # ═══════════════════════════════════════════════════════════════
+            # 🛡️ GUARD 0.5: ORDER IN-FLIGHT CHECK
+            # Prevents duplicate submissions before order fills
+            # ═══════════════════════════════════════════════════════════════
+            if self._is_order_in_flight(trade_symbol or base_symbol, base_symbol):
+                self._logger.info(
+                    f"🛡️ ORDER IN-FLIGHT REJECT: {base_symbol} | "
+                    "Waiting for pending order to complete",
+                    extra={"event": "order_in_flight_reject", "symbol": base_symbol},
+                )
+                return
+            # -----------------------------------------------------------
+            # 🛡️ GUARD 1: Signal Debounce (Anti-Whipsaw)
+            # -----------------------------------------------------------
+            with self._lock:
+                state = self._symbol_state.get(base_symbol)
+                if state and state.last_signal_at:
+                    delta = (timestamp - state.last_signal_at).total_seconds()
+                    debounce_limit = self._risk_manager.settings.signal_debounce_seconds
+
+                    if delta < debounce_limit:
+                        self._logger.info(
+                            f"⏳ DEBOUNCE REJECT: {base_symbol} | "
+                            f"Wait {debounce_limit - delta:.1f}s more | "
+                            f"Action={signal.action}",
+                            extra={
+                                "event": "signal_debounce_reject",
+                                "symbol": base_symbol,
+                            },
+                        )
+                        return
+
+            # -----------------------------------------------------------
+            # 🛡️ GUARD 1.5: Recently Closed Check (Anti Re-Entry)
+            # ✅ FIX (6 Feb 2026): Prevents bot from re-entering manually exited trades
+            # -----------------------------------------------------------
+            import time as _time_mod
+
+            _exit_cooldown_sec = float(
+                os.getenv("EXIT_REENTRY_COOLDOWN_SEC", "300")
+            )  # 5 min default
+            _last_exit_time = self._recently_closed.get(base_symbol, 0)
+            if (
+                _last_exit_time
+                and (_time_mod.time() - _last_exit_time) < _exit_cooldown_sec
+            ):
+                _remaining = _exit_cooldown_sec - (
+                    _time_mod.time() - _last_exit_time
+                )
+                self._logger.info(
+                    f"🛡️ REENTRY COOLDOWN: {base_symbol} | "
+                    f"Exited {_time_mod.time() - _last_exit_time:.0f}s ago | "
+                    f"Wait {_remaining:.0f}s more",
+                    extra={"event": "signal_reentry_cooldown", "symbol": base_symbol},
+                )
+                return
+
+            # -----------------------------------------------------------
+            # 🛡️ GUARD 2: Position Check (No Pyramiding + Cross-Strike)
+            # ✅ FIX (6 Feb 2026): Also blocks same-underlying different-strike entries
+            # -----------------------------------------------------------
+            if self._position_manager:
+                active_contract = self._position_manager.get_active_contract(
+                    base_symbol
+                )
+                if active_contract and not self._risk_manager.settings.allow_pyramiding:
                     self._logger.info(
-                        f"⏳ DEBOUNCE REJECT: {base_symbol} | "
-                        f"Wait {debounce_limit - delta:.1f}s more | "
-                        f"Action={signal.action}",
+                        f"🛡️ PYRAMID REJECT: {base_symbol} | "
+                        f"Already active on {active_contract.symbol} | "
+                        "Pyramiding Disabled",
+                        extra={"event": "signal_pyramid_reject", "symbol": base_symbol},
+                    )
+                    with self._lock:
+                        if state:
+                            state.last_signal_at = timestamp
+                    return
+
+                # ✅ FIX (6 Feb 2026): Cross-strike check — block if ANY NIFTY option is active
+                _max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
+                _all_positions = (
+                    list(self._position_manager.get_open_positions())
+                    if hasattr(self._position_manager, "get_open_positions")
+                    else []
+                )
+                _nifty_active = [
+                    p
+                    for p in _all_positions
+                    if "NIFTY" in getattr(p, "symbol", "").upper()
+                    and abs(getattr(p, "quantity", 0) or 0) > 0
+                ]
+                if len(_nifty_active) >= _max_nifty_positions:
+                    self._logger.info(
+                        f"🛡️ CROSS-STRIKE REJECT: {base_symbol} | "
+                        f"Already {len(_nifty_active)} NIFTY positions active "
+                        f"(max={_max_nifty_positions}) | "
+                        f"Active: {[getattr(p, 'symbol', '?') for p in _nifty_active]}",
                         extra={
-                            "event": "signal_debounce_reject",
+                            "event": "signal_cross_strike_reject",
                             "symbol": base_symbol,
                         },
                     )
+                    with self._lock:
+                        if state:
+                            state.last_signal_at = timestamp
                     return
 
-        # -----------------------------------------------------------
-        # 🛡️ GUARD 1.5: Recently Closed Check (Anti Re-Entry)
-        # ✅ FIX (6 Feb 2026): Prevents bot from re-entering manually exited trades
-        # -----------------------------------------------------------
-        import time as _time_mod
-        _exit_cooldown_sec = float(os.getenv("EXIT_REENTRY_COOLDOWN_SEC", "300"))  # 5 min default
-        _last_exit_time = self._recently_closed.get(base_symbol, 0)
-        if _last_exit_time and (_time_mod.time() - _last_exit_time) < _exit_cooldown_sec:
-            _remaining = _exit_cooldown_sec - (_time_mod.time() - _last_exit_time)
-            self._logger.info(
-                f"🛡️ REENTRY COOLDOWN: {base_symbol} | "
-                f"Exited {_time_mod.time() - _last_exit_time:.0f}s ago | "
-                f"Wait {_remaining:.0f}s more",
-                extra={"event": "signal_reentry_cooldown", "symbol": base_symbol},
+            side = "LONG" if signal.action == "BUY" else "SHORT"
+            confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
+
+            # Confidence Threshold
+            min_confidence = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45"))
+
+            if confidence < min_confidence:
+                self._logger.info(
+                    f"🚫 CONFIDENCE REJECT: {base_symbol} | "
+                    f"Score={confidence:.2f} < min={min_confidence:.2f}",
+                    extra={"event": "signal_confidence_reject", "symbol": base_symbol},
+                )
+                return
+            action = signal.action
+        except Exception as exc:
+            self._logger.error(
+                "Failure in _handle_entry_signal_inner: %s",
+                exc,
+                exc_info=True,
             )
             return
-
-        # -----------------------------------------------------------
-        # 🛡️ GUARD 2: Position Check (No Pyramiding + Cross-Strike)
-        # ✅ FIX (6 Feb 2026): Also blocks same-underlying different-strike entries
-        # -----------------------------------------------------------
-        if self._position_manager:
-            active_contract = self._position_manager.get_active_contract(base_symbol)
-            if active_contract and not self._risk_manager.settings.allow_pyramiding:
-                self._logger.info(
-                    f"🛡️ PYRAMID REJECT: {base_symbol} | "
-                    f"Already active on {active_contract.symbol} | "
-                    f"Pyramiding Disabled",
-                    extra={"event": "signal_pyramid_reject", "symbol": base_symbol},
-                )
-                with self._lock:
-                    if state:
-                        state.last_signal_at = timestamp
-                return
-
-            # ✅ FIX (6 Feb 2026): Cross-strike check — block if ANY NIFTY option is active
-            _max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
-            _all_positions = (
-                list(self._position_manager.get_open_positions())
-                if hasattr(self._position_manager, "get_open_positions")
-                else []
-            )
-            _nifty_active = [
-                p for p in _all_positions
-                if "NIFTY" in getattr(p, "symbol", "").upper()
-                and abs(getattr(p, "quantity", 0) or 0) > 0
-            ]
-            if len(_nifty_active) >= _max_nifty_positions:
-                self._logger.info(
-                    f"🛡️ CROSS-STRIKE REJECT: {base_symbol} | "
-                    f"Already {len(_nifty_active)} NIFTY positions active "
-                    f"(max={_max_nifty_positions}) | "
-                    f"Active: {[getattr(p, 'symbol', '?') for p in _nifty_active]}",
-                    extra={"event": "signal_cross_strike_reject", "symbol": base_symbol},
-                )
-                with self._lock:
-                    if state:
-                        state.last_signal_at = timestamp
-                return
-
-        side = "LONG" if signal.action == "BUY" else "SHORT"
-        confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
-
-        # Confidence Threshold
-        import os
-
-        min_confidence = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45"))
-
-        if confidence < min_confidence:
-            self._logger.info(
-                f"🚫 CONFIDENCE REJECT: {base_symbol} | "
-                f"Score={confidence:.2f} < min={min_confidence:.2f}",
-                extra={"event": "signal_confidence_reject", "symbol": base_symbol},
-            )
-            return
-        action = signal.action
 
         # ===========================================================
         # ✅ SMART VWAP FILTER (Unshackles Elite Strategies)
