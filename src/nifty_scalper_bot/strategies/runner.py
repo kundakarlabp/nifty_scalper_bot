@@ -1234,7 +1234,7 @@ class StrategyRunner:
         self,
         signals: list[Signal],
     ) -> dict[str, Signal]:
-        """Aggregate strategy signals by symbol to limit duplicated risk."""
+        """Aggregate by symbol with confidence weights. Args: signals. Returns: Aggregated signals. Raises: None."""
         self._logger.debug(
             "Entered StrategyRunner.aggregate_signals_by_symbol",
             extra={"event": "aggregate_signals_enter", "count": len(signals)},
@@ -1280,8 +1280,15 @@ class StrategyRunner:
                     )
                     continue
 
-                avg_confidence = sum(sig.confidence for sig in symbol_signals) / len(
-                    symbol_signals
+                normalized_confidences = [
+                    self._normalize_confidence(sig.confidence)
+                    for sig in symbol_signals
+                ]
+                weight_sum = sum(conf**2 for conf in normalized_confidences)
+                avg_confidence = (
+                    sum(conf * (conf**2) for conf in normalized_confidences) / weight_sum
+                    if weight_sum > 0
+                    else 0.0
                 )
 
                 stop_candidates = [
@@ -1296,13 +1303,19 @@ class StrategyRunner:
                     if isinstance(sig.take_profit, (int, float))
                 ]
 
-                best_signal = max(symbol_signals, key=lambda sig: sig.confidence)
+                best_signal = max(
+                    symbol_signals,
+                    key=lambda sig: self._normalize_confidence(sig.confidence),
+                )
                 metadata = dict(best_signal.metadata)
                 metadata["aggregated_count"] = len(symbol_signals)
                 metadata["aggregated_sources"] = [
                     {
                         "strategy": sig.metadata.get("strategy"),
                         "confidence": sig.confidence,
+                        "normalized_confidence": self._normalize_confidence(
+                            sig.confidence
+                        ),
                         "reason": sig.reason,
                     }
                     for sig in symbol_signals
@@ -1349,6 +1362,26 @@ class StrategyRunner:
             return {}
 
         return aggregated
+
+    def _normalize_confidence(self, value: float) -> float:
+        """Normalize confidence to 0-1. Args: value. Returns: Normalized confidence. Raises: None."""
+        self._logger.debug(
+            "Entered StrategyRunner._normalize_confidence",
+            extra={"event": "normalize_confidence"},
+        )
+        try:
+            scaled = float(value)
+            if scaled > 1.0:
+                scaled /= 100.0
+            return min(1.0, max(0.0, scaled))
+        except Exception as exc:
+            self._logger.error(
+                "Failure in StrategyRunner._normalize_confidence: %s",
+                exc,
+                extra={"event": "normalize_confidence_error"},
+                exc_info=exc,
+            )
+            return 0.0
 
     def _select_best_option(
         self,
