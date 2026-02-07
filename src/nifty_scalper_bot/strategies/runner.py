@@ -216,6 +216,7 @@ class SymbolState:
     strategy_data: dict[str, Any] = field(default_factory=dict)
     vwap: float | None = None
     _last_strategy_eval: datetime | None = None  # [FIX] For Throttling strategy calls
+    _last_eval_bar_ts: datetime | None = None
     trade_history: Deque[TradeRecord] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -445,7 +446,9 @@ class StrategyRunner:
         self._persistent_state: PersistentStateManager | None = None
         self._orders_in_flight: dict[str, float] = {}  # symbol -> timestamp
         self._order_in_flight_timeout: float = 30.0  # seconds
-        self._recently_closed: dict[str, float] = {}  # ✅ FIX: Track recently exited symbols
+        self._recently_closed: dict[str, float] = (
+            {}
+        )  # ✅ FIX: Track recently exited symbols
         self._entry_lock = threading.Lock()  # Atomic entry lock
         self._last_cumulative_volume: dict[str, int] = {}
         self._last_valid_price: dict[str, float] = {}
@@ -1283,12 +1286,12 @@ class StrategyRunner:
                     continue
 
                 normalized_confidences = [
-                    self._normalize_confidence(sig.confidence)
-                    for sig in symbol_signals
+                    self._normalize_confidence(sig.confidence) for sig in symbol_signals
                 ]
                 weight_sum = sum(conf**2 for conf in normalized_confidences)
                 avg_confidence = (
-                    sum(conf * (conf**2) for conf in normalized_confidences) / weight_sum
+                    sum(conf * (conf**2) for conf in normalized_confidences)
+                    / weight_sum
                     if weight_sum > 0
                     else 0.0
                 )
@@ -1720,6 +1723,7 @@ class StrategyRunner:
         """
         # ✅ FIX (6 Feb 2026): Also track in _recently_closed for re-entry prevention
         import time as _t
+
         if hasattr(self, "_recently_closed"):
             self._recently_closed[base_symbol] = _t.time()
             self._logger.info(
@@ -1746,13 +1750,14 @@ class StrategyRunner:
                         "cooldown_seconds": self._post_exit_cooldown_seconds,
                     },
                 )
+
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
         # [MODIFIED] Using defined helper correctly
         log_throttled(
             self._logger,
-            'msg_bus_tick',
-            f'🔔 MESSAGE BUS TICK: type={message.type}',
+            "msg_bus_tick",
+            f"🔔 MESSAGE BUS TICK: type={message.type}",
             interval_sec=60.0,
             level=logging.DEBUG,
         )
@@ -1904,13 +1909,13 @@ class StrategyRunner:
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
         self._logger.debug(
-            'Entered StrategyRunner._on_tick',
-            extra={'event': 'tick_enter', 'symbol': symbol},
+            "Entered StrategyRunner._on_tick",
+            extra={"event": "tick_enter", "symbol": symbol},
         )
         try:
             now = datetime.now(timezone.utc)
 
-            if 'FUT' in symbol.upper():
+            if "FUT" in symbol.upper():
                 return
 
             # =================================================================
@@ -1922,16 +1927,16 @@ class StrategyRunner:
             if self._position_manager:
                 active_pos = self._position_manager.get_active_contract(symbol)
                 if active_pos:
-                    strat = getattr(active_pos, 'strategy', '') or 'unknown'
-                    if 'manual' in strat.lower() or 'unknown' in strat.lower():
+                    strat = getattr(active_pos, "strategy", "") or "unknown"
+                    if "manual" in strat.lower() or "unknown" in strat.lower():
                         log_throttled(
                             self._logger,
-                            f'orphan_guard_{symbol}',
-                            f'🛡️ ORPHAN GUARD: {symbol} is unmanaged. Adopting (tick continues)...',
+                            f"orphan_guard_{symbol}",
+                            f"🛡️ ORPHAN GUARD: {symbol} is unmanaged. Adopting (tick continues)...",
                             interval_sec=30.0,
                             level=logging.WARNING,
                         )
-                        if hasattr(self, '_adopt_orphan_positions'):
+                        if hasattr(self, "_adopt_orphan_positions"):
                             self._adopt_orphan_positions()
                         # ✅ DO NOT return — tick must continue flowing for bracket SL/TP monitoring
 
@@ -1939,8 +1944,8 @@ class StrategyRunner:
             if not self._is_market_open(now):
                 log_throttled(
                     self._logger,
-                    f'market_closed_{symbol}',
-                    'Condition met: market_closed',
+                    f"market_closed_{symbol}",
+                    "Condition met: market_closed",
                     interval_sec=30.0,
                     level=logging.INFO,
                 )
@@ -1954,7 +1959,7 @@ class StrategyRunner:
 
             # Helper: Extract timestamp for freshness check
             def _extract_timestamp(t, fallback):
-                ts = t.get('timestamp') or t.get('exchange_timestamp')
+                ts = t.get("timestamp") or t.get("exchange_timestamp")
                 if isinstance(ts, (int, float)):
                     if ts > 10_000_000_000:  # Detect milliseconds
                         ts = ts / 1000.0
@@ -1975,9 +1980,9 @@ class StrategyRunner:
                             value = float(d[k])
                         except (ValueError, TypeError) as exc:
                             self._logger.debug(
-                                'Failure in _extract_float: %s',
+                                "Failure in _extract_float: %s",
                                 exc,
-                                extra={'event': 'tick_extract_float_error', 'key': k},
+                                extra={"event": "tick_extract_float_error", "key": k},
                             )
                             continue
                         if value > 0:
@@ -1997,19 +2002,19 @@ class StrategyRunner:
             # Extract all data FIRST
             timestamp = _extract_timestamp(tick, now)
             tick_age = (now - timestamp).total_seconds()
-            price = _extract_float(tick, 'ltp', 'last_price', 'close', 'price')
-            broker_vwap = _extract_float(tick, 'average_price', 'vwap')
+            price = _extract_float(tick, "ltp", "last_price", "close", "price")
+            broker_vwap = _extract_float(tick, "average_price", "vwap")
             raw_volume = _extract_int(
-                tick, 'volume', 'volume_traded', 'volume_traded_today'
+                tick, "volume", "volume_traded", "volume_traded_today"
             )
             last_quantity = _extract_int(
                 tick,
-                'last_quantity',
-                'last_traded_quantity',
-                'last_trade_quantity',
-                'last_traded_qty',
+                "last_quantity",
+                "last_traded_quantity",
+                "last_trade_quantity",
+                "last_traded_qty",
             )
-            source = tick.get('source', 'unknown')
+            source = tick.get("source", "unknown")
 
             # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
             volume = 0
@@ -2030,8 +2035,8 @@ class StrategyRunner:
                 volume = last_quantity
                 log_throttled(
                     self._logger,
-                    f'tick_volume_fallback_{symbol}',
-                    'Condition met: tick_volume_last_quantity',
+                    f"tick_volume_fallback_{symbol}",
+                    "Condition met: tick_volume_last_quantity",
                     interval_sec=60.0,
                     level=logging.INFO,
                 )
@@ -2041,43 +2046,43 @@ class StrategyRunner:
             # =================================================================
 
             # Stale tick check (increased threshold for REST polling to prevent false positives)
-            stale_threshold = 30.0 if source in ('rest', 'polling') else 10.0
+            stale_threshold = 30.0 if source in ("rest", "polling") else 10.0
 
             if tick_age > stale_threshold:
                 log_throttled(
                     self._logger,
-                    f'stale_tick_{symbol}',
-                    f'⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)',
+                    f"stale_tick_{symbol}",
+                    f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)",
                     interval_sec=30.0,
                     level=logging.WARNING,
                 )
                 return
 
-            price_source = 'ltp'
+            price_source = "ltp"
             price_from_cache = False
 
             if price <= 0:
                 best_bid = _extract_float(
-                    tick, 'best_bid', 'bid', 'best_bid_price', 'buy_price'
+                    tick, "best_bid", "bid", "best_bid_price", "buy_price"
                 )
                 best_ask = _extract_float(
-                    tick, 'best_ask', 'ask', 'best_ask_price', 'sell_price'
+                    tick, "best_ask", "ask", "best_ask_price", "sell_price"
                 )
                 if best_bid > 0 and best_ask > 0:
                     price = (best_bid + best_ask) / 2.0
-                    price_source = 'book_mid'
+                    price_source = "book_mid"
                 elif best_bid > 0:
                     price = best_bid
-                    price_source = 'book_bid'
+                    price_source = "book_bid"
                 elif best_ask > 0:
                     price = best_ask
-                    price_source = 'book_ask'
+                    price_source = "book_ask"
 
                 if price > 0:
                     log_throttled(
                         self._logger,
-                        f'price_from_book_{symbol}',
-                        f'Condition met: tick_price_from_book ({price_source})',
+                        f"price_from_book_{symbol}",
+                        f"Condition met: tick_price_from_book ({price_source})",
                         interval_sec=60.0,
                         level=logging.INFO,
                     )
@@ -2085,18 +2090,18 @@ class StrategyRunner:
                     last_price = self._last_valid_price.get(symbol)
                     last_ts = self._last_valid_price_ts.get(symbol)
                     if last_price and last_ts:
-                        max_age = 30.0 if source in ('rest', 'polling') else 5.0
+                        max_age = 30.0 if source in ("rest", "polling") else 5.0
                         cache_age = (now - last_ts).total_seconds()
                         if cache_age <= max_age:
                             price = last_price
-                            price_source = 'cache'
+                            price_source = "cache"
                             price_from_cache = True
                             log_throttled(
                                 self._logger,
-                                f'price_from_cache_{symbol}',
+                                f"price_from_cache_{symbol}",
                                 (
-                                    'Condition met: tick_price_cache_used '
-                                    f'age={cache_age:.1f}s'
+                                    "Condition met: tick_price_cache_used "
+                                    f"age={cache_age:.1f}s"
                                 ),
                                 interval_sec=60.0,
                                 level=logging.INFO,
@@ -2104,10 +2109,10 @@ class StrategyRunner:
                         else:
                             log_throttled(
                                 self._logger,
-                                f'price_cache_stale_{symbol}',
+                                f"price_cache_stale_{symbol}",
                                 (
-                                    'Condition met: tick_price_cache_stale '
-                                    f'age={cache_age:.1f}s'
+                                    "Condition met: tick_price_cache_stale "
+                                    f"age={cache_age:.1f}s"
                                 ),
                                 interval_sec=60.0,
                                 level=logging.WARNING,
@@ -2121,8 +2126,8 @@ class StrategyRunner:
             if price <= 0:
                 log_throttled(
                     self._logger,
-                    f'invalid_price_{symbol}',
-                    f'⚠️ Invalid price ({price}) for {symbol}, skipping',
+                    f"invalid_price_{symbol}",
+                    f"⚠️ Invalid price ({price}) for {symbol}, skipping",
                     interval_sec=60.0,
                     level=logging.WARNING,
                 )
@@ -2132,8 +2137,8 @@ class StrategyRunner:
             if volume < 0:
                 log_throttled(
                     self._logger,
-                    f'invalid_vol_{symbol}',
-                    f'⚠️ Invalid volume ({volume}) for {symbol}, skipping',
+                    f"invalid_vol_{symbol}",
+                    f"⚠️ Invalid volume ({volume}) for {symbol}, skipping",
                     interval_sec=60.0,
                     level=logging.WARNING,
                 )
@@ -2146,14 +2151,14 @@ class StrategyRunner:
             # Log successful tick acceptance (throttled)
             log_throttled(
                 self._logger,
-                f'tick_accepted_{symbol}',
-                f'✅ TICK ACCEPTED: {symbol} | LTP={price:.2f} | Age={tick_age:.1f}s | Vol={volume}',
+                f"tick_accepted_{symbol}",
+                f"✅ TICK ACCEPTED: {symbol} | LTP={price:.2f} | Age={tick_age:.1f}s | Vol={volume}",
                 interval_sec=60.0,
                 level=logging.DEBUG,
             )
 
             # Grace period warmup logging
-            startup_time = getattr(self, '_startup_timestamp', None)
+            startup_time = getattr(self, "_startup_timestamp", None)
             if startup_time is None:
                 self._startup_timestamp = time.time()
                 startup_time = self._startup_timestamp
@@ -2164,8 +2169,8 @@ class StrategyRunner:
             if in_warmup:
                 log_throttled(
                     self._logger,
-                    'warmup_period',
-                    f'⏳ WARMUP: {15 - time_since_startup:.0f}s remaining before trading enabled',
+                    "warmup_period",
+                    f"⏳ WARMUP: {15 - time_since_startup:.0f}s remaining before trading enabled",
                     interval_sec=5.0,
                     level=logging.INFO,
                 )
@@ -2180,15 +2185,15 @@ class StrategyRunner:
                 if completed_bar is not None:
                     self._ingest_bar(symbol, completed_bar)
             except ValueError as exc:
-                if getattr(builder, '_last_error_ts', 0) < now.timestamp() - 60:
-                    self._logger.warning(f'Bar update issue for {symbol}: {exc}')
+                if getattr(builder, "_last_error_ts", 0) < now.timestamp() - 60:
+                    self._logger.warning(f"Bar update issue for {symbol}: {exc}")
                     builder._last_error_ts = now.timestamp()
 
             # =================================================================
             # PHASE 5: POSITION MANAGER UPDATE
             # =================================================================
 
-            if hasattr(self._position_manager, 'update_position_price'):
+            if hasattr(self._position_manager, "update_position_price"):
                 try:
                     self._position_manager.update_position_price(symbol, price)
                 except Exception:
@@ -2205,12 +2210,12 @@ class StrategyRunner:
                     rm = self._risk_manager
 
                     if rm:
-                        if hasattr(rm, 'can_trade'):
+                        if hasattr(rm, "can_trade"):
                             is_allowed = rm.can_trade(symbol)
-                        elif hasattr(rm, 'risk_gate_should_trade'):
+                        elif hasattr(rm, "risk_gate_should_trade"):
                             res = rm.risk_gate_should_trade()
                             is_allowed = res[0] if isinstance(res, tuple) else bool(res)
-                        elif hasattr(rm, 'can_trade_now'):
+                        elif hasattr(rm, "can_trade_now"):
                             res = rm.can_trade_now()
                             is_allowed = res[0] if isinstance(res, tuple) else bool(res)
                         else:
@@ -2222,15 +2227,17 @@ class StrategyRunner:
                     if not is_allowed:
                         log_throttled(
                             self._logger,
-                            f'risk_block_{symbol}',
-                            f'⛔ Risk Block Active: {symbol}. Trading Halted.',
+                            f"risk_block_{symbol}",
+                            f"⛔ Risk Block Active: {symbol}. Trading Halted.",
                             interval_sec=30.0,
                             level=logging.WARNING,
                         )
                         return
 
                 except Exception as e:
-                    self._logger.error(f'Critical error in risk check for {symbol}: {e}')
+                    self._logger.error(
+                        f"Critical error in risk check for {symbol}: {e}"
+                    )
                     return
 
             # =================================================================
@@ -2243,7 +2250,7 @@ class StrategyRunner:
             with self._lock:
                 # Auto-track new symbols
                 if symbol not in self._active_symbols:
-                    self._logger.info(f'🆕 Auto-tracking symbol from feed: {symbol}')
+                    self._logger.info(f"🆕 Auto-tracking symbol from feed: {symbol}")
                     self._active_symbols.add(symbol)
                     self._symbol_state[symbol] = SymbolState(
                         symbol=symbol, history_limit=self._config.max_trade_history
@@ -2258,11 +2265,11 @@ class StrategyRunner:
                     state.vwap = broker_vwap
 
                 # Heartbeat logging for derivatives (confirms data flow)
-                if 'NIFTY' in symbol and any(x in symbol for x in ['FUT', 'CE', 'PE']):
+                if "NIFTY" in symbol and any(x in symbol for x in ["FUT", "CE", "PE"]):
                     log_throttled(
                         self._logger,
-                        f'heartbeat_{symbol}',
-                        f'💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}',
+                        f"heartbeat_{symbol}",
+                        f"💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}",
                         interval_sec=30.0,
                         level=logging.DEBUG,
                     )
@@ -2273,28 +2280,28 @@ class StrategyRunner:
                 generated_signal = None
 
                 # 8A. FORCED SIGNAL (Testing only)
-                force_signal_enabled = os.getenv('FORCE_SIGNAL', '').lower() == 'true'
+                force_signal_enabled = os.getenv("FORCE_SIGNAL", "").lower() == "true"
                 disable_early_forced = (
-                    os.getenv('FEATURE_DISABLE_EARLY_FORCED_SIGNALS', '').lower()
-                    == 'true'
+                    os.getenv("FEATURE_DISABLE_EARLY_FORCED_SIGNALS", "").lower()
+                    == "true"
                 )
 
                 if force_signal_enabled and not disable_early_forced:
                     generated_signal = Signal(
-                        action='BUY',
+                        action="BUY",
                         symbol=symbol,
                         quantity=1,
                         confidence=1.0,
-                        reason='forced_signal_validation',
+                        reason="forced_signal_validation",
                         stop_loss=None,
                         take_profit=None,
-                        metadata={'source': 'forced'},
+                        metadata={"source": "forced"},
                     )
-                    self._logger.warning(f'⚠️ FORCED SIGNAL EMITTED for {symbol}')
+                    self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
 
                 # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
                 vwap_crossover_enabled = (
-                    os.getenv('ENABLE_VWAP_CROSSOVER', 'false').lower() == 'true'
+                    os.getenv("ENABLE_VWAP_CROSSOVER", "false").lower() == "true"
                 )
 
                 if (
@@ -2302,10 +2309,10 @@ class StrategyRunner:
                     and generated_signal is None
                     and state.vwap
                     and state.vwap > 0
-                    and 'FUT' not in symbol.upper()
+                    and "FUT" not in symbol.upper()
                 ):
                     prev_ltp = (
-                        _extract_float(state.last_tick, 'ltp', 'last_price')
+                        _extract_float(state.last_tick, "ltp", "last_price")
                         if state.last_tick
                         else None
                     )
@@ -2321,9 +2328,9 @@ class StrategyRunner:
                         )
 
                         # ✅ FIX: Calculate proper stop_loss and take_profit
-                        sl_pct = float(os.getenv('VWAP_SL_PCT', '1.5'))  # 1.5% SL
+                        sl_pct = float(os.getenv("VWAP_SL_PCT", "1.5"))  # 1.5% SL
                         tp_pct = float(
-                            os.getenv('VWAP_TP_PCT', '2.0')
+                            os.getenv("VWAP_TP_PCT", "2.0")
                         )  # 2.0% TP (1:1.33 RR)
 
                         if is_cross_up:
@@ -2332,23 +2339,23 @@ class StrategyRunner:
                             calculated_tp = price * (1 + tp_pct / 100)
 
                             self._logger.info(
-                                f'⚡ VWAP CROSSOVER UP: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})',
-                                extra={'event': 'vwap_crossover', 'symbol': symbol},
+                                f"⚡ VWAP CROSSOVER UP: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
+                                extra={"event": "vwap_crossover", "symbol": symbol},
                             )
                             generated_signal = Signal(
-                                action='BUY',
+                                action="BUY",
                                 symbol=symbol,
                                 quantity=1,
                                 confidence=0.75,
-                                reason='vwap_crossover_up',
+                                reason="vwap_crossover_up",
                                 stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
                                 take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
                                 metadata={
-                                    'strategy': 'vwap_scalp',
-                                    'vwap': curr_vwap,
-                                    'tag': 'vwap_scalp',
-                                    'sl_pct': sl_pct,
-                                    'tp_pct': tp_pct,
+                                    "strategy": "vwap_scalp",
+                                    "vwap": curr_vwap,
+                                    "tag": "vwap_scalp",
+                                    "sl_pct": sl_pct,
+                                    "tp_pct": tp_pct,
                                 },
                             )
                         elif is_cross_down:
@@ -2357,30 +2364,30 @@ class StrategyRunner:
                             calculated_tp = price * (1 - tp_pct / 100)
 
                             self._logger.info(
-                                f'⚡ VWAP CROSSOVER DOWN: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})',
-                                extra={'event': 'vwap_crossover', 'symbol': symbol},
+                                f"⚡ VWAP CROSSOVER DOWN: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
+                                extra={"event": "vwap_crossover", "symbol": symbol},
                             )
                             generated_signal = Signal(
-                                action='SELL',
+                                action="SELL",
                                 symbol=symbol,
                                 quantity=1,
                                 confidence=0.75,
-                                reason='vwap_crossover_down',
+                                reason="vwap_crossover_down",
                                 stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
                                 take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
                                 metadata={
-                                    'strategy': 'vwap_scalp',
-                                    'vwap': curr_vwap,
-                                    'tag': 'vwap_scalp_short',
-                                    'sl_pct': sl_pct,
-                                    'tp_pct': tp_pct,
+                                    "strategy": "vwap_scalp",
+                                    "vwap": curr_vwap,
+                                    "tag": "vwap_scalp_short",
+                                    "sl_pct": sl_pct,
+                                    "tp_pct": tp_pct,
                                 },
                             )
 
                 # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
                 if generated_signal is None and (not state.vwap or state.vwap == 0):
                     prev_ltp = (
-                        _extract_float(state.last_tick, 'ltp', 'last_price')
+                        _extract_float(state.last_tick, "ltp", "last_price")
                         if state.last_tick
                         else None
                     )
@@ -2390,29 +2397,29 @@ class StrategyRunner:
                         MOMENTUM_THRESHOLD_PCT = 0.15
 
                         # ✅ FIX: Calculate proper stop_loss for momentum signals too
-                        sl_pct = float(os.getenv('MOMENTUM_SL_PCT', '2.0'))
-                        tp_pct = float(os.getenv('MOMENTUM_TP_PCT', '2.5'))
+                        sl_pct = float(os.getenv("MOMENTUM_SL_PCT", "2.0"))
+                        tp_pct = float(os.getenv("MOMENTUM_TP_PCT", "2.5"))
 
                         if price_change_pct > MOMENTUM_THRESHOLD_PCT:
                             calculated_sl = price * (1 - sl_pct / 100)
                             calculated_tp = price * (1 + tp_pct / 100)
 
                             self._logger.info(
-                                f'🚀 MOMENTUM FALLBACK BUY: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)',
-                                extra={'event': 'momentum_fallback', 'symbol': symbol},
+                                f"🚀 MOMENTUM FALLBACK BUY: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)",
+                                extra={"event": "momentum_fallback", "symbol": symbol},
                             )
                             generated_signal = Signal(
-                                action='BUY',
+                                action="BUY",
                                 symbol=symbol,
                                 quantity=1,
                                 confidence=0.60,
-                                reason='momentum_breakout_up',
+                                reason="momentum_breakout_up",
                                 stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
                                 take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
                                 metadata={
-                                    'strategy': 'momentum_fallback',
-                                    'price_change_pct': price_change_pct,
-                                    'tag': 'fallback_long',
+                                    "strategy": "momentum_fallback",
+                                    "price_change_pct": price_change_pct,
+                                    "tag": "fallback_long",
                                 },
                             )
                         elif price_change_pct < -MOMENTUM_THRESHOLD_PCT:
@@ -2420,21 +2427,21 @@ class StrategyRunner:
                             calculated_tp = price * (1 - tp_pct / 100)
 
                             self._logger.info(
-                                f'🔻 MOMENTUM FALLBACK SELL: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)',
-                                extra={'event': 'momentum_fallback', 'symbol': symbol},
+                                f"🔻 MOMENTUM FALLBACK SELL: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)",
+                                extra={"event": "momentum_fallback", "symbol": symbol},
                             )
                             generated_signal = Signal(
-                                action='SELL',
+                                action="SELL",
                                 symbol=symbol,
                                 quantity=1,
                                 confidence=0.60,
-                                reason='momentum_breakout_down',
+                                reason="momentum_breakout_down",
                                 stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
                                 take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
                                 metadata={
-                                    'strategy': 'momentum_fallback',
-                                    'price_change_pct': price_change_pct,
-                                    'tag': 'fallback_short',
+                                    "strategy": "momentum_fallback",
+                                    "price_change_pct": price_change_pct,
+                                    "tag": "fallback_short",
                                 },
                             )
 
@@ -2442,7 +2449,7 @@ class StrategyRunner:
                 state.last_tick = dict(tick)
 
                 # Check if trading is paused
-                if not self._running or getattr(self, '_trading_paused', False):
+                if not self._running or getattr(self, "_trading_paused", False):
                     return
 
                 # Check cooldown
@@ -2461,19 +2468,54 @@ class StrategyRunner:
                 with self._lock:
                     state = self._symbol_state.get(symbol)
                     if state:
-                        last_eval = getattr(state, '_last_strategy_eval', None)
+                        last_eval = getattr(state, "_last_strategy_eval", None)
+                        last_bar_ts = self._last_bar_ts.get(symbol)
+                        if last_bar_ts and state._last_eval_bar_ts:
+                            if last_bar_ts <= state._last_eval_bar_ts:
+                                log_throttled(
+                                    self._logger,
+                                    f"strategy_eval_skip_bar_{symbol}",
+                                    "Condition met: strategy_eval_skipped_same_bar",
+                                    interval_sec=30.0,
+                                    level=logging.INFO,
+                                    extra={
+                                        "event": "strategy_eval_skipped_same_bar",
+                                        "symbol": symbol,
+                                        "bar_ts": last_bar_ts.isoformat(),
+                                    },
+                                )
+                                return
+                        if last_bar_ts:
+                            bar_age = (now - last_bar_ts).total_seconds()
+                            if bar_age > 120.0:
+                                log_throttled(
+                                    self._logger,
+                                    f"strategy_eval_stale_bar_{symbol}",
+                                    "Condition met: strategy_eval_stale_bar",
+                                    interval_sec=60.0,
+                                    level=logging.WARNING,
+                                    extra={
+                                        "event": "strategy_eval_stale_bar",
+                                        "symbol": symbol,
+                                        "bar_age_s": bar_age,
+                                        "bar_ts": last_bar_ts.isoformat(),
+                                    },
+                                )
+                                return
                         # Limit evaluation frequency (max 2 per second)
                         if last_eval and (now - last_eval).total_seconds() < 0.5:
                             return
                         state._last_strategy_eval = now
+                        if last_bar_ts:
+                            state._last_eval_bar_ts = last_bar_ts
                         should_evaluate = True
 
                 if should_evaluate:
                     # ✅ DIAGNOSTIC LOG: Confirm evaluation is happening
                     log_throttled(
                         self._logger,
-                        f'strategy_eval_{symbol}',
-                        f'🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._config.min_indicator_bars}',
+                        f"strategy_eval_{symbol}",
+                        f"🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._config.min_indicator_bars}",
                         interval_sec=30.0,
                         level=logging.INFO,
                     )
@@ -2486,8 +2528,8 @@ class StrategyRunner:
                         # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
                         log_throttled(
                             self._logger,
-                            f'indicators_ready_{symbol}',
-                            f'✅ INDICATORS READY: {symbol} | Calling StrategyManager...',
+                            f"indicators_ready_{symbol}",
+                            f"✅ INDICATORS READY: {symbol} | Calling StrategyManager...",
                             interval_sec=60.0,
                             level=logging.INFO,
                         )
@@ -2496,8 +2538,8 @@ class StrategyRunner:
                         if signal is None:
                             log_throttled(
                                 self._logger,
-                                f'no_signal_manager_{symbol}',
-                                f'📉 Strategy Manager evaluated {symbol}: NO SIGNAL',
+                                f"no_signal_manager_{symbol}",
+                                f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL",
                                 interval_sec=30.0,
                                 level=logging.INFO,
                             )
@@ -2505,8 +2547,8 @@ class StrategyRunner:
                         # ✅ DIAGNOSTIC LOG: Explain why no evaluation happened
                         log_throttled(
                             self._logger,
-                            f'not_ready_{symbol}',
-                            f'⏳ INDICATORS NOT READY: {symbol} (Need {self._config.min_indicator_bars} bars)',
+                            f"not_ready_{symbol}",
+                            f"⏳ INDICATORS NOT READY: {symbol} (Need {self._config.min_indicator_bars} bars)",
                             interval_sec=30.0,
                             level=logging.WARNING,
                         )
@@ -2515,7 +2557,7 @@ class StrategyRunner:
             # PHASE 10: EXECUTE SIGNAL
             # =================================================================
 
-            if signal and signal.action != 'HOLD':
+            if signal and signal.action != "HOLD":
                 with self._lock:
                     state = self._symbol_state.get(symbol)
                     if state:
@@ -2524,18 +2566,18 @@ class StrategyRunner:
                             if elapsed < self._config.signal_cooldown_seconds:
                                 return
 
-                        state.strategy_data['last_signal'] = {
-                            'action': signal.action,
-                            'reason': signal.reason,
-                            'timestamp': now.isoformat(),
+                        state.strategy_data["last_signal"] = {
+                            "action": signal.action,
+                            "reason": signal.reason,
+                            "timestamp": now.isoformat(),
                         }
 
                 self._logger.info(
-                    f'🚀 SIGNAL EXECUTING: {symbol} | Action={signal.action} | Reason={signal.reason}'
+                    f"🚀 SIGNAL EXECUTING: {symbol} | Action={signal.action} | Reason={signal.reason}"
                 )
                 self._handle_signal(signal, price, now)
         except Exception as e:
-            self._logger.error('Failure in _on_tick: %s', e, exc_info=True)
+            self._logger.error("Failure in _on_tick: %s", e, exc_info=True)
             return
 
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
@@ -2880,8 +2922,8 @@ class StrategyRunner:
         """Args: signal, base_symbol, trade_symbol, trade_price, timestamp. Returns: None. Raises: Exception."""
         try:
             self._logger.debug(
-                'Entered StrategyRunner._handle_entry_signal_inner',
-                extra={'event': 'entry_signal_inner', 'symbol': base_symbol},
+                "Entered StrategyRunner._handle_entry_signal_inner",
+                extra={"event": "entry_signal_inner", "symbol": base_symbol},
             )
 
             # ═══════════════════════════════════════════════════════════════
@@ -2930,9 +2972,7 @@ class StrategyRunner:
                 _last_exit_time
                 and (_time_mod.time() - _last_exit_time) < _exit_cooldown_sec
             ):
-                _remaining = _exit_cooldown_sec - (
-                    _time_mod.time() - _last_exit_time
-                )
+                _remaining = _exit_cooldown_sec - (_time_mod.time() - _last_exit_time)
                 self._logger.info(
                     f"🛡️ REENTRY COOLDOWN: {base_symbol} | "
                     f"Exited {_time_mod.time() - _last_exit_time:.0f}s ago | "
@@ -3261,10 +3301,10 @@ class StrategyRunner:
             unique_tag = f"{strat_name[:3]}_{int(timestamp.timestamp())}"
 
             bracket_meta = signal.metadata if isinstance(signal.metadata, dict) else {}
-            bracket_type = str(bracket_meta.get('bracket_type') or '').upper()
+            bracket_type = str(bracket_meta.get("bracket_type") or "").upper()
             use_virtual_bracket = (
-                bracket_type == 'VIRTUAL'
-                and hasattr(self._order_manager, 'place_bracket_order')
+                bracket_type == "VIRTUAL"
+                and hasattr(self._order_manager, "place_bracket_order")
                 and signal.stop_loss
                 and signal.take_profit
             )
@@ -3275,13 +3315,13 @@ class StrategyRunner:
 
             if use_virtual_bracket:
                 try:
-                    sl_atr_mult = float(bracket_meta.get('sl_atr_mult') or 0.0)
-                    tp1_atr_mult = float(bracket_meta.get('tp1_atr_mult') or 0.0)
-                    tp2_atr_mult = float(bracket_meta.get('tp2_atr_mult') or 0.0)
-                    tp1_qty_pct = float(bracket_meta.get('tp1_qty_pct') or 0.0)
+                    sl_atr_mult = float(bracket_meta.get("sl_atr_mult") or 0.0)
+                    tp1_atr_mult = float(bracket_meta.get("tp1_atr_mult") or 0.0)
+                    tp2_atr_mult = float(bracket_meta.get("tp2_atr_mult") or 0.0)
+                    tp1_qty_pct = float(bracket_meta.get("tp1_qty_pct") or 0.0)
 
                     if tp1_atr_mult > 0 and atr_val > 0:
-                        if entry_side == 'BUY':
+                        if entry_side == "BUY":
                             tp1_price = execution_price + (atr_val * tp1_atr_mult)
                         else:
                             tp1_price = execution_price - (atr_val * tp1_atr_mult)
@@ -3291,7 +3331,7 @@ class StrategyRunner:
                         and atr_val > 0
                         and (effective_tp is None or effective_tp <= 0)
                     ):
-                        if entry_side == 'BUY':
+                        if entry_side == "BUY":
                             effective_tp = execution_price + (atr_val * tp2_atr_mult)
                         else:
                             effective_tp = execution_price - (atr_val * tp2_atr_mult)
@@ -3301,35 +3341,33 @@ class StrategyRunner:
                         if tp1_qty >= int(sized_qty):
                             tp1_qty = None
 
-                    runner_trail = bool(bracket_meta.get('runner_trail_after_tp1'))
-                    sl_mode = str(bracket_meta.get('sl_mode') or '')
-                    if runner_trail or sl_mode == 'ATR_TRAIL':
+                    runner_trail = bool(bracket_meta.get("runner_trail_after_tp1"))
+                    sl_mode = str(bracket_meta.get("sl_mode") or "")
+                    if runner_trail or sl_mode == "ATR_TRAIL":
                         trailing_atr_mult = float(
-                            bracket_meta.get('trailing_atr_mult')
-                            or sl_atr_mult
-                            or 1.5
+                            bracket_meta.get("trailing_atr_mult") or sl_atr_mult or 1.5
                         )
                         if trailing_atr_mult <= 0:
                             trailing_atr_mult = None
 
                     self._logger.info(
-                        'Condition met: virtual_bracket_ready',
+                        "Condition met: virtual_bracket_ready",
                         extra={
-                            'event': 'virtual_bracket_ready',
-                            'symbol': trade_symbol,
-                            'tp1_price': tp1_price,
-                            'tp1_qty': tp1_qty,
-                            'tp2_price': effective_tp,
-                            'trailing_atr_mult': trailing_atr_mult,
+                            "event": "virtual_bracket_ready",
+                            "symbol": trade_symbol,
+                            "tp1_price": tp1_price,
+                            "tp1_qty": tp1_qty,
+                            "tp2_price": effective_tp,
+                            "trailing_atr_mult": trailing_atr_mult,
                         },
                     )
                 except Exception as exc:
                     self._logger.error(
-                        'Failure in StrategyRunner._handle_entry_signal_inner bracket setup: %s',
+                        "Failure in StrategyRunner._handle_entry_signal_inner bracket setup: %s",
                         exc,
                         extra={
-                            'event': 'virtual_bracket_setup_failed',
-                            'symbol': trade_symbol,
+                            "event": "virtual_bracket_setup_failed",
+                            "symbol": trade_symbol,
                         },
                         exc_info=exc,
                     )
@@ -3352,11 +3390,11 @@ class StrategyRunner:
                     )
                 except Exception as exc:
                     self._logger.error(
-                        'Failure in StrategyRunner._handle_entry_signal_inner virtual bracket: %s',
+                        "Failure in StrategyRunner._handle_entry_signal_inner virtual bracket: %s",
                         exc,
                         extra={
-                            'event': 'virtual_bracket_submit_failed',
-                            'symbol': trade_symbol,
+                            "event": "virtual_bracket_submit_failed",
+                            "symbol": trade_symbol,
                         },
                         exc_info=exc,
                     )

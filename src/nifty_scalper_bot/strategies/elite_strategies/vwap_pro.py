@@ -29,6 +29,7 @@ class VWAPProStrategy(EliteStrategy):
     COOLDOWN_SECONDS = 60
     VWAP_ACCEPTANCE_BARS = 2
     TELEMETRY_LOG_EVERY = 5
+    VOLUME_GRACE_SECONDS = 120.0
 
     __slots__ = (
         "_vwap_config",
@@ -37,6 +38,9 @@ class VWAPProStrategy(EliteStrategy):
         "_strike_lock",
         "_last_expiry",
         "_telemetry",
+        "_last_valid_volume",
+        "_last_valid_avg_volume",
+        "_last_valid_volume_ts",
     )
 
     def __init__(
@@ -44,6 +48,7 @@ class VWAPProStrategy(EliteStrategy):
         config: VWAPProStrategyConfig,
         indicator_engine: Any,
     ) -> None:
+        """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._vwap_config = config
 
@@ -51,18 +56,22 @@ class VWAPProStrategy(EliteStrategy):
         self._vwap_acceptance_tracker: Dict[str, int] = {}
         self._strike_lock: Dict[str, str] = {}
         self._last_expiry: str | None = None
+        self._last_valid_volume: Dict[str, float] = {}
+        self._last_valid_avg_volume: Dict[str, float] = {}
+        self._last_valid_volume_ts: Dict[str, float] = {}
 
         self._telemetry: Dict[str, int] = {
-            "evaluations": 0,
-            "signals": 0,
-            "skipped_cooldown": 0,
-            "skipped_strike_lock": 0,
-            "skipped_bias": 0,
-            "skipped_no_vwap": 0,
-            "skipped_vwap": 0,
-            "skipped_volume": 0,
-            "skipped_overextended": 0,
-            "skipped_acceptance": 0,
+            'evaluations': 0,
+            'signals': 0,
+            'skipped_cooldown': 0,
+            'skipped_strike_lock': 0,
+            'skipped_bias': 0,
+            'skipped_no_vwap': 0,
+            'skipped_vwap': 0,
+            'skipped_volume': 0,
+            'skipped_data': 0,
+            'skipped_overextended': 0,
+            'skipped_acceptance': 0,
         }
         self._index_bias_missing_logged: bool = False
 
@@ -73,10 +82,13 @@ class VWAPProStrategy(EliteStrategy):
     def get_required_indicators(self) -> set[str]:
         """Declare ALL indicators VWAPPro needs."""
         return {
-            "vwap", "atr", "volume", "avg_volume",
+            "vwap",
+            "atr",
+            "volume",
+            "avg_volume",
             "rsi",  # for potential future use
         }
-    
+
     def _extract_expiry(self, symbol: str) -> str:
         digits = "".join(c for c in symbol if c.isdigit())
         return digits[:5] if len(digits) >= 5 else "UNK"
@@ -104,8 +116,8 @@ class VWAPProStrategy(EliteStrategy):
     ) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         LOGGER.debug(
-            'Entered VWAPProStrategy._evaluate_signal',
-            extra={'event': 'vwap_pro_signal_enter', 'symbol': symbol},
+            "Entered VWAPProStrategy._evaluate_signal",
+            extra={"event": "vwap_pro_signal_enter", "symbol": symbol},
         )
         try:
             now = time_module.time()
@@ -114,8 +126,8 @@ class VWAPProStrategy(EliteStrategy):
             direction = "CE" if is_ce else "PE"
 
             # ✅ FIX B6: Periodic telemetry dump
-            self._telemetry["evaluations"] += 1
-            _evals = self._telemetry["evaluations"]
+            self._telemetry['evaluations'] += 1
+            _evals = self._telemetry['evaluations']
             if _evals == 1 or _evals % self.TELEMETRY_LOG_EVERY == 0:
                 LOGGER.info(
                     f"📊 VWAPPro TELEMETRY [{symbol}]: evals={_evals} "
@@ -126,9 +138,10 @@ class VWAPProStrategy(EliteStrategy):
                     f"vwap0={self._telemetry['skipped_no_vwap']} "
                     f"vwap={self._telemetry['skipped_vwap']} "
                     f"vol={self._telemetry['skipped_volume']} "
+                    f"data={self._telemetry['skipped_data']} "
                     f"overext={self._telemetry['skipped_overextended']} "
                     f"accept={self._telemetry['skipped_acceptance']}",
-                    extra={"event": "vwap_pro_telemetry", "symbol": symbol},
+                    extra={'event': 'vwap_pro_telemetry', 'symbol': symbol},
                 )
 
             lock_key = f"NIFTY:{expiry}:{direction}"
@@ -170,26 +183,43 @@ class VWAPProStrategy(EliteStrategy):
             # ✅ BONUS: Prefer exchange VWAP (full-session, from broker) over rolling VWAP
             _exch_vwap = indicators.get("exchange_vwap")
             _rolling_vwap = indicators.get("vwap")
-            vwap = float(_exch_vwap or _rolling_vwap or 0.0)  # ✅ Exchange > Rolling > 0
-            
+            vwap = float(
+                _exch_vwap or _rolling_vwap or 0.0
+            )  # ✅ Exchange > Rolling > 0
+
             atr = float(indicators.get("atr") or max(current_price * 0.015, 1.0))
             entropy = float(indicators.get("entropy_5") or 0.5)
 
-            index_ltp = float(indicators.get("nifty_fut_ltp") or indicators.get("nifty_index_ltp") or 0.0)
-            index_vwap = float(indicators.get("nifty_fut_vwap") or indicators.get("nifty_index_vwap") or 0.0)
+            index_ltp = float(
+                indicators.get("nifty_fut_ltp")
+                or indicators.get("nifty_index_ltp")
+                or 0.0
+            )
+            index_vwap = float(
+                indicators.get("nifty_fut_vwap")
+                or indicators.get("nifty_index_vwap")
+                or 0.0
+            )
 
             if index_ltp <= 0 or index_vwap <= 0:
                 if not self._index_bias_missing_logged:
-                    LOGGER.error("INVALID INDEX DATA — blocking signal", extra={"symbol": symbol})
+                    LOGGER.error(
+                        "INVALID INDEX DATA — blocking signal", extra={"symbol": symbol}
+                    )
                     self._index_bias_missing_logged = True
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
             self._index_bias_missing_logged = False
 
-            if (is_ce and index_ltp < index_vwap) or (not is_ce and index_ltp > index_vwap):
+            if (is_ce and index_ltp < index_vwap) or (
+                not is_ce and index_ltp > index_vwap
+            ):
                 self._telemetry["skipped_bias"] += 1
-                if self._telemetry["skipped_bias"] <= 3 or self._telemetry["skipped_bias"] % self.TELEMETRY_LOG_EVERY == 0:
+                if (
+                    self._telemetry["skipped_bias"] <= 3
+                    or self._telemetry["skipped_bias"] % self.TELEMETRY_LOG_EVERY == 0
+                ):
                     LOGGER.info(
                         f"🧭 BIAS GATE: {symbol} {direction} blocked | "
                         f"IdxLTP={index_ltp:.2f} IdxVWAP={index_vwap:.2f} "
@@ -211,7 +241,10 @@ class VWAPProStrategy(EliteStrategy):
 
             if current_price < vwap:
                 self._telemetry["skipped_vwap"] += 1
-                if self._telemetry["skipped_vwap"] <= 3 or self._telemetry["skipped_vwap"] % self.TELEMETRY_LOG_EVERY == 0:
+                if (
+                    self._telemetry["skipped_vwap"] <= 3
+                    or self._telemetry["skipped_vwap"] % self.TELEMETRY_LOG_EVERY == 0
+                ):
                     LOGGER.info(
                         f"📏 OPT VWAP: {symbol} {direction} | "
                         f"Price={current_price:.2f} VWAP={vwap:.2f}",
@@ -230,18 +263,65 @@ class VWAPProStrategy(EliteStrategy):
                         LOGGER.info(
                             f"📐 OVEREXT: {symbol} | z={z:.2f} > 2.2 | "
                             f"Price={current_price:.2f} VWAP={vwap:.2f} Std={vwap_std:.2f}",
-                            extra={"event": "vwap_pro_overext_reject", "symbol": symbol},
+                            extra={
+                                "event": "vwap_pro_overext_reject",
+                                "symbol": symbol,
+                            },
                         )
                     self._vwap_acceptance_tracker[acc_key] = 0
                     return None
 
             # 🔊 ISSUE 4 FIX: Reset acceptance on Volume rejection
-            vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("avg_volume") or 1.0)
+            vol = float(indicators.get('volume') or 0.0)
+            avg_vol = float(indicators.get('avg_volume') or 0.0)
+            if vol > 0 and avg_vol > 0:
+                self._last_valid_volume[symbol] = vol
+                self._last_valid_avg_volume[symbol] = avg_vol
+                self._last_valid_volume_ts[symbol] = now
+            else:
+                last_vol = self._last_valid_volume.get(symbol)
+                last_avg = self._last_valid_avg_volume.get(symbol)
+                last_ts = self._last_valid_volume_ts.get(symbol, 0.0)
+                if (
+                    last_vol is not None
+                    and last_avg is not None
+                    and (now - last_ts) <= self.VOLUME_GRACE_SECONDS
+                ):
+                    LOGGER.info(
+                        'Condition met: vwap_pro_volume_grace_fallback',
+                        extra={
+                            'event': 'vwap_pro_volume_grace_fallback',
+                            'symbol': symbol,
+                            'fallback_volume': last_vol,
+                            'fallback_avg_volume': last_avg,
+                        },
+                    )
+                    vol = last_vol
+                    avg_vol = last_avg
+                else:
+                    self._telemetry['skipped_data'] += 1
+                    if (
+                        self._telemetry['skipped_data'] <= 5
+                        or self._telemetry['skipped_data'] % self.TELEMETRY_LOG_EVERY
+                        == 0
+                    ):
+                        LOGGER.warning(
+                            f"⚠️ DATA INVALID: {symbol} | "
+                            f"vol={vol:.0f} avg_vol={avg_vol:.0f}",
+                            extra={
+                                'event': 'vwap_pro_data_invalid',
+                                'symbol': symbol,
+                            },
+                        )
+                    self._vwap_acceptance_tracker[acc_key] = 0
+                    return None
             vol_thresh = self._dynamic_volume_threshold()
             if vol < avg_vol * vol_thresh:
                 self._telemetry["skipped_volume"] += 1
-                if self._telemetry["skipped_volume"] <= 5 or self._telemetry["skipped_volume"] % self.TELEMETRY_LOG_EVERY == 0:
+                if (
+                    self._telemetry["skipped_volume"] <= 5
+                    or self._telemetry["skipped_volume"] % self.TELEMETRY_LOG_EVERY == 0
+                ):
                     LOGGER.info(
                         f"🔊 VOL GATE: {symbol} | vol={vol:.0f} < avg={avg_vol:.0f}×{vol_thresh}={avg_vol*vol_thresh:.0f}",
                         extra={"event": "vwap_pro_vol_reject", "symbol": symbol},
@@ -265,7 +345,9 @@ class VWAPProStrategy(EliteStrategy):
             # LONG any option (CE or PE) → profit when PREMIUM rises
             # Therefore: SL below entry, TP above entry (ALWAYS for LONG)
             # ═══════════════════════════════════════════════════════════════════
-            sl_mult = (1.2 if self._is_expiry_day() else 1.5) * (0.85 if entropy > 0.75 else 1.0)
+            sl_mult = (1.2 if self._is_expiry_day() else 1.5) * (
+                0.85 if entropy > 0.75 else 1.0
+            )
             tp2_mult = 3.0
 
             # LONG position: SL below, TP above (regardless of CE/PE)
@@ -278,7 +360,13 @@ class VWAPProStrategy(EliteStrategy):
             if invalid:
                 LOGGER.error(
                     "Invalid SL/TP for LONG",
-                    extra={"symbol": symbol, "entry": current_price, "sl": sl, "tp": tp2, "atr": atr}
+                    extra={
+                        "symbol": symbol,
+                        "entry": current_price,
+                        "sl": sl,
+                        "tp": tp2,
+                        "atr": atr,
+                    },
                 )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
@@ -294,14 +382,14 @@ class VWAPProStrategy(EliteStrategy):
             self._telemetry["signals"] += 1
 
             LOGGER.info(
-                'Condition met: vwap_pro_signal_ready',
+                "Condition met: vwap_pro_signal_ready",
                 extra={
-                    'event': 'vwap_pro_signal_ready',
-                    'symbol': symbol,
-                    'direction': direction,
-                    'entry': current_price,
-                    'sl': sl,
-                    'tp2': tp2,
+                    "event": "vwap_pro_signal_ready",
+                    "symbol": symbol,
+                    "direction": direction,
+                    "entry": current_price,
+                    "sl": sl,
+                    "tp2": tp2,
                 },
             )
 

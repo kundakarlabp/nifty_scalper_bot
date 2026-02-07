@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import time
-import typing as t
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import sqrt
 from statistics import mean, pstdev
+import time
+import typing as t
 
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
@@ -17,8 +17,6 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.signal_generator import (
     Signal,
-)
-from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
@@ -967,6 +965,15 @@ class StrategyManager(_BaseStrategyManager):
         self._last_regime_gate: tuple[bool, tuple[str, ...]] | None = None
         self._last_regime_gate_at: float = 0.0
         self._regime_gate_cooldown = 10.0
+        self._no_signal_summary: dict[str, int] = {
+            'total': 0,
+            'missing_indicators': 0,
+            'volume_zero': 0,
+            'avg_volume_zero': 0,
+            'error_strategies': 0,
+        }
+        self._no_signal_missing: dict[str, int] = {}
+        self._no_signal_last_summary_ts = time.time()
         required: set[str] = set()
         for strategy in strategies:
             required.update(strategy.get_required_indicators())
@@ -1498,7 +1505,7 @@ class StrategyManager(_BaseStrategyManager):
                 exc_info=exc,
             )
             return self._regime_state
-        
+
         if snapshot is None:
             return self._regime_state
 
@@ -1510,17 +1517,17 @@ class StrategyManager(_BaseStrategyManager):
         if isinstance(snapshot, dict):
             regime_raw = snapshot.get("regime")
             confidence_raw = snapshot.get("confidence", 0.0)
-        
+
         # Case 2: It's a Raw String (e.g. "TRENDING")
         elif isinstance(snapshot, str):
             regime_raw = snapshot
-            confidence_raw = 0.0 # Strings carry no confidence data
-            
+            confidence_raw = 0.0  # Strings carry no confidence data
+
         # Case 3: It's an Object (RegimeSnapshot)
         elif hasattr(snapshot, "regime"):
             regime_raw = snapshot.regime
             confidence_raw = getattr(snapshot, "confidence", 0.0)
-            
+
         # Case 4: Fallback
         else:
             regime_raw = str(snapshot)
@@ -1541,26 +1548,26 @@ class StrategyManager(_BaseStrategyManager):
             confidence=max(0.0, min(confidence, 1.0)),
             updated_at=datetime.now(timezone.utc),
         )
-        
+
         # Logging & Metrics (Kept from your original code)
         payload = {
-            'event': 'regime_state_refreshed',
-            'regime': self._regime_state.regime,
-            'confidence': self._regime_state.confidence,
+            "event": "regime_state_refreshed",
+            "regime": self._regime_state.regime,
+            "confidence": self._regime_state.confidence,
         }
         change_payload = dict(payload)
         emitted_change = log_state_change(
             log,
-            key='strategy_manager.regime_state',
+            key="strategy_manager.regime_state",
             value=(self._regime_state.regime, self._regime_state.confidence),
-            msg='Condition met: regime_state_refreshed',
+            msg="Condition met: regime_state_refreshed",
             extra=change_payload,
         )
         if not emitted_change:
             log_throttled(
                 log,
-                key='strategy_manager.regime_state_refreshed',
-                msg='Condition met: regime_state_refreshed',
+                key="strategy_manager.regime_state_refreshed",
+                msg="Condition met: regime_state_refreshed",
                 interval_sec=10.0,
                 extra=dict(payload),
             )
@@ -1577,7 +1584,89 @@ class StrategyManager(_BaseStrategyManager):
                 extra={"event": "strategy_regime_metric_error"},
             )
         return self._regime_state
-        
+
+    def _record_no_signal_summary(
+        self,
+        *,
+        symbol: str,
+        missing: list[str],
+        indicators: t.Mapping[str, t.Any],
+        error_strategies: list[str],
+    ) -> None:
+        """Args: symbol, missing, indicators, error_strategies. Returns: None. Raises: Exception."""
+        log.debug(
+            'Entered StrategyManager._record_no_signal_summary',
+            extra={'event': 'strategy_no_signal_summary_enter', 'symbol': symbol},
+        )
+        try:
+            self._no_signal_summary['total'] += 1
+            if missing:
+                self._no_signal_summary['missing_indicators'] += len(missing)
+                for name in missing:
+                    self._no_signal_missing[name] = (
+                        self._no_signal_missing.get(name, 0) + 1
+                    )
+            volume = indicators.get('volume')
+            avg_volume = indicators.get('avg_volume')
+            try:
+                if volume is None or float(volume) <= 0.0:
+                    self._no_signal_summary['volume_zero'] += 1
+            except (TypeError, ValueError) as exc:
+                log.debug(
+                    'Failure in volume coercion: %s',
+                    exc,
+                    extra={
+                        'event': 'strategy_no_signal_volume_error',
+                        'symbol': symbol,
+                    },
+                )
+                self._no_signal_summary['volume_zero'] += 1
+            try:
+                if avg_volume is None or float(avg_volume) <= 0.0:
+                    self._no_signal_summary['avg_volume_zero'] += 1
+            except (TypeError, ValueError) as exc:
+                log.debug(
+                    'Failure in avg_volume coercion: %s',
+                    exc,
+                    extra={
+                        'event': 'strategy_no_signal_avg_volume_error',
+                        'symbol': symbol,
+                    },
+                )
+                self._no_signal_summary['avg_volume_zero'] += 1
+            if error_strategies:
+                self._no_signal_summary['error_strategies'] += len(error_strategies)
+            now_ts = time.time()
+            if now_ts - self._no_signal_last_summary_ts >= 60.0:
+                top_missing = sorted(
+                    self._no_signal_missing.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:5]
+                log.info(
+                    'Condition met: strategy_manager_no_signal_summary',
+                    extra={
+                        'event': 'strategy_manager_no_signal_summary',
+                        'symbol': symbol,
+                        'total': self._no_signal_summary['total'],
+                        'missing_indicators': self._no_signal_summary[
+                            'missing_indicators'
+                        ],
+                        'volume_zero': self._no_signal_summary['volume_zero'],
+                        'avg_volume_zero': self._no_signal_summary['avg_volume_zero'],
+                        'error_strategies': self._no_signal_summary['error_strategies'],
+                        'top_missing': top_missing,
+                    },
+                )
+                self._no_signal_last_summary_ts = now_ts
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                'Failure in StrategyManager no-signal summary: %s',
+                exc,
+                exc_info=exc,
+                extra={'event': 'strategy_no_signal_summary_error', 'symbol': symbol},
+            )
+
     def generate_signal(self, symbol: str, current_price: float) -> Signal | None:
         """Generate signal with confidence adjusted by strategy scores.
 
@@ -1636,7 +1725,9 @@ class StrategyManager(_BaseStrategyManager):
             try:
                 opt_quote = self._data_hub.get_quote(symbol)
                 if opt_quote:
-                    _exch_vwap = self._extract_float(opt_quote, ("vwap", "average_price"))
+                    _exch_vwap = self._extract_float(
+                        opt_quote, ("vwap", "average_price")
+                    )
                     if _exch_vwap and _exch_vwap > 0:
                         indicators["exchange_vwap"] = _exch_vwap
                         if not indicators.get("vwap") or indicators["vwap"] is None:
@@ -1685,7 +1776,9 @@ class StrategyManager(_BaseStrategyManager):
 
         if not signals:
             missing = sorted(
-                name for name in self._required_indicators if indicators.get(name) is None
+                name
+                for name in self._required_indicators
+                if indicators.get(name) is None
             )
             log_throttled(
                 log,
@@ -1703,6 +1796,12 @@ class StrategyManager(_BaseStrategyManager):
                     "volume": indicators.get("volume"),
                     "avg_volume": indicators.get("avg_volume"),
                 },
+            )
+            self._record_no_signal_summary(
+                symbol=symbol,
+                missing=missing,
+                indicators=indicators,
+                error_strategies=errors,
             )
             return None
 
@@ -1735,7 +1834,10 @@ class StrategyManager(_BaseStrategyManager):
         elif combined is None:
             log.info(
                 "Condition met: strategy_manager_no_combined_signal",
-                extra={"event": "strategy_manager_no_combined_signal", "symbol": symbol},
+                extra={
+                    "event": "strategy_manager_no_combined_signal",
+                    "symbol": symbol,
+                },
             )
         else:
             log.info(
