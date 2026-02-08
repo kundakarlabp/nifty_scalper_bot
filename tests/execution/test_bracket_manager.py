@@ -48,6 +48,28 @@ class TestBracketManager:
 
         broker.cancel_order.assert_called_once_with("tp-2")
 
+    def test_create_bracket_normalizes_long_side(self) -> None:
+        """create_bracket should normalize LONG to BUY with defaults."""
+        broker = Mock()
+        manager = BracketManager(broker_client=broker)
+
+        order_id = manager.create_bracket(
+            symbol='NIFTYTEST',
+            side='LONG',
+            entry_price=100.0,
+            stop_loss=0.0,
+            take_profit=0.0,
+            quantity=1,
+            strategy='unit_test',
+        )
+
+        bracket = manager.get_bracket(order_id)
+
+        assert bracket is not None
+        assert bracket.side == 'BUY'
+        assert bracket.sl_trigger_price == pytest.approx(95.0)
+        assert bracket.tp_trigger_price == pytest.approx(110.0)
+
     @pytest.mark.flaky(reruns=1)
     def test_race_between_stop_and_target_is_serialised(self) -> None:
         """Only the first leg fill should trigger cancellations."""
