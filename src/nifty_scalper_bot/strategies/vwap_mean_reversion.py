@@ -60,26 +60,26 @@ class VWAPMeanReversionStrategy:
         """
 
         logger.debug(
-            "Entered VWAPMeanReversionStrategy.generate_signal",
-            extra={"event": "vwap_mean_reversion_enter"},
+            'Entered VWAPMeanReversionStrategy.generate_signal',
+            extra={'event': 'vwap_mean_reversion_enter'},
         )
         try:
-            spot_snapshot = market_data.get("NIFTY")
+            spot_snapshot = market_data.get('NIFTY')
             if not isinstance(spot_snapshot, Mapping):
                 logger.info(
-                    "Condition met: spot_price_missing",
-                    extra={"event": "vwap_mean_reversion_no_spot"},
+                    'Condition met: spot_price_missing',
+                    extra={'event': 'vwap_mean_reversion_no_spot'},
                 )
                 return VWAPSignal(
                     action="HOLD",
                     reason="spot_price_missing",
                     metadata={"threshold_pct": self._threshold_pct},
                 )
-            spot_price_value = _coerce_float(spot_snapshot.get("ltp"))
+            spot_price_value = _coerce_float(spot_snapshot.get('ltp'))
             if spot_price_value is None:
                 logger.info(
-                    "Condition met: spot_price_invalid",
-                    extra={"event": "vwap_mean_reversion_invalid_spot"},
+                    'Condition met: spot_price_invalid',
+                    extra={'event': 'vwap_mean_reversion_invalid_spot'},
                 )
                 return VWAPSignal(
                     action="HOLD",
@@ -87,11 +87,13 @@ class VWAPMeanReversionStrategy:
                     metadata={"threshold_pct": self._threshold_pct},
                 )
             spot_price = spot_price_value
-            bars_payload = market_data.get("NIFTYFUT_bars")
+            bars_payload = market_data.get('NIFTYFUT_bars') or market_data.get(
+                'NIFTY_bars'
+            )
             if not isinstance(bars_payload, Sequence):
                 logger.info(
-                    "Condition met: volume_data_missing",
-                    extra={"event": "vwap_mean_reversion_no_bars"},
+                    'Condition met: volume_data_missing',
+                    extra={'event': 'vwap_mean_reversion_no_bars'},
                 )
                 return VWAPSignal(
                     action="HOLD",
@@ -113,8 +115,8 @@ class VWAPMeanReversionStrategy:
             total_volume = sum(volumes)
             if total_volume <= 0.0 or not closes:
                 logger.info(
-                    "Condition met: volume_data_missing",
-                    extra={"event": "vwap_mean_reversion_zero_volume"},
+                    'Condition met: volume_data_missing',
+                    extra={'event': 'vwap_mean_reversion_zero_volume'},
                 )
                 return VWAPSignal(
                     action="HOLD",
@@ -138,12 +140,12 @@ class VWAPMeanReversionStrategy:
                 volatility_pct = (variance**0.5) / vwap
                 threshold = max(threshold, volatility_pct * 0.5)
             logger.debug(
-                "Computed VWAP volatility-adjusted threshold",
+                'Computed VWAP volatility-adjusted threshold',
                 extra={
-                    "event": "vwap_mean_reversion_threshold",
-                    "base_threshold_pct": self._threshold_pct,
-                    "dynamic_threshold_pct": threshold,
-                    "volatility_pct": volatility_pct,
+                    'event': 'vwap_mean_reversion_threshold',
+                    'base_threshold_pct': self._threshold_pct,
+                    'dynamic_threshold_pct': threshold,
+                    'volatility_pct': volatility_pct,
                 },
             )
             if deviation <= -threshold:
@@ -155,30 +157,35 @@ class VWAPMeanReversionStrategy:
             else:
                 action = "HOLD"
                 reason = "within_band"
+            deviation_sigma = (
+                deviation / volatility_pct if volatility_pct > 0 else 0.0
+            )
             metadata = {
-                "spot_price": spot_price,
-                "vwap": vwap,
-                "deviation_pct": deviation,
-                "total_volume": total_volume,
-                "bars_used": len(closes),
-                "threshold_pct": threshold,
-                "volatility_pct": volatility_pct,
+                'spot_price': spot_price,
+                'vwap': vwap,
+                'deviation_pct': deviation,
+                'total_volume': total_volume,
+                'bars_used': len(closes),
+                'threshold_pct': threshold,
+                'volatility_pct': volatility_pct,
+                'deviation_sigma': deviation_sigma,
             }
             logger.info(
-                "Condition met: vwap_signal_computed",
+                'Condition met: vwap_signal_computed',
                 extra={
-                    "event": "vwap_mean_reversion_decision",
-                    "action": action,
-                    "reason": reason,
-                    "deviation_pct": deviation,
+                    'event': 'vwap_mean_reversion_decision',
+                    'action': action,
+                    'reason': reason,
+                    'deviation_pct': deviation,
                 },
             )
             return VWAPSignal(action=action, reason=reason, metadata=metadata)
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "Failure in VWAPMeanReversionStrategy.generate_signal: %s",
+                'Failure in VWAPMeanReversionStrategy.generate_signal: %s',
                 exc,
-                extra={"event": "vwap_mean_reversion_error"},
+                extra={'event': 'vwap_mean_reversion_error'},
+                exc_info=exc,
             )
             raise
 

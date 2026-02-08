@@ -6,6 +6,10 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, Literal, Optional
 
+from nifty_scalper_bot.utils.logging import get_logger
+
+LOGGER = get_logger(__name__)
+
 PositionSide = Literal["FLAT", "LONG", "SHORT"]
 
 
@@ -75,73 +79,147 @@ class OptionMicroSignal:
 
         Returns:
             SignalDecision capturing entry/exit intent and feature values.
+
+        Raises:
+            None.
         """
+        LOGGER.debug(
+            'Entered OptionMicroSignal.on_tick',
+            extra={'event': 'option_micro_signal_tick'},
+        )
+        features: Dict[str, float] = {'last_size': float(last_size)}
+        try:
+            if (
+                not math.isfinite(bid)
+                or not math.isfinite(ask)
+                or not math.isfinite(last_price)
+            ):
+                LOGGER.info(
+                    'Condition met: option_micro_signal_invalid_price',
+                    extra={'event': 'option_micro_signal_invalid_price'},
+                )
+                return SignalDecision(False, False, None, None, features)
+            if ask <= 0.0 or bid <= 0.0 or ask < bid:
+                LOGGER.info(
+                    'Condition met: option_micro_signal_invalid_quote',
+                    extra={
+                        'event': 'option_micro_signal_invalid_quote',
+                        'bid': bid,
+                        'ask': ask,
+                    },
+                )
+                return SignalDecision(False, False, None, None, features)
+            if last_size < 0 or depth < 0:
+                LOGGER.info(
+                    'Condition met: option_micro_signal_invalid_depth',
+                    extra={
+                        'event': 'option_micro_signal_invalid_depth',
+                        'last_size': last_size,
+                        'depth': depth,
+                    },
+                )
+                return SignalDecision(False, False, None, None, features)
 
-        spread = max(ask - bid, self.tick_size)
-        mid = (ask + bid) / 2.0
-        features: Dict[str, float] = {"last_size": float(last_size)}
-        if self._last_mid is None:
-            self._last_mid = mid
-            self._last_ts_ns = ts_ns
-            return SignalDecision(False, False, None, None, features)
+            spread = max(ask - bid, self.tick_size)
+            mid = (ask + bid) / 2.0
+            if self._last_mid is None:
+                self._last_mid = mid
+                self._last_ts_ns = ts_ns
+                return SignalDecision(False, False, None, None, features)
 
-        delta_mid = mid - self._last_mid
-        delta_abs = abs(delta_mid)
-        features["spread"] = spread
-        features["mid"] = mid
-        features["delta_mid"] = delta_mid
-        features["depth"] = float(depth)
+            delta_mid = mid - self._last_mid
+            delta_abs = abs(delta_mid)
+            features['spread'] = spread
+            features['mid'] = mid
+            features['delta_mid'] = delta_mid
+            features['depth'] = float(depth)
 
-        elapsed_ns = max(ts_ns - self._last_ts_ns, 1)
-        elapsed_ms = elapsed_ns / 1_000_000
-        decay = math.exp(-elapsed_ms / max(self.ema_half_life_ms, 1e-6))
-        alpha = 1.0 - decay
-        self._microvol = (1.0 - alpha) * self._microvol + alpha * delta_abs
-        features["microvol"] = self._microvol
+            elapsed_ns = max(ts_ns - self._last_ts_ns, 1)
+            elapsed_ms = elapsed_ns / 1_000_000
+            decay = math.exp(-elapsed_ms / max(self.ema_half_life_ms, 1e-6))
+            alpha = 1.0 - decay
+            self._microvol = (1.0 - alpha) * self._microvol + alpha * delta_abs
+            features['microvol'] = self._microvol
 
-        snmom = delta_mid / max(spread, self.tick_size)
-        features["snmom"] = snmom
+            snmom = delta_mid / max(spread, self.tick_size)
+            features['snmom'] = snmom
 
-        ltt_flag = math.isclose(
-            last_price, bid, abs_tol=self.tick_size / 2
-        ) or math.isclose(last_price, ask, abs_tol=self.tick_size / 2)
-        features["ltt"] = 1.0 if ltt_flag else 0.0
+            ltt_flag = math.isclose(
+                last_price, bid, abs_tol=self.tick_size / 2
+            ) or math.isclose(last_price, ask, abs_tol=self.tick_size / 2)
+            features['ltt'] = 1.0 if ltt_flag else 0.0
 
-        decision = SignalDecision(False, False, None, None, features)
-        if spread > self.spread_limit or depth < self.min_depth:
+            decision = SignalDecision(False, False, None, None, features)
+            if spread > self.spread_limit or depth < self.min_depth:
+                LOGGER.info(
+                    'Condition met: option_micro_signal_liquidity_block',
+                    extra={
+                        'event': 'option_micro_signal_liquidity_block',
+                        'spread': spread,
+                        'depth': depth,
+                    },
+                )
+                self._update_state(mid, ts_ns)
+                return decision
+
+            if self._position == 'FLAT':
+                if (
+                    snmom > self.snmom_threshold
+                    and self._microvol > self.microvol_threshold
+                    and ltt_flag
+                    and math.isclose(last_price, ask, abs_tol=self.tick_size / 2)
+                ):
+                    self._position = 'LONG'
+                    self._entry_mid = mid
+                    LOGGER.info(
+                        'Condition met: option_micro_signal_long_entry',
+                        extra={'event': 'option_micro_signal_long_entry'},
+                    )
+                    decision = SignalDecision(
+                        True, False, 'LONG', 'LONG_ENTRY', features
+                    )
+                elif (
+                    snmom < -self.snmom_threshold
+                    and self._microvol > self.microvol_threshold
+                    and ltt_flag
+                    and math.isclose(last_price, bid, abs_tol=self.tick_size / 2)
+                ):
+                    self._position = 'SHORT'
+                    self._entry_mid = mid
+                    LOGGER.info(
+                        'Condition met: option_micro_signal_short_entry',
+                        extra={'event': 'option_micro_signal_short_entry'},
+                    )
+                    decision = SignalDecision(
+                        True, False, 'SHORT', 'SHORT_ENTRY', features
+                    )
+            else:
+                exit_reason = self._should_exit(mid, snmom)
+                if exit_reason:
+                    LOGGER.info(
+                        'Condition met: option_micro_signal_exit',
+                        extra={
+                            'event': 'option_micro_signal_exit',
+                            'reason': exit_reason,
+                            'side': self._position,
+                        },
+                    )
+                    decision = SignalDecision(
+                        False, True, self._position, exit_reason, features
+                    )
+                    self._position = 'FLAT'
+                    self._entry_mid = None
+
             self._update_state(mid, ts_ns)
             return decision
-
-        if self._position == "FLAT":
-            if (
-                snmom > self.snmom_threshold
-                and self._microvol > self.microvol_threshold
-                and ltt_flag
-                and math.isclose(last_price, ask, abs_tol=self.tick_size / 2)
-            ):
-                self._position = "LONG"
-                self._entry_mid = mid
-                decision = SignalDecision(True, False, "LONG", "LONG_ENTRY", features)
-            elif (
-                snmom < -self.snmom_threshold
-                and self._microvol > self.microvol_threshold
-                and ltt_flag
-                and math.isclose(last_price, bid, abs_tol=self.tick_size / 2)
-            ):
-                self._position = "SHORT"
-                self._entry_mid = mid
-                decision = SignalDecision(True, False, "SHORT", "SHORT_ENTRY", features)
-        else:
-            exit_reason = self._should_exit(mid, snmom)
-            if exit_reason:
-                decision = SignalDecision(
-                    False, True, self._position, exit_reason, features
-                )
-                self._position = "FLAT"
-                self._entry_mid = None
-
-        self._update_state(mid, ts_ns)
-        return decision
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                'Failure in OptionMicroSignal.on_tick: %s',
+                exc,
+                extra={'event': 'option_micro_signal_error'},
+                exc_info=exc,
+            )
+            return SignalDecision(False, False, None, None, features)
 
     def _should_exit(self, mid: float, snmom: float) -> str | None:
         if self._position == "LONG":

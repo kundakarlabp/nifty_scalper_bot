@@ -278,70 +278,91 @@ class RegimeAdaptiveStrategy(Strategy):
         """Return snapshot including OI/IV/ATR/volume from DataHub or MDM."""
 
         self._logger.debug(
-            "Entered RegimeAdaptiveStrategy._build_market_snapshot",
-            extra={"event": "regime_snapshot_enter", "symbol": symbol},
+            'Entered RegimeAdaptiveStrategy._build_market_snapshot',
+            extra={'event': 'regime_snapshot_enter', 'symbol': symbol},
         )
+        try:
+            # 1. Try DataHub (Primary Source - Enriched)
+            latest: dict[str, Any] = {}
+            iv = None
+            if self._data_hub:
+                try:
+                    iv = self._data_hub.get_iv(symbol)
+                    latest = self._data_hub.get_quote(symbol) or {}
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        'Failure in RegimeAdaptiveStrategy._build_market_snapshot: %s',
+                        exc,
+                        extra={'event': 'regime_snapshot_datahub_error'},
+                        exc_info=exc,
+                    )
 
-        # 1. Try DataHub (Primary Source - Enriched)
-        latest: dict[str, Any] = {}
-        iv = None
-        if self._data_hub:
-            try:
-                iv = self._data_hub.get_iv(symbol)
-                latest = self._data_hub.get_quote(symbol) or {}
-            except Exception:
-                pass
-        
-        # 2. Fallback to MarketDataManager (Secondary Source - Raw)
-        if not latest:
-            latest = self._market_data.get_latest_tick(symbol) or {}
+            # 2. Fallback to MarketDataManager (Secondary Source - Raw)
+            if not latest:
+                latest = self._market_data.get_latest_tick(symbol) or {}
 
-        if not latest:
+            if not latest:
+                return None
+
+            snapshot: MutableMapping[str, float] = {}
+
+            # Extract Open Interest
+            oi_value = latest.get('open_interest') or latest.get('oi')
+            if isinstance(oi_value, (int, float)):
+                snapshot['open_interest'] = float(oi_value)
+
+            # Extract Implied Volatility
+            # Use DataHub calculation if available, else raw tick
+            if isinstance(iv, (int, float)):
+                snapshot['iv_rank'] = float(iv) * 100.0
+            else:
+                raw_iv = latest.get('implied_volatility')
+                if not isinstance(raw_iv, (int, float)):
+                    raw = (
+                        latest.get('raw')
+                        if isinstance(latest.get('raw'), Mapping)
+                        else None
+                    )
+                    if isinstance(raw, Mapping):
+                        raw_iv = raw.get('implied_volatility')
+                if isinstance(raw_iv, (int, float)):
+                    snapshot['iv_rank'] = float(raw_iv) * 100.0
+
+            # Extract ATR
+            atr = latest.get('atr')
+            if isinstance(atr, (int, float)):
+                snapshot['atr'] = float(atr)
+
+            # Extract Volume & Ratio
+            volume = (
+                latest.get('volume')
+                or latest.get('trades')
+                or latest.get('volume_traded')
+            )
+            avg_volume = latest.get('avg_volume')
+            if isinstance(volume, (int, float)):
+                vol_val = float(volume)
+                snapshot['volume'] = vol_val
+                if isinstance(avg_volume, (int, float)) and avg_volume > 0:
+                    snapshot['volume_ratio'] = vol_val / float(avg_volume)
+
+            # Extract SL/TP hints from tick (if any)
+            stop_loss = latest.get('stop_loss')
+            take_profit = latest.get('take_profit')
+            if isinstance(stop_loss, (int, float)):
+                snapshot['stop_loss'] = float(stop_loss)
+            if isinstance(take_profit, (int, float)):
+                snapshot['take_profit'] = float(take_profit)
+
+            return snapshot
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                'Failure in RegimeAdaptiveStrategy._build_market_snapshot: %s',
+                exc,
+                extra={'event': 'regime_snapshot_error', 'symbol': symbol},
+                exc_info=exc,
+            )
             return None
-
-        snapshot: MutableMapping[str, float] = {}
-        
-        # Extract Open Interest
-        oi_value = latest.get("open_interest") or latest.get("oi")
-        if isinstance(oi_value, (int, float)):
-            snapshot["open_interest"] = float(oi_value)
-
-        # Extract Implied Volatility
-        # Use DataHub calculation if available, else raw tick
-        if isinstance(iv, (int, float)):
-            snapshot["iv_rank"] = float(iv) * 100.0
-        else:
-            raw_iv = latest.get("implied_volatility")
-            if not isinstance(raw_iv, (int, float)):
-                raw = latest.get("raw") if isinstance(latest.get("raw"), Mapping) else None
-                if isinstance(raw, Mapping):
-                    raw_iv = raw.get("implied_volatility")
-            if isinstance(raw_iv, (int, float)):
-                snapshot["iv_rank"] = float(raw_iv) * 100.0
-
-        # Extract ATR
-        atr = latest.get("atr")
-        if isinstance(atr, (int, float)):
-            snapshot["atr"] = float(atr)
-
-        # Extract Volume & Ratio
-        volume = latest.get("volume") or latest.get("trades") or latest.get("volume_traded")
-        avg_volume = latest.get("avg_volume")
-        if isinstance(volume, (int, float)):
-            vol_val = float(volume)
-            snapshot["volume"] = vol_val
-            if isinstance(avg_volume, (int, float)) and avg_volume > 0:
-                snapshot["volume_ratio"] = vol_val / float(avg_volume)
-
-        # Extract SL/TP hints from tick (if any)
-        stop_loss = latest.get("stop_loss")
-        take_profit = latest.get("take_profit")
-        if isinstance(stop_loss, (int, float)):
-            snapshot["stop_loss"] = float(stop_loss)
-        if isinstance(take_profit, (int, float)):
-            snapshot["take_profit"] = float(take_profit)
-
-        return snapshot
 
     def _passes_filters(
         self,

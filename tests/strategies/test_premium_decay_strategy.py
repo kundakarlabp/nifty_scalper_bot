@@ -235,3 +235,28 @@ def test_square_off_before_cutoff(dependencies: tuple[Any, ...]) -> None:
     )
     assert strategy._active is None
     assert len(orchestrator.exits) == 1
+
+
+def test_entry_blocked_on_high_iv(dependencies: tuple[Any, ...]) -> None:
+    """Strategy should block entries when IV exceeds exit threshold."""
+
+    order_manager, risk_manager, orchestrator, position_manager = dependencies
+    strategy = PremiumDecayStrategy(
+        order_manager=order_manager,
+        risk_manager=risk_manager,
+        orchestrator=orchestrator,
+        position_manager=position_manager,
+        iv_exit_threshold=0.25,
+    )
+    option_chain = [
+        _make_contract("TESTCE", "CE", 20000, 0.26),
+        _make_contract("TESTPE", "PE", 20000, -0.24),
+    ]
+    placed = strategy.evaluate_entry(
+        underlying="NIFTY",
+        indicators={"atr": 12.0, "adx": 10.0},
+        option_chain=option_chain,
+        iv=0.3,
+    )
+    assert placed is False
+    assert len(order_manager.placed) == 0

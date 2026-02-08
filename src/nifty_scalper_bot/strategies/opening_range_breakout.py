@@ -90,37 +90,55 @@ class OpeningRangeBreakoutStrategy(Strategy):
         """
 
         logger.debug(
-            "Entered OpeningRangeBreakoutStrategy.generate_signal",
-            extra={"event": "opening_range_generate_enter", "symbol": symbol},
+            'Entered OpeningRangeBreakoutStrategy.generate_signal',
+            extra={'event': 'opening_range_generate_enter', 'symbol': symbol},
         )
         try:
-            orb_high_raw = indicators.get("opening_range_high")
-            orb_low_raw = indicators.get("opening_range_low")
+            orb_high_raw = indicators.get('opening_range_high')
+            orb_low_raw = indicators.get('opening_range_low')
             if not isinstance(orb_high_raw, (int, float)) or not isinstance(
                 orb_low_raw, (int, float)
             ):
+                logger.info(
+                    'Condition met: opening_range_missing',
+                    extra={'event': 'opening_range_missing', 'symbol': symbol},
+                )
                 return None
             orb_high = float(orb_high_raw)
             orb_low = float(orb_low_raw)
-            current_range = max(orb_high - orb_low, 0.0)
+            if orb_high <= orb_low:
+                logger.info(
+                    'Condition met: opening_range_invalid',
+                    extra={
+                        'event': 'opening_range_invalid',
+                        'symbol': symbol,
+                        'orb_high': orb_high,
+                        'orb_low': orb_low,
+                    },
+                )
+                return None
+            current_range = orb_high - orb_low
+            range_pct = current_range / max(orb_low, 1.0)
 
             if not self._passes_nr7(symbol, current_range):
                 logger.info(
-                    "Condition met: nr7_filter_failed",
+                    'Condition met: nr7_filter_failed',
                     extra={
-                        "event": "nr7_filter_failed",
-                        "symbol": symbol,
-                        "current_range": current_range,
+                        'event': 'nr7_filter_failed',
+                        'symbol': symbol,
+                        'current_range': current_range,
+                        'range_pct': range_pct,
                     },
                 )
                 return None
 
             logger.info(
-                "Condition met: nr7_filter_passed",
+                'Condition met: nr7_filter_passed',
                 extra={
-                    "event": "nr7_filter_passed",
-                    "symbol": symbol,
-                    "current_range": current_range,
+                    'event': 'nr7_filter_passed',
+                    'symbol': symbol,
+                    'current_range': current_range,
+                    'range_pct': range_pct,
                 },
             )
 
@@ -128,8 +146,8 @@ class OpeningRangeBreakoutStrategy(Strategy):
                 # Skip entries if position already open to avoid duplicates.
                 return None
 
-            direction = indicators.get("orb_break_direction")
-            entry_raw = indicators.get("orb_entry_price")
+            direction = indicators.get('orb_break_direction')
+            entry_raw = indicators.get('orb_entry_price')
             if not isinstance(entry_raw, (int, float)):
                 entry_price = current_price
             else:
@@ -141,14 +159,14 @@ class OpeningRangeBreakoutStrategy(Strategy):
             if direction == "UP":
                 if entry_price <= orb_high + breakout_buffer:
                     logger.info(
-                        "Condition met: breakout_buffer_unmet",
+                        'Condition met: breakout_buffer_unmet',
                         extra={
-                            "event": "opening_range_buffer_failed",
-                            "symbol": symbol,
-                            "direction": "UP",
-                            "entry_price": entry_price,
-                            "orb_high": orb_high,
-                            "buffer": breakout_buffer,
+                            'event': 'opening_range_buffer_failed',
+                            'symbol': symbol,
+                            'direction': 'UP',
+                            'entry_price': entry_price,
+                            'orb_high': orb_high,
+                            'buffer': breakout_buffer,
                         },
                     )
                     return None
@@ -159,14 +177,14 @@ class OpeningRangeBreakoutStrategy(Strategy):
             elif direction == "DOWN":
                 if entry_price >= orb_low - breakout_buffer:
                     logger.info(
-                        "Condition met: breakout_buffer_unmet",
+                        'Condition met: breakout_buffer_unmet',
                         extra={
-                            "event": "opening_range_buffer_failed",
-                            "symbol": symbol,
-                            "direction": "DOWN",
-                            "entry_price": entry_price,
-                            "orb_low": orb_low,
-                            "buffer": breakout_buffer,
+                            'event': 'opening_range_buffer_failed',
+                            'symbol': symbol,
+                            'direction': 'DOWN',
+                            'entry_price': entry_price,
+                            'orb_low': orb_low,
+                            'buffer': breakout_buffer,
                         },
                     )
                     return None
@@ -182,11 +200,12 @@ class OpeningRangeBreakoutStrategy(Strategy):
 
             reason = "Opening range breakout with NR7 confirmation"
             metadata = {
-                "strategy": self.name,
-                "orb_high": orb_high,
-                "orb_low": orb_low,
-                "nr7": True,
-                "breakout_buffer": breakout_buffer,
+                'strategy': self.name,
+                'orb_high': orb_high,
+                'orb_low': orb_low,
+                'nr7': True,
+                'breakout_buffer': breakout_buffer,
+                'range_pct': range_pct,
             }
             return Signal(
                 action=side,
@@ -200,9 +219,10 @@ class OpeningRangeBreakoutStrategy(Strategy):
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "Failure in OpeningRangeBreakoutStrategy.generate_signal: %s",
+                'Failure in OpeningRangeBreakoutStrategy.generate_signal: %s',
                 exc,
-                extra={"event": "opening_range_generate_error", "symbol": symbol},
+                extra={'event': 'opening_range_generate_error', 'symbol': symbol},
+                exc_info=exc,
             )
             return None
 
