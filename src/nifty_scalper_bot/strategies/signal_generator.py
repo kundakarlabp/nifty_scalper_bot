@@ -1151,8 +1151,12 @@ class StrategyManager:
         self._data_hub = data_hub
         self._logger = logger
         self._orchestrator = orchestrator
-        self._futures_symbol = (futures_symbol or "NIFTY").strip().upper()
+        self._futures_symbol = (futures_symbol or 'NIFTY').strip().upper()
         self._futures_volume_history: Deque[float] = deque(maxlen=120)
+        self._last_index_ltp: float | None = None
+        self._last_index_vwap: float | None = None
+        self._last_index_update_ts: float | None = None
+        self._index_cache_log_ts: float | None = None
 
         raw_config = config if config else (strategies[0].config if strategies else {})
         self._config = raw_config
@@ -1471,19 +1475,14 @@ class StrategyManager:
                 return max(0.0, min(1.0, scaled))
 
             normalized: list[tuple[Signal, float]] = [
-                (signal, _normalize_confidence(signal.confidence))
-                for signal in signals
+                (signal, _normalize_confidence(signal.confidence)) for signal in signals
             ]
 
             buy_signals = [
-                (signal, conf)
-                for signal, conf in normalized
-                if signal.action == "BUY"
+                (signal, conf) for signal, conf in normalized if signal.action == "BUY"
             ]
             sell_signals = [
-                (signal, conf)
-                for signal, conf in normalized
-                if signal.action == "SELL"
+                (signal, conf) for signal, conf in normalized if signal.action == "SELL"
             ]
 
             buy_weight = sum(conf**2 for _, conf in buy_signals)
@@ -1614,16 +1613,16 @@ class StrategyManager:
         return (sl, tp)
 
     def _augment_futures_metrics(self, indicators: MutableMapping[str, Any]) -> None:
-        '''Augment metrics. Args: indicators. Returns: None. Raises: NA.'''
+        """Augment metrics. Args: indicators. Returns: None. Raises: NA."""
         self._logger.debug(
-            'Entered StrategyManager._augment_futures_metrics',
-            extra={'event': 'augment_futures_metrics'},
+            "Entered StrategyManager._augment_futures_metrics",
+            extra={"event": "augment_futures_metrics"},
         )
-        indicators.setdefault('futures_volume', None)
-        indicators.setdefault('futures_volume_avg', None)
-        indicators.setdefault('futures_volume_ratio', None)
-        indicators.setdefault('nifty_index_ltp', None)  # ✅ NEW
-        indicators.setdefault('nifty_index_vwap', None)  # ✅ NEW
+        indicators.setdefault("futures_volume", None)
+        indicators.setdefault("futures_volume_avg", None)
+        indicators.setdefault("futures_volume_ratio", None)
+        indicators.setdefault("nifty_index_ltp", None)  # ✅ NEW
+        indicators.setdefault("nifty_index_vwap", None)  # ✅ NEW
 
         data_hub = self._data_hub
         if data_hub is None:
@@ -1636,30 +1635,30 @@ class StrategyManager:
             quote = data_hub.get_quote(self._futures_symbol)
         except Exception as exc:
             self._logger.error(
-                'Failure in StrategyManager._augment_futures_metrics futures quote: %s',
+                "Failure in StrategyManager._augment_futures_metrics futures quote: %s",
                 exc,
-                extra={'event': 'futures_quote_error', 'symbol': self._futures_symbol},
+                extra={"event": "futures_quote_error", "symbol": self._futures_symbol},
             )
             quote = None
 
         if quote:
             volume = self._extract_float(
                 quote,
-                ('volume_traded_today', 'volume_traded', 'volume', 'last_quantity'),
+                ("volume_traded_today", "volume_traded", "volume", "last_quantity"),
             )
             if volume is not None:
-                last_volume = getattr(self, '_last_futures_volume', None)
+                last_volume = getattr(self, "_last_futures_volume", None)
                 if last_volume is None:
                     volume_delta = volume
                 elif volume < last_volume:
                     volume_delta = volume
                     self._logger.info(
-                        'Condition met: futures_volume_reset',
+                        "Condition met: futures_volume_reset",
                         extra={
-                            'event': 'futures_volume_reset',
-                            'symbol': self._futures_symbol,
-                            'last_volume': last_volume,
-                            'current_volume': volume,
+                            "event": "futures_volume_reset",
+                            "symbol": self._futures_symbol,
+                            "last_volume": last_volume,
+                            "current_volume": volume,
                         },
                     )
                 else:
@@ -1669,22 +1668,22 @@ class StrategyManager:
                 if volume_delta >= 0:
                     self._futures_volume_history.append(volume_delta)
 
-                indicators['futures_volume'] = volume
+                indicators["futures_volume"] = volume
                 if self._futures_volume_history:
                     avg = sum(self._futures_volume_history) / len(
                         self._futures_volume_history
                     )
-                    indicators['futures_volume_avg'] = avg
+                    indicators["futures_volume_avg"] = avg
                     if avg > 0:
-                        indicators['futures_volume_ratio'] = volume_delta / avg
+                        indicators["futures_volume_ratio"] = volume_delta / avg
                         self._logger.info(
-                            'Condition met: futures_volume_ratio_updated',
+                            "Condition met: futures_volume_ratio_updated",
                             extra={
-                                'event': 'futures_volume_ratio_updated',
-                                'symbol': self._futures_symbol,
-                                'volume_delta': volume_delta,
-                                'volume_avg': avg,
-                                'volume_ratio': indicators['futures_volume_ratio'],
+                                "event": "futures_volume_ratio_updated",
+                                "symbol": self._futures_symbol,
+                                "volume_delta": volume_delta,
+                                "volume_avg": avg,
+                                "volume_ratio": indicators["futures_volume_ratio"],
                             },
                         )
 
@@ -1693,32 +1692,65 @@ class StrategyManager:
         # ═══════════════════════════════════════════════════════════
         try:
             # Try NIFTY 50 spot index first
-            index_quote = data_hub.get_quote("NSE:NIFTY 50")
+            index_quote = data_hub.get_quote('NSE:NIFTY 50', allow_pull=True)
+            if not index_quote:
+                index_quote = data_hub.get_quote('NIFTY 50', allow_pull=True)
             if index_quote:
                 index_ltp = self._extract_float(
-                    index_quote, ("last_price", "ltp", "close")
+                    index_quote, ('last_price', 'ltp', 'close')
                 )
-                index_vwap = self._extract_float(index_quote, ("vwap", "average_price"))
+                index_vwap = self._extract_float(
+                    index_quote, ('vwap', 'average_price')
+                )
 
                 if index_ltp and index_ltp > 0:
-                    indicators["nifty_index_ltp"] = index_ltp
+                    indicators['nifty_index_ltp'] = index_ltp
 
                 if index_vwap and index_vwap > 0:
-                    indicators["nifty_index_vwap"] = index_vwap
+                    indicators['nifty_index_vwap'] = index_vwap
+
+            cache_now = datetime.now().timestamp()
+            if indicators.get('nifty_index_ltp') or indicators.get('nifty_index_vwap'):
+                self._last_index_ltp = indicators.get('nifty_index_ltp')
+                self._last_index_vwap = indicators.get('nifty_index_vwap')
+                self._last_index_update_ts = cache_now
+            else:
+                cache_age = None
+                if self._last_index_update_ts is not None:
+                    cache_age = cache_now - self._last_index_update_ts
+                if cache_age is not None and cache_age <= 120.0:
+                    if not indicators.get('nifty_index_ltp') and self._last_index_ltp:
+                        indicators['nifty_index_ltp'] = self._last_index_ltp
+                    if not indicators.get('nifty_index_vwap') and self._last_index_vwap:
+                        indicators['nifty_index_vwap'] = self._last_index_vwap
+                    log_age = (
+                        cache_now - self._index_cache_log_ts
+                        if self._index_cache_log_ts is not None
+                        else None
+                    )
+                    if log_age is None or log_age >= 60.0:
+                        self._logger.info(
+                            'Condition met: index_cache_used',
+                            extra={
+                                'event': 'index_cache_used',
+                                'age_sec': round(cache_age, 1),
+                            },
+                        )
+                        self._index_cache_log_ts = cache_now
 
             # ═══════════════════════════════════════════════════════
             # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
             # ═══════════════════════════════════════════════════════
-            if not indicators.get("nifty_index_vwap"):
+            if not indicators.get('nifty_index_vwap'):
                 from datetime import datetime
 
                 now = datetime.now()
-                y_str = now.strftime("%y")
-                m_str = now.strftime("%b").upper()
+                y_str = now.strftime('%y')
+                m_str = now.strftime('%b').upper()
 
                 # Build list of symbols to try (in order of preference)
                 symbols_to_try = [
-                    f"NFO:NIFTY{y_str}{m_str}FUT",  # Current month: NFO:NIFTY26FEBFUT
+                    f'NFO:NIFTY{y_str}{m_str}FUT',  # Current month: NFO:NIFTY26FEBFUT
                 ]
 
                 # Add configured symbol and variations
@@ -1726,13 +1758,13 @@ class StrategyManager:
                     if self._futures_symbol not in symbols_to_try:
                         symbols_to_try.append(self._futures_symbol)
                     # Try with NFO: prefix if not present
-                    if not self._futures_symbol.startswith("NFO:"):
-                        prefixed = f"NFO:{self._futures_symbol}"
+                    if not self._futures_symbol.startswith('NFO:'):
+                        prefixed = f'NFO:{self._futures_symbol}'
                         if prefixed not in symbols_to_try:
                             symbols_to_try.append(prefixed)
                         # Also try NFO:NIFTY{symbol}FUT pattern
-                        if "FUT" not in self._futures_symbol.upper():
-                            fut_pattern = f"NFO:{self._futures_symbol}FUT"
+                        if 'FUT' not in self._futures_symbol.upper():
+                            fut_pattern = f'NFO:{self._futures_symbol}FUT'
                             if fut_pattern not in symbols_to_try:
                                 symbols_to_try.append(fut_pattern)
 
@@ -1741,15 +1773,15 @@ class StrategyManager:
 
                 for fut_sym in symbols_to_try:
                     try:
-                        fut_quote = data_hub.get_quote(fut_sym)
+                        fut_quote = data_hub.get_quote(fut_sym, allow_pull=True)
                         if fut_quote:
                             working_symbol = fut_sym
-                            if not getattr(self, "_vwap_source_logged", False):
+                            if not getattr(self, '_vwap_source_logged', False):
                                 self._logger.info(
-                                    f"✅ Futures VWAP source resolved: {fut_sym}",
+                                    f'✅ Futures VWAP source resolved: {fut_sym}',
                                     extra={
-                                        "event": "futures_vwap_resolved",
-                                        "symbol": fut_sym,
+                                        'event': 'futures_vwap_resolved',
+                                        'symbol': fut_sym,
                                     },
                                 )
                                 self._vwap_source_logged = True
@@ -1822,9 +1854,9 @@ class StrategyManager:
 
         except Exception as e:
             self._logger.error(
-                'Failure in StrategyManager._augment_futures_metrics index augment: %s',
+                "Failure in StrategyManager._augment_futures_metrics index augment: %s",
                 e,
-                extra={'event': 'index_data_augment_failed'},
+                extra={"event": "index_data_augment_failed"},
             )
 
     @staticmethod
