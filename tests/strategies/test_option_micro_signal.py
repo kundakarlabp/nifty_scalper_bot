@@ -84,3 +84,17 @@ def test_exit_on_adverse_move() -> None:
     )
     assert exit_decision.exit is True
     assert exit_decision.reason == "HARD_STOP"
+
+
+def test_invalid_quote_returns_hold() -> None:
+    signal = make_signal()
+    decision = signal.on_tick(
+        bid=102.0,
+        ask=101.0,
+        last_price=101.0,
+        last_size=1,
+        depth=10,
+        ts_ns=0,
+    )
+    assert decision.enter is False
+    assert decision.exit is False
