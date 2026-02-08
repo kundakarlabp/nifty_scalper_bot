@@ -761,7 +761,15 @@ class RiskManager:
         # ✅ FIX 6: Force minimum 1 lot when capital exists
         if max_units_by_risk < lot_size:
             if balance > 0:
-                self._logger.warning(f"⚠️ Forcing minimum 1 lot (capital insufficient for standard sizing)")
+                one_lot_risk = lot_size * sl_distance
+                if one_lot_risk > (allowed_risk * 2.0):
+                    self._logger.warning(
+                        "⚠️ Skipping trade: 1 lot risk exceeds 2x allowed risk"
+                    )
+                    return 0
+                self._logger.warning(
+                    "⚠️ Forcing minimum 1 lot (capital insufficient for standard sizing)"
+                )
                 return lot_size
             return 0
 

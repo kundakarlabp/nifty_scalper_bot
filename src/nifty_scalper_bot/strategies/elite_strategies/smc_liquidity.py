@@ -162,6 +162,7 @@ class SMCStrategy(EliteStrategy):
             sweep_key = f"{symbol}:{signal_side}:{sweep_level:.1f}"
             if self._last_sweep_key.get(symbol) == sweep_key:
                 return None  # ✅ Exact same sweep, skip
+            now = time_module.time()
             self._cooldown_tracker[symbol] = now              # ✅ Set 120s cooldown
             self._last_sweep_key[symbol] = sweep_key 
 

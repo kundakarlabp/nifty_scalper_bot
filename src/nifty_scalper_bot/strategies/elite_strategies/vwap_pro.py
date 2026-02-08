@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time as time_module
 from typing import Any, Dict
 
@@ -101,7 +102,8 @@ class VWAPProStrategy(EliteStrategy):
         return 0.9
 
     def _is_expiry_day(self) -> bool:
-        return time_module.localtime().tm_wday == 3
+        expiry_day = int(os.getenv("NIFTY_EXPIRY_WEEKDAY", "2"))
+        return time_module.localtime().tm_wday == expiry_day
 
     # ------------------------------------------------------------------ #
     # Core Signal Logic
