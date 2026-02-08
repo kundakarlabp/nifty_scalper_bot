@@ -129,6 +129,23 @@ class VWAPMeanReversionStrategy:
             if vwap > 0:
                 deviation = (spot_price - vwap) / vwap
             threshold = self._threshold_pct
+            volatility_pct = 0.0
+            if len(closes) > 1 and vwap > 0:
+                mean_close = sum(closes) / len(closes)
+                variance = sum(
+                    (close - mean_close) ** 2 for close in closes
+                ) / len(closes)
+                volatility_pct = (variance**0.5) / vwap
+                threshold = max(threshold, volatility_pct * 0.5)
+            logger.debug(
+                "Computed VWAP volatility-adjusted threshold",
+                extra={
+                    "event": "vwap_mean_reversion_threshold",
+                    "base_threshold_pct": self._threshold_pct,
+                    "dynamic_threshold_pct": threshold,
+                    "volatility_pct": volatility_pct,
+                },
+            )
             if deviation <= -threshold:
                 action: Literal["BUY", "SELL", "HOLD"] = "BUY"
                 reason = "spot_below_vwap"
@@ -145,6 +162,7 @@ class VWAPMeanReversionStrategy:
                 "total_volume": total_volume,
                 "bars_used": len(closes),
                 "threshold_pct": threshold,
+                "volatility_pct": volatility_pct,
             }
             logger.info(
                 "Condition met: vwap_signal_computed",

@@ -27,6 +27,8 @@ def test_vwap_strategy_generates_sell_signal() -> None:
     assert signal.reason == "spot_above_vwap"
     assert signal.metadata["total_volume"] == pytest.approx(150.0)
     assert signal.metadata["vwap"] == pytest.approx(100.231, rel=1e-3)
+    assert signal.metadata["threshold_pct"] >= 0.001
+    assert signal.metadata["volatility_pct"] >= 0.0
 
 
 def test_vwap_strategy_generates_buy_signal() -> None:
@@ -42,6 +44,8 @@ def test_vwap_strategy_generates_buy_signal() -> None:
     assert signal.action == "BUY"
     assert signal.reason == "spot_below_vwap"
     assert signal.metadata["bars_used"] == 2
+    assert signal.metadata["threshold_pct"] >= 0.001
+    assert signal.metadata["volatility_pct"] >= 0.0
 
 
 def test_vwap_strategy_returns_hold_when_volume_missing() -> None:

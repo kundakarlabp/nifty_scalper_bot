@@ -93,82 +93,118 @@ class OpeningRangeBreakoutStrategy(Strategy):
             "Entered OpeningRangeBreakoutStrategy.generate_signal",
             extra={"event": "opening_range_generate_enter", "symbol": symbol},
         )
-        orb_high_raw = indicators.get("opening_range_high")
-        orb_low_raw = indicators.get("opening_range_low")
-        if not isinstance(orb_high_raw, (int, float)) or not isinstance(
-            orb_low_raw, (int, float)
-        ):
-            return None
-        orb_high = float(orb_high_raw)
-        orb_low = float(orb_low_raw)
-        current_range = max(orb_high - orb_low, 0.0)
+        try:
+            orb_high_raw = indicators.get("opening_range_high")
+            orb_low_raw = indicators.get("opening_range_low")
+            if not isinstance(orb_high_raw, (int, float)) or not isinstance(
+                orb_low_raw, (int, float)
+            ):
+                return None
+            orb_high = float(orb_high_raw)
+            orb_low = float(orb_low_raw)
+            current_range = max(orb_high - orb_low, 0.0)
 
-        if not self._passes_nr7(symbol, current_range):
+            if not self._passes_nr7(symbol, current_range):
+                logger.info(
+                    "Condition met: nr7_filter_failed",
+                    extra={
+                        "event": "nr7_filter_failed",
+                        "symbol": symbol,
+                        "current_range": current_range,
+                    },
+                )
+                return None
+
             logger.info(
-                "Condition met: nr7_filter_failed",
+                "Condition met: nr7_filter_passed",
                 extra={
-                    "event": "nr7_filter_failed",
+                    "event": "nr7_filter_passed",
                     "symbol": symbol,
                     "current_range": current_range,
                 },
             )
-            return None
 
-        logger.info(
-            "Condition met: nr7_filter_passed",
-            extra={
-                "event": "nr7_filter_passed",
-                "symbol": symbol,
-                "current_range": current_range,
-            },
-        )
+            if position:
+                # Skip entries if position already open to avoid duplicates.
+                return None
 
-        if position:
-            # Skip entries if position already open to avoid duplicates.
-            return None
+            direction = indicators.get("orb_break_direction")
+            entry_raw = indicators.get("orb_entry_price")
+            if not isinstance(entry_raw, (int, float)):
+                entry_price = current_price
+            else:
+                entry_price = float(entry_raw)
+            breakout_buffer = max(current_range * 0.05, 0.5)
+            side: Literal["BUY", "SELL"]
+            stop_loss_price: float | None
+            take_profit_price: float | None
+            if direction == "UP":
+                if entry_price <= orb_high + breakout_buffer:
+                    logger.info(
+                        "Condition met: breakout_buffer_unmet",
+                        extra={
+                            "event": "opening_range_buffer_failed",
+                            "symbol": symbol,
+                            "direction": "UP",
+                            "entry_price": entry_price,
+                            "orb_high": orb_high,
+                            "buffer": breakout_buffer,
+                        },
+                    )
+                    return None
+                side = "BUY"
+                stop_loss_price, take_profit_price = self._ensure_rr(
+                    "BUY", entry_price, orb_low, desired_rr=2.0
+                )
+            elif direction == "DOWN":
+                if entry_price >= orb_low - breakout_buffer:
+                    logger.info(
+                        "Condition met: breakout_buffer_unmet",
+                        extra={
+                            "event": "opening_range_buffer_failed",
+                            "symbol": symbol,
+                            "direction": "DOWN",
+                            "entry_price": entry_price,
+                            "orb_low": orb_low,
+                            "buffer": breakout_buffer,
+                        },
+                    )
+                    return None
+                side = "SELL"
+                stop_loss_price, take_profit_price = self._ensure_rr(
+                    "SELL", entry_price, orb_high, desired_rr=2.0
+                )
+            else:
+                return None
 
-        direction = indicators.get("orb_break_direction")
-        entry_raw = indicators.get("orb_entry_price")
-        if not isinstance(entry_raw, (int, float)):
-            entry_price = current_price
-        else:
-            entry_price = float(entry_raw)
-        side: Literal["BUY", "SELL"]
-        stop_loss_price: float | None
-        take_profit_price: float | None
-        if direction == "UP":
-            side = "BUY"
-            stop_loss_price, take_profit_price = self._ensure_rr(
-                "BUY", entry_price, orb_low, desired_rr=2.0
+            if stop_loss_price is None or take_profit_price is None:
+                return None
+
+            reason = "Opening range breakout with NR7 confirmation"
+            metadata = {
+                "strategy": self.name,
+                "orb_high": orb_high,
+                "orb_low": orb_low,
+                "nr7": True,
+                "breakout_buffer": breakout_buffer,
+            }
+            return Signal(
+                action=side,
+                symbol=symbol,
+                quantity=1,
+                confidence=self._bounded_confidence(0.6),
+                reason=reason,
+                stop_loss=stop_loss_price,
+                take_profit=take_profit_price,
+                metadata=metadata,
             )
-        elif direction == "DOWN":
-            side = "SELL"
-            stop_loss_price, take_profit_price = self._ensure_rr(
-                "SELL", entry_price, orb_high, desired_rr=2.0
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failure in OpeningRangeBreakoutStrategy.generate_signal: %s",
+                exc,
+                extra={"event": "opening_range_generate_error", "symbol": symbol},
             )
-        else:
             return None
-
-        if stop_loss_price is None or take_profit_price is None:
-            return None
-
-        reason = "Opening range breakout with NR7 confirmation"
-        metadata = {
-            "strategy": self.name,
-            "orb_high": orb_high,
-            "orb_low": orb_low,
-            "nr7": True,
-        }
-        return Signal(
-            action=side,
-            symbol=symbol,
-            quantity=1,
-            confidence=self._bounded_confidence(0.6),
-            reason=reason,
-            stop_loss=stop_loss_price,
-            take_profit=take_profit_price,
-            metadata=metadata,
-        )
 
     def _passes_nr7(self, symbol: str, current_range: float) -> bool:
         """Return ``True`` when current range is narrowest of last seven.

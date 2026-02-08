@@ -106,3 +106,19 @@ def test_generate_signal_handles_provider_errors() -> None:
     signal = strategy.generate_signal("NIFTY24JANFUT", indicators, 126.0, None)
 
     assert signal is None
+
+
+def test_generate_signal_blocks_on_breakout_buffer() -> None:
+    """Strategy should skip signals that do not clear the breakout buffer."""
+
+    strategy = OpeningRangeBreakoutStrategy()
+    indicators = {
+        "opening_range_high": 25.0,
+        "opening_range_low": 24.0,
+        "orb_break_direction": "UP",
+        "orb_entry_price": 25.1,
+    }
+
+    signal = strategy.generate_signal("NIFTY24JANFUT", indicators, 25.1, None)
+
+    assert signal is None
