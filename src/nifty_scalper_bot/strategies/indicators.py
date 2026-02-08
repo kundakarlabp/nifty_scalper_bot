@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 PriceInput = float | Mapping[str, float] | Sequence[float]
 
@@ -168,69 +168,132 @@ class IndicatorEngine:
     def get_indicators(
         self, symbol: str, names: Iterable[str] | None = None
     ) -> dict[str, float | tuple[float, float, float] | None]:
-        """Get indicator snapshot for *symbol*.
-
-        When *names* is provided only the requested indicators are returned.
-        """
-
-        indicators: dict[str, float | tuple[float, float, float] | None] = {}
-        indicators["rsi"] = self.get_rsi(symbol)
-        indicators["ema"] = self.get_ema(symbol)
-        indicators["sma"] = self.get_sma(symbol)
-        macd = self.get_macd(symbol)
-        if macd is not None:
-            (
-                indicators["macd"],
-                indicators["macd_signal"],
-                indicators["macd_histogram"],
-            ) = macd
-        else:
-            indicators["macd"] = indicators["macd_signal"] = indicators[
-                "macd_histogram"
-            ] = None
-        bands = self.get_bollinger_bands(symbol)
-        if bands is not None:
-            (
-                indicators["bollinger_upper"],
-                indicators["bollinger_middle"],
-                indicators["bollinger_lower"],
-            ) = bands
-        else:
-            indicators["bollinger_upper"] = indicators["bollinger_middle"] = indicators[
-                "bollinger_lower"
-            ] = None
-        indicators["atr"] = self.get_atr(symbol)
-        indicators["atr_trend"] = self.get_atr_trend(symbol)
-        indicators["volatility_index"] = self.get_volatility_index(symbol)
-        indicators["vwap"] = self.get_vwap(symbol)
-        self._augment_session_metrics(symbol, indicators)
-        # ✅ FIX S1: Expose latest-bar OHLC for strategies that need it
-        history = self._histories.get(symbol)
-        if history and len(history) > 0:
-            closes = history.get_closes(1)
-            highs = history.get_highs(1)
-            lows = history.get_lows(1)
-            opens = history.get_opens(1) if hasattr(history, 'get_opens') else closes
-            if closes:
-                indicators.setdefault("close", float(closes[-1]))
-            if highs:
-                indicators.setdefault("high", float(highs[-1]))
-            if lows:
-                indicators.setdefault("low", float(lows[-1]))
-            if opens:
-                indicators.setdefault("open", float(opens[-1]))
-        _always_include = {"vwap", "atr", "volume", "avg_volume", "rsi",
-                           "high", "low", "close", "open",
-                           "bollinger_upper", "bollinger_lower", "bollinger_middle",
-                           "minutes_since_open", "minutes_until_close",
-                           "volume_spike_ratio", "bar_range"}
-        all_names = (set(names) if names else set()) | _always_include
-        requested: dict = {}
-        for name in all_names:
-            key = str(name)
-            if key in indicators:
-                requested[key] = indicators[key]
-        return requested
+        """Args: symbol, names. Returns: indicators dict. Raises: Exception."""
+        LOGGER.debug(
+            'Entered IndicatorEngine.get_indicators',
+            extra={'event': 'indicator_engine_get_indicators_enter', 'symbol': symbol},
+        )
+        try:
+            indicators: dict[str, float | tuple[float, float, float] | None] = {}
+            indicators["rsi"] = self.get_rsi(symbol)
+            indicators["ema"] = self.get_ema(symbol)
+            indicators["sma"] = self.get_sma(symbol)
+            macd = self.get_macd(symbol)
+            if macd is not None:
+                (
+                    indicators["macd"],
+                    indicators["macd_signal"],
+                    indicators["macd_histogram"],
+                ) = macd
+            else:
+                indicators["macd"] = indicators["macd_signal"] = indicators[
+                    "macd_histogram"
+                ] = None
+            bands = self.get_bollinger_bands(symbol)
+            if bands is not None:
+                (
+                    indicators["bollinger_upper"],
+                    indicators["bollinger_middle"],
+                    indicators["bollinger_lower"],
+                ) = bands
+            else:
+                indicators["bollinger_upper"] = indicators["bollinger_middle"] = (
+                    indicators["bollinger_lower"]
+                ) = None
+            indicators["atr"] = self.get_atr(symbol)
+            indicators["atr_trend"] = self.get_atr_trend(symbol)
+            indicators["volatility_index"] = self.get_volatility_index(symbol)
+            indicators["vwap"] = self.get_vwap(symbol)
+            self._augment_session_metrics(symbol, indicators)
+            # ✅ FIX S1: Expose latest-bar OHLC for strategies that need it
+            history = self._histories.get(symbol)
+            if history and len(history) > 0:
+                closes = history.get_closes(1)
+                highs = history.get_highs(1)
+                lows = history.get_lows(1)
+                opens = (
+                    history.get_opens(1) if hasattr(history, 'get_opens') else closes
+                )
+                if closes:
+                    indicators.setdefault('close', float(closes[-1]))
+                if highs:
+                    indicators.setdefault('high', float(highs[-1]))
+                if lows:
+                    indicators.setdefault('low', float(lows[-1]))
+                if opens:
+                    indicators.setdefault('open', float(opens[-1]))
+            _always_include = {
+                "vwap",
+                "atr",
+                "volume",
+                "avg_volume",
+                "rsi",
+                "high",
+                "low",
+                "close",
+                "open",
+                "bollinger_upper",
+                "bollinger_lower",
+                "bollinger_middle",
+                "minutes_since_open",
+                "minutes_until_close",
+                "volume_spike_ratio",
+                "bar_range",
+            }
+            name_set: set[str] = set()
+            if names is None:
+                log_throttled(
+                    LOGGER,
+                    f'indicator_names_defaulted_{symbol}',
+                    'Condition met: indicator_names_defaulted',
+                    interval_sec=60.0,
+                    extra={
+                        'event': 'indicator_engine_names_defaulted',
+                        'symbol': symbol,
+                    },
+                )
+            else:
+                try:
+                    name_set = {str(name) for name in names if name is not None}
+                except TypeError as e:
+                    log_throttled(
+                        LOGGER,
+                        f'indicator_names_invalid_{symbol}',
+                        'Condition met: indicator_names_invalid',
+                        interval_sec=60.0,
+                        extra={
+                            'event': 'indicator_engine_names_invalid',
+                            'symbol': symbol,
+                        },
+                    )
+                    LOGGER.error(
+                        'Failure in IndicatorEngine.get_indicators: %s',
+                        e,
+                        extra={
+                            'event': 'indicator_engine_names_error',
+                            'symbol': symbol,
+                        },
+                        exc_info=e,
+                    )
+                    name_set = set()
+            all_names = name_set | _always_include
+            requested: dict[str, float | tuple[float, float, float] | None] = {}
+            for name in all_names:
+                key = str(name)
+                if key in indicators:
+                    requested[key] = indicators[key]
+            return requested
+        except Exception as e:
+            LOGGER.error(
+                'Failure in IndicatorEngine.get_indicators: %s',
+                e,
+                extra={
+                    'event': 'indicator_engine_get_indicators_error',
+                    'symbol': symbol,
+                },
+                exc_info=e,
+            )
+            return {}
 
     def get_rsi(self, symbol: str, period: int = 14) -> float | None:
         """Calculate RSI. Returns None if insufficient data."""
@@ -358,7 +421,7 @@ class IndicatorEngine:
         effective_period = min(period, len(history))
         if effective_period < 3:
             return None  # Need at least 3 bars for meaningful VWAP
-        
+
         last_timestamp = history.last_timestamp
         if last_timestamp is None:
             return None
@@ -366,7 +429,7 @@ class IndicatorEngine:
         cached = self._get_cached(symbol, cache_key, last_timestamp)
         if cached is not None:
             return cached  # type: ignore[return-value]
-        prices = history.get_closes(effective_period) 
+        prices = history.get_closes(effective_period)
         volumes = history.get_volumes(effective_period)
         value = self._calculate_vwap(prices, volumes)
         if value is not None:
@@ -994,22 +1057,22 @@ class IndicatorEngine:
     def compute_atr(self, symbol: str, period: int = 14) -> object | None:
         """
         Compute ATR for volatility-adaptive trailing.
-        
+
         ✅ PRODUCTION FIX:
         - Reduced minimum bars from 25 to 10
         - Added fallback ATR calculation (1.5% of price)
         """
         # Lazy import to avoid circular dependency
         from nifty_scalper_bot.indicators.atr_provider import ATRSnapshot
-        
+
         hist = self._histories.get(symbol)
-        
+
         # ✅ FIX: Reduced minimum bars requirement
         min_bars = max(period + 2, 10)  # Reduced from 25 to 10
-        
+
         if not hist:
             return None
-            
+
         # ✅ FIX: Fallback for insufficient bars
         if len(hist) < min_bars:
             # Try to estimate ATR from available data
@@ -1017,7 +1080,7 @@ class IndicatorEngine:
                 closes = hist.get_closes()
                 if closes and len(closes) >= 2:
                     # Use recent price volatility as proxy
-                    recent_closes = closes[-min(len(closes), 5):]
+                    recent_closes = closes[-min(len(closes), 5) :]
                     if len(recent_closes) >= 2:
                         price_range = max(recent_closes) - min(recent_closes)
                         avg_price = sum(recent_closes) / len(recent_closes)
@@ -1032,13 +1095,13 @@ class IndicatorEngine:
             except Exception:
                 pass
             return None
-            
+
         try:
             lookback = period + 20
             closes = np.array(hist.get_closes(lookback), dtype=float)
             highs = np.array(hist.get_highs(lookback), dtype=float)
             lows = np.array(hist.get_lows(lookback), dtype=float)
-            
+
             if len(closes) < period:
                 # ✅ FIX: Fallback to percentage-based ATR
                 if len(closes) > 0:
@@ -1051,25 +1114,25 @@ class IndicatorEngine:
             for i in range(1, len(closes)):
                 tr = max(
                     highs[i] - lows[i],
-                    abs(highs[i] - closes[i-1]),
-                    abs(lows[i] - closes[i-1]),
+                    abs(highs[i] - closes[i - 1]),
+                    abs(lows[i] - closes[i - 1]),
                 )
                 tr_values.append(max(tr, 0.01))
-        
+
             if not tr_values:
                 return None
-                
+
             tr_array = np.array(tr_values)
-            
+
             # Current ATR
             current_atr = float(np.mean(tr_array[-period:]))
-            
+
             # ✅ FIX: Ensure ATR is reasonable (at least 0.5% of price)
             if current_atr <= 0 and len(closes) > 0:
                 current_atr = float(closes[-1]) * 0.015
-            
+
             return current_atr
-            
+
         except Exception as e:
             self._logger.error(f"ATR Compute Failed for {symbol}: {e}")
             # ✅ FIX: Return fallback instead of None
@@ -1083,14 +1146,16 @@ class IndicatorEngine:
                 pass
             return None
 
-    def calculate_slope(self, symbol: str, indicator_name: str = "close", period: int = 5) -> float:
+    def calculate_slope(
+        self, symbol: str, indicator_name: str = "close", period: int = 5
+    ) -> float:
         try:
             # ✅ FIX: Use self._histories (plural)
             history = self._histories.get(symbol)
-            
+
             if not history or len(history) < period:
                 return 0.0
-            
+
             # Use getters based on indicator_name
             if indicator_name == "close":
                 values = history.get_closes(period)
@@ -1103,8 +1168,9 @@ class IndicatorEngine:
 
             # 3. Normalize to Basis Points (Price agnostic)
             start = values[0]
-            if start == 0: return 0.0
-            
+            if start == 0:
+                return 0.0
+
             # Convert to relative change (100 -> 100.1 = +10)
             y = [(v - start) / start * 10000 for v in values]
             x = list(range(len(y)))
@@ -1115,13 +1181,14 @@ class IndicatorEngine:
             sum_y = sum(y)
             sum_xy = sum(xi * yi for xi, yi in zip(x, y))
             sum_xx = sum(xi**2 for xi in x)
-            
+
             slope_m = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x**2)
-            
+
             # 5. Convert to Degrees
             import math
+
             return math.degrees(math.atan(slope_m))
-            
+
         except Exception as e:
             self._logger.debug(f"Slope calc failed for {symbol}: {e}")
             return 0.0
@@ -1133,10 +1200,10 @@ class IndicatorEngine:
             # Use getattr to be safe if methods are missing, defaulting to None
             get_rsi = getattr(self, "get_rsi", None)
             get_adx = getattr(self, "get_adx", None)
-            
+
             rsi_val = get_rsi(symbol) if callable(get_rsi) else None
             adx_val = get_adx(symbol) if callable(get_adx) else None
-            
+
             # 2. Fetch ATR (Already implemented)
             atr_snap = self.compute_atr(symbol)
             atr_val = atr_snap.current_atr if atr_snap else None
@@ -1145,7 +1212,7 @@ class IndicatorEngine:
                 "rsi": rsi_val,
                 "adx": adx_val,
                 "atr": atr_val,
-                "ltp": self.get_latest_price(symbol)
+                "ltp": self.get_latest_price(symbol),
             }
         except Exception as e:
             # Prevent indicator calculation errors from crashing the Order Manager

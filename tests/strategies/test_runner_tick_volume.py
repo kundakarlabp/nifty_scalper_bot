@@ -37,9 +37,9 @@ def test_on_tick_uses_last_quantity_volume(
             strike_selector=None,
         )
 
-        symbol = "NFO:NIFTY2621025700PE"
+        symbol = 'NFO:NIFTY2621025700PE'
         runner._startup_timestamp = time.time()
-        monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
+        monkeypatch.setattr(runner, '_is_market_open', lambda _now: True)
 
         builder = MagicMock()
         builder.update.return_value = None
@@ -87,9 +87,9 @@ def test_on_tick_uses_order_book_price(
             strike_selector=None,
         )
 
-        symbol = "NFO:NIFTY2621025700PE"
+        symbol = 'NFO:NIFTY2621025700PE'
         runner._startup_timestamp = time.time()
-        monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
+        monkeypatch.setattr(runner, '_is_market_open', lambda _now: True)
 
         builder = MagicMock()
         builder.update.return_value = None
@@ -138,9 +138,9 @@ def test_on_tick_first_volume_uses_raw_exchange(
             strike_selector=None,
         )
 
-        symbol = "NFO:NIFTY2621025700PE"
+        symbol = 'NFO:NIFTY2621025700PE'
         runner._startup_timestamp = time.time()
-        monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
+        monkeypatch.setattr(runner, '_is_market_open', lambda _now: True)
 
         builder = MagicMock()
         builder.update.return_value = None
@@ -159,4 +159,55 @@ def test_on_tick_first_volume_uses_raw_exchange(
         assert builder.update.call_args[0][1] == 100
     except Exception as e:
         logger.error("Failure in test_on_tick_first_volume_uses_raw_exchange: %s", e)
+        raise
+
+
+def test_on_tick_first_volume_seeds_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify seeded volume. Args: monkeypatch. Returns: None. Raises: Exception."""
+    logger = logging.getLogger(__name__)
+    try:
+        market_data = MagicMock()
+        indicator = MagicMock()
+        strategy_manager = MagicMock()
+        risk_manager = MagicMock()
+        order_manager = MagicMock()
+        position_manager = MagicMock()
+
+        risk_manager.can_trade.return_value = True
+
+        runner = StrategyRunner(
+            market_data_manager=market_data,
+            indicator_engine=indicator,
+            strategy_manager=strategy_manager,
+            risk_manager=risk_manager,
+            order_manager=order_manager,
+            position_manager=position_manager,
+            config=StrategyRunnerConfig(max_trade_history=4, min_indicator_bars=0),
+            data_hub=None,
+            strike_selector=None,
+        )
+
+        symbol = 'NFO:NIFTY2621025700PE'
+        runner._startup_timestamp = time.time()
+        monkeypatch.setattr(runner, '_is_market_open', lambda _now: True)
+
+        builder = MagicMock()
+        builder.update.return_value = None
+        runner._bar_builders[symbol] = builder
+
+        tick = {
+            'ltp': 100.0,
+            'volume': 0,
+            'last_quantity': 0,
+            'timestamp': datetime.now(timezone.utc),
+        }
+
+        runner._on_tick(symbol, tick)
+
+        builder.update.assert_called()
+        assert builder.update.call_args[0][1] == 1
+    except Exception as e:
+        logger.error('Failure in test_on_tick_first_volume_seeds_when_missing: %s', e)
         raise

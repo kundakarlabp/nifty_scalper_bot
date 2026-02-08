@@ -1662,7 +1662,9 @@ class StrategyRunner:
             # Check if symbol or underlying has pending order
             if symbol in self._orders_in_flight:
                 elapsed = now - self._orders_in_flight[symbol]
-                self._logger.debug(f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s")
+                self._logger.debug(
+                    f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s"
+                )
                 return True
 
             if (
@@ -2028,6 +2030,7 @@ class StrategyRunner:
 
             # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
             volume = 0
+            first_tick_seen = symbol not in self._last_cumulative_volume
             if raw_volume > 0:
                 last_cum = self._last_cumulative_volume.get(
                     symbol, -1
@@ -2048,8 +2051,18 @@ class StrategyRunner:
                 volume = last_quantity
                 log_throttled(
                     self._logger,
-                    f"tick_volume_fallback_{symbol}",
-                    "Condition met: tick_volume_last_quantity",
+                    f'tick_volume_fallback_{symbol}',
+                    'Condition met: tick_volume_last_quantity',
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                )
+            elif first_tick_seen:
+                volume = 1
+                self._last_cumulative_volume[symbol] = raw_volume
+                log_throttled(
+                    self._logger,
+                    f'tick_volume_seeded_{symbol}',
+                    'Condition met: tick_volume_seeded_first_tick',
                     interval_sec=60.0,
                     level=logging.INFO,
                 )
