@@ -2013,14 +2013,14 @@ class StrategyRunner:
                 "last_trade_quantity",
                 "last_traded_qty",
             )
-            source = tick.get('source', 'unknown')
-            is_seed = bool(tick.get('seed'))
+            source = tick.get("source", "unknown")
+            is_seed = bool(tick.get("seed"))
 
             if is_seed and price <= 0:
                 log_throttled(
                     self._logger,
-                    f'seed_tick_price_zero_{symbol}',
-                    f'Condition met: seed_tick_price_missing for {symbol}',
+                    f"seed_tick_price_zero_{symbol}",
+                    f"Condition met: seed_tick_price_missing for {symbol}",
                     interval_sec=120.0,
                     level=logging.INFO,
                 )
@@ -2034,7 +2034,10 @@ class StrategyRunner:
                 )  # ✅ Sentinel -1 (not 0)
                 if last_cum < 0:  # ✅ First tick detected by sentinel
                     # FIRST tick for this symbol — store baseline, DON'T use as bar volume
-                    volume = last_quantity if last_quantity > 0 else 0
+                    if last_quantity > 0:
+                        volume = last_quantity
+                    else:
+                        volume = raw_volume
                 elif raw_volume >= last_cum:
                     volume = raw_volume - last_cum  # Normal delta
                 else:

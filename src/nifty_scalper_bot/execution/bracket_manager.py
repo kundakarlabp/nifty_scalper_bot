@@ -3,16 +3,18 @@ Thread-safe Bracket Manager with VIRTUAL Execution capabilities.
 Production-Grade: Replaces legacy broker-side brackets with high-speed internal monitoring.
 Enhanced with ATR Trailing, Multi-Target (TP1/TP2), Partial Scaling, and Orphan Sync.
 """
+
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
+import math
+import os
+from pathlib import Path
 import threading
 from threading import RLock
 import time
-import json
-import os
-from datetime import datetime, timezone 
-import math 
-from pathlib import Path
+
 _THREADING_MODULE = threading
 _RLOCK_CLASS = RLock
 from dataclasses import dataclass, field
@@ -30,6 +32,7 @@ from typing import (
 )
 
 from nifty_scalper_bot.utils.logging import get_logger
+
 try:
     from nifty_scalper_bot.data.bracket_store import BracketStore
 except ImportError:
@@ -37,18 +40,23 @@ except ImportError:
 
 # --- NEW IMPORTS FOR WORLD-CLASS TRAILING ---
 try:
-    from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
     # Assuming TrailingSpec is defined in adaptive_trailing or we define a local fallback
-    from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController, TrailingSpec
+    from nifty_scalper_bot.execution.adaptive_trailing import (
+        AdaptiveTrailingController,
+        TrailingSpec,
+    )
+    from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
 except ImportError:
     SafeATRProvider = None
     AdaptiveTrailingController = None
+
     # Fallback definition if import fails
     @dataclass
     class TrailingSpec:
         trail_by: float
         step: float
         activation: float
+
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.infra.metrics import MetricsCollector
@@ -60,6 +68,7 @@ METRICS_AVAILABLE = False
 METRICS = None
 
 LOGGER = get_logger(__name__)
+
 
 def _normalize_bracket_side(side: str) -> str:
     """Normalize side to 'BUY'/'SELL' for consistent bracket comparisons.
@@ -74,6 +83,7 @@ def _normalize_bracket_side(side: str) -> str:
         return "SELL"
     raise ValueError(f"Invalid bracket side: {side!r}. Must be BUY/LONG or SELL/SHORT.")
 
+
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
 _CANCELLED_STATUSES = {"CANCELLED", "REJECTED", "CANCELED"}
 
@@ -84,23 +94,26 @@ _CANCELLED_STATUSES = {"CANCELLED", "REJECTED", "CANCELED"}
 @runtime_checkable
 class SupportsCancelOrder(Protocol):
     """Protocol representing broker cancel capability."""
-    def cancel_order(self, order_id: str, *args: Any, **kwargs: Any) -> Any:
-        ...
+
+    def cancel_order(self, order_id: str, *args: Any, **kwargs: Any) -> Any: ...
+
 
 @runtime_checkable
 class SupportsModifyOrder(Protocol):
     """Protocol representing broker order modification capability."""
-    def modify_order(self, order_id: str, **kwargs: Any) -> Any:
-        ...
+
+    def modify_order(self, order_id: str, **kwargs: Any) -> Any: ...
 
 
 # --------------------------------------------------------------------------
 # DATA STRUCTURES
 # --------------------------------------------------------------------------
 
+
 @dataclass
 class TargetLevel:
     """Represents a partial profit target level."""
+
     price: float
     quantity: int
     executed: bool = False
@@ -113,32 +126,35 @@ class BracketState:
     State container for a managed trade exit.
     Held in memory; survives restarts if persisted via TradeStore.
     """
+
     entry_order_id: str
     symbol: str
-    side: str          # Entry Side (BUY/SELL)
-    quantity: int      # Original Quantity
+    side: str  # Entry Side (BUY/SELL)
+    quantity: int  # Original Quantity
     entry_price: float
-    
+
     # Execution Triggers
     sl_trigger_price: float
     tp_trigger_price: float  # Final/Ultimate TP
-    
+
     # Multi-Target & Scaling State (NEW)
     remaining_quantity: int = 0
     tp_levels: List[TargetLevel] = field(default_factory=list)
-    
+
     # Trailing & Logic State (NEW)
     is_virtual: bool = True
     active: bool = True  # If False, waits for confirmation or is finished
     trailing_enabled: bool = True
-    trailing_config: Dict[str, Any] = field(default_factory=dict) # e.g. {'mode': 'ATR', 'mult': 1.5}
-    virtual_sl_id: str = "" # ID for the Adaptive Controller
-    
+    trailing_config: Dict[str, Any] = field(
+        default_factory=dict
+    )  # e.g. {'mode': 'ATR', 'mult': 1.5}
+    virtual_sl_id: str = ""  # ID for the Adaptive Controller
+
     # Market Data Tracking (NEW)
     highest_ltp: float = 0.0  # High water mark since entry (for BUY)
-    lowest_ltp: float = float('inf')  # Low water mark since entry (for SELL)
-    last_ltp: float = 0.0 # Latest price seen
-    
+    lowest_ltp: float = float("inf")  # Low water mark since entry (for SELL)
+    last_ltp: float = 0.0  # Latest price seen
+
     # Metadata
     tag: str | None = None
     created_at: float = field(default_factory=time.time)
@@ -148,12 +164,12 @@ class BracketState:
         # Auto-initialize state fields if not set
         if self.remaining_quantity == 0:
             self.remaining_quantity = self.quantity
-        
+
         # Initialize High/Low water marks with entry price
         if self.highest_ltp == 0.0 or self.highest_ltp < self.entry_price:
             self.highest_ltp = self.entry_price
-        
-        if self.lowest_ltp == float('inf') or self.lowest_ltp > self.entry_price:
+
+        if self.lowest_ltp == float("inf") or self.lowest_ltp > self.entry_price:
             self.lowest_ltp = self.entry_price
 
     # ✅ FIX: Add Serialization for Persistence
@@ -177,13 +193,18 @@ class BracketState:
             "lowest_ltp": self.lowest_ltp,
             "tag": self.tag,
             "created_at": self.created_at,
-            "updated_at": self.updated_at
+            "updated_at": self.updated_at,
         }
+
 
 # Mock Journal for Adaptive Controller (In-Memory)
 class MockJournal:
-    def set(self, key, value): pass
-    def get(self, key): return None
+    def set(self, key, value):
+        pass
+
+    def get(self, key):
+        return None
+
 
 class BracketManager:
     """
@@ -192,13 +213,17 @@ class BracketManager:
     Supports TP1/TP2 scaling, ATR-based Trailing, and Broker Sync.
     """
 
-    def __init__(self, order_manager: Any, indicator_engine: Any = None, market_data: Any = None):
+    def __init__(
+        self, order_manager: Any, indicator_engine: Any = None, market_data: Any = None
+    ):
         self.order_manager = order_manager
         self._brackets: Dict[str, BracketState] = {}
         # Reverse Index: Map broker order IDs/Symbol to entry IDs
         self._order_to_entry: Dict[str, str] = {}
-        self._symbol_map: Dict[str, List[str]] = {}  # Fast lookup: Symbol -> [Entry IDs]
-        
+        self._symbol_map: Dict[str, List[str]] = (
+            {}
+        )  # Fast lookup: Symbol -> [Entry IDs]
+
         # --- ATR & Trailing Setup ---
         self._indicator_engine = indicator_engine
         self._market_data = market_data
@@ -210,17 +235,17 @@ class BracketManager:
                 LOGGER.info("✅ BracketStore initialized for persistence.")
             except Exception as e:
                 LOGGER.error(f"❌ Failed to init BracketStore: {e}")
-                
+
         self._atr_provider = None
         if SafeATRProvider and indicator_engine:
             # Initialize Safe Provider with 60s cache validity
             self._atr_provider = SafeATRProvider(indicator_engine, max_cache_age=60.0)
-            
+
         # Store active trailing controllers: {entry_order_id: Controller}
         self._trailing_controllers: Dict[str, Any] = {}
         self._recent_ticks: Dict[str, deque] = {}
         self._max_tick_history = 20
-    
+
         # Real-time Data Cache (Legacy Fallback)
         self._current_atr: Dict[str, float] = {}
         self._last_price_cache: Dict[str, float] = {}
@@ -230,7 +255,7 @@ class BracketManager:
         self._trail_notify_sl: Dict[str, float] = {}
         self._lock = _RLOCK_CLASS()
         self._running = True
-        
+
         # Configuration
         self._auto_reduce_sl = True
         self._stale_cleanup_age = 86400  # 24 hours
@@ -254,26 +279,26 @@ class BracketManager:
             None.
         """
         LOGGER.debug(
-            'Entered set_notifier',
-            extra={'event': 'bracket_manager_set_notifier_enter'},
+            "Entered set_notifier",
+            extra={"event": "bracket_manager_set_notifier_enter"},
         )
         try:
             self._notifier = notifier
             if notifier is None:
                 LOGGER.info(
-                    'Bracket notifier cleared',
-                    extra={'event': 'bracket_manager_notifier_cleared'},
+                    "Bracket notifier cleared",
+                    extra={"event": "bracket_manager_notifier_cleared"},
                 )
             else:
                 LOGGER.info(
-                    'Bracket notifier attached',
-                    extra={'event': 'bracket_manager_notifier_attached'},
+                    "Bracket notifier attached",
+                    extra={"event": "bracket_manager_notifier_attached"},
                 )
         except Exception as exc:
             LOGGER.error(
-                'Failure in set_notifier: %s',
+                "Failure in set_notifier: %s",
                 exc,
-                extra={'event': 'bracket_manager_notifier_failed'},
+                extra={"event": "bracket_manager_notifier_failed"},
                 exc_info=exc,
             )
 
@@ -293,8 +318,8 @@ class BracketManager:
             None.
         """
         LOGGER.debug(
-            'Entered _notify_event',
-            extra={'event': 'bracket_manager_notify_enter', 'notify_event': event},
+            "Entered _notify_event",
+            extra={"event": "bracket_manager_notify_enter", "notify_event": event},
         )
         if self._notifier is None:
             return
@@ -302,9 +327,9 @@ class BracketManager:
             self._notifier(event, payload)
         except Exception as exc:
             LOGGER.error(
-                'Failure in _notify_event: %s',
+                "Failure in _notify_event: %s",
                 exc,
-                extra={'event': 'bracket_manager_notify_failed', 'notify_event': event},
+                extra={"event": "bracket_manager_notify_failed", "notify_event": event},
                 exc_info=exc,
             )
 
@@ -328,8 +353,8 @@ class BracketManager:
             last_sl = self._trail_notify_sl.get(entry_id, old_sl)
             price_delta = abs(new_sl - last_sl)
             pct_delta = (price_delta / last_sl * 100.0) if last_sl > 0 else 100.0
-            min_seconds = float(os.getenv('TRAIL_NOTIFY_COOLDOWN_SEC', '60'))
-            min_pct = float(os.getenv('TRAIL_NOTIFY_MIN_PCT', '0.5'))
+            min_seconds = float(os.getenv("TRAIL_NOTIFY_COOLDOWN_SEC", "60"))
+            min_pct = float(os.getenv("TRAIL_NOTIFY_MIN_PCT", "0.5"))
             if (now - last_ts) >= min_seconds or pct_delta >= min_pct:
                 self._trail_notify_at[entry_id] = now
                 self._trail_notify_sl[entry_id] = new_sl
@@ -337,11 +362,11 @@ class BracketManager:
             return False
         except Exception as exc:
             LOGGER.error(
-                'Failure in _should_notify_trail: %s',
+                "Failure in _should_notify_trail: %s",
                 exc,
                 extra={
-                    'event': 'bracket_manager_trail_notify_failed',
-                    'entry_id': entry_id,
+                    "event": "bracket_manager_trail_notify_failed",
+                    "entry_id": entry_id,
                 },
                 exc_info=exc,
             )
@@ -360,7 +385,7 @@ class BracketManager:
         # --- NEW OPTIONAL ARGUMENTS ---
         tp1_price: float | None = None,
         tp1_qty: int | None = None,
-        trailing_atr_mult: float | None = None
+        trailing_atr_mult: float | None = None,
     ) -> str:
         """
         Legacy Bridge: Allows old code to call this method.
@@ -382,27 +407,27 @@ class BracketManager:
             tp1_price=tp1_price,
             tp1_qty=tp1_qty,
             trailing_atr_mult=trailing_atr_mult,
-            activate_immediately=False # 🔒 Safety: Wait for fill or tick
+            activate_immediately=False,  # 🔒 Safety: Wait for fill or tick
         )
 
         LOGGER.info(f"🛡️ Bracket Registered: {entry_order_id} for {symbol}")
         return entry_order_id  # 🟢 FIX 2: Return the ID
 
     def register_virtual_bracket(
-        self, 
-        order_id: str, 
-        symbol: str, 
-        side: str, 
-        qty: int, 
-        price: float, 
-        sl: float, 
+        self,
+        order_id: str,
+        symbol: str,
+        side: str,
+        qty: int,
+        price: float,
+        sl: float,
         tp: float,
         tag: str = "virtual",
         # --- NEW OPTIONAL ARGUMENTS ---
         tp1_price: float | None = None,
         tp1_qty: int | None = None,
         trailing_atr_mult: float | None = None,
-        activate_immediately: bool = True
+        activate_immediately: bool = True,
     ) -> None:
         """Register a position for virtual bracket monitoring.
 
@@ -432,27 +457,33 @@ class BracketManager:
                 LOGGER.warning(f"Bracket {order_id} exists. Updating triggers.")
                 existing = self._brackets[order_id]
                 # Only update non-zero values to avoid overwriting with bad data
-                if sl > 0: existing.sl_trigger_price = sl
-                if tp > 0: existing.tp_trigger_price = tp
+                if sl > 0:
+                    existing.sl_trigger_price = sl
+                if tp > 0:
+                    existing.tp_trigger_price = tp
                 # Reset quantity if re-registering (e.g. scale-in)
                 existing.quantity = abs(qty)
                 existing.remaining_quantity = abs(qty)
-                self.save_state() # Persist updates
+                self.save_state()  # Persist updates
                 return
 
             # 2. Setup Trailing Config
             t_config = {}
             if trailing_atr_mult:
-                t_config = {'mode': 'ATR', 'mult': trailing_atr_mult}
+                t_config = {"mode": "ATR", "mult": trailing_atr_mult}
             elif self._auto_reduce_sl:
                 # Default logic if enabled but no explicit ATR
-                t_config = {'mode': 'STANDARD'}
+                t_config = {"mode": "STANDARD"}
 
             # 3. Setup TP Levels (Partial Exits)
             targets = []
             if tp1_price and tp1_qty and tp1_qty < abs(qty):
-                targets.append(TargetLevel(price=tp1_price, quantity=tp1_qty, name="TP1"))
-                LOGGER.info(f"🔹 Configured TP1 for {symbol}: {tp1_price} (Qty: {tp1_qty})")
+                targets.append(
+                    TargetLevel(price=tp1_price, quantity=tp1_qty, name="TP1")
+                )
+                LOGGER.info(
+                    f"🔹 Configured TP1 for {symbol}: {tp1_price} (Qty: {tp1_qty})"
+                )
 
             # 4. ORPHAN SAFETY CHECK (CRITICAL)
             # If SL or TP are 0.0 (invalid/missing), we MUST NOT enable active exiting.
@@ -465,7 +496,7 @@ class BracketManager:
                 )
                 # Force inactive so it monitors but doesn't fire
                 status_mode = "MONITORING_ONLY"
-                activate_immediately = False 
+                activate_immediately = False
 
             # 5. Create State Object
             state = BracketState(
@@ -476,17 +507,17 @@ class BracketManager:
                 remaining_quantity=abs(qty),
                 entry_price=price,
                 sl_trigger_price=sl,
-                tp_trigger_price=tp, # This is effectively Final TP
+                tp_trigger_price=tp,  # This is effectively Final TP
                 tp_levels=targets,
                 is_virtual=True,
                 active=activate_immediately,
                 tag=tag,
                 trailing_config=t_config,
-                virtual_sl_id=f"vsl_{order_id}"
+                virtual_sl_id=f"vsl_{order_id}",
             )
-            
+
             self._brackets[order_id] = state
-            
+
             # 6. Populate Indices
             self._order_to_entry[order_id] = order_id
             if symbol not in self._symbol_map:
@@ -500,16 +531,16 @@ class BracketManager:
                     LOGGER.info(f"💾 Bracket PERSISTED to DB: {symbol} (SL: {sl})")
                 except Exception as e:
                     LOGGER.error(f"❌ Failed to persist bracket for {symbol}: {e}")
-            
+
             # 7. Initialize Adaptive Controller (The "Brain")
             if trailing_atr_mult and self._atr_provider and AdaptiveTrailingController:
                 try:
                     spec = TrailingSpec(
-                        trail_by=20.0, # Fallback
-                        step=1.0,      # Update on every 1pt move
-                        activation=0.1 # Activate immediately (0.1%)
+                        trail_by=20.0,  # Fallback
+                        step=1.0,  # Update on every 1pt move
+                        activation=0.1,  # Activate immediately (0.1%)
                     )
-                    
+
                     # We pass a lambda that returns the latest price from the bracket state
                     ctrl = AdaptiveTrailingController(
                         symbol=symbol,
@@ -518,15 +549,17 @@ class BracketManager:
                         sl_order_id=state.virtual_sl_id,
                         variety="virtual",
                         spec=spec,
-                        get_ltp=lambda s: state.last_ltp, 
+                        get_ltp=lambda s: state.last_ltp,
                         modify_order=self._virtual_modify_sl,
                         atr_provider=self._atr_provider,
                         journal=MockJournal(),
-                        atr_multiplier=trailing_atr_mult
+                        atr_multiplier=trailing_atr_mult,
                     )
                     self._trailing_controllers[order_id] = ctrl
-                    LOGGER.info(f"🧠 Adaptive Controller Attached to {symbol} (Mult: {trailing_atr_mult}x)")
-                    
+                    LOGGER.info(
+                        f"🧠 Adaptive Controller Attached to {symbol} (Mult: {trailing_atr_mult}x)"
+                    )
+
                 except Exception as e:
                     LOGGER.error(f"Failed to attach Adaptive Controller: {e}")
 
@@ -536,15 +569,15 @@ class BracketManager:
                 f"Entry={price} | SL={sl} | TP={tp} {trail_msg} | Mode={status_mode}"
             )
             self._notify_event(
-                'BRACKET_REGISTERED',
+                "BRACKET_REGISTERED",
                 {
-                    'symbol': symbol,
-                    'side': side,
-                    'qty': abs(qty),
-                    'entry': round(price, 2),
-                    'sl': round(sl, 2) if sl else 0.0,
-                    'tp': round(tp, 2) if tp else 0.0,
-                    'mode': status_mode,
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": abs(qty),
+                    "entry": round(price, 2),
+                    "sl": round(sl, 2) if sl else 0.0,
+                    "tp": round(tp, 2) if tp else 0.0,
+                    "mode": status_mode,
                 },
             )
 
@@ -552,8 +585,9 @@ class BracketManager:
             if METRICS_AVAILABLE and METRICS:
                 try:
                     METRICS.brackets_created.inc()
-                except Exception: pass
-            
+                except Exception:
+                    pass
+
             # ✅ FIX: Persist immediately so we don't lose this if we crash now
             self.save_state()
 
@@ -575,58 +609,58 @@ class BracketManager:
             if not bracket:
                 LOGGER.warning(f"⚠️ No bracket found for order {order_id}")
                 return
-            
+
             # Update entry price with actual fill
             if fill_price and fill_price > 0:
                 old_price = bracket.entry_price
                 bracket.entry_price = fill_price
-                
+
                 # Adjust SL/TP if they were calculated from expected price
                 if old_price > 0 and old_price != fill_price:
                     price_diff_pct = (fill_price - old_price) / old_price
-                    
+
                     # Adjust SL proportionally
                     if bracket.sl_trigger_price > 0:
                         bracket.sl_trigger_price = round(
                             bracket.sl_trigger_price * (1 + price_diff_pct), 2
                         )
-                    
+
                     # Adjust TP proportionally
                     if bracket.tp_trigger_price > 0:
                         bracket.tp_trigger_price = round(
                             bracket.tp_trigger_price * (1 + price_diff_pct), 2
                         )
-                    
+
                     LOGGER.info(
                         f"📊 Bracket adjusted for fill price: Entry={fill_price:.2f} "
                         f"SL={bracket.sl_trigger_price:.2f} TP={bracket.tp_trigger_price:.2f}"
                     )
-            
+
             # ✅ ACTIVATE IMMEDIATELY
             bracket.active = True
             bracket.updated_at = time.time()
-            
+
             # Initialize water marks
             bracket.highest_ltp = fill_price
             bracket.lowest_ltp = fill_price
             bracket.last_ltp = fill_price
-            
+
             LOGGER.info(
                 f"🎯 BRACKET ACTIVATED: {bracket.symbol} | "
                 f"Entry={fill_price:.2f} | SL={bracket.sl_trigger_price:.2f} | "
                 f"TP={bracket.tp_trigger_price:.2f}"
             )
             self._notify_event(
-                'BRACKET_ACTIVATED',
+                "BRACKET_ACTIVATED",
                 {
-                    'symbol': bracket.symbol,
-                    'side': bracket.side,
-                    'entry': round(fill_price, 2),
-                    'sl': round(bracket.sl_trigger_price, 2),
-                    'tp': round(bracket.tp_trigger_price, 2),
+                    "symbol": bracket.symbol,
+                    "side": bracket.side,
+                    "entry": round(fill_price, 2),
+                    "sl": round(bracket.sl_trigger_price, 2),
+                    "tp": round(bracket.tp_trigger_price, 2),
                 },
             )
-            
+
             # Persist state
             try:
                 self.save_state()
@@ -637,13 +671,15 @@ class BracketManager:
     # 2. MARKET DATA INGESTION (NEW)
     # --------------------------------------------------------------------------
 
-    def update_market_stats(self, symbol: str, atr: float = 0.0, volume: float = 0.0) -> None:
+    def update_market_stats(
+        self, symbol: str, atr: float = 0.0, volume: float = 0.0
+    ) -> None:
         """Feed external calculations (ATR) into the manager."""
         if atr > 0:
             # Update Legacy Cache
             self._current_atr[symbol] = atr
             # Feed Safe Provider if available
-            if self._atr_provider and hasattr(self._atr_provider, 'feed_manual'):
+            if self._atr_provider and hasattr(self._atr_provider, "feed_manual"):
                 self._atr_provider.feed_manual(symbol, atr)
 
     def feed_atr_updates(self, symbol: str, atr: float) -> None:
@@ -659,12 +695,14 @@ class BracketManager:
                 if b.virtual_sl_id == order_id:
                     target_bracket = b
                     break
-            
+
             if target_bracket:
                 old_sl = target_bracket.sl_trigger_price
                 target_bracket.sl_trigger_price = price
                 target_bracket.updated_at = time.time()
-                LOGGER.info(f"🔄 Dynamic ATR Trail: {target_bracket.symbol} SL {old_sl} -> {price}")
+                LOGGER.info(
+                    f"🔄 Dynamic ATR Trail: {target_bracket.symbol} SL {old_sl} -> {price}"
+                )
                 # ✅ FIX: Persist trailing update
                 self.save_state()
                 return True
@@ -677,7 +715,7 @@ class BracketManager:
     def on_tick(self, symbol: str, ltp: float) -> None:
         """
         Ultra-low-latency tick processing.
-        
+
         ✅ WORLD-CLASS OPTIMIZATIONS:
         - Minimal lock scope (snapshot only)
         - No lock during exit evaluation
@@ -689,15 +727,15 @@ class BracketManager:
         # ═══════════════════════════════════════════════════════════
         if not self._brackets:
             return
-        
+
         # Fast symbol lookup (dict access is atomic in Python)
         relevant_ids = self._symbol_map.get(symbol)
         if not relevant_ids:
             return
-        
+
         if ltp <= 0:
             return
-        
+
         # ═══════════════════════════════════════════════════════════
         # SNAPSHOT: Minimal lock scope - just get bracket references
         # ═══════════════════════════════════════════════════════════
@@ -708,26 +746,27 @@ class BracketManager:
                 # 🟢 FIX: Remove 'b.active' check so we can catch inactive ones
                 if b and b.remaining_quantity > 0:
                     candidates.append(b)
-        
+
         if not candidates:
             return
-        
+
         # ═══════════════════════════════════════════════════════════
         # TRACK TICK HISTORY (for momentum, outside lock)
         # ═══════════════════════════════════════════════════════════
-        if not hasattr(self, '_recent_ticks'):
+        if not hasattr(self, "_recent_ticks"):
             self._recent_ticks = {}
-        
+
         if symbol not in self._recent_ticks:
             from collections import deque
+
             self._recent_ticks[symbol] = deque(maxlen=20)
         self._recent_ticks[symbol].append(ltp)
-        
+
         # ═══════════════════════════════════════════════════════════
         # EVALUATE: Check all brackets WITHOUT lock
         # ═══════════════════════════════════════════════════════════
         exits_to_fire = []
-        
+
         for bracket in candidates:
             # 🟢 FAILSAFE: Auto-activate on first tick if stuck inactive
             if not bracket.active:
@@ -736,22 +775,24 @@ class BracketManager:
                     # Fix missing entry price (Market Orders)
                     if bracket.entry_price <= 0:
                         bracket.entry_price = ltp
-                    
+
                     # Initialize Watermarks for Trailing
-                    if bracket.side == "BUY": 
+                    if bracket.side == "BUY":
                         bracket.highest_ltp = ltp
-                    else: 
+                    else:
                         bracket.lowest_ltp = ltp
-                    
+
                     # ✅ CORRECTED ATTRIBUTE: Use 'entry_order_id', not 'order_id'
-                    LOGGER.warning(f"⚠️ Failsafe Activation: {bracket.entry_order_id} @ {ltp}")
+                    LOGGER.warning(
+                        f"⚠️ Failsafe Activation: {bracket.entry_order_id} @ {ltp}"
+                    )
                 else:
                     # If we can't activate (no price), skip this bracket
                     continue
 
             # Atomic write - single field assignment is thread-safe in Python
             bracket.last_ltp = ltp
-            
+
             # Update high/low water marks (atomic operations)
             if bracket.side == "BUY":
                 if ltp > bracket.highest_ltp:
@@ -759,31 +800,31 @@ class BracketManager:
             else:
                 if ltp < bracket.lowest_ltp:
                     bracket.lowest_ltp = ltp
-            
+
             # Check trailing controller (if attached)
             entry_id = bracket.entry_order_id
             if entry_id in self._trailing_controllers:
                 ctrl = self._trailing_controllers[entry_id]
-                
+
                 # Inject ATR if available
                 current_atr = self._current_atr.get(symbol)
-                if current_atr and current_atr > 0 and hasattr(ctrl, 'update_atr'):
+                if current_atr and current_atr > 0 and hasattr(ctrl, "update_atr"):
                     ctrl.update_atr(current_atr)
-                
+
                 # Run controller
                 ctrl.on_tick(ltp)
             else:
                 # Use built-in adaptive trailing
                 self._apply_trailing_math(bracket)
-            
+
             # ═══════════════════════════════════════════════════════
             # EVALUATE EXIT CONDITIONS (Pure logic, no side effects)
             # ═══════════════════════════════════════════════════════
             exit_action = self._evaluate_exit_fast(bracket, ltp)
-            
+
             if exit_action:
                 exits_to_fire.append((bracket, exit_action))
-        
+
         # ═══════════════════════════════════════════════════════════
         # FIRE EXITS: Batch processing (takes lock once)
         # ═══════════════════════════════════════════════════════════
@@ -794,29 +835,29 @@ class BracketManager:
         """
         Pure function to evaluate exit conditions.
         Returns exit action dict or None.
-        
+
         ✅ NO LOCKS, NO SIDE EFFECTS - Just logic
         """
         # Check partial targets first (TP1, TP2, etc.)
         for target in bracket.tp_levels:
             if target.executed:
                 continue
-            
+
             triggered = False
             if bracket.side == "BUY" and ltp >= target.price:
                 triggered = True
             elif bracket.side == "SELL" and ltp <= target.price:
                 triggered = True
-            
+
             if triggered:
                 return {
                     "type": "PARTIAL_TP",
                     "target": target,
                     "price": ltp,
                     "qty": min(target.quantity, bracket.remaining_quantity),
-                    "reason": f"{target.name} Hit ({ltp:.2f})"
+                    "reason": f"{target.name} Hit ({ltp:.2f})",
                 }
-        
+
         # Check final TP
         if bracket.tp_trigger_price > 0:
             triggered = False
@@ -824,15 +865,15 @@ class BracketManager:
                 triggered = True
             elif bracket.side == "SELL" and ltp <= bracket.tp_trigger_price:
                 triggered = True
-            
+
             if triggered:
                 return {
                     "type": "FINAL_TP",
                     "price": ltp,
                     "qty": bracket.remaining_quantity,
-                    "reason": f"TP Hit ({ltp:.2f} vs {bracket.tp_trigger_price:.2f})"
+                    "reason": f"TP Hit ({ltp:.2f} vs {bracket.tp_trigger_price:.2f})",
                 }
-        
+
         # Check SL (CRITICAL - always check last)
         if bracket.sl_trigger_price > 0:
             triggered = False
@@ -840,15 +881,15 @@ class BracketManager:
                 triggered = True
             elif bracket.side == "SELL" and ltp >= bracket.sl_trigger_price:
                 triggered = True
-            
+
             if triggered:
                 return {
                     "type": "SL",
                     "price": ltp,
                     "qty": bracket.remaining_quantity,
-                    "reason": f"SL Hit ({ltp:.2f} vs {bracket.sl_trigger_price:.2f})"
+                    "reason": f"SL Hit ({ltp:.2f} vs {bracket.sl_trigger_price:.2f})",
                 }
-        
+
         return None
 
     def _fire_exits_batch(self, exits: list) -> None:
@@ -864,8 +905,9 @@ class BracketManager:
             None.
         """
         import time
+
         now = time.time()
-        
+
         processed_ids: set[str] = set()
 
         with self._lock:
@@ -875,67 +917,67 @@ class BracketManager:
                 if now - last_attempt < 5.0:
                     LOGGER.debug(f"⏳ Cooldown active for {bracket.symbol}")
                     continue
-                
+
                 # Check if still valid
                 if not bracket.active or bracket.remaining_quantity <= 0:
                     continue
-                
+
                 # Mark exit in progress
                 self._exit_cooldowns[bracket.entry_order_id] = now
                 processed_ids.add(bracket.entry_order_id)
-                
+
                 exit_type = action["type"]
                 qty = action["qty"]
                 reason = action["reason"]
-                
+
                 # Update state
                 bracket.remaining_quantity -= qty
-                
+
                 if exit_type in {"SL", "FINAL_TP"} or bracket.remaining_quantity <= 0:
                     bracket.active = False
-                
+
                 # Handle partial target marking
                 if exit_type == "PARTIAL_TP" and "target" in action:
                     action["target"].executed = True
                     # Move SL to breakeven after TP1
                     if action["target"].name == "TP1":
                         self._move_sl_to_breakeven(bracket)
-        
+
         # Persist state once (outside lock)
         try:
             self.save_state()
         except Exception:
             pass
-        
+
         # Fire exit orders (outside lock, can be slow)
         for bracket, action in exits:
             # Skip if we didn't actually queue this exit (cooldown, etc.)
             if bracket.entry_order_id not in processed_ids:
                 continue
-            
+
             exit_type = action["type"]
             qty = action["qty"]
             reason = action["reason"]
-            
+
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
             is_partial = exit_type == "PARTIAL_TP"
-            
+
             LOGGER.warning(
                 f"⚡ EXIT FIRED: {bracket.symbol} | {exit_side} {qty} | "
                 f"Type: {exit_type} | Reason: {reason}"
             )
             self._notify_event(
-                'BRACKET_EXIT_FIRED',
+                "BRACKET_EXIT_FIRED",
                 {
-                    'symbol': bracket.symbol,
-                    'side': exit_side,
-                    'qty': qty,
-                    'exit_type': exit_type,
-                    'reason': reason,
-                    'ltp': round(float(action.get('price', 0.0) or 0.0), 2),
+                    "symbol": bracket.symbol,
+                    "side": exit_side,
+                    "qty": qty,
+                    "exit_type": exit_type,
+                    "reason": reason,
+                    "ltp": round(float(action.get("price", 0.0) or 0.0), 2),
                 },
             )
-            
+
             try:
                 # Use optimized exit with slippage protection
                 self._execute_exit_order(
@@ -944,13 +986,13 @@ class BracketManager:
             except Exception as e:
                 LOGGER.critical(f"🛑 EXIT ORDER FAILED: {e}")
                 self._notify_event(
-                    'BRACKET_EXIT_FAILED',
+                    "BRACKET_EXIT_FAILED",
                     {
-                        'symbol': bracket.symbol,
-                        'side': exit_side,
-                        'qty': qty,
-                        'exit_type': exit_type,
-                        'reason': reason,
+                        "symbol": bracket.symbol,
+                        "side": exit_side,
+                        "qty": qty,
+                        "exit_type": exit_type,
+                        "reason": reason,
                     },
                 )
                 # Revert state
@@ -960,59 +1002,59 @@ class BracketManager:
                         bracket.active = True
 
     def _execute_exit_order(
-        self, 
-        bracket: BracketState, 
-        qty: int, 
-        exit_side: str, 
+        self,
+        bracket: BracketState,
+        qty: int,
+        exit_side: str,
         reason: str,
         is_partial: bool,
-        exit_type: str
+        exit_type: str,
     ) -> None:
         """
         Execute the actual exit order with slippage protection.
         Called outside the main lock for better concurrency.
         """
         import os
-        
+
         # Get current price for LIMIT calculation
         current_ltp = bracket.last_ltp
         if not current_ltp or current_ltp <= 0:
             current_ltp = bracket.entry_price
-        
+
         # Calculate slippage-protected limit price
         max_slippage_pct = float(os.getenv("EXIT_MAX_SLIPPAGE_PCT", "2.0"))
-        
+
         if exit_side == "SELL":
             limit_price = round(current_ltp * (1 - max_slippage_pct / 100), 2)
         else:
             limit_price = round(current_ltp * (1 + max_slippage_pct / 100), 2)
-        
+
         limit_price = max(limit_price, 0.05)
-        
-        order_type = "LIMIT"
-        if exit_type == "SL":
-            order_type = "MARKET"
+
+        order_type = "MARKET" if exit_type == "SL" else "LIMIT"
+
+        order_kwargs = {
+            "symbol": bracket.symbol,
+            "side": exit_side,
+            "quantity": qty,
+            "order_type": order_type,
+            "tag": f"exit_{reason[:3]}_{bracket.tag[:3] if bracket.tag else 'auto'}",
+            "check_risk": False,
+            "product": "MIS",
+        }
+        if order_type == "LIMIT":
+            order_kwargs["price"] = limit_price
 
         # Place order via OrderManager
-        self.order_manager.place_order(
-            symbol=bracket.symbol,
-            side=exit_side,
-            quantity=qty,
-            order_type=order_type,
-            price=limit_price,
-            tag=f"exit_{reason[:3]}_{bracket.tag[:3] if bracket.tag else 'auto'}",
-            check_risk=False,
-            product="MIS"
-        )
-        
+        self.order_manager.place_order(**order_kwargs)
+
         # Cleanup if full exit
         if not is_partial and bracket.remaining_quantity <= 0:
             self.unregister_bracket(bracket.entry_order_id)
 
-
     def _check_and_fire(self, bracket: BracketState, ltp: float) -> None:
         """Evaluate logic for a single bracket: Exits, Partials, and Trailing."""
-        
+
         # 1. UPDATE TRAILING STATE (High/Low Water Marks)
         self._process_trailing_logic(bracket, ltp)
 
@@ -1028,12 +1070,12 @@ class BracketManager:
 
     def _process_trailing_logic(self, bracket: BracketState, ltp: float) -> None:
         """Updates High/Low marks and adjusts SL if Trailing is enabled."""
-        
+
         # A. Update Water Marks
         if bracket.side == "BUY":
             if ltp > bracket.highest_ltp:
                 bracket.highest_ltp = ltp
-        else: # SELL
+        else:  # SELL
             if ltp < bracket.lowest_ltp:
                 bracket.lowest_ltp = ltp
 
@@ -1046,7 +1088,7 @@ class BracketManager:
                 ctrl.update_atr(current_atr)
             # The controller calculates using ATR and calls _virtual_modify_sl if needed
             # We updated bracket.last_ltp in on_tick, so controller reads fresh data
-            ctrl.on_tick(None) 
+            ctrl.on_tick(None)
             return
 
         # C. Fallback Legacy Logic
@@ -1065,23 +1107,23 @@ class BracketManager:
             None.
         """
         import os
-        
+
         if not bracket.trailing_enabled:
             return
-        
+
         ltp = bracket.last_ltp
         if not ltp or ltp <= 0:
             return
-        
+
         entry = bracket.entry_price
         if entry <= 0:
             return
-        
+
         current_sl = bracket.sl_trigger_price
-        
+
         # Get ATR for trailing calculations
         atr = self._get_current_atr(bracket.symbol)
-        
+
         # Calculate profit metrics
         if bracket.side == "BUY":
             profit_pct = ((ltp - entry) / entry) * 100
@@ -1091,19 +1133,19 @@ class BracketManager:
             profit_pct = ((entry - ltp) / entry) * 100
             high_water = bracket.lowest_ltp
             profit_points = entry - ltp
-        
+
         # Calculate new SL based on tiered system
         new_sl = self._calculate_tiered_trailing_sl(
             bracket=bracket,
             ltp=ltp,
             profit_pct=profit_pct,
             high_water=high_water,
-            atr=atr
+            atr=atr,
         )
-        
+
         if new_sl is None:
             return
-        
+
         # Apply the new SL (only if it improves protection)
         with self._lock:
             if bracket.side == "BUY":
@@ -1111,7 +1153,7 @@ class BracketManager:
                     old_sl = bracket.sl_trigger_price
                     bracket.sl_trigger_price = round(new_sl, 2)
                     bracket.updated_at = time.time()
-                    
+
                     LOGGER.info(
                         f"📈 TRAIL UPDATE {bracket.symbol}: "
                         f"SL {old_sl:.2f} → {new_sl:.2f} | "
@@ -1121,13 +1163,13 @@ class BracketManager:
                         bracket.entry_order_id, bracket.sl_trigger_price, old_sl
                     ):
                         self._notify_event(
-                            'BRACKET_TRAIL_UPDATE',
+                            "BRACKET_TRAIL_UPDATE",
                             {
-                                'symbol': bracket.symbol,
-                                'side': bracket.side,
-                                'sl': round(bracket.sl_trigger_price, 2),
-                                'ltp': round(ltp, 2),
-                                'profit_pct': round(profit_pct, 2),
+                                "symbol": bracket.symbol,
+                                "side": bracket.side,
+                                "sl": round(bracket.sl_trigger_price, 2),
+                                "ltp": round(ltp, 2),
+                                "profit_pct": round(profit_pct, 2),
                             },
                         )
             else:  # SELL
@@ -1135,7 +1177,7 @@ class BracketManager:
                     old_sl = bracket.sl_trigger_price
                     bracket.sl_trigger_price = round(new_sl, 2)
                     bracket.updated_at = time.time()
-                    
+
                     LOGGER.info(
                         f"📉 TRAIL UPDATE {bracket.symbol}: "
                         f"SL {old_sl:.2f} → {new_sl:.2f} | "
@@ -1145,13 +1187,13 @@ class BracketManager:
                         bracket.entry_order_id, bracket.sl_trigger_price, old_sl
                     ):
                         self._notify_event(
-                            'BRACKET_TRAIL_UPDATE',
+                            "BRACKET_TRAIL_UPDATE",
                             {
-                                'symbol': bracket.symbol,
-                                'side': bracket.side,
-                                'sl': round(bracket.sl_trigger_price, 2),
-                                'ltp': round(ltp, 2),
-                                'profit_pct': round(profit_pct, 2),
+                                "symbol": bracket.symbol,
+                                "side": bracket.side,
+                                "sl": round(bracket.sl_trigger_price, 2),
+                                "ltp": round(ltp, 2),
+                                "profit_pct": round(profit_pct, 2),
                             },
                         )
 
@@ -1161,11 +1203,11 @@ class BracketManager:
         ltp: float,
         profit_pct: float,
         high_water: float,
-        atr: float
+        atr: float,
     ) -> float | None:
         """
         Calculate trailing SL using tiered protection system.
-        
+
         TIERS:
         - Tier 0 (< 1%): No trailing, use original SL
         - Tier 1 (1-2%): Lock breakeven
@@ -1174,25 +1216,25 @@ class BracketManager:
         - Tier 4 (> 6%): Protect 60% of profit + tight ATR trail
         """
         import os
-        
+
         entry = bracket.entry_price
         current_sl = bracket.sl_trigger_price
 
         if bracket.side == "SELL" and (high_water == float("inf") or high_water <= 0):
             return None
-        
+
         # Configuration from environment
         tier1_threshold = float(os.getenv("TRAIL_TIER1_PCT", "1.0"))
         tier2_threshold = float(os.getenv("TRAIL_TIER2_PCT", "2.0"))
         tier3_threshold = float(os.getenv("TRAIL_TIER3_PCT", "4.0"))
         tier4_threshold = float(os.getenv("TRAIL_TIER4_PCT", "6.0"))
-        
+
         # ═══════════════════════════════════════════════════════════
         # TIER 0: NO PROFIT (< 1%) - Use original SL
         # ═══════════════════════════════════════════════════════════
         if profit_pct < tier1_threshold:
             return None  # No change
-        
+
         # ═══════════════════════════════════════════════════════════
         # TIER 1: SMALL PROFIT (1-2%) - BREAKEVEN LOCK
         # ═══════════════════════════════════════════════════════════
@@ -1207,13 +1249,13 @@ class BracketManager:
                     LOGGER.debug(f"🔒 Tier 1: Breakeven lock at {entry:.2f}")
                     return entry
             return None
-        
+
         # ═══════════════════════════════════════════════════════════
         # TIER 2: MODERATE PROFIT (2-4%) - PROTECT 40%
         # ═══════════════════════════════════════════════════════════
         if tier2_threshold <= profit_pct < tier3_threshold:
             protection_pct = 0.40
-            
+
             if bracket.side == "BUY":
                 profit_amount = high_water - entry
                 protected_sl = entry + (profit_amount * protection_pct)
@@ -1224,22 +1266,22 @@ class BracketManager:
                 protected_sl = entry - (profit_amount * protection_pct)
                 LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")
                 return protected_sl
-        
+
         # ═══════════════════════════════════════════════════════════
         # TIER 3: GOOD PROFIT (4-6%) - PROTECT 50% + ATR TRAIL
         # ═══════════════════════════════════════════════════════════
         if tier3_threshold <= profit_pct < tier4_threshold:
             protection_pct = 0.50
-            
+
             # Calculate momentum-adjusted ATR multiplier
             momentum = self._calculate_momentum(bracket.symbol)
             atr_mult = self._get_momentum_adjusted_atr_mult(momentum, base_mult=1.5)
-            
+
             if bracket.side == "BUY":
                 # Minimum: 50% profit protection
                 profit_amount = high_water - entry
                 min_sl = entry + (profit_amount * protection_pct)
-                
+
                 # ATR trail from high water
                 if atr > 0:
                     atr_sl = high_water - (atr * atr_mult)
@@ -1247,57 +1289,57 @@ class BracketManager:
                     protected_sl = max(min_sl, atr_sl)
                 else:
                     protected_sl = min_sl
-                
+
                 LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")
                 return protected_sl
             else:
                 profit_amount = entry - high_water
                 min_sl = entry - (profit_amount * protection_pct)
-                
+
                 if atr > 0:
                     atr_sl = high_water + (atr * atr_mult)
                     protected_sl = min(min_sl, atr_sl)
                 else:
                     protected_sl = min_sl
-                
+
                 LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")
                 return protected_sl
-        
+
         # ═══════════════════════════════════════════════════════════
         # TIER 4: EXCELLENT PROFIT (> 6%) - PROTECT 60% + TIGHT TRAIL
         # ═══════════════════════════════════════════════════════════
         if profit_pct >= tier4_threshold:
             protection_pct = 0.60
-            
+
             # Tighter ATR multiplier for big winners
             momentum = self._calculate_momentum(bracket.symbol)
             atr_mult = self._get_momentum_adjusted_atr_mult(momentum, base_mult=1.0)
-            
+
             if bracket.side == "BUY":
                 profit_amount = high_water - entry
                 min_sl = entry + (profit_amount * protection_pct)
-                
+
                 if atr > 0:
                     atr_sl = high_water - (atr * atr_mult)
                     protected_sl = max(min_sl, atr_sl)
                 else:
                     protected_sl = min_sl
-                
+
                 LOGGER.info(f"🏆 Tier 4: 60% + tight trail at {protected_sl:.2f}")
                 return protected_sl
             else:
                 profit_amount = entry - high_water
                 min_sl = entry - (profit_amount * protection_pct)
-                
+
                 if atr > 0:
                     atr_sl = high_water + (atr * atr_mult)
                     protected_sl = min(min_sl, atr_sl)
                 else:
                     protected_sl = min_sl
-                
+
                 LOGGER.info(f"🏆 Tier 4: 60% + tight trail at {protected_sl:.2f}")
                 return protected_sl
-        
+
         return None
 
     def _get_current_atr(self, symbol: str) -> float:
@@ -1310,7 +1352,7 @@ class BracketManager:
                     return snapshot.value
             except Exception:
                 pass
-        
+
         # Fallback to local cache
         return self._current_atr.get(symbol, 0.0)
 
@@ -1322,16 +1364,16 @@ class BracketManager:
         # Use last_ltp changes if available
         # This is a simplified momentum calculation
         # For production, you might want to track a deque of recent prices
-        
+
         # Check if we have historical tick data
-        if hasattr(self, '_recent_ticks') and symbol in self._recent_ticks:
+        if hasattr(self, "_recent_ticks") and symbol in self._recent_ticks:
             ticks = self._recent_ticks[symbol]
             if len(ticks) >= 5:
                 first = ticks[-5]
                 last = ticks[-1]
                 if first > 0:
                     return ((last - first) / first) * 100
-        
+
         # Fallback: use bracket's high/low water marks
         bracket = None
         with self._lock:
@@ -1339,25 +1381,27 @@ class BracketManager:
                 if b.symbol == symbol and b.active:
                     bracket = b
                     break
-        
+
         if bracket:
             ltp = bracket.last_ltp
             entry = bracket.entry_price
             if entry > 0 and ltp > 0:
                 # Simple momentum: current move from entry
                 return ((ltp - entry) / entry) * 100
-        
+
         return 0.0
 
-    def _get_momentum_adjusted_atr_mult(self, momentum: float, base_mult: float) -> float:
+    def _get_momentum_adjusted_atr_mult(
+        self, momentum: float, base_mult: float
+    ) -> float:
         """
         Adjust ATR multiplier based on momentum.
-        
+
         Strong momentum = tighter trail (capture the move)
         Weak momentum = looser trail (avoid noise)
         """
         abs_momentum = abs(momentum)
-        
+
         if abs_momentum > 1.0:
             # Very strong momentum: tight trail
             return base_mult * 0.8
@@ -1370,7 +1414,6 @@ class BracketManager:
         else:
             # Weak/choppy: looser trail
             return base_mult * 1.3
-            
 
     def _check_stop_loss(self, bracket: BracketState, ltp: float) -> bool:
         """Returns True if SL hit and exit fired (Safe against 0.0)."""
@@ -1385,7 +1428,7 @@ class BracketManager:
             if ltp <= bracket.sl_trigger_price:
                 triggered = True
                 reason = f"SL Hit ({ltp} <= {bracket.sl_trigger_price:.2f})"
-        else: # SELL
+        else:  # SELL
             if ltp >= bracket.sl_trigger_price:
                 triggered = True
                 reason = f"SL Hit ({ltp} >= {bracket.sl_trigger_price:.2f})"
@@ -1393,7 +1436,9 @@ class BracketManager:
         if triggered:
             LOGGER.warning(f"🛑 STOP LOSS TRIGGERED for {bracket.symbol} | {reason}")
             # Exit full remaining quantity
-            self._execute_exit(bracket, bracket.remaining_quantity, reason, is_partial=False)
+            self._execute_exit(
+                bracket, bracket.remaining_quantity, reason, is_partial=False
+            )
             return True
         return False
 
@@ -1402,22 +1447,24 @@ class BracketManager:
         for target in bracket.tp_levels:
             if target.executed:
                 continue
-            
+
             triggered = False
             if bracket.side == "BUY":
                 if ltp >= target.price:
                     triggered = True
-            else: # SELL
+            else:  # SELL
                 if ltp <= target.price:
                     triggered = True
-            
+
             if triggered:
                 reason = f"{target.name} Hit ({ltp})"
                 qty_to_close = min(target.quantity, bracket.remaining_quantity)
-                
+
                 # Execute Partial
-                success = self._execute_exit(bracket, qty_to_close, reason, is_partial=True)
-                
+                success = self._execute_exit(
+                    bracket, qty_to_close, reason, is_partial=True
+                )
+
                 if success:
                     target.executed = True
                     # AUTO-ADJUST: Move SL to Breakeven after TP1
@@ -1434,13 +1481,15 @@ class BracketManager:
         if bracket.side == "BUY":
             if ltp >= bracket.tp_trigger_price:
                 triggered = True
-        else: # SELL
+        else:  # SELL
             if ltp <= bracket.tp_trigger_price:
                 triggered = True
 
         if triggered:
             reason = f"FINAL TP Hit ({ltp})"
-            self._execute_exit(bracket, bracket.remaining_quantity, reason, is_partial=False)
+            self._execute_exit(
+                bracket, bracket.remaining_quantity, reason, is_partial=False
+            )
 
     def _move_sl_to_breakeven(self, bracket: BracketState) -> None:
         """Moves SL to Entry Price (Cost)."""
@@ -1448,21 +1497,27 @@ class BracketManager:
             if bracket.side == "BUY":
                 if bracket.entry_price > bracket.sl_trigger_price:
                     bracket.sl_trigger_price = bracket.entry_price
-                    LOGGER.info(f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})")
+                    LOGGER.info(
+                        f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})"
+                    )
             else:
                 if bracket.entry_price < bracket.sl_trigger_price:
                     bracket.sl_trigger_price = bracket.entry_price
-                    LOGGER.info(f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})")
+                    LOGGER.info(
+                        f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})"
+                    )
 
-    def _execute_exit(self, bracket: BracketState, qty: int, reason: str, is_partial: bool) -> bool:
+    def _execute_exit(
+        self, bracket: BracketState, qty: int, reason: str, is_partial: bool
+    ) -> bool:
         """
         Send exit order with SLIPPAGE PROTECTION.
         Uses aggressive LIMIT instead of MARKET.
-        
+
         ✅ WORLD-CLASS OPTIMIZATION: Caps slippage at 2%
         """
         import os
-        
+
         if qty <= 0:
             return False
 
@@ -1472,7 +1527,7 @@ class BracketManager:
             # 🛑 1. COOLDOWN CHECK (Prevent Rapid Firing)
             last_attempt = self._exit_cooldowns.get(bracket.entry_order_id, 0)
             cooldown_seconds = float(os.getenv("EXIT_COOLDOWN_SECONDS", "5.0"))
-            
+
             if now - last_attempt < cooldown_seconds:
                 LOGGER.debug(f"⏳ Exit Cooldown Active for {bracket.symbol}. Skipping.")
                 return False
@@ -1480,16 +1535,16 @@ class BracketManager:
             # Double check if we still have quantity or are active
             if bracket.remaining_quantity <= 0 or not bracket.active:
                 return False
-            
+
             # Set Cooldown IMMEDIATELY
             self._exit_cooldowns[bracket.entry_order_id] = now
-            
+
             # 🛑 2. STATE LOCKING (Update *Before* Order)
             bracket.remaining_quantity -= qty
-            
+
             if not is_partial or bracket.remaining_quantity <= 0:
                 bracket.active = False
-            
+
             # Persist state (non-blocking if using async)
             try:
                 self.save_state()
@@ -1500,51 +1555,56 @@ class BracketManager:
         # ✅ WORLD-CLASS: SLIPPAGE-PROTECTED EXIT
         # ═══════════════════════════════════════════════════════════
         exit_side = "SELL" if bracket.side == "BUY" else "BUY"
-        
+
         # Get current market price
         current_ltp = bracket.last_ltp
         if not current_ltp or current_ltp <= 0:
             # Fallback: Use entry price if LTP unavailable
             current_ltp = bracket.entry_price
-        
+
         # Calculate LIMIT price with slippage buffer
         max_slippage_pct = float(os.getenv("EXIT_MAX_SLIPPAGE_PCT", "2.0"))
-        
+
         if exit_side == "SELL":
             # SELL exit: Accept price up to 2% BELOW current
             limit_price = round(current_ltp * (1 - max_slippage_pct / 100), 2)
         else:
             # BUY exit (short cover): Accept price up to 2% ABOVE current
             limit_price = round(current_ltp * (1 + max_slippage_pct / 100), 2)
-        
+
         # Ensure limit price is positive
         limit_price = max(limit_price, 0.05)
-        
+
+        exit_is_stop = "SL" in reason.upper()
+        order_type = "MARKET" if exit_is_stop else "LIMIT"
+
         LOGGER.warning(
             f"⚡ EXECUTING EXIT: {bracket.symbol} | {exit_side} {qty} | "
             f"LTP={current_ltp:.2f} | Limit={limit_price:.2f} | Reason={reason}"
         )
 
         try:
-            # ✅ PRIMARY: Aggressive LIMIT order (should fill instantly)
-            order_id = self.order_manager.place_order(
-                symbol=bracket.symbol,
-                side=exit_side,
-                quantity=qty,
-                order_type="LIMIT",           # ✅ LIMIT instead of MARKET
-                price=limit_price,            # ✅ Protected price
-                tag=f"exit_{reason[:3]}_{bracket.tag[:3] if bracket.tag else 'auto'}",
-                check_risk=False,
-                product="MIS"
-            )
-            
+            # ✅ PRIMARY: Aggressive LIMIT order (MARKET for SL to guarantee exit)
+            order_kwargs = {
+                "symbol": bracket.symbol,
+                "side": exit_side,
+                "quantity": qty,
+                "order_type": order_type,
+                "tag": f"exit_{reason[:3]}_{bracket.tag[:3] if bracket.tag else 'auto'}",
+                "check_risk": False,
+                "product": "MIS",
+            }
+            if order_type == "LIMIT":
+                order_kwargs["price"] = limit_price
+            order_id = self.order_manager.place_order(**order_kwargs)
+
             if order_id:
                 LOGGER.info(f"✅ Exit order placed: {order_id}")
-                
+
                 # Quick status check (non-blocking, 200ms)
                 try:
                     time.sleep(0.2)
-                    if hasattr(self.order_manager, '_broker'):
+                    if hasattr(self.order_manager, "_broker"):
                         status = self.order_manager._broker.get_order_status(order_id)
                         if status:
                             status_str = str(status.get("status", "")).upper()
@@ -1552,18 +1612,22 @@ class BracketManager:
                                 LOGGER.info(f"✅ Exit filled immediately: {order_id}")
                             elif status_str == "REJECTED":
                                 # Fallback to MARKET if LIMIT rejected
-                                LOGGER.warning(f"⚠️ LIMIT rejected, trying MARKET fallback")
-                                self._market_fallback_exit(bracket, qty, exit_side, reason)
+                                LOGGER.warning(
+                                    f"⚠️ LIMIT rejected, trying MARKET fallback"
+                                )
+                                self._market_fallback_exit(
+                                    bracket, qty, exit_side, reason
+                                )
                 except Exception as e:
                     LOGGER.debug(f"Status check skipped: {e}")
-            
+
             # Metrics
             if METRICS_AVAILABLE and METRICS:
                 try:
                     METRICS.brackets_triggered.inc()
                 except Exception:
                     pass
-                
+
             # Cleanup if full exit
             if not is_partial and bracket.remaining_quantity <= 0:
                 self.unregister_bracket(bracket.entry_order_id)
@@ -1572,7 +1636,7 @@ class BracketManager:
 
         except Exception as e:
             LOGGER.critical(f"🛑 EXIT FAILED for {bracket.symbol}: {e}", exc_info=True)
-            
+
             # 🛑 3. REVERT STATE ON FAILURE
             with self._lock:
                 bracket.remaining_quantity += qty
@@ -1582,18 +1646,20 @@ class BracketManager:
                     self.save_state()
                 except Exception:
                     pass
-                
+
             # ✅ FALLBACK: Try MARKET order as last resort
             return self._market_fallback_exit(bracket, qty, exit_side, reason)
 
-    def _market_fallback_exit(self, bracket: BracketState, qty: int, exit_side: str, reason: str) -> bool:
+    def _market_fallback_exit(
+        self, bracket: BracketState, qty: int, exit_side: str, reason: str
+    ) -> bool:
         """
         Last resort MARKET exit when LIMIT fails.
         Only used as fallback to ensure position is closed.
         """
         try:
             LOGGER.warning(f"🚨 MARKET FALLBACK: {bracket.symbol} | {exit_side} {qty}")
-            
+
             order_id = self.order_manager.place_order(
                 symbol=bracket.symbol,
                 side=exit_side,
@@ -1601,19 +1667,18 @@ class BracketManager:
                 order_type="MARKET",
                 tag=f"mkt_exit_{reason[:3]}",
                 check_risk=False,
-                product="MIS"
+                product="MIS",
             )
-            
+
             if order_id:
                 LOGGER.info(f"✅ Market fallback placed: {order_id}")
                 return True
             return False
-            
+
         except Exception as e:
             LOGGER.critical(f"🛑 MARKET FALLBACK ALSO FAILED: {e}")
             return False
 
-    
     # --------------------------------------------------------------------------
     # 4. SYNC & MANUAL INTERVENTION (World Class)
     # --------------------------------------------------------------------------
@@ -1630,31 +1695,37 @@ class BracketManager:
             # For now, we assume if some qty remains, we keep brackets active
             pass
 
-    def manual_override_close(self, symbol: str, reason: str = "Manual Override") -> None:
+    def manual_override_close(
+        self, symbol: str, reason: str = "Manual Override"
+    ) -> None:
         """Force close/remove all brackets for a symbol."""
         with self._lock:
             relevant_ids = self._symbol_map.get(symbol, [])
             if not relevant_ids:
                 return
-            
+
             count = 0
             for eid in list(relevant_ids):
                 if eid in self._brackets:
                     # We strictly unregister, assuming the position is already gone/closing
                     self.unregister_bracket(eid)
                     count += 1
-            
-            if count > 0:
-                LOGGER.info(f"🧹 Cleaned up {count} brackets for {symbol} due to: {reason}")
 
-    def sync_order_status(self, broker_order_id: str, status: str, filled_qty: int) -> None:
+            if count > 0:
+                LOGGER.info(
+                    f"🧹 Cleaned up {count} brackets for {symbol} due to: {reason}"
+                )
+
+    def sync_order_status(
+        self, broker_order_id: str, status: str, filled_qty: int
+    ) -> None:
         """
         Detects if an Exit order initiated externally has filled.
         Used to keep internal state consistent.
         """
         if status not in _FILLED_STATUSES:
             return
-            
+
         # This is a hook for future expansion where we map every broker order back to a bracket.
         # Currently handled via sync_manual_exit based on net position.
         pass
@@ -1667,22 +1738,24 @@ class BracketManager:
         """Update SL price manually for all active brackets on a symbol."""
         with self._lock:
             relevant_ids = self._symbol_map.get(symbol, [])
-            if not relevant_ids: return
+            if not relevant_ids:
+                return
 
             for eid in relevant_ids:
                 bracket = self._brackets.get(eid)
-                if not bracket or not bracket.active: continue
-                
+                if not bracket or not bracket.active:
+                    continue
+
                 updated = False
                 if bracket.side == "BUY":
                     if new_sl > bracket.sl_trigger_price:
                         bracket.sl_trigger_price = new_sl
                         updated = True
-                else: # SELL
+                else:  # SELL
                     if new_sl < bracket.sl_trigger_price:
                         bracket.sl_trigger_price = new_sl
                         updated = True
-                
+
                 if updated:
                     bracket.updated_at = time.time()
                     LOGGER.info(f"📈 Manual SL Update {symbol}: SL -> {new_sl:.2f}")
@@ -1700,7 +1773,7 @@ class BracketManager:
             # 1. Fast check: symbol not in tracking map
             if symbol not in self._symbol_map:
                 return False
-            
+
             # 2. Deep check: Are any linked brackets actually active?
             # We iterate through all order IDs associated with this symbol
             entry_ids = self._symbol_map.get(symbol, [])
@@ -1709,7 +1782,7 @@ class BracketManager:
                 # It's managed if at least one bracket is Active and has Quantity remaining
                 if bracket and bracket.active and bracket.remaining_quantity > 0:
                     return True
-            
+
             return False
 
     def get_bracket(self, entry_id: str) -> Optional[BracketState]:
@@ -1722,17 +1795,17 @@ class BracketManager:
             if entry_id in self._brackets:
                 bracket = self._brackets[entry_id]
                 symbol = bracket.symbol
-                
+
                 # Cleanup Main Dict
                 del self._brackets[entry_id]
-                
+
                 # Cleanup Symbol Map
                 if symbol in self._symbol_map:
                     if entry_id in self._symbol_map[symbol]:
                         self._symbol_map[symbol].remove(entry_id)
                     if not self._symbol_map[symbol]:
                         del self._symbol_map[symbol]
-                        
+
                 # Cleanup Controller
                 if entry_id in self._trailing_controllers:
                     del self._trailing_controllers[entry_id]
@@ -1747,18 +1820,19 @@ class BracketManager:
             # Cleanup reverse index (outside main check if orphaned)
             if entry_id in self._order_to_entry:
                 del self._order_to_entry[entry_id]
-                
+
     def cleanup_stale_brackets(self, max_age_seconds: int = 86400) -> int:
         """Remove old inactive brackets."""
         now = time.time()
         with self._lock:
             to_remove = [
-                eid for eid, b in self._brackets.items()
+                eid
+                for eid, b in self._brackets.items()
                 if (now - b.created_at) > max_age_seconds
             ]
             for eid in to_remove:
                 self.unregister_bracket(eid)
-            
+
             if to_remove:
                 LOGGER.info(f"🧹 Cleaned up {len(to_remove)} stale brackets.")
             return len(to_remove)
@@ -1770,21 +1844,22 @@ class BracketManager:
                 "active_brackets": len(self._brackets),
                 "symbols_managed": len(self._symbol_map),
                 "atr_tracked_symbols": len(self._current_atr),
-                "adaptive_controllers": len(self._trailing_controllers)
+                "adaptive_controllers": len(self._trailing_controllers),
             }
+
     # ----------------------------------------------------------------
     # 💾 PERSISTENCE LAYER (Add to BracketManager)
     # ----------------------------------------------------------------
     def _get_storage_path(self) -> Path:
         """Get storage path with DATA_DIR support for Railway.
-        
+
         ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback.
         """
         import os
-        
+
         data_dir = os.getenv("DATA_DIR", "data")
         path = Path(data_dir) / "virtual_brackets.json"
-        
+
         # Test if we can write to this directory
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1796,20 +1871,20 @@ class BracketManager:
             path = Path("/tmp/nifty_scalper_data/virtual_brackets.json")
             path.parent.mkdir(parents=True, exist_ok=True)
             LOGGER.warning(f"⚠️ Using /tmp fallback for brackets: {path}")
-        
+
         return path
 
     def save_state(self) -> None:
         """Persist active brackets to disk ATOMICALLY with Enum handling.
-        
+
         ✅ PRODUCTION FIX: Added Enum serialization and DATA_DIR support.
         """
-        import uuid
-        import os
-        from enum import Enum
-        from datetime import datetime, date
+        from datetime import date, datetime
         from decimal import Decimal
-        
+        from enum import Enum
+        import os
+        import uuid
+
         # ✅ FIX: Sanitize function for Enum types
         def _sanitize(obj):
             if isinstance(obj, dict):
@@ -1817,60 +1892,63 @@ class BracketManager:
             elif isinstance(obj, (list, tuple)):
                 return [_sanitize(item) for item in obj]
             elif isinstance(obj, Enum):
-                return obj.value if hasattr(obj, 'value') else obj.name
+                return obj.value if hasattr(obj, "value") else obj.name
             elif isinstance(obj, (datetime, date)):
                 return obj.isoformat()
             elif isinstance(obj, Decimal):
                 return float(obj)
             return obj
-        
+
         data = {}
         with self._lock:
             for eid, b in self._brackets.items():
-                data[eid] = _sanitize({
-                    "entry_order_id": eid,
-                    "symbol": b.symbol,
-                    "quantity": b.quantity,
-                    "remaining_quantity": b.remaining_quantity,
-                    "entry_price": b.entry_price,
-                    "side": b.side,
-                    "sl_trigger_price": b.sl_trigger_price,
-                    "tp_trigger_price": b.tp_trigger_price,
-                    "trailing_enabled": b.trailing_enabled,
-                    "trailing_config": b.trailing_config,
-                    "active": b.active,
-                    "created_at": b.created_at,
-                    "updated_at": b.updated_at,
-                    "highest_ltp": b.highest_ltp,
-                    "lowest_ltp": b.lowest_ltp,
-                    "last_ltp": b.last_ltp,
-                    "tp_levels": [
-                        {
-                            "price": tl.price,
-                            "quantity": tl.quantity,
-                            "executed": tl.executed,
-                            "name": tl.name
-                        } for tl in b.tp_levels
-                    ],
-                    "tag": b.tag
-                })
-        
+                data[eid] = _sanitize(
+                    {
+                        "entry_order_id": eid,
+                        "symbol": b.symbol,
+                        "quantity": b.quantity,
+                        "remaining_quantity": b.remaining_quantity,
+                        "entry_price": b.entry_price,
+                        "side": b.side,
+                        "sl_trigger_price": b.sl_trigger_price,
+                        "tp_trigger_price": b.tp_trigger_price,
+                        "trailing_enabled": b.trailing_enabled,
+                        "trailing_config": b.trailing_config,
+                        "active": b.active,
+                        "created_at": b.created_at,
+                        "updated_at": b.updated_at,
+                        "highest_ltp": b.highest_ltp,
+                        "lowest_ltp": b.lowest_ltp,
+                        "last_ltp": b.last_ltp,
+                        "tp_levels": [
+                            {
+                                "price": tl.price,
+                                "quantity": tl.quantity,
+                                "executed": tl.executed,
+                                "name": tl.name,
+                            }
+                            for tl in b.tp_levels
+                        ],
+                        "tag": b.tag,
+                    }
+                )
+
         try:
             path = self._get_storage_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # ✅ FIX: Write to temp file first, then atomic replace
             tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
-            
+
             with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2, default=str)
                 f.flush()
                 os.fsync(f.fileno())  # Force write to physical disk
-            
+
             # Atomic swap (Crash-safe)
             os.replace(tmp_path, path)
             LOGGER.debug(f"✅ Brackets saved to {path}")
-            
+
         except Exception as e:
             LOGGER.error(f"Failed to save bracket state: {e}")
 
@@ -1884,7 +1962,7 @@ class BracketManager:
         try:
             with open(path, "r") as f:
                 data = json.load(f)
-            
+
             restored_count = 0
             with self._lock:
                 for eid, d in data.items():
@@ -1892,23 +1970,31 @@ class BracketManager:
                         # Restore TargetLevels
                         tp_levels = []
                         for tl_data in d.get("tp_levels", []):
-                            tp_levels.append(TargetLevel(
-                                price=tl_data["price"],
-                                quantity=tl_data["quantity"],
-                                executed=tl_data.get("executed", False),
-                                name=tl_data.get("name", "TP")
-                            ))
-                        
+                            tp_levels.append(
+                                TargetLevel(
+                                    price=tl_data["price"],
+                                    quantity=tl_data["quantity"],
+                                    executed=tl_data.get("executed", False),
+                                    name=tl_data.get("name", "TP"),
+                                )
+                            )
+
                         # Reconstruct BracketState with CORRECT parameters
                         b = BracketState(
-                            entry_order_id=eid,                                    # ✅ FIXED: was entry_id
+                            entry_order_id=eid,  # ✅ FIXED: was entry_id
                             symbol=d["symbol"],
                             quantity=d["quantity"],
                             entry_price=d["entry_price"],
                             side=d["side"],
-                            sl_trigger_price=d["sl_trigger_price"],                # ✅ FIXED: was stop_loss
-                            tp_trigger_price=d["tp_trigger_price"],                # ✅ FIXED: was take_profit
-                            remaining_quantity=d.get("remaining_quantity", d["quantity"]),
+                            sl_trigger_price=d[
+                                "sl_trigger_price"
+                            ],  # ✅ FIXED: was stop_loss
+                            tp_trigger_price=d[
+                                "tp_trigger_price"
+                            ],  # ✅ FIXED: was take_profit
+                            remaining_quantity=d.get(
+                                "remaining_quantity", d["quantity"]
+                            ),
                             tp_levels=tp_levels,
                             trailing_enabled=d.get("trailing_enabled", False),
                             trailing_config=d.get("trailing_config", {}),
@@ -1917,31 +2003,32 @@ class BracketManager:
                             highest_ltp=d.get("highest_ltp", d["entry_price"]),
                             lowest_ltp=d.get("lowest_ltp", d["entry_price"]),
                             last_ltp=d.get("last_ltp", d["entry_price"]),
-                            tag=d.get("tag")
+                            tag=d.get("tag"),
                         )
-                        
+
                         # Set active state AFTER construction
                         b.active = d.get("active", True)
                         b.virtual_sl_id = f"vsl_{eid}"
-                        
+
                         # Register bracket
                         self._brackets[eid] = b
                         self._order_to_entry[eid] = eid
-                        
+
                         # Update symbol map
                         if b.symbol not in self._symbol_map:
                             self._symbol_map[b.symbol] = []
                         self._symbol_map[b.symbol].append(eid)
-                        
+
                         # Restore trailing controller if needed
-                        if b.trailing_enabled and b.trailing_config.get("mode") == "ATR":
+                        if (
+                            b.trailing_enabled
+                            and b.trailing_config.get("mode") == "ATR"
+                        ):
                             if self._atr_provider and AdaptiveTrailingController:
                                 try:
                                     mult = b.trailing_config.get("mult", 1.5)
                                     spec = TrailingSpec(
-                                        trail_by=20.0,
-                                        step=1.0,
-                                        activation=0.1
+                                        trail_by=20.0, step=1.0, activation=0.1
                                     )
                                     ctrl = AdaptiveTrailingController(
                                         symbol=b.symbol,
@@ -1954,84 +2041,84 @@ class BracketManager:
                                         modify_order=self._virtual_modify_sl,
                                         atr_provider=self._atr_provider,
                                         journal=MockJournal(),
-                                        atr_multiplier=mult
+                                        atr_multiplier=mult,
                                     )
                                     self._trailing_controllers[eid] = ctrl
-                                    LOGGER.debug(f"🧠 Restored controller for {b.symbol}")
+                                    LOGGER.debug(
+                                        f"🧠 Restored controller for {b.symbol}"
+                                    )
                                 except Exception as e:
-                                    LOGGER.warning(f"Failed to restore controller for {b.symbol}: {e}")
-                        
+                                    LOGGER.warning(
+                                        f"Failed to restore controller for {b.symbol}: {e}"
+                                    )
+
                         restored_count += 1
-                        
+
                     except Exception as e:
                         LOGGER.error(f"Failed to restore bracket {eid}: {e}")
                         continue
-            
+
             LOGGER.info(f"♻️ Restored {restored_count} virtual brackets from disk")
-            
+
             # ✅ CRITICAL: Resubscribe to market data
             self._resubscribe_restored_brackets()
-            
+
         except Exception as e:
             LOGGER.error(f"Failed to load bracket state: {e}", exc_info=True)
-
 
     def _resubscribe_restored_brackets(self) -> None:
         """Resubscribe to market data for all restored brackets."""
         if not self._market_data:
             LOGGER.warning("Cannot resubscribe: MarketDataManager not available")
             return
-        
+
         unique_symbols = set()
         with self._lock:
             for bracket in self._brackets.values():
                 if bracket.active and bracket.remaining_quantity > 0:
                     unique_symbols.add(bracket.symbol)
-        
+
         for symbol in unique_symbols:
             try:
                 # Create callback closure for this symbol
                 def tick_callback(sym=symbol, ltp=None):
                     if ltp is not None:
                         self.on_tick(sym, ltp)
-                
+
                 # Register with market data manager
-                if hasattr(self._market_data, 'subscribe'):
+                if hasattr(self._market_data, "subscribe"):
                     self._market_data.subscribe(symbol, tick_callback)
-                elif hasattr(self._market_data, 'register_callback'):
+                elif hasattr(self._market_data, "register_callback"):
                     self._market_data.register_callback(symbol, tick_callback)
-                
+
                 LOGGER.info(f"🔔 Resubscribed {symbol} to market data feed")
-                
+
             except Exception as e:
                 LOGGER.error(f"Failed to resubscribe {symbol}: {e}")
-        
+
         if unique_symbols:
             LOGGER.info(f"✅ Resubscribed {len(unique_symbols)} symbols to market data")
 
     def attach_orphan_position(
-        self,
-        symbol: str,
-        side: str,
-        qty: int,
-        entry_price: float
+        self, symbol: str, side: str, qty: int, entry_price: float
     ) -> str:
         """
         Wraps an existing naked position in a protective bracket.
         Called by Runner when 'ORPHAN GUARD' triggers.
         """
         oid = f"orphan_{int(time.time())}_{symbol}"
-        
+
         # 1. Dynamic ATR Calculation (if provider available)
         atr = entry_price * 0.01  # Default 1%
         if self._atr_provider:
-             calc_atr = self._atr_provider.get_current_atr(symbol)
-             if calc_atr and calc_atr > 0: atr = calc_atr
+            calc_atr = self._atr_provider.get_current_atr(symbol)
+            if calc_atr and calc_atr > 0:
+                atr = calc_atr
 
         # 2. Define Rescue Levels (1.5x Risk / 3.0x Reward)
         # Handle 'BUY'/'LONG' vs 'SELL'/'SHORT'
         is_long = side.upper() in ["BUY", "LONG"]
-        
+
         if is_long:
             sl = entry_price - (atr * 1.5)
             tp = entry_price + (atr * 3.0)
@@ -2050,9 +2137,9 @@ class BracketManager:
             tp=tp,
             tag="orphan_recovery",
             trailing_atr_mult=1.5,
-            activate_immediately=True  # 🟢 Critical: It's already live
+            activate_immediately=True,  # 🟢 Critical: It's already live
         )
-        
+
         LOGGER.warning(
             f"🧯 ORPHAN ATTACHED: {symbol} | Entry={entry_price:.2f} | "
             f"SL={sl:.2f} | TP={tp:.2f} | ID={oid}"
@@ -2072,11 +2159,11 @@ class BracketManager:
     ) -> str:
         """
         Create a virtual bracket with specified SL/TP levels.
-        
+
         This is an alias method that provides the API expected by runner.py.
         Unlike attach_orphan_position(), this uses the SPECIFIED SL/TP values
         rather than auto-calculating them from ATR.
-        
+
         Args:
             symbol: Trading symbol (e.g., "NIFTY2620324650CE")
             side: "LONG", "SHORT", "BUY", or "SELL"
@@ -2086,10 +2173,10 @@ class BracketManager:
             quantity: Position size (will use absolute value)
             strategy: Strategy name for tagging (default: "auto")
             order_id: Optional specific order ID (auto-generated if None)
-            
+
         Returns:
             The order_id (entry_id) used for bracket registration.
-            
+
         Example:
             >>> bm.create_bracket(
             ...     symbol="NIFTY2620324650CE",
@@ -2102,29 +2189,39 @@ class BracketManager:
             ... )
         """
         import time
-        
+
         # Normalize side to BUY/SELL
         normalized_side = _normalize_bracket_side(side)
 
         # Validate side
         if normalized_side not in ("BUY", "SELL"):
-            LOGGER.warning(f"⚠️ create_bracket: Invalid side '{side}', defaulting to BUY")
+            LOGGER.warning(
+                f"⚠️ create_bracket: Invalid side '{side}', defaulting to BUY"
+            )
             normalized_side = "BUY"
-        
+
         # Auto-generate order_id if not provided
         if not order_id:
             safe_symbol = symbol.replace(":", "_")[:20]
             order_id = f"bracket_{int(time.time() * 1000)}_{safe_symbol}"
-        
+
         # Validate SL/TP (use defaults if invalid)
         if stop_loss <= 0:
-            LOGGER.warning(f"⚠️ create_bracket: Invalid SL={stop_loss}, using 5% default")
-            stop_loss = entry_price * 0.95 if normalized_side == "BUY" else entry_price * 1.05
-            
+            LOGGER.warning(
+                f"⚠️ create_bracket: Invalid SL={stop_loss}, using 5% default"
+            )
+            stop_loss = (
+                entry_price * 0.95 if normalized_side == "BUY" else entry_price * 1.05
+            )
+
         if take_profit <= 0:
-            LOGGER.warning(f"⚠️ create_bracket: Invalid TP={take_profit}, using 10% default")
-            take_profit = entry_price * 1.10 if normalized_side == "BUY" else entry_price * 0.90
-        
+            LOGGER.warning(
+                f"⚠️ create_bracket: Invalid TP={take_profit}, using 10% default"
+            )
+            take_profit = (
+                entry_price * 1.10 if normalized_side == "BUY" else entry_price * 0.90
+            )
+
         # Register the bracket
         self.register_virtual_bracket(
             order_id=order_id,
@@ -2138,32 +2235,32 @@ class BracketManager:
             trailing_atr_mult=1.5,  # Enable ATR-based trailing
             activate_immediately=True,  # Start monitoring immediately
         )
-        
+
         LOGGER.info(
             f"✅ create_bracket: {symbol} | {normalized_side} | "
             f"Entry={entry_price:.2f} | SL={stop_loss:.2f} | TP={take_profit:.2f} | "
             f"ID={order_id}"
         )
-        
+
         return order_id
 
     # ═══════════════════════════════════════════════════════════════════════════
     # ✅ FIX: Add get_bracket_by_symbol() for Symbol-Based Lookup
     # ═══════════════════════════════════════════════════════════════════════════
-    
+
     def get_bracket_by_symbol(self, symbol: str) -> Optional[BracketState]:
         """
         Get the first active bracket for a given symbol.
-        
+
         This is different from get_bracket(entry_id) which looks up by order_id.
         Use this when you have a symbol but not the order_id.
-        
+
         Args:
             symbol: Trading symbol (e.g., "NIFTY2620324650CE")
-            
+
         Returns:
             BracketState if found and active, None otherwise.
-            
+
         Example:
             >>> bracket = bm.get_bracket_by_symbol("NIFTY2620324650CE")
             >>> if bracket:
@@ -2171,28 +2268,28 @@ class BracketManager:
         """
         with self._lock:
             entry_ids = self._symbol_map.get(symbol, [])
-            
+
             # First pass: Look for active brackets
             for entry_id in entry_ids:
                 bracket = self._brackets.get(entry_id)
                 if bracket and bracket.active and bracket.remaining_quantity > 0:
                     return bracket
-            
+
             # Second pass: Look for any bracket (even inactive)
             for entry_id in entry_ids:
                 bracket = self._brackets.get(entry_id)
                 if bracket and bracket.remaining_quantity > 0:
                     return bracket
-            
+
             return None
 
     def get_all_brackets_for_symbol(self, symbol: str) -> List[BracketState]:
         """
         Get all brackets (active and inactive) for a given symbol.
-        
+
         Args:
             symbol: Trading symbol
-            
+
         Returns:
             List of BracketState objects (may be empty).
         """
@@ -2208,12 +2305,12 @@ class BracketManager:
     def has_active_bracket(self, symbol: str) -> bool:
         """
         Quick check if a symbol has any active bracket.
-        
+
         This is an alias for is_symbol_managed() for clarity.
-        
+
         Args:
             symbol: Trading symbol
-            
+
         Returns:
             True if symbol has at least one active bracket with remaining quantity.
         """
