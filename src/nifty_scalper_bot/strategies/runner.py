@@ -2024,7 +2024,18 @@ class StrategyRunner:
                 "last_trade_quantity",
                 "last_traded_qty",
             )
-            source = tick.get("source", "unknown")
+            source = tick.get('source', 'unknown')
+            is_seed = bool(tick.get('seed'))
+
+            if is_seed and price <= 0:
+                log_throttled(
+                    self._logger,
+                    f'seed_tick_price_zero_{symbol}',
+                    f'Condition met: seed_tick_price_missing for {symbol}',
+                    interval_sec=120.0,
+                    level=logging.INFO,
+                )
+                return
 
             # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
             volume = 0
