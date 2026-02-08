@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 
 import numpy as np
 import pytest
@@ -126,6 +127,25 @@ def test_bollinger_bands(engine: IndicatorEngine) -> None:
     assert upper == pytest.approx(expected_middle + 2.0 * expected_std)
     assert middle == pytest.approx(expected_middle)
     assert lower == pytest.approx(expected_middle - 2.0 * expected_std)
+
+
+def test_get_indicators_accepts_none_names(engine: IndicatorEngine) -> None:
+    """Verify indicator guard. Args: engine. Returns: None. Raises: Exception."""
+    logger = logging.getLogger(__name__)
+    try:
+        engine.update_price(
+            'SNAPSHOT',
+            {'open': 100.0, 'high': 101.0, 'low': 99.0, 'close': 100.5},
+            volume=10,
+            timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )
+        result = engine.get_indicators('SNAPSHOT', None)
+        assert 'vwap' in result
+        result = engine.get_indicators('SNAPSHOT', [None, 'vwap'])
+        assert 'vwap' in result
+    except Exception as e:
+        logger.error('Failure in test_get_indicators_accepts_none_names: %s', e)
+        raise
 
 
 def test_atr_matches_reference(engine: IndicatorEngine) -> None:

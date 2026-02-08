@@ -11,7 +11,7 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     VWAPProStrategyConfig,
 )
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
 
@@ -102,8 +102,62 @@ class VWAPProStrategy(EliteStrategy):
         return 0.9
 
     def _is_expiry_day(self) -> bool:
-        expiry_day = int(os.getenv("NIFTY_EXPIRY_WEEKDAY", "2"))
-        return time_module.localtime().tm_wday == expiry_day
+        """Args: None. Returns: bool. Raises: Exception."""
+        LOGGER.debug(
+            'Entered VWAPProStrategy._is_expiry_day',
+            extra={'event': 'vwap_pro_expiry_day_enter'},
+        )
+        try:
+            expiry_day_raw = os.getenv('NIFTY_EXPIRY_WEEKDAY', '2')
+            try:
+                expiry_day = int(expiry_day_raw)
+            except ValueError as e:
+                log_throttled(
+                    LOGGER,
+                    'vwap_pro_expiry_defaulted',
+                    'Condition met: expiry_day_defaulted',
+                    interval_sec=3600.0,
+                )
+                LOGGER.error(
+                    'Failure in VWAPProStrategy._is_expiry_day: %s',
+                    e,
+                    extra={'event': 'vwap_pro_expiry_day_parse_error'},
+                    exc_info=e,
+                )
+                expiry_day = 2
+            if expiry_day not in range(7):
+                log_throttled(
+                    LOGGER,
+                    'vwap_pro_expiry_out_of_range',
+                    'Condition met: expiry_day_out_of_range',
+                    interval_sec=3600.0,
+                )
+                expiry_day = 2
+            if expiry_day == 3:
+                log_throttled(
+                    LOGGER,
+                    'vwap_pro_expiry_corrected',
+                    'Condition met: expiry_day_corrected_to_wednesday',
+                    interval_sec=3600.0,
+                )
+                expiry_day = 2
+            is_expiry = time_module.localtime().tm_wday == expiry_day
+            if is_expiry:
+                log_throttled(
+                    LOGGER,
+                    'vwap_pro_expiry_active',
+                    'Condition met: expiry_day_active',
+                    interval_sec=3600.0,
+                )
+            return is_expiry
+        except Exception as e:
+            LOGGER.error(
+                'Failure in VWAPProStrategy._is_expiry_day: %s',
+                e,
+                extra={'event': 'vwap_pro_expiry_day_error'},
+                exc_info=e,
+            )
+            return False
 
     # ------------------------------------------------------------------ #
     # Core Signal Logic

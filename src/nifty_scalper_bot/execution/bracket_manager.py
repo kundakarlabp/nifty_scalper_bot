@@ -893,113 +893,137 @@ class BracketManager:
         return None
 
     def _fire_exits_batch(self, exits: list) -> None:
-        """Process exit queue with a single lock acquisition.
-
-        Args:
-            exits: Iterable of bracket/action tuples to execute.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-        import time
-
-        now = time.time()
-
-        processed_ids: set[str] = set()
-
-        with self._lock:
-            for bracket, action in exits:
-                # Check cooldown
-                last_attempt = self._exit_cooldowns.get(bracket.entry_order_id, 0)
-                if now - last_attempt < 5.0:
-                    LOGGER.debug(f"⏳ Cooldown active for {bracket.symbol}")
-                    continue
-
-                # Check if still valid
-                if not bracket.active or bracket.remaining_quantity <= 0:
-                    continue
-
-                # Mark exit in progress
-                self._exit_cooldowns[bracket.entry_order_id] = now
-                processed_ids.add(bracket.entry_order_id)
-
-                exit_type = action["type"]
-                qty = action["qty"]
-                reason = action["reason"]
-
-                # Update state
-                bracket.remaining_quantity -= qty
-
-                if exit_type in {"SL", "FINAL_TP"} or bracket.remaining_quantity <= 0:
-                    bracket.active = False
-
-                # Handle partial target marking
-                if exit_type == "PARTIAL_TP" and "target" in action:
-                    action["target"].executed = True
-                    # Move SL to breakeven after TP1
-                    if action["target"].name == "TP1":
-                        self._move_sl_to_breakeven(bracket)
-
-        # Persist state once (outside lock)
+        """Args: exits. Returns: None. Raises: Exception."""
+        LOGGER.debug(
+            'Entered BracketManager._fire_exits_batch',
+            extra={'event': 'bracket_manager_fire_exits_batch_enter'},
+        )
         try:
-            self.save_state()
-        except Exception:
-            pass
+            import time
 
-        # Fire exit orders (outside lock, can be slow)
-        for bracket, action in exits:
-            # Skip if we didn't actually queue this exit (cooldown, etc.)
-            if bracket.entry_order_id not in processed_ids:
-                continue
+            now = time.time()
 
-            exit_type = action["type"]
-            qty = action["qty"]
-            reason = action["reason"]
+            processed_ids: set[str] = set()
+            batch_cooldowns: dict[str, float] = {}
 
-            exit_side = "SELL" if bracket.side == "BUY" else "BUY"
-            is_partial = exit_type == "PARTIAL_TP"
+            with self._lock:
+                for bracket, action in exits:
+                    # Check cooldown (per batch, avoid stale state across loops)
+                    last_attempt = batch_cooldowns.get(bracket.entry_order_id, 0.0)
+                    if now - last_attempt < 5.0:
+                        LOGGER.debug('⏳ Cooldown active for %s', bracket.symbol)
+                        continue
 
-            LOGGER.warning(
-                f"⚡ EXIT FIRED: {bracket.symbol} | {exit_side} {qty} | "
-                f"Type: {exit_type} | Reason: {reason}"
-            )
-            self._notify_event(
-                "BRACKET_EXIT_FIRED",
-                {
-                    "symbol": bracket.symbol,
-                    "side": exit_side,
-                    "qty": qty,
-                    "exit_type": exit_type,
-                    "reason": reason,
-                    "ltp": round(float(action.get("price", 0.0) or 0.0), 2),
-                },
-            )
+                    # Check if still valid
+                    if not bracket.active or bracket.remaining_quantity <= 0:
+                        continue
 
+                    # Mark exit in progress
+                    batch_cooldowns[bracket.entry_order_id] = now
+                    processed_ids.add(bracket.entry_order_id)
+
+                    LOGGER.info(
+                        'Condition met: exit_batch_queued',
+                        extra={
+                            'event': 'bracket_manager_exit_batch_queued',
+                            'symbol': bracket.symbol,
+                            'entry_id': bracket.entry_order_id,
+                        },
+                    )
+
+                    exit_type = action['type']
+                    qty = action['qty']
+                    reason = action['reason']
+
+                    # Update state
+                    bracket.remaining_quantity -= qty
+
+                    if (
+                        exit_type in {'SL', 'FINAL_TP'}
+                        or bracket.remaining_quantity <= 0
+                    ):
+                        bracket.active = False
+
+                    # Handle partial target marking
+                    if exit_type == 'PARTIAL_TP' and 'target' in action:
+                        action['target'].executed = True
+                        # Move SL to breakeven after TP1
+                        if action['target'].name == 'TP1':
+                            self._move_sl_to_breakeven(bracket)
+
+            # Persist state once (outside lock)
             try:
-                # Use optimized exit with slippage protection
-                self._execute_exit_order(
-                    bracket, qty, exit_side, reason, is_partial, exit_type
-                )
+                self.save_state()
             except Exception as e:
-                LOGGER.critical(f"🛑 EXIT ORDER FAILED: {e}")
+                LOGGER.error(
+                    'Failure in BracketManager._fire_exits_batch: %s',
+                    e,
+                    extra={'event': 'bracket_manager_exit_batch_persist_error'},
+                    exc_info=e,
+                )
+
+            # Fire exit orders (outside lock, can be slow)
+            for bracket, action in exits:
+                # Skip if we didn't actually queue this exit (cooldown, etc.)
+                if bracket.entry_order_id not in processed_ids:
+                    continue
+
+                exit_type = action['type']
+                qty = action['qty']
+                reason = action['reason']
+
+                exit_side = 'SELL' if bracket.side == 'BUY' else 'BUY'
+                is_partial = exit_type == 'PARTIAL_TP'
+
+                LOGGER.warning(
+                    '⚡ EXIT FIRED: %s | %s %s | Type: %s | Reason: %s',
+                    bracket.symbol,
+                    exit_side,
+                    qty,
+                    exit_type,
+                    reason,
+                )
                 self._notify_event(
-                    "BRACKET_EXIT_FAILED",
+                    'BRACKET_EXIT_FIRED',
                     {
-                        "symbol": bracket.symbol,
-                        "side": exit_side,
-                        "qty": qty,
-                        "exit_type": exit_type,
-                        "reason": reason,
+                        'symbol': bracket.symbol,
+                        'side': exit_side,
+                        'qty': qty,
+                        'exit_type': exit_type,
+                        'reason': reason,
+                        'ltp': round(float(action.get('price', 0.0) or 0.0), 2),
                     },
                 )
-                # Revert state
-                with self._lock:
-                    bracket.remaining_quantity += qty
-                    if not is_partial:
-                        bracket.active = True
+
+                try:
+                    # Use optimized exit with slippage protection
+                    self._execute_exit_order(
+                        bracket, qty, exit_side, reason, is_partial, exit_type
+                    )
+                except Exception as e:
+                    LOGGER.critical('🛑 EXIT ORDER FAILED: %s', e)
+                    self._notify_event(
+                        'BRACKET_EXIT_FAILED',
+                        {
+                            'symbol': bracket.symbol,
+                            'side': exit_side,
+                            'qty': qty,
+                            'exit_type': exit_type,
+                            'reason': reason,
+                        },
+                    )
+                    # Revert state
+                    with self._lock:
+                        bracket.remaining_quantity += qty
+                        if not is_partial:
+                            bracket.active = True
+        except Exception as e:
+            LOGGER.error(
+                'Failure in BracketManager._fire_exits_batch: %s',
+                e,
+                extra={'event': 'bracket_manager_exit_batch_error'},
+                exc_info=e,
+            )
 
     def _execute_exit_order(
         self,
