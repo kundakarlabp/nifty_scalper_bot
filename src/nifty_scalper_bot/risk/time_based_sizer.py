@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.smart_symbol import WEEKLY_EXPIRY_WEEKDAY
 
 LOGGER = get_logger(__name__)
 
@@ -75,7 +76,7 @@ class TimeBasedSizer:
             None.
 
         Returns:
-            bool: ``True`` when the current day is a Thursday expiry.
+            bool: ``True`` when the current day is a Tuesday expiry.
 
         Raises:
             None.
@@ -86,7 +87,7 @@ class TimeBasedSizer:
             extra={"event": "time_sizer_expiry_check"},
         )
         try:
-            result = datetime.now().weekday() == 3
+            result = datetime.now().weekday() == WEEKLY_EXPIRY_WEEKDAY
             LOGGER.debug(
                 "Condition met: expiry_day_flag",
                 extra={"event": "expiry_day_flag", "value": result},
