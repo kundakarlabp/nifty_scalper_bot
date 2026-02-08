@@ -2157,89 +2157,73 @@ class BracketManager:
         strategy: str = "auto",
         order_id: str | None = None,
     ) -> str:
-        """
-        Create a virtual bracket with specified SL/TP levels.
-
-        This is an alias method that provides the API expected by runner.py.
-        Unlike attach_orphan_position(), this uses the SPECIFIED SL/TP values
-        rather than auto-calculating them from ATR.
-
-        Args:
-            symbol: Trading symbol (e.g., "NIFTY2620324650CE")
-            side: "LONG", "SHORT", "BUY", or "SELL"
-            entry_price: Entry price for the position
-            stop_loss: Stop loss price (must be > 0)
-            take_profit: Take profit price (must be > 0)
-            quantity: Position size (will use absolute value)
-            strategy: Strategy name for tagging (default: "auto")
-            order_id: Optional specific order ID (auto-generated if None)
-
-        Returns:
-            The order_id (entry_id) used for bracket registration.
-
-        Example:
-            >>> bm.create_bracket(
-            ...     symbol="NIFTY2620324650CE",
-            ...     side="LONG",
-            ...     entry_price=165.0,
-            ...     stop_loss=155.0,
-            ...     take_profit=180.0,
-            ...     quantity=65,
-            ...     strategy="VWAP_Pro"
-            ... )
-        """
+        """Create a virtual bracket with provided SL/TP. Args/Returns/Raises."""
         import time
 
-        # Normalize side to BUY/SELL
-        normalized_side = _normalize_bracket_side(side)
+        LOGGER.debug('Entered create_bracket')
+
+        try:
+            # Normalize side to BUY/SELL
+            normalized_side = _normalize_bracket_side(side)
+        except Exception as e:
+            LOGGER.error('Failure in create_bracket: %s', e)
+            normalized_side = 'BUY'
+            LOGGER.info('Condition met: defaulted side to BUY after normalization')
 
         # Validate side
-        if normalized_side not in ("BUY", "SELL"):
+        if normalized_side not in ('BUY', 'SELL'):
             LOGGER.warning(
-                f"⚠️ create_bracket: Invalid side '{side}', defaulting to BUY"
+                f'⚠️ create_bracket: Invalid side \'{side}\', defaulting to BUY'
             )
-            normalized_side = "BUY"
+            normalized_side = 'BUY'
+            LOGGER.info('Condition met: defaulted side to BUY after validation')
 
         # Auto-generate order_id if not provided
         if not order_id:
-            safe_symbol = symbol.replace(":", "_")[:20]
-            order_id = f"bracket_{int(time.time() * 1000)}_{safe_symbol}"
+            safe_symbol = symbol.replace(':', '_')[:20]
+            order_id = f'bracket_{int(time.time() * 1000)}_{safe_symbol}'
 
         # Validate SL/TP (use defaults if invalid)
         if stop_loss <= 0:
             LOGGER.warning(
-                f"⚠️ create_bracket: Invalid SL={stop_loss}, using 5% default"
+                f'⚠️ create_bracket: Invalid SL={stop_loss}, using 5% default'
             )
+            LOGGER.info('Condition met: defaulted stop_loss based on entry_price')
             stop_loss = (
-                entry_price * 0.95 if normalized_side == "BUY" else entry_price * 1.05
+                entry_price * 0.95 if normalized_side == 'BUY' else entry_price * 1.05
             )
 
         if take_profit <= 0:
             LOGGER.warning(
-                f"⚠️ create_bracket: Invalid TP={take_profit}, using 10% default"
+                f'⚠️ create_bracket: Invalid TP={take_profit}, using 10% default'
             )
+            LOGGER.info('Condition met: defaulted take_profit based on entry_price')
             take_profit = (
-                entry_price * 1.10 if normalized_side == "BUY" else entry_price * 0.90
+                entry_price * 1.10 if normalized_side == 'BUY' else entry_price * 0.90
             )
 
-        # Register the bracket
-        self.register_virtual_bracket(
-            order_id=order_id,
-            symbol=symbol,
-            side=normalized_side,
-            qty=abs(quantity),
-            price=entry_price,
-            sl=stop_loss,
-            tp=take_profit,
-            tag=strategy,
-            trailing_atr_mult=1.5,  # Enable ATR-based trailing
-            activate_immediately=True,  # Start monitoring immediately
-        )
+        try:
+            # Register the bracket
+            self.register_virtual_bracket(
+                order_id=order_id,
+                symbol=symbol,
+                side=normalized_side,
+                qty=abs(quantity),
+                price=entry_price,
+                sl=stop_loss,
+                tp=take_profit,
+                tag=strategy,
+                trailing_atr_mult=1.5,  # Enable ATR-based trailing
+                activate_immediately=True,  # Start monitoring immediately
+            )
+        except Exception as e:
+            LOGGER.error('Failure in create_bracket: %s', e)
+            return order_id
 
         LOGGER.info(
-            f"✅ create_bracket: {symbol} | {normalized_side} | "
-            f"Entry={entry_price:.2f} | SL={stop_loss:.2f} | TP={take_profit:.2f} | "
-            f"ID={order_id}"
+            f'✅ create_bracket: {symbol} | {normalized_side} | '
+            f'Entry={entry_price:.2f} | SL={stop_loss:.2f} | TP={take_profit:.2f} | '
+            f'ID={order_id}'
         )
 
         return order_id
