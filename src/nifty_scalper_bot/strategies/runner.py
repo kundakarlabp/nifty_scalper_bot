@@ -2132,27 +2132,34 @@ class StrategyRunner:
             if self._bracket_manager and price > 0:
                 self._bracket_manager.on_tick(symbol, price)
 
+            skip_strategy = False
             if not self._is_market_open(now):
                 log_throttled(
                     self._logger,
-                    f"market_closed_{symbol}",
-                    "Condition met: market_closed",
+                    f'market_closed_{symbol}',
+                    'Condition met: market_closed',
                     interval_sec=30.0,
                     level=logging.INFO,
                 )
-                return
+                skip_strategy = True
 
             # Stale tick check (increased threshold for REST polling to prevent false positives)
-            stale_threshold = 30.0 if source in ("rest", "polling") else 10.0
+            stale_threshold = 30.0 if source in ('rest', 'polling') else 10.0
 
             if tick_age > stale_threshold:
                 log_throttled(
                     self._logger,
-                    f"stale_tick_{symbol}",
-                    f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)",
+                    f'stale_tick_{symbol}',
+                    (
+                        f'⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, '
+                        f'threshold={stale_threshold}s)'
+                    ),
                     interval_sec=30.0,
                     level=logging.WARNING,
                 )
+                skip_strategy = True
+
+            if skip_strategy:
                 return
 
             # Volume validity check (relaxed warnings for REST mode)

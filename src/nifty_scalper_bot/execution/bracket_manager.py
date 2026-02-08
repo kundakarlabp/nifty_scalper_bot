@@ -1031,7 +1031,9 @@ class BracketManager:
 
         limit_price = max(limit_price, 0.05)
 
-        order_type = "MARKET" if exit_type == "SL" else "LIMIT"
+        exit_type_upper = exit_type.upper()
+        is_stop_exit = exit_type_upper.startswith("SL") or "STOP" in exit_type_upper
+        order_type = "MARKET" if is_stop_exit else "LIMIT"
 
         order_kwargs = {
             "symbol": bracket.symbol,

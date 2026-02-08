@@ -98,6 +98,7 @@ class RSIDivergenceStrategy(EliteStrategy):
                 return None
 
             # 4. Analyze Divergence (Regular)
+            entry_price = float(current_price)
             
             # --- Bullish Divergence (Long) ---
             # Condition: Price makes Lower Low, RSI makes Higher Low
@@ -117,9 +118,9 @@ class RSIDivergenceStrategy(EliteStrategy):
                             symbol=symbol,
                             signal="BUY",
                             confidence=0.80,
-                            entry_price=current_price,
-                            stop_loss=current_price - (atr * 2.0),
-                            target=current_price + (atr * 4.0),
+                            entry_price=entry_price,
+                            stop_loss=entry_price - (atr * 2.0),
+                            target=entry_price + (atr * 4.0),
                             quantity=self._config.quantity or 1,
                             strategy_name="RSI_Div_Pro",
                             metadata={
@@ -145,9 +146,9 @@ class RSIDivergenceStrategy(EliteStrategy):
                             symbol=symbol,
                             signal="SELL",
                             confidence=0.80,
-                            entry_price=current_price,
-                            stop_loss=current_price + (atr * 2.0),
-                            target=current_price - (atr * 4.0),
+                            entry_price=entry_price,
+                            stop_loss=entry_price + (atr * 2.0),
+                            target=entry_price - (atr * 4.0),
                             quantity=self._config.quantity or 1,
                             strategy_name="RSI_Div_Pro",
                             metadata={
