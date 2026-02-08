@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 import dataclasses
+import datetime as dt
 from dataclasses import dataclass, field
 from datetime import datetime, time
 import hashlib
@@ -1709,7 +1710,7 @@ class StrategyManager:
                 if index_vwap and index_vwap > 0:
                     indicators['nifty_index_vwap'] = index_vwap
 
-            cache_now = datetime.now().timestamp()
+            cache_now = dt.datetime.now().timestamp()
             if indicators.get('nifty_index_ltp') or indicators.get('nifty_index_vwap'):
                 self._last_index_ltp = indicators.get('nifty_index_ltp')
                 self._last_index_vwap = indicators.get('nifty_index_vwap')
@@ -1742,7 +1743,7 @@ class StrategyManager:
             # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
             # ═══════════════════════════════════════════════════════
             if not indicators.get('nifty_index_vwap'):
-                now = datetime.now()
+                now = dt.datetime.now()
                 y_str = now.strftime('%y')
                 m_str = now.strftime('%b').upper()
 
