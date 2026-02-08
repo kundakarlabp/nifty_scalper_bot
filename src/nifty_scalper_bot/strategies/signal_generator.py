@@ -1742,8 +1742,6 @@ class StrategyManager:
             # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
             # ═══════════════════════════════════════════════════════
             if not indicators.get('nifty_index_vwap'):
-                from datetime import datetime
-
                 now = datetime.now()
                 y_str = now.strftime('%y')
                 m_str = now.strftime('%b').upper()
