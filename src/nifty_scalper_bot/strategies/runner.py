@@ -62,23 +62,33 @@ _THROTTLE_LOCK = threading.Lock()
 
 
 def log_throttled(
-    logger: Any, key: str, msg: str, interval_sec: float = 60.0, level: str = "info"
+    logger: Any,
+    key: str,
+    msg: str,
+    interval_sec: float = 60.0,
+    level: int | str = logging.INFO,
+    extra: dict[str, Any] | None = None,
 ) -> None:
-    """Log a message only if 'interval_sec' has passed since the last log for 'key'."""
-    with _THROTTLE_LOCK:
-        now = time.time()
-        last_time = _THROTTLE_CACHE.get(key, 0.0)
-        if now - last_time < interval_sec:
-            return
-        _THROTTLE_CACHE[key] = now
+    """Log throttled message. Args: logger, key, msg. Returns: None. Raises: Exception."""
+    try:
+        with _THROTTLE_LOCK:
+            now = time.time()
+            last_time = _THROTTLE_CACHE.get(key, 0.0)
+            if now - last_time < interval_sec:
+                return
+            _THROTTLE_CACHE[key] = now
 
-    # Normalize log level (accept str or logging.* int)
-    if isinstance(level, int):
-        log_method = logger.log
-        log_method(level, msg)
-    else:
-        log_method = getattr(logger, str(level).lower(), logger.info)
-        log_method(msg)
+        # Normalize log level (accept str or logging.* int)
+        if isinstance(level, int):
+            logger.log(level, msg, extra=extra or {})
+        else:
+            log_method = getattr(logger, str(level).lower(), logger.info)
+            if extra:
+                log_method(msg, extra=extra)
+            else:
+                log_method(msg)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failure in log_throttled: %s", exc, exc_info=True)
 
 
 _STRATEGY_SKIP_COUNTER = Counter(
