@@ -12,6 +12,7 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     VWAPProStrategyConfig,
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
+from nifty_scalper_bot.utils.smart_symbol import WEEKLY_EXPIRY_WEEKDAY
 
 LOGGER = get_logger(__name__)
 
@@ -62,17 +63,17 @@ class VWAPProStrategy(EliteStrategy):
         self._last_valid_volume_ts: Dict[str, float] = {}
 
         self._telemetry: Dict[str, int] = {
-            'evaluations': 0,
-            'signals': 0,
-            'skipped_cooldown': 0,
-            'skipped_strike_lock': 0,
-            'skipped_bias': 0,
-            'skipped_no_vwap': 0,
-            'skipped_vwap': 0,
-            'skipped_volume': 0,
-            'skipped_data': 0,
-            'skipped_overextended': 0,
-            'skipped_acceptance': 0,
+            "evaluations": 0,
+            "signals": 0,
+            "skipped_cooldown": 0,
+            "skipped_strike_lock": 0,
+            "skipped_bias": 0,
+            "skipped_no_vwap": 0,
+            "skipped_vwap": 0,
+            "skipped_volume": 0,
+            "skipped_data": 0,
+            "skipped_overextended": 0,
+            "skipped_acceptance": 0,
         }
         self._index_bias_missing_logged: bool = False
 
@@ -104,57 +105,58 @@ class VWAPProStrategy(EliteStrategy):
     def _is_expiry_day(self) -> bool:
         """Args: None. Returns: bool. Raises: Exception."""
         LOGGER.debug(
-            'Entered VWAPProStrategy._is_expiry_day',
-            extra={'event': 'vwap_pro_expiry_day_enter'},
+            "Entered VWAPProStrategy._is_expiry_day",
+            extra={"event": "vwap_pro_expiry_day_enter"},
         )
         try:
-            expiry_day_raw = os.getenv('NIFTY_EXPIRY_WEEKDAY', '2')
+            default_weekday = WEEKLY_EXPIRY_WEEKDAY
+            expiry_day_raw = os.getenv("NIFTY_EXPIRY_WEEKDAY", str(default_weekday))
             try:
                 expiry_day = int(expiry_day_raw)
             except ValueError as e:
                 log_throttled(
                     LOGGER,
-                    'vwap_pro_expiry_defaulted',
-                    'Condition met: expiry_day_defaulted',
+                    "vwap_pro_expiry_defaulted",
+                    "Condition met: expiry_day_defaulted",
                     interval_sec=3600.0,
                 )
                 LOGGER.error(
-                    'Failure in VWAPProStrategy._is_expiry_day: %s',
+                    "Failure in VWAPProStrategy._is_expiry_day: %s",
                     e,
-                    extra={'event': 'vwap_pro_expiry_day_parse_error'},
+                    extra={"event": "vwap_pro_expiry_day_parse_error"},
                     exc_info=e,
                 )
-                expiry_day = 2
+                expiry_day = default_weekday
             if expiry_day not in range(7):
                 log_throttled(
                     LOGGER,
-                    'vwap_pro_expiry_out_of_range',
-                    'Condition met: expiry_day_out_of_range',
+                    "vwap_pro_expiry_out_of_range",
+                    "Condition met: expiry_day_out_of_range",
                     interval_sec=3600.0,
                 )
-                expiry_day = 2
+                expiry_day = default_weekday
             if expiry_day == 3:
                 log_throttled(
                     LOGGER,
-                    'vwap_pro_expiry_corrected',
-                    'Condition met: expiry_day_corrected_to_wednesday',
+                    "vwap_pro_expiry_corrected",
+                    "Condition met: expiry_day_corrected_to_default",
                     interval_sec=3600.0,
                 )
-                expiry_day = 2
+                expiry_day = default_weekday
             is_expiry = time_module.localtime().tm_wday == expiry_day
             if is_expiry:
                 log_throttled(
                     LOGGER,
-                    'vwap_pro_expiry_active',
-                    'Condition met: expiry_day_active',
+                    "vwap_pro_expiry_active",
+                    "Condition met: expiry_day_active",
                     interval_sec=3600.0,
                 )
             return is_expiry
         except Exception as e:
             LOGGER.error(
-                'Failure in VWAPProStrategy._is_expiry_day: %s',
+                "Failure in VWAPProStrategy._is_expiry_day: %s",
                 e,
-                extra={'event': 'vwap_pro_expiry_day_error'},
+                extra={"event": "vwap_pro_expiry_day_error"},
                 exc_info=e,
             )
             return False
@@ -182,8 +184,8 @@ class VWAPProStrategy(EliteStrategy):
             direction = "CE" if is_ce else "PE"
 
             # ✅ FIX B6: Periodic telemetry dump
-            self._telemetry['evaluations'] += 1
-            _evals = self._telemetry['evaluations']
+            self._telemetry["evaluations"] += 1
+            _evals = self._telemetry["evaluations"]
             if _evals == 1 or _evals % self.TELEMETRY_LOG_EVERY == 0:
                 LOGGER.info(
                     f"📊 VWAPPro TELEMETRY [{symbol}]: evals={_evals} "
@@ -197,7 +199,7 @@ class VWAPProStrategy(EliteStrategy):
                     f"data={self._telemetry['skipped_data']} "
                     f"overext={self._telemetry['skipped_overextended']} "
                     f"accept={self._telemetry['skipped_acceptance']}",
-                    extra={'event': 'vwap_pro_telemetry', 'symbol': symbol},
+                    extra={"event": "vwap_pro_telemetry", "symbol": symbol},
                 )
 
             lock_key = f"NIFTY:{expiry}:{direction}"
@@ -328,8 +330,8 @@ class VWAPProStrategy(EliteStrategy):
                     return None
 
             # 🔊 ISSUE 4 FIX: Reset acceptance on Volume rejection
-            vol = float(indicators.get('volume') or 0.0)
-            avg_vol = float(indicators.get('avg_volume') or 0.0)
+            vol = float(indicators.get("volume") or 0.0)
+            avg_vol = float(indicators.get("avg_volume") or 0.0)
             if vol > 0 and avg_vol > 0:
                 self._last_valid_volume[symbol] = vol
                 self._last_valid_avg_volume[symbol] = avg_vol
@@ -344,29 +346,29 @@ class VWAPProStrategy(EliteStrategy):
                     and (now - last_ts) <= self.VOLUME_GRACE_SECONDS
                 ):
                     LOGGER.info(
-                        'Condition met: vwap_pro_volume_grace_fallback',
+                        "Condition met: vwap_pro_volume_grace_fallback",
                         extra={
-                            'event': 'vwap_pro_volume_grace_fallback',
-                            'symbol': symbol,
-                            'fallback_volume': last_vol,
-                            'fallback_avg_volume': last_avg,
+                            "event": "vwap_pro_volume_grace_fallback",
+                            "symbol": symbol,
+                            "fallback_volume": last_vol,
+                            "fallback_avg_volume": last_avg,
                         },
                     )
                     vol = last_vol
                     avg_vol = last_avg
                 else:
-                    self._telemetry['skipped_data'] += 1
+                    self._telemetry["skipped_data"] += 1
                     if (
-                        self._telemetry['skipped_data'] <= 5
-                        or self._telemetry['skipped_data'] % self.TELEMETRY_LOG_EVERY
+                        self._telemetry["skipped_data"] <= 5
+                        or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY
                         == 0
                     ):
                         LOGGER.warning(
                             f"⚠️ DATA INVALID: {symbol} | "
                             f"vol={vol:.0f} avg_vol={avg_vol:.0f}",
                             extra={
-                                'event': 'vwap_pro_data_invalid',
-                                'symbol': symbol,
+                                "event": "vwap_pro_data_invalid",
+                                "symbol": symbol,
                             },
                         )
                     self._vwap_acceptance_tracker[acc_key] = 0
