@@ -249,6 +249,15 @@ def test_get_indicators_returns_all_keys(engine: IndicatorEngine) -> None:
     assert expected_keys.issubset(indicators.keys())
 
 
+def test_get_indicators_accepts_none_names(engine: IndicatorEngine) -> None:
+    ts = _time_series(1)[0]
+    engine.update_price("NIFTY", 100.0, volume=10, timestamp=ts)
+
+    indicators = engine.get_indicators("NIFTY")
+
+    assert "close" in indicators
+
+
 def test_is_ready(engine: IndicatorEngine) -> None:
     timestamps = _time_series(5)
     for ts in timestamps:

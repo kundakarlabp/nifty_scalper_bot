@@ -1950,17 +1950,6 @@ class StrategyRunner:
                             self._adopt_orphan_positions()
                         # ✅ DO NOT return — tick must continue flowing for bracket SL/TP monitoring
 
-            # 2. Market Time Check (Now 'now' is valid!)
-            if not self._is_market_open(now):
-                log_throttled(
-                    self._logger,
-                    f"market_closed_{symbol}",
-                    "Condition met: market_closed",
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                )
-                return
-
             # =================================================================
             # PHASE 1: EXTRACT DATA FIRST (Must happen before any logging)
             # =================================================================
@@ -2045,7 +2034,7 @@ class StrategyRunner:
                 )  # ✅ Sentinel -1 (not 0)
                 if last_cum < 0:  # ✅ First tick detected by sentinel
                     # FIRST tick for this symbol — store baseline, DON'T use as bar volume
-                    volume = 0  # ✅ Bar 1 gets volume=0, not 318M
+                    volume = last_quantity if last_quantity > 0 else 0
                 elif raw_volume >= last_cum:
                     volume = raw_volume - last_cum  # Normal delta
                 else:
@@ -2061,23 +2050,6 @@ class StrategyRunner:
                     interval_sec=60.0,
                     level=logging.INFO,
                 )
-
-            # =================================================================
-            # PHASE 2: DATA VALIDATION
-            # =================================================================
-
-            # Stale tick check (increased threshold for REST polling to prevent false positives)
-            stale_threshold = 30.0 if source in ("rest", "polling") else 10.0
-
-            if tick_age > stale_threshold:
-                log_throttled(
-                    self._logger,
-                    f"stale_tick_{symbol}",
-                    f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)",
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                )
-                return
 
             price_source = "ltp"
             price_from_cache = False
@@ -2150,6 +2122,32 @@ class StrategyRunner:
                     f"invalid_price_{symbol}",
                     f"⚠️ Invalid price ({price}) for {symbol}, skipping",
                     interval_sec=60.0,
+                    level=logging.WARNING,
+                )
+                return
+
+            if self._bracket_manager and price > 0:
+                self._bracket_manager.on_tick(symbol, price)
+
+            if not self._is_market_open(now):
+                log_throttled(
+                    self._logger,
+                    f"market_closed_{symbol}",
+                    "Condition met: market_closed",
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                )
+                return
+
+            # Stale tick check (increased threshold for REST polling to prevent false positives)
+            stale_threshold = 30.0 if source in ("rest", "polling") else 10.0
+
+            if tick_age > stale_threshold:
+                log_throttled(
+                    self._logger,
+                    f"stale_tick_{symbol}",
+                    f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)",
+                    interval_sec=30.0,
                     level=logging.WARNING,
                 )
                 return
@@ -2540,7 +2538,6 @@ class StrategyRunner:
                         interval_sec=30.0,
                         level=logging.INFO,
                     )
-
                     is_ready = self._indicator_engine.is_ready(
                         symbol, self._config.min_indicator_bars
                     )

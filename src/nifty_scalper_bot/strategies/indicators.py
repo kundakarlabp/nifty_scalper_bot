@@ -224,7 +224,7 @@ class IndicatorEngine:
                            "bollinger_upper", "bollinger_lower", "bollinger_middle",
                            "minutes_since_open", "minutes_until_close",
                            "volume_spike_ratio", "bar_range"}
-        all_names = set(names) | _always_include
+        all_names = (set(names) if names else set()) | _always_include
         requested: dict = {}
         for name in all_names:
             key = str(name)

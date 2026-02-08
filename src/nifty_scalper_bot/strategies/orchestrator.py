@@ -184,6 +184,7 @@ class StrategyOrchestrator:
         # 🛡️ FIX 6: DIRECTION CONFLICT GUARD (No simultaneous CE+PE)
         # ✅ Added 6 Feb 2026: Prevents bot from taking both CE and PE trades
         # ═══════════════════════════════════════════════════════════
+        _direction = None
         if action == "BUY":
             import time as _t
             _sym_upper = symbol.upper()
@@ -211,12 +212,6 @@ class StrategyOrchestrator:
                     )
                     self._set_skip_reason("direction_conflict")
                     return None
-
-            # Lock direction on signal pass
-            if _direction:
-                self._active_direction = _direction
-                self._active_direction_symbol = symbol
-                self._direction_lock_time = _t.time()
 
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX 4: SIGNAL FLOOD PREVENTION (Rate Limiting)
@@ -319,6 +314,10 @@ class StrategyOrchestrator:
         if action in {"BUY"}:
             self._last_signal_time = now
             self._pending_underlyings[underlying] = now
+            if _direction:
+                self._active_direction = _direction
+                self._active_direction_symbol = symbol
+                self._direction_lock_time = time.time()
         
         self._logger.info(
             f"✅ SIGNAL APPROVED: {symbol} | {action} | conf={confidence:.2f} | Strategy: {strategy_name}",

@@ -112,6 +112,23 @@ def test_suggest_position_size_scales_with_confidence() -> None:
     assert quantity == 300
 
 
+def test_suggest_position_size_skips_when_one_lot_risk_too_high() -> None:
+    settings = RiskSettings(per_trade_risk_pct=0.5)
+    pm = DummyPositionManager(realized=0.0)
+    risk = _make_risk_manager(settings=settings, pm=pm, balance=1_000.0)
+
+    quantity = risk.suggest_position_size(
+        side="BUY",
+        price=100.0,
+        stop_loss=80.0,
+        atr=None,
+        requested_quantity=75,
+        confidence=1.0,
+    )
+
+    assert quantity == 0
+
+
 def _make_valid_signal() -> OrderSignal:
     return OrderSignal(
         symbol="NIFTY",

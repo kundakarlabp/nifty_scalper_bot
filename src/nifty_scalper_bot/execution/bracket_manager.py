@@ -866,6 +866,8 @@ class BracketManager:
         import time
         now = time.time()
         
+        processed_ids: set[str] = set()
+
         with self._lock:
             for bracket, action in exits:
                 # Check cooldown
@@ -880,6 +882,7 @@ class BracketManager:
                 
                 # Mark exit in progress
                 self._exit_cooldowns[bracket.entry_order_id] = now
+                processed_ids.add(bracket.entry_order_id)
                 
                 exit_type = action["type"]
                 qty = action["qty"]
@@ -907,7 +910,7 @@ class BracketManager:
         # Fire exit orders (outside lock, can be slow)
         for bracket, action in exits:
             # Skip if we didn't actually queue this exit (cooldown, etc.)
-            if bracket.entry_order_id not in self._exit_cooldowns:
+            if bracket.entry_order_id not in processed_ids:
                 continue
             
             exit_type = action["type"]
@@ -935,7 +938,9 @@ class BracketManager:
             
             try:
                 # Use optimized exit with slippage protection
-                self._execute_exit_order(bracket, qty, exit_side, reason, is_partial)
+                self._execute_exit_order(
+                    bracket, qty, exit_side, reason, is_partial, exit_type
+                )
             except Exception as e:
                 LOGGER.critical(f"🛑 EXIT ORDER FAILED: {e}")
                 self._notify_event(
@@ -960,7 +965,8 @@ class BracketManager:
         qty: int, 
         exit_side: str, 
         reason: str,
-        is_partial: bool
+        is_partial: bool,
+        exit_type: str
     ) -> None:
         """
         Execute the actual exit order with slippage protection.
@@ -983,12 +989,16 @@ class BracketManager:
         
         limit_price = max(limit_price, 0.05)
         
+        order_type = "LIMIT"
+        if exit_type == "SL":
+            order_type = "MARKET"
+
         # Place order via OrderManager
         self.order_manager.place_order(
             symbol=bracket.symbol,
             side=exit_side,
             quantity=qty,
-            order_type="LIMIT",
+            order_type=order_type,
             price=limit_price,
             tag=f"exit_{reason[:3]}_{bracket.tag[:3] if bracket.tag else 'auto'}",
             check_risk=False,
@@ -1167,6 +1177,9 @@ class BracketManager:
         
         entry = bracket.entry_price
         current_sl = bracket.sl_trigger_price
+
+        if bracket.side == "SELL" and (high_water == float("inf") or high_water <= 0):
+            return None
         
         # Configuration from environment
         tier1_threshold = float(os.getenv("TRAIL_TIER1_PCT", "1.0"))
@@ -2090,17 +2103,13 @@ class BracketManager:
         """
         import time
         
-        # Normalize side to LONG/SHORT
+        # Normalize side to BUY/SELL
         normalized_side = _normalize_bracket_side(side)
-        if normalized_side == "BUY":
-            normalized_side = "LONG"
-        elif normalized_side == "SELL":
-            normalized_side = "SHORT"
-        
+
         # Validate side
-        if normalized_side not in ("LONG", "SHORT"):
-            LOGGER.warning(f"⚠️ create_bracket: Invalid side '{side}', defaulting to LONG")
-            normalized_side = "LONG"
+        if normalized_side not in ("BUY", "SELL"):
+            LOGGER.warning(f"⚠️ create_bracket: Invalid side '{side}', defaulting to BUY")
+            normalized_side = "BUY"
         
         # Auto-generate order_id if not provided
         if not order_id:
