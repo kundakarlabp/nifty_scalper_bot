@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import threading
-import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import os
 from statistics import median
+import threading
+import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Protocol
 
 from nifty_scalper_bot.execution.position_manager import Position
@@ -133,11 +133,13 @@ class RiskManager:
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
-        
+
         # [ROBUSTNESS] Do not crash on 0 balance; allow API to fetch it later
         if self.account_balance <= 0:
-            self._logger.warning("Initial account_balance is 0 or negative. Waiting for DataHub refresh.")
-            if self.account_balance < 0: 
+            self._logger.warning(
+                "Initial account_balance is 0 or negative. Waiting for DataHub refresh."
+            )
+            if self.account_balance < 0:
                 self.account_balance = 0.0
 
         self._cooldown_until = None
@@ -186,13 +188,15 @@ class RiskManager:
             float(get_float("RISK__BALANCE_JIT_REFRESH", default=1.0)),
         )
         self._last_log_time = 0.0
-        
+
         # [FIX] Just ensure day starts clean, but let _refresh_realized_pnl handle the sync
         import os
+
         if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
             self._switches.reset_day()
             self._breaker_tripped = False
             self._logger.info("⚠️ Risk Override Enabled: Waiting for PnL sync...")
+
     @property
     def risk_config(self) -> RiskSettings:
         """Expose the bound risk settings for telemetry consumers."""
@@ -361,7 +365,7 @@ class RiskManager:
                 extra={"event": "balance_fetch_error"},
                 exc_info=exc,
             )
-            
+
             fallback_value = cached_balance_value
             if fallback_value is None or fallback_value <= 0:
                 for candidate in (self._cached_balance, self.account_balance):
@@ -370,7 +374,7 @@ class RiskManager:
                         break
             if fallback_value is None:
                 fallback_value = self._resolve_env_balance_fallback()
-            
+
             self.account_balance = float(fallback_value)
             self._cached_balance = self.account_balance
             self._last_balance_refresh = now
@@ -517,12 +521,12 @@ class RiskManager:
             if force_refresh:
                 self.refresh_account_balance(force=True)
         except Exception as exc:  # noqa: BLE001
-            # [ROBUSTNESS] Non-blocking error handling. 
+            # [ROBUSTNESS] Non-blocking error handling.
             self._logger.warning(
                 "RiskManager balance refresh failed during check_order (using cache)",
-                extra={"error": str(exc)}
+                extra={"error": str(exc)},
             )
-        
+
         self._reset_daily_if_needed()
         self._refresh_realized_pnl()
 
@@ -607,14 +611,14 @@ class RiskManager:
             self._last_rejection = None
         return allowed, ordered
 
-
     # [FIX] Enhanced can_trade with Override Support
     def can_trade(self, symbol: str) -> bool:
         # 0. Check Override (The "God Mode" check)
         import os
+
         if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
             # If override is ON, we force trade (unless data is stale)
-            # We still check risk_gate_should_trade() because trading on 
+            # We still check risk_gate_should_trade() because trading on
             # stale data is technically impossible/dangerous, not just risky.
             stale_check, _ = self.risk_gate_should_trade()
             return stale_check
@@ -678,121 +682,131 @@ class RiskManager:
         symbol: str | None = None,
     ) -> int:
         """Return quantity respecting per-trade risk sizing with diagnostics.
-        
+
         ✅ PRODUCTION FIX: Added fallback stop_loss when None is provided.
         """
         import os
-        
-        # ✅ FIX 1: Enhanced diagnostic logging
-        self._logger.info(
-            f"📊 SIZING: {symbol} | Price={price:.2f} | SL={stop_loss} | "
-            f"ATR={atr} | ReqQty={requested_quantity} | Conf={confidence}"
-        )
 
-        # ✅ FIX 2: Generate fallback stop_loss if None (using 2% default)
-        if stop_loss is None:
-            default_sl_pct = float(os.getenv("DEFAULT_SL_PCT", "2.0"))
-            if side == "BUY":
-                stop_loss = price * (1 - default_sl_pct / 100)
-            else:
-                stop_loss = price * (1 + default_sl_pct / 100)
-            self._logger.warning(
-                f"⚠️ No SL provided, using {default_sl_pct}% fallback: {stop_loss:.2f}"
-            )
+        self._logger.debug("Entered suggest_position_size")
 
-        # Validate basic inputs (but not stop_loss anymore - we generated it above)
-        if requested_quantity <= 0 or price <= 0:
-            self._logger.warning(
-                f"❌ Risk sizing skipped: qty={requested_quantity}, price={price}"
-            )
-            return 0
-
-        sl_distance = abs(price - stop_loss)
-        if atr is not None:
-            try:
-                atr_value = float(atr)
-            except (TypeError, ValueError):
-                atr_value = 0.0
-            sl_distance = max(sl_distance, abs(atr_value))
-        
-        # ✅ FIX 3: Minimum SL distance to prevent division issues
-        min_sl_distance = price * 0.005  # 0.5% minimum
-        if sl_distance < min_sl_distance:
-            sl_distance = min_sl_distance
-            self._logger.warning(f"⚠️ SL distance too small, using minimum: {sl_distance:.2f}")
-
-        # ✅ FIX 4: Fallback account balance when 0 or negative
-        balance = self.account_balance
-        if balance <= 0:
-            balance = getattr(self, '_cached_balance', 0.0)
-        if balance <= 0:
-            balance = float(os.getenv("FALLBACK_MARGIN", "100000"))
-            self._logger.warning(f"⚠️ Using FALLBACK_MARGIN: ₹{balance:,.2f}")
-        
-        allowed_risk = balance * (self.settings.per_trade_risk_pct / 100.0)
-        
-        # ✅ FIX 5: Minimum risk allowance
-        min_risk = float(os.getenv("MIN_RISK_PER_TRADE", "500"))
-        allowed_risk = max(allowed_risk, min_risk)
-        
-        self._logger.info(
-            f"💰 Balance={balance:,.2f} | AllowedRisk={allowed_risk:.2f} | SL_Dist={sl_distance:.2f}"
-        )
-
-        confidence_value = 1.0
-        if confidence is not None:
-            try:
-                confidence_value = float(confidence)
-            except (TypeError, ValueError):
-                confidence_value = 0.0
-        confidence_value = max(0.0, min(1.0, confidence_value))
-
-        # Lot size resolution with fallback
         try:
-            lot_size = self._resolve_lot_size(symbol)
-        except (RuntimeError, ValueError) as exc:
-            self._logger.warning(f"Cannot resolve lot size for {symbol}: {exc}")
-            lot_size = int(os.getenv("DEFAULT_LOT_SIZE", "25"))
+            # ✅ FIX 1: Enhanced diagnostic logging
+            self._logger.info(
+                f"📊 SIZING: {symbol} | Price={price:.2f} | SL={stop_loss} | "
+                f"ATR={atr} | ReqQty={requested_quantity} | Conf={confidence}"
+            )
 
-        max_units_by_risk = int(allowed_risk // sl_distance)
-        
-        self._logger.info(f"📈 MaxUnits={max_units_by_risk} | LotSize={lot_size}")
-        
-        # ✅ FIX 6: Force minimum 1 lot when capital exists
-        if max_units_by_risk < lot_size:
-            if balance > 0:
-                one_lot_risk = lot_size * sl_distance
-                if one_lot_risk > (allowed_risk * 2.0):
-                    self._logger.warning(
-                        "⚠️ Skipping trade: 1 lot risk exceeds 2x allowed risk"
-                    )
-                    return 0
+            # ✅ FIX 2: Generate fallback stop_loss if None (using 2% default)
+            if stop_loss is None:
+                default_sl_pct = float(os.getenv("DEFAULT_SL_PCT", "2.0"))
+                if side == "BUY":
+                    stop_loss = price * (1 - default_sl_pct / 100)
+                else:
+                    stop_loss = price * (1 + default_sl_pct / 100)
                 self._logger.warning(
-                    "⚠️ Forcing minimum 1 lot (capital insufficient for standard sizing)"
+                    f"⚠️ No SL provided, using {default_sl_pct}% fallback: {stop_loss:.2f}"
                 )
-                return lot_size
+
+            # Validate basic inputs (but not stop_loss anymore - we generated it above)
+            if requested_quantity <= 0 or price <= 0:
+                self._logger.warning(
+                    f"❌ Risk sizing skipped: qty={requested_quantity}, price={price}"
+                )
+                return 0
+
+            sl_distance = abs(price - stop_loss)
+            if atr is not None:
+                try:
+                    atr_value = float(atr)
+                except (TypeError, ValueError):
+                    atr_value = 0.0
+                sl_distance = max(sl_distance, abs(atr_value))
+
+            # ✅ FIX 3: Minimum SL distance to prevent division issues
+            min_sl_distance = price * 0.005  # 0.5% minimum
+            if sl_distance < min_sl_distance:
+                sl_distance = min_sl_distance
+                self._logger.warning(
+                    f"⚠️ SL distance too small, using minimum: {sl_distance:.2f}"
+                )
+
+            # ✅ FIX 4: Fallback account balance when 0 or negative
+            balance = self.account_balance
+            if balance <= 0:
+                balance = getattr(self, "_cached_balance", 0.0)
+            if balance <= 0:
+                balance = float(os.getenv("FALLBACK_MARGIN", "100000"))
+                self._logger.warning(f"⚠️ Using FALLBACK_MARGIN: ₹{balance:,.2f}")
+
+            allowed_risk = balance * (self.settings.per_trade_risk_pct / 100.0)
+
+            # ✅ FIX 5: Minimum risk allowance
+            min_risk = float(os.getenv("MIN_RISK_PER_TRADE", "500"))
+            allowed_risk = max(allowed_risk, min_risk)
+
+            self._logger.info(
+                f"💰 Balance={balance:,.2f} | AllowedRisk={allowed_risk:.2f} | "
+                f"SL_Dist={sl_distance:.2f}"
+            )
+
+            confidence_value = 1.0
+            if confidence is not None:
+                try:
+                    confidence_value = float(confidence)
+                except (TypeError, ValueError):
+                    confidence_value = 0.0
+            confidence_value = max(0.0, min(1.0, confidence_value))
+
+            # Lot size resolution with fallback
+            try:
+                lot_size = self._resolve_lot_size(symbol)
+            except (RuntimeError, ValueError) as exc:
+                self._logger.warning(f"Cannot resolve lot size for {symbol}: {exc}")
+                lot_size = int(os.getenv("DEFAULT_LOT_SIZE", "25"))
+
+            max_units_by_risk = int(allowed_risk // sl_distance)
+
+            self._logger.info(f"📈 MaxUnits={max_units_by_risk} | LotSize={lot_size}")
+
+            # ✅ FIX 6: Force minimum 1 lot when capital exists
+            if max_units_by_risk < lot_size:
+                if balance > 0:
+                    one_lot_risk = lot_size * sl_distance
+                    if one_lot_risk > allowed_risk:
+                        self._logger.warning(
+                            "⚠️ Skipping trade: 1 lot risk exceeds allowed risk"
+                        )
+                        return 0
+                    self._logger.warning(
+                        "⚠️ Forcing minimum 1 lot (capital insufficient for standard sizing)"
+                    )
+                    return lot_size
+                return 0
+
+            max_lots_by_risk = max_units_by_risk // lot_size
+            scaled_lots = int(max_lots_by_risk * confidence_value)
+            if scaled_lots == 0 and confidence_value > 0.0 and max_lots_by_risk > 0:
+                scaled_lots = 1
+
+            requested_lots = requested_quantity // lot_size
+            if requested_lots == 0 and requested_quantity > 0:
+                requested_lots = 1
+
+            final_lots = min(requested_lots, scaled_lots)
+
+            # ✅ FIX 7: Ensure minimum 1 lot output when we have capital
+            if final_lots <= 0 and balance > 0:
+                final_lots = 1
+
+            final_qty = final_lots * lot_size
+            self._logger.info(
+                f"✅ FINAL QTY: {final_qty} ({final_lots} lots × {lot_size})"
+            )
+
+            return final_qty
+        except Exception as exc:
+            self._logger.error("Failure in suggest_position_size: %s", exc)
             return 0
-
-        max_lots_by_risk = max_units_by_risk // lot_size
-        scaled_lots = int(max_lots_by_risk * confidence_value)
-        if scaled_lots == 0 and confidence_value > 0.0 and max_lots_by_risk > 0:
-            scaled_lots = 1
-
-        requested_lots = requested_quantity // lot_size
-        if requested_lots == 0 and requested_quantity > 0:
-            requested_lots = 1
-
-        final_lots = min(requested_lots, scaled_lots)
-        
-        # ✅ FIX 7: Ensure minimum 1 lot output when we have capital
-        if final_lots <= 0 and balance > 0:
-            final_lots = 1
-
-        final_qty = final_lots * lot_size
-        self._logger.info(f"✅ FINAL QTY: {final_qty} ({final_lots} lots × {lot_size})")
-        
-        return final_qty
-        
 
     def set_lot_size_provider(
         self, lookup: Callable[[str], int] | None, *, symbol: str | None = None
@@ -807,7 +821,7 @@ class RiskManager:
         # 1. Try the wired lookup function (Primary)
         lookup = self._lot_size_lookup
         target_symbol = symbol or self._lot_size_symbol
-        
+
         if lookup is not None and callable(lookup) and target_symbol:
             try:
                 resolved = lookup(target_symbol)
@@ -815,14 +829,14 @@ class RiskManager:
                 if lot_size > 0:
                     return lot_size
             except Exception:
-                pass # Fallthrough to settings
-        
+                pass  # Fallthrough to settings
+
         # 2. Fallback to Settings (Safety Net)
         # Your settings.py already defaults contract_lot_size to 75. Use it!
         if hasattr(self.settings, "contract_lot_size"):
-             default_size = int(self.settings.contract_lot_size)
-             if default_size > 0:
-                 return default_size
+            default_size = int(self.settings.contract_lot_size)
+            if default_size > 0:
+                return default_size
 
         # 3. Last Resort Hardcoded Fallback
         return 75
@@ -985,16 +999,17 @@ class RiskManager:
         """
         current = float(self.position_manager.get_realized_pnl())
         delta = current - self._last_pnl_snapshot
-        
+
         if abs(delta) < 1e-6:
             return
 
         # [FIX] Zombie Data Protection
-        # If we see a massive drop AND we have the override enabled, 
+        # If we see a massive drop AND we have the override enabled,
         # assume this is history loading and ignore the loss.
         import os
+
         is_override = os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true"
-        
+
         # Threshold: If delta is negative and > 50% of daily limit (or just huge)
         # This catches the -11L restore event.
         if is_override and delta < 0 and abs(delta) > 5000:
@@ -1004,7 +1019,7 @@ class RiskManager:
             )
             # Sync the snapshot BUT DO NOT record the loss to switches
             self._last_pnl_snapshot = current
-            
+
             # Ensure breaker is clear
             if self._breaker_tripped:
                 self._breaker_tripped = False
@@ -1014,7 +1029,7 @@ class RiskManager:
         # Normal operation
         self._switches.record_pnl(delta)
         self._last_pnl_snapshot = current
-        
+
         try:
             METRICS.set_live_pnl(book="primary", value=current)
         except Exception:
@@ -1023,7 +1038,7 @@ class RiskManager:
             METRICS.set_pnl_breakdown(book="primary", realized=current)
         except Exception:
             pass
-            
+
         reason = self._switches.breach_reason()
         if reason:
             formatted = self._format_switch_reason(reason)
@@ -1032,9 +1047,12 @@ class RiskManager:
     def _trip_breaker(self, reason: str) -> None:  # pragma: no cover
         # [FIX] Nuclear Override: Physically prevent breaker activation
         import os
+
         if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
             if not getattr(self, "_override_log_sent", False):
-                self._logger.warning(f"🛡️ BREAKER TRIED TO TRIP BUT WAS BLOCKED BY OVERRIDE. Reason: {reason}")
+                self._logger.warning(
+                    f"🛡️ BREAKER TRIED TO TRIP BUT WAS BLOCKED BY OVERRIDE. Reason: {reason}"
+                )
                 self._override_log_sent = True
             return
 
@@ -1168,7 +1186,6 @@ class RiskManager:
             },
         )
 
-
     def _set_cooldown_metric(self, value: float) -> None:  # pragma: no cover
         try:
             self._m_cooldown.set(value)
@@ -1301,7 +1318,6 @@ class RiskState:
         """
         self._last_tick_ns = -1
         self._reasons.discard("STALE")
- 
 
     def _evaluate_spread(self, spread: float) -> None:
         if self._median_spread <= 0:

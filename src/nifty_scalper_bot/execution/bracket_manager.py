@@ -1215,132 +1215,142 @@ class BracketManager:
         - Tier 3 (4-6%): Protect 50% of profit + ATR trail
         - Tier 4 (> 6%): Protect 60% of profit + tight ATR trail
         """
+        import math
         import os
 
-        entry = bracket.entry_price
-        current_sl = bracket.sl_trigger_price
+        LOGGER.debug("Entered _calculate_tiered_trailing_sl")
 
-        if bracket.side == "SELL" and (high_water == float("inf") or high_water <= 0):
+        try:
+            entry = bracket.entry_price
+            current_sl = bracket.sl_trigger_price
+
+            if not math.isfinite(high_water) or high_water <= 0:
+                LOGGER.info(
+                    "Condition met: trailing_high_water_invalid",
+                    extra={"symbol": bracket.symbol, "side": bracket.side},
+                )
+                return None
+
+            # Configuration from environment
+            tier1_threshold = float(os.getenv("TRAIL_TIER1_PCT", "1.0"))
+            tier2_threshold = float(os.getenv("TRAIL_TIER2_PCT", "2.0"))
+            tier3_threshold = float(os.getenv("TRAIL_TIER3_PCT", "4.0"))
+            tier4_threshold = float(os.getenv("TRAIL_TIER4_PCT", "6.0"))
+
+            # ═══════════════════════════════════════════════════════════
+            # TIER 0: NO PROFIT (< 1%) - Use original SL
+            # ═══════════════════════════════════════════════════════════
+            if profit_pct < tier1_threshold:
+                return None  # No change
+
+            # ═══════════════════════════════════════════════════════════
+            # TIER 1: SMALL PROFIT (1-2%) - BREAKEVEN LOCK
+            # ═══════════════════════════════════════════════════════════
+            if tier1_threshold <= profit_pct < tier2_threshold:
+                # Lock at breakeven (entry price)
+                if bracket.side == "BUY":
+                    if entry > current_sl:
+                        LOGGER.debug(f"🔒 Tier 1: Breakeven lock at {entry:.2f}")
+                        return entry
+                else:
+                    if entry < current_sl:
+                        LOGGER.debug(f"🔒 Tier 1: Breakeven lock at {entry:.2f}")
+                        return entry
+
+            # ═══════════════════════════════════════════════════════════
+            # TIER 2: MODERATE PROFIT (2-4%) - PROTECT 40%
+            # ═══════════════════════════════════════════════════════════
+            if tier2_threshold <= profit_pct < tier3_threshold:
+                protection_pct = 0.40
+
+                if bracket.side == "BUY":
+                    profit_amount = high_water - entry
+                    protected_sl = entry + (profit_amount * protection_pct)
+                    LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")
+                    return protected_sl
+                else:
+                    profit_amount = entry - high_water
+                    protected_sl = entry - (profit_amount * protection_pct)
+                    LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")
+                    return protected_sl
+
+            # ═══════════════════════════════════════════════════════════
+            # TIER 3: GOOD PROFIT (4-6%) - PROTECT 50% + ATR TRAIL
+            # ═══════════════════════════════════════════════════════════
+            if tier3_threshold <= profit_pct < tier4_threshold:
+                protection_pct = 0.50
+
+                # Calculate momentum-adjusted ATR multiplier
+                momentum = self._calculate_momentum(bracket.symbol)
+                atr_mult = self._get_momentum_adjusted_atr_mult(momentum, base_mult=1.5)
+
+                if bracket.side == "BUY":
+                    # Minimum: 50% profit protection
+                    profit_amount = high_water - entry
+                    min_sl = entry + (profit_amount * protection_pct)
+
+                    # ATR trail from high water
+                    if atr > 0:
+                        atr_sl = high_water - (atr * atr_mult)
+                        # Use whichever is HIGHER (more protective)
+                        protected_sl = max(min_sl, atr_sl)
+                    else:
+                        protected_sl = min_sl
+
+                    LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")
+                    return protected_sl
+                else:
+                    profit_amount = entry - high_water
+                    min_sl = entry - (profit_amount * protection_pct)
+
+                    if atr > 0:
+                        atr_sl = high_water + (atr * atr_mult)
+                        protected_sl = min(min_sl, atr_sl)
+                    else:
+                        protected_sl = min_sl
+
+                    LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")
+                    return protected_sl
+
+            # ═══════════════════════════════════════════════════════════
+            # TIER 4: EXCELLENT PROFIT (> 6%) - PROTECT 60% + TIGHT TRAIL
+            # ═══════════════════════════════════════════════════════════
+            if profit_pct >= tier4_threshold:
+                protection_pct = 0.60
+
+                # Tighter ATR multiplier for big winners
+                momentum = self._calculate_momentum(bracket.symbol)
+                atr_mult = self._get_momentum_adjusted_atr_mult(momentum, base_mult=1.0)
+
+                if bracket.side == "BUY":
+                    profit_amount = high_water - entry
+                    min_sl = entry + (profit_amount * protection_pct)
+
+                    if atr > 0:
+                        atr_sl = high_water - (atr * atr_mult)
+                        protected_sl = max(min_sl, atr_sl)
+                    else:
+                        protected_sl = min_sl
+
+                    LOGGER.info(f"🏆 Tier 4: 60% + tight trail at {protected_sl:.2f}")
+                    return protected_sl
+                else:
+                    profit_amount = entry - high_water
+                    min_sl = entry - (profit_amount * protection_pct)
+
+                    if atr > 0:
+                        atr_sl = high_water + (atr * atr_mult)
+                        protected_sl = min(min_sl, atr_sl)
+                    else:
+                        protected_sl = min_sl
+
+                    LOGGER.info(f"🏆 Tier 4: 60% + tight trail at {protected_sl:.2f}")
+                    return protected_sl
+
             return None
-
-        # Configuration from environment
-        tier1_threshold = float(os.getenv("TRAIL_TIER1_PCT", "1.0"))
-        tier2_threshold = float(os.getenv("TRAIL_TIER2_PCT", "2.0"))
-        tier3_threshold = float(os.getenv("TRAIL_TIER3_PCT", "4.0"))
-        tier4_threshold = float(os.getenv("TRAIL_TIER4_PCT", "6.0"))
-
-        # ═══════════════════════════════════════════════════════════
-        # TIER 0: NO PROFIT (< 1%) - Use original SL
-        # ═══════════════════════════════════════════════════════════
-        if profit_pct < tier1_threshold:
-            return None  # No change
-
-        # ═══════════════════════════════════════════════════════════
-        # TIER 1: SMALL PROFIT (1-2%) - BREAKEVEN LOCK
-        # ═══════════════════════════════════════════════════════════
-        if tier1_threshold <= profit_pct < tier2_threshold:
-            # Lock at breakeven (entry price)
-            if bracket.side == "BUY":
-                if entry > current_sl:
-                    LOGGER.debug(f"🔒 Tier 1: Breakeven lock at {entry:.2f}")
-                    return entry
-            else:
-                if entry < current_sl:
-                    LOGGER.debug(f"🔒 Tier 1: Breakeven lock at {entry:.2f}")
-                    return entry
+        except Exception as exc:
+            LOGGER.error("Failure in _calculate_tiered_trailing_sl: %s", exc)
             return None
-
-        # ═══════════════════════════════════════════════════════════
-        # TIER 2: MODERATE PROFIT (2-4%) - PROTECT 40%
-        # ═══════════════════════════════════════════════════════════
-        if tier2_threshold <= profit_pct < tier3_threshold:
-            protection_pct = 0.40
-
-            if bracket.side == "BUY":
-                profit_amount = high_water - entry
-                protected_sl = entry + (profit_amount * protection_pct)
-                LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")
-                return protected_sl
-            else:
-                profit_amount = entry - high_water
-                protected_sl = entry - (profit_amount * protection_pct)
-                LOGGER.debug(f"🛡️ Tier 2: 40% protection at {protected_sl:.2f}")
-                return protected_sl
-
-        # ═══════════════════════════════════════════════════════════
-        # TIER 3: GOOD PROFIT (4-6%) - PROTECT 50% + ATR TRAIL
-        # ═══════════════════════════════════════════════════════════
-        if tier3_threshold <= profit_pct < tier4_threshold:
-            protection_pct = 0.50
-
-            # Calculate momentum-adjusted ATR multiplier
-            momentum = self._calculate_momentum(bracket.symbol)
-            atr_mult = self._get_momentum_adjusted_atr_mult(momentum, base_mult=1.5)
-
-            if bracket.side == "BUY":
-                # Minimum: 50% profit protection
-                profit_amount = high_water - entry
-                min_sl = entry + (profit_amount * protection_pct)
-
-                # ATR trail from high water
-                if atr > 0:
-                    atr_sl = high_water - (atr * atr_mult)
-                    # Use whichever is HIGHER (more protective)
-                    protected_sl = max(min_sl, atr_sl)
-                else:
-                    protected_sl = min_sl
-
-                LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")
-                return protected_sl
-            else:
-                profit_amount = entry - high_water
-                min_sl = entry - (profit_amount * protection_pct)
-
-                if atr > 0:
-                    atr_sl = high_water + (atr * atr_mult)
-                    protected_sl = min(min_sl, atr_sl)
-                else:
-                    protected_sl = min_sl
-
-                LOGGER.debug(f"📊 Tier 3: 50% + ATR trail at {protected_sl:.2f}")
-                return protected_sl
-
-        # ═══════════════════════════════════════════════════════════
-        # TIER 4: EXCELLENT PROFIT (> 6%) - PROTECT 60% + TIGHT TRAIL
-        # ═══════════════════════════════════════════════════════════
-        if profit_pct >= tier4_threshold:
-            protection_pct = 0.60
-
-            # Tighter ATR multiplier for big winners
-            momentum = self._calculate_momentum(bracket.symbol)
-            atr_mult = self._get_momentum_adjusted_atr_mult(momentum, base_mult=1.0)
-
-            if bracket.side == "BUY":
-                profit_amount = high_water - entry
-                min_sl = entry + (profit_amount * protection_pct)
-
-                if atr > 0:
-                    atr_sl = high_water - (atr * atr_mult)
-                    protected_sl = max(min_sl, atr_sl)
-                else:
-                    protected_sl = min_sl
-
-                LOGGER.info(f"🏆 Tier 4: 60% + tight trail at {protected_sl:.2f}")
-                return protected_sl
-            else:
-                profit_amount = entry - high_water
-                min_sl = entry - (profit_amount * protection_pct)
-
-                if atr > 0:
-                    atr_sl = high_water + (atr * atr_mult)
-                    protected_sl = min(min_sl, atr_sl)
-                else:
-                    protected_sl = min_sl
-
-                LOGGER.info(f"🏆 Tier 4: 60% + tight trail at {protected_sl:.2f}")
-                return protected_sl
-
-        return None
 
     def _get_current_atr(self, symbol: str) -> float:
         """Get current ATR from provider or cache."""

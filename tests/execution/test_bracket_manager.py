@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.execution.bracket_manager import BracketManager, BracketState
 
 
 class TestBracketManager:
@@ -47,6 +47,32 @@ class TestBracketManager:
         )
 
         broker.cancel_order.assert_called_once_with("tp-2")
+
+    def test_tiered_trailing_skips_invalid_high_water(self) -> None:
+        """Trailing calc should skip when high-water is invalid."""
+
+        broker = Mock()
+        manager = BracketManager(broker_client=broker)
+        bracket = BracketState(
+            entry_order_id="entry-4",
+            symbol="NIFTYTEST",
+            side="SELL",
+            quantity=1,
+            entry_price=100.0,
+            sl_trigger_price=105.0,
+            tp_trigger_price=90.0,
+        )
+
+        assert (
+            manager._calculate_tiered_trailing_sl(
+                bracket=bracket,
+                ltp=95.0,
+                profit_pct=5.0,
+                high_water=float("inf"),
+                atr=0.0,
+            )
+            is None
+        )
 
     @pytest.mark.flaky(reruns=1)
     def test_race_between_stop_and_target_is_serialised(self) -> None:
