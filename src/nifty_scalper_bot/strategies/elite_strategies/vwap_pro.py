@@ -44,6 +44,7 @@ class VWAPProStrategy(EliteStrategy):
         "_last_valid_avg_volume",
         "_last_valid_volume_ts",
         "_reject_reason_counts",
+        "_index_bias_degraded_logged",
     )
 
     def __init__(
@@ -78,6 +79,7 @@ class VWAPProStrategy(EliteStrategy):
         }
         self._reject_reason_counts: Dict[str, int] = {}
         self._index_bias_missing_logged: bool = False
+        self._index_bias_degraded_logged: bool = False
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -194,7 +196,11 @@ class VWAPProStrategy(EliteStrategy):
                 payload["avg_vol"] = avg_vol
             if context:
                 payload.update(context)
-            LOGGER.debug("NO SIGNAL: %s", reason_code, extra=payload)
+            LOGGER.debug(
+                "VWAP_PRO_REJECT | reason=%s",
+                reason_code,
+                extra=payload,
+            )
         except Exception as exc:
             LOGGER.error(
                 "Failure in VWAPProStrategy._log_no_signal_reason: %s",
@@ -202,6 +208,32 @@ class VWAPProStrategy(EliteStrategy):
                 extra={
                     "event": "vwap_pro_no_signal_reason_error",
                     "symbol": symbol,
+                },
+                exc_info=exc,
+            )
+
+    def _reset_acceptance(self, key: str, *, symbol: str, reason_code: str) -> None:
+        """Args: key, symbol, reason_code. Returns: None. Raises: Exception."""
+        try:
+            self._vwap_acceptance_tracker[key] = 0
+            LOGGER.debug(
+                "⏳ ACCEPTANCE RESET | symbol=%s reason=%s",
+                symbol,
+                reason_code,
+                extra={
+                    "event": "vwap_pro_acceptance_reset",
+                    "symbol": symbol,
+                    "reason_code": reason_code,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "Failure in VWAPProStrategy._reset_acceptance: %s",
+                exc,
+                extra={
+                    "event": "vwap_pro_acceptance_reset_error",
+                    "symbol": symbol,
+                    "reason_code": reason_code,
                 },
                 exc_info=exc,
             )
@@ -223,6 +255,31 @@ class VWAPProStrategy(EliteStrategy):
             extra={"event": "vwap_pro_signal_enter", "symbol": symbol},
         )
         try:
+            def _emit_no_signal(reason_code: str) -> None:
+                """Args: reason_code. Returns: None. Raises: Exception."""
+                try:
+                    LOGGER.info(
+                        "📉 NO SIGNAL | symbol=%s reason=%s",
+                        symbol,
+                        reason_code,
+                        extra={
+                            "event": "vwap_pro_no_signal",
+                            "symbol": symbol,
+                            "reason_code": reason_code,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.error(
+                        "Failure in VWAPProStrategy._emit_no_signal: %s",
+                        exc,
+                        extra={
+                            "event": "vwap_pro_no_signal_error",
+                            "symbol": symbol,
+                            "reason_code": reason_code,
+                        },
+                        exc_info=exc,
+                    )
+
             now = time_module.time()
             expiry = self._extract_expiry(symbol)
             is_ce = "CE" in symbol.upper()
@@ -249,7 +306,9 @@ class VWAPProStrategy(EliteStrategy):
                     f"vol={self._telemetry['skipped_volume']} "
                     f"data={self._telemetry['skipped_data']} "
                     f"overext={self._telemetry['skipped_overextended']} "
-                    f"accept={self._telemetry['skipped_acceptance']}",
+                    f"accept={self._telemetry['skipped_acceptance']} "
+                    f"dominant_reject_reason={dominant_reject_reason} "
+                    f"reject_counts={dict(self._reject_reason_counts)}",
                     extra={
                         "event": "vwap_pro_telemetry",
                         "symbol": symbol,
@@ -285,7 +344,10 @@ class VWAPProStrategy(EliteStrategy):
                     vwap=indicators.get("vwap"),
                     context={"active_symbol": self._strike_lock.get(lock_key)},
                 )
-                self._vwap_acceptance_tracker[acc_key] = 0
+                self._reset_acceptance(
+                    acc_key, symbol=symbol, reason_code="strike_lock_active"
+                )
+                _emit_no_signal("strike_lock_active")
                 return None
 
             last_fire = self._signal_cooldown_tracker.get(cooldown_key, 0.0)
@@ -308,7 +370,10 @@ class VWAPProStrategy(EliteStrategy):
                         )
                     },
                 )
-                self._vwap_acceptance_tracker[acc_key] = 0
+                self._reset_acceptance(
+                    acc_key, symbol=symbol, reason_code="cooldown_active"
+                )
+                _emit_no_signal("cooldown_active")
                 return None
 
             # 📊 ISSUE 1 FIX: Hard-block on missing Futures VWAP (No spot fallback)
@@ -332,11 +397,59 @@ class VWAPProStrategy(EliteStrategy):
                 or indicators.get("nifty_index_vwap")
                 or 0.0
             )
+            index_volume = float(indicators.get("futures_volume") or 0.0)
 
-            if index_ltp <= 0 or index_vwap <= 0:
+            if index_vwap <= 0 or index_volume <= 0:
+                if not self._index_bias_degraded_logged:
+                    LOGGER.info(
+                        "🚫 INDEX BIAS DEGRADED → PE BLOCKED, CE-ONLY MODE",
+                        extra={
+                            "event": "vwap_pro_index_bias_degraded",
+                            "symbol": symbol,
+                            "index_vwap": index_vwap,
+                            "index_volume": index_volume,
+                        },
+                    )
+                    self._index_bias_degraded_logged = True
+                if index_ltp <= 0:
+                    self._log_no_signal_reason(
+                        "index_bias_invalid",
+                        symbol=symbol,
+                        ltp=current_price,
+                        vwap=vwap,
+                        context={
+                            "index_ltp": index_ltp,
+                            "index_vwap": index_vwap,
+                            "index_volume": index_volume,
+                        },
+                    )
+                    self._reset_acceptance(
+                        acc_key, symbol=symbol, reason_code="index_bias_invalid"
+                    )
+                    _emit_no_signal("index_bias_invalid")
+                    return None
+                if not is_ce:
+                    self._log_no_signal_reason(
+                        "index_bias_invalid",
+                        symbol=symbol,
+                        ltp=current_price,
+                        vwap=vwap,
+                        context={
+                            "index_ltp": index_ltp,
+                            "index_vwap": index_vwap,
+                            "index_volume": index_volume,
+                        },
+                    )
+                    self._reset_acceptance(
+                        acc_key, symbol=symbol, reason_code="index_bias_invalid"
+                    )
+                    _emit_no_signal("index_bias_invalid")
+                    return None
+            elif index_ltp <= 0:
                 if not self._index_bias_missing_logged:
                     LOGGER.error(
-                        "INVALID INDEX DATA — blocking signal", extra={"symbol": symbol}
+                        "INVALID INDEX DATA — blocking signal",
+                        extra={"event": "vwap_pro_index_invalid", "symbol": symbol},
                     )
                     self._index_bias_missing_logged = True
                 self._log_no_signal_reason(
@@ -346,10 +459,15 @@ class VWAPProStrategy(EliteStrategy):
                     vwap=vwap,
                     context={"index_ltp": index_ltp, "index_vwap": index_vwap},
                 )
-                self._vwap_acceptance_tracker[acc_key] = 0
+                self._reset_acceptance(
+                    acc_key, symbol=symbol, reason_code="index_bias_invalid"
+                )
+                _emit_no_signal("index_bias_invalid")
                 return None
 
             self._index_bias_missing_logged = False
+            if index_vwap > 0 and index_volume > 0:
+                self._index_bias_degraded_logged = False
 
             if (is_ce and index_ltp < index_vwap) or (
                 not is_ce and index_ltp > index_vwap
@@ -376,7 +494,10 @@ class VWAPProStrategy(EliteStrategy):
                         "direction": direction,
                     },
                 )
-                self._vwap_acceptance_tracker[acc_key] = 0
+                self._reset_acceptance(
+                    acc_key, symbol=symbol, reason_code="index_bias_invalid"
+                )
+                _emit_no_signal("index_bias_invalid")
                 return None
 
             if current_price <= 0 or vwap <= 0:
@@ -392,7 +513,10 @@ class VWAPProStrategy(EliteStrategy):
                     ltp=current_price,
                     vwap=vwap,
                 )
-                self._vwap_acceptance_tracker[acc_key] = 0
+                self._reset_acceptance(
+                    acc_key, symbol=symbol, reason_code="vwap_zero_or_invalid"
+                )
+                _emit_no_signal("vwap_zero_or_invalid")
                 return None
 
             if current_price < vwap:
@@ -412,7 +536,10 @@ class VWAPProStrategy(EliteStrategy):
                     ltp=current_price,
                     vwap=vwap,
                 )
-                self._vwap_acceptance_tracker[acc_key] = 0
+                self._reset_acceptance(
+                    acc_key, symbol=symbol, reason_code="price_below_vwap"
+                )
+                _emit_no_signal("price_below_vwap")
                 return None
 
             # 📏 Over-extension filter
@@ -437,7 +564,10 @@ class VWAPProStrategy(EliteStrategy):
                         vwap=vwap,
                         context={"vwap_std": vwap_std, "z_score": z},
                     )
-                    self._vwap_acceptance_tracker[acc_key] = 0
+                    self._reset_acceptance(
+                        acc_key, symbol=symbol, reason_code="overextension_filter"
+                    )
+                    _emit_no_signal("overextension_filter")
                     return None
 
             # 🔊 ISSUE 4 FIX: Reset acceptance on Volume rejection
@@ -500,7 +630,10 @@ class VWAPProStrategy(EliteStrategy):
                         vol=vol,
                         avg_vol=avg_vol,
                     )
-                    self._vwap_acceptance_tracker[acc_key] = 0
+                    self._reset_acceptance(
+                        acc_key, symbol=symbol, reason_code="volume_below_threshold"
+                    )
+                    _emit_no_signal("volume_below_threshold")
                     return None
             vol_thresh = self._dynamic_volume_threshold()
             if vol < avg_vol * vol_thresh:
@@ -536,7 +669,10 @@ class VWAPProStrategy(EliteStrategy):
                         "required_volume": avg_vol * vol_thresh,
                     },
                 )
-                self._vwap_acceptance_tracker[acc_key] = 0
+                self._reset_acceptance(
+                    acc_key, symbol=symbol, reason_code="volume_below_threshold"
+                )
+                _emit_no_signal("volume_below_threshold")
                 return None
 
             self._vwap_acceptance_tracker[acc_key] += 1
@@ -557,6 +693,7 @@ class VWAPProStrategy(EliteStrategy):
                         "required_bars": self.VWAP_ACCEPTANCE_BARS,
                     },
                 )
+                _emit_no_signal("acceptance_bars_insufficient")
                 return None
 
             # ═══════════════════════════════════════════════════════════════════
@@ -595,7 +732,10 @@ class VWAPProStrategy(EliteStrategy):
                     vwap=vwap,
                     context={"sl": sl, "tp": tp2, "atr": atr},
                 )
-                self._vwap_acceptance_tracker[acc_key] = 0
+                self._reset_acceptance(
+                    acc_key, symbol=symbol, reason_code="overextension_filter"
+                )
+                _emit_no_signal("overextension_filter")
                 return None
 
             # 🎯 Final Signal Prep
@@ -604,7 +744,7 @@ class VWAPProStrategy(EliteStrategy):
             qty = max(1, int(base_qty * confidence))
 
             # 🏁 CRITICAL ISSUE 3 FIX: Reset acceptance after firing
-            self._vwap_acceptance_tracker[acc_key] = 0
+            self._reset_acceptance(acc_key, symbol=symbol, reason_code="signal_fired")
             self._signal_cooldown_tracker[cooldown_key] = now
             self._telemetry["signals"] += 1
 

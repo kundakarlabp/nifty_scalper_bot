@@ -974,6 +974,9 @@ class StrategyManager(_BaseStrategyManager):
         }
         self._no_signal_missing: dict[str, int] = {}
         self._no_signal_last_summary_ts = time.time()
+        self._symbol_invalid_counts: dict[str, int] = {}
+        self._symbol_temporarily_ineligible: dict[str, str] = {}
+        self._symbol_invalid_threshold = 3  # intent: suspend after consecutive invalid data
         required: set[str] = set()
         for strategy in strategies:
             required.update(strategy.get_required_indicators())
@@ -1685,6 +1688,64 @@ class StrategyManager(_BaseStrategyManager):
             "Entered StrategyManager.generate_signal",
             extra={"event": "scored_strategy_generate", "symbol": symbol},
         )
+        def _log_reject(
+            reason_code: str, context: dict[str, t.Any] | None = None
+        ) -> None:
+            """Args: reason_code, context. Returns: None. Raises: Exception."""
+            try:
+                payload = {
+                    "event": "strategy_no_signal_reject",
+                    "symbol": symbol,
+                    "reason_code": reason_code,
+                }
+                if context:
+                    payload.update(context)
+                log.debug(
+                    "VWAP_PRO_REJECT | reason=%s",
+                    reason_code,
+                    extra=payload,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "Failure in StrategyManager._log_reject: %s",
+                    exc,
+                    exc_info=exc,
+                    extra={
+                        "event": "strategy_no_signal_reject_error",
+                        "symbol": symbol,
+                        "reason_code": reason_code,
+                    },
+                )
+
+        def _emit_no_signal(
+            reason_code: str, context: dict[str, t.Any] | None = None
+        ) -> None:
+            """Args: reason_code, context. Returns: None. Raises: Exception."""
+            try:
+                payload = {
+                    "event": "strategy_no_signal",
+                    "symbol": symbol,
+                    "reason_code": reason_code,
+                }
+                if context:
+                    payload.update(context)
+                log.info(
+                    "📉 NO SIGNAL | symbol=%s reason=%s",
+                    symbol,
+                    reason_code,
+                    extra=payload,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "Failure in StrategyManager._emit_no_signal: %s",
+                    exc,
+                    exc_info=exc,
+                    extra={
+                        "event": "strategy_no_signal_emit_error",
+                        "symbol": symbol,
+                        "reason_code": reason_code,
+                    },
+                )
         regime_manager = self._regime_manager
         regime_snapshot: RegimeSnapshot | None = None
         adjustments: dict[str, t.Any] = {}
@@ -1701,6 +1762,11 @@ class StrategyManager(_BaseStrategyManager):
                     snapshot=regime_snapshot,
                 )
                 if not allowed:
+                    _log_reject(
+                        "data_invalid",
+                        {"gate_reasons": reasons, "gate": "regime_manager"},
+                    )
+                    _emit_no_signal("data_invalid", {"gate_reasons": reasons})
                     return None
             except Exception as exc:  # noqa: BLE001
                 log.error(
@@ -1734,6 +1800,74 @@ class StrategyManager(_BaseStrategyManager):
                             indicators["vwap"] = _exch_vwap
             except Exception:
                 pass
+        invalid_reason: str | None = None
+        vwap = indicators.get("vwap") or indicators.get("exchange_vwap")
+        volume = indicators.get("volume")
+        avg_volume = indicators.get("avg_volume")
+        try:
+            if vwap is None or float(vwap) <= 0.0:
+                invalid_reason = "vwap_zero_or_invalid"
+            elif volume is None or float(volume) <= 0.0:
+                invalid_reason = "volume_below_threshold"
+            elif avg_volume is None or float(avg_volume) <= 0.0:
+                invalid_reason = "volume_below_threshold"
+        except (TypeError, ValueError):
+            invalid_reason = "data_invalid"
+
+        if invalid_reason is not None:
+            count = self._symbol_invalid_counts.get(symbol, 0) + 1
+            self._symbol_invalid_counts[symbol] = count
+            if count > self._symbol_invalid_threshold:
+                if symbol not in self._symbol_temporarily_ineligible:
+                    self._symbol_temporarily_ineligible[symbol] = invalid_reason
+                    log.info(
+                        "⛔ SYMBOL SUSPENDED — Data invalid | symbol=%s reason=%s",
+                        symbol,
+                        invalid_reason,
+                        extra={
+                            "event": "symbol_suspended_data_invalid",
+                            "symbol": symbol,
+                            "reason_code": invalid_reason,
+                            "invalid_streak": count,
+                        },
+                    )
+                _log_reject(
+                    "data_invalid",
+                    {
+                        "reason_code": invalid_reason,
+                        "invalid_streak": count,
+                        "ltp": current_price,
+                        "vwap": vwap,
+                        "volume": volume,
+                        "avg_volume": avg_volume,
+                    },
+                )
+                _emit_no_signal("data_invalid", {"reason_code": invalid_reason})
+                return None
+        else:
+            self._symbol_invalid_counts.pop(symbol, None)
+            if symbol in self._symbol_temporarily_ineligible:
+                self._symbol_temporarily_ineligible.pop(symbol, None)
+
+        if symbol in self._symbol_temporarily_ineligible:
+            _log_reject(
+                "data_invalid",
+                {
+                    "reason_code": self._symbol_temporarily_ineligible.get(symbol),
+                    "invalid_streak": self._symbol_invalid_counts.get(symbol, 0),
+                    "ltp": current_price,
+                    "vwap": vwap,
+                    "volume": volume,
+                    "avg_volume": avg_volume,
+                },
+            )
+            _emit_no_signal(
+                "data_invalid",
+                {
+                    "reason_code": self._symbol_temporarily_ineligible.get(symbol),
+                },
+            )
+            return None
         position = self._position_manager.get_position(symbol)
 
         signals: list[Signal] = []
@@ -1803,6 +1937,25 @@ class StrategyManager(_BaseStrategyManager):
                 indicators=indicators,
                 error_strategies=errors,
             )
+            _log_reject(
+                "data_invalid",
+                {
+                    "missing_indicators": missing,
+                    "no_signal_strategies": empty[:8],
+                    "error_strategies": errors,
+                    "ltp": current_price,
+                    "vwap": vwap,
+                    "volume": volume,
+                    "avg_volume": avg_volume,
+                },
+            )
+            _emit_no_signal(
+                "data_invalid",
+                {
+                    "missing_indicators": missing,
+                    "no_signal_strategies": empty[:8],
+                },
+            )
             return None
 
         combined = self._combine_signals(signals)
@@ -1839,12 +1992,43 @@ class StrategyManager(_BaseStrategyManager):
                     "symbol": symbol,
                 },
             )
+            _log_reject(
+                "data_invalid",
+                {
+                    "stage": "combine",
+                    "ltp": current_price,
+                    "vwap": vwap,
+                    "volume": volume,
+                    "avg_volume": avg_volume,
+                },
+            )
+            _emit_no_signal("data_invalid", {"stage": "combine"})
         else:
             log.info(
                 "Condition met: strategy_manager_filtered_signal",
                 extra={
                     "event": "strategy_manager_filtered_signal",
                     "symbol": symbol,
+                    "action": combined.action,
+                    "confidence": combined.confidence,
+                },
+            )
+            _log_reject(
+                "data_invalid",
+                {
+                    "stage": "filter",
+                    "action": combined.action,
+                    "confidence": combined.confidence,
+                    "ltp": current_price,
+                    "vwap": vwap,
+                    "volume": volume,
+                    "avg_volume": avg_volume,
+                },
+            )
+            _emit_no_signal(
+                "data_invalid",
+                {
+                    "stage": "filter",
                     "action": combined.action,
                     "confidence": combined.confidence,
                 },
