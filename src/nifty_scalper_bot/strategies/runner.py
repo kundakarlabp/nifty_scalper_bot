@@ -62,7 +62,8 @@ _THROTTLE_LOCK = threading.Lock()
 
 
 def log_throttled(
-    logger: Any, key: str, msg: str, interval_sec: float = 60.0, level: str = "info"
+    logger: Any, key: str, msg: str, interval_sec: float = 60.0, level: str = "info",
+    extra: dict | None = None,
 ) -> None:
     """Log a message only if 'interval_sec' has passed since the last log for 'key'."""
     with _THROTTLE_LOCK:
@@ -73,12 +74,12 @@ def log_throttled(
         _THROTTLE_CACHE[key] = now
 
     # Normalize log level (accept str or logging.* int)
+    kwargs = {"extra": extra} if extra else {}
     if isinstance(level, int):
-        log_method = logger.log
-        log_method(level, msg)
+        logger.log(level, msg, **kwargs)
     else:
         log_method = getattr(logger, str(level).lower(), logger.info)
-        log_method(msg)
+        log_method(msg, **kwargs)
 
 
 _STRATEGY_SKIP_COUNTER = Counter(
