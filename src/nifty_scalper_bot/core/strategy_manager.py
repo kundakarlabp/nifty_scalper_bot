@@ -962,7 +962,7 @@ class StrategyManager(_BaseStrategyManager):
         self._dynamic_enable_threshold = 0.35
         self._dynamic_trade_threshold = 5
         self._dynamic_confidence_floor = 0.45
-        self._last_regime_gate: tuple[bool, tuple[str, ...]] | None = None
+        self._last_regime_gate: tuple[bool, tuple[str, ...], str | None] | None = None
         self._last_regime_gate_at: float = 0.0
         self._regime_gate_cooldown = 10.0
         self._no_signal_summary: dict[str, int] = {
@@ -1913,16 +1913,6 @@ class StrategyManager(_BaseStrategyManager):
         )
 
         now = time.time()
-        gate_key = (allowed, reasons)
-
-        if (
-            self._last_regime_gate == gate_key
-            and (now - self._last_regime_gate_at) < self._regime_gate_cooldown
-        ):
-            return
-
-        self._last_regime_gate = gate_key
-        self._last_regime_gate_at = now
 
         # ---------- SAFE NORMALIZATION (NO ASSUMPTIONS) ----------
         regime_val: str | None = None
@@ -1940,6 +1930,8 @@ class StrategyManager(_BaseStrategyManager):
         # snapshot may also be None -> leave as None
         # ---------------------------------------------------------
 
+        gate_key = (allowed, reasons, regime_val)
+
         extras = {
             "event": (
                 "strategy_regime_gate_allow"
@@ -1952,6 +1944,15 @@ class StrategyManager(_BaseStrategyManager):
             "reasons": list(reasons),
         }
 
+        if self._last_regime_gate == gate_key:
+            if (now - self._last_regime_gate_at) < self._regime_gate_cooldown:
+                return
+            self._last_regime_gate_at = now
+            log.debug("Condition met: strategy_regime_gate_unchanged", extra=extras)
+            return
+
+        self._last_regime_gate = gate_key
+        self._last_regime_gate_at = now
         if allowed:
             log.info("Condition met: strategy_regime_gate_allow", extra=extras)
         else:

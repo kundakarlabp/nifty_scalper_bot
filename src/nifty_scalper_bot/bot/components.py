@@ -523,6 +523,22 @@ class StrategyRunner:
 
     def _on_tick(self, symbol: str, price: float) -> None:
         """Process a new market data tick for *symbol*."""
+        upper_symbol = symbol.upper()
+        if (
+            upper_symbol.startswith("NSE:")
+            and "NIFTY" in upper_symbol
+            and "CE" not in upper_symbol
+            and "PE" not in upper_symbol
+            and "FUT" not in upper_symbol
+        ):
+            LOGGER.debug(
+                "Condition met: strategy_eval_skipped_index_symbol",
+                extra={
+                    "event": "strategy_eval_skipped_index_symbol",
+                    "symbol": symbol,
+                },
+            )
+            return
 
         open_positions = {
             pos.symbol: pos for pos in self._positions.get_all_positions()
