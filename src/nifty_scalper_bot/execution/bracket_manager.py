@@ -458,7 +458,7 @@ class BracketManager:
             # If SL or TP are 0.0 (invalid/missing), we MUST NOT enable active exiting.
             # This prevents the bot from seeing LTP > 0 as "Target Hit".
             status_mode = "ACTIVE" if activate_immediately else "INACTIVE"
-            if sl <= 0 or tp <= 0:
+            if sl <= 0 and tp <= 0:
                 LOGGER.warning(
                     f"⚠️ Bracket {symbol} has zero SL/TP (SL={sl}, TP={tp}). "
                     "Setting MONITORING_ONLY mode to prevent suicide exit."
@@ -892,7 +892,8 @@ class BracketManager:
         """
         import time
         now = time.time()
-        
+
+        approved_ids = set()
         with self._lock:
             for bracket, action in exits:
                 # Check cooldown
@@ -907,6 +908,7 @@ class BracketManager:
                 
                 # Mark exit in progress
                 self._exit_cooldowns[bracket.entry_order_id] = now
+                approved_ids.add(bracket.entry_order_id)
                 
                 exit_type = action["type"]
                 qty = action["qty"]
@@ -934,7 +936,7 @@ class BracketManager:
         # Fire exit orders (outside lock, can be slow)
         for bracket, action in exits:
             # Skip if we didn't actually queue this exit (cooldown, etc.)
-            if bracket.entry_order_id not in self._exit_cooldowns:
+            if bracket.entry_order_id not in approved_ids:
                 continue
             
             exit_type = action["type"]
@@ -1016,7 +1018,7 @@ class BracketManager:
         _price = None if _order_type == "MARKET" else limit_price
         
         # Place order via OrderManager
-        self.order_manager.place_order(
+        order_id = self.order_manager.place_order(
             symbol=bracket.symbol,
             side=exit_side,
             quantity=qty,
@@ -1025,6 +1027,17 @@ class BracketManager:
             tag=f"exit_{reason[:3]}_{bracket.tag[:3] if bracket.tag else 'auto'}",
             check_risk=False,
             product="MIS"
+        )
+        
+        if not order_id:
+            raise RuntimeError(
+                f"Exit order BLOCKED for {bracket.symbol} ({reason}). "
+                f"place_order returned None — bracket state must be reverted."
+            )
+        
+        LOGGER.info(
+            f"✅ Exit order placed: {bracket.symbol} | order_id={order_id} | "
+            f"type={_order_type} | reason={reason}"
         )
         
         # Cleanup if full exit
