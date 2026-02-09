@@ -89,7 +89,6 @@ class SMCStrategy(EliteStrategy):
             avg_vol = float(indicators.get("avg_volume") or 1.0) # Avoid div/0
             atr = float(indicators.get("atr") or 0.0)
             vwap = float(indicators.get("vwap") or current_price)
-            now = time_module.time()
             
             # Candle OHLC (needed for wick detection)
             high = float(indicators.get("high") or current_price)
@@ -160,10 +159,17 @@ class SMCStrategy(EliteStrategy):
                 confidence += 0.15
 
             # ✅ FIX B5: Set cooldown and dedup
+            now = time_module.time()
+
+            # Cooldown check (was missing — COOLDOWN_SECONDS defined but never used)
+            last_fire = self._cooldown_tracker.get(symbol, 0.0)
+            if now - last_fire < self.COOLDOWN_SECONDS:
+                return None
+
+            # Dedup check
             sweep_key = f"{symbol}:{signal_side}:{sweep_level:.1f}"
             if self._last_sweep_key.get(symbol) == sweep_key:
                 return None  # ✅ Exact same sweep, skip
-            now = time_module.time()
             self._cooldown_tracker[symbol] = now              # ✅ Set 120s cooldown
             self._last_sweep_key[symbol] = sweep_key 
 
