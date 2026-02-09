@@ -43,6 +43,7 @@ class VWAPProStrategy(EliteStrategy):
         "_last_valid_volume",
         "_last_valid_avg_volume",
         "_last_valid_volume_ts",
+        "_reject_reason_counts",
     )
 
     def __init__(
@@ -75,6 +76,7 @@ class VWAPProStrategy(EliteStrategy):
             "skipped_overextended": 0,
             "skipped_acceptance": 0,
         }
+        self._reject_reason_counts: Dict[str, int] = {}
         self._index_bias_missing_logged: bool = False
 
     # ------------------------------------------------------------------ #
@@ -161,6 +163,49 @@ class VWAPProStrategy(EliteStrategy):
             )
             return False
 
+    def _log_no_signal_reason(
+        self,
+        reason_code: str,
+        *,
+        symbol: str,
+        ltp: float | None = None,
+        vwap: float | None = None,
+        vol: float | None = None,
+        avg_vol: float | None = None,
+        context: Dict[str, Any] | None = None,
+    ) -> None:
+        """Args: reason_code, symbol, ltp, vwap, vol, avg_vol, context. Returns: None. Raises: Exception."""
+        try:
+            self._reject_reason_counts[reason_code] = (
+                self._reject_reason_counts.get(reason_code, 0) + 1
+            )
+            payload: Dict[str, Any] = {
+                "event": "vwap_pro_no_signal_reason",
+                "reason_code": reason_code,
+                "symbol": symbol,
+            }
+            if ltp is not None:
+                payload["ltp"] = ltp
+            if vwap is not None:
+                payload["vwap"] = vwap
+            if vol is not None:
+                payload["vol"] = vol
+            if avg_vol is not None:
+                payload["avg_vol"] = avg_vol
+            if context:
+                payload.update(context)
+            LOGGER.debug("NO SIGNAL: %s", reason_code, extra=payload)
+        except Exception as exc:
+            LOGGER.error(
+                "Failure in VWAPProStrategy._log_no_signal_reason: %s",
+                exc,
+                extra={
+                    "event": "vwap_pro_no_signal_reason_error",
+                    "symbol": symbol,
+                },
+                exc_info=exc,
+            )
+
     # ------------------------------------------------------------------ #
     # Core Signal Logic
     # ------------------------------------------------------------------ #
@@ -187,6 +232,12 @@ class VWAPProStrategy(EliteStrategy):
             self._telemetry["evaluations"] += 1
             _evals = self._telemetry["evaluations"]
             if _evals == 1 or _evals % self.TELEMETRY_LOG_EVERY == 0:
+                dominant_reject_reason = None
+                if self._reject_reason_counts:
+                    dominant_reject_reason = max(
+                        self._reject_reason_counts.items(),
+                        key=lambda item: item[1],
+                    )[0]
                 LOGGER.info(
                     f"📊 VWAPPro TELEMETRY [{symbol}]: evals={_evals} "
                     f"signals={self._telemetry['signals']} "
@@ -199,7 +250,12 @@ class VWAPProStrategy(EliteStrategy):
                     f"data={self._telemetry['skipped_data']} "
                     f"overext={self._telemetry['skipped_overextended']} "
                     f"accept={self._telemetry['skipped_acceptance']}",
-                    extra={"event": "vwap_pro_telemetry", "symbol": symbol},
+                    extra={
+                        "event": "vwap_pro_telemetry",
+                        "symbol": symbol,
+                        "dominant_reject_reason": dominant_reject_reason,
+                        "reject_counts_by_reason": dict(self._reject_reason_counts),
+                    },
                 )
 
             lock_key = f"NIFTY:{expiry}:{direction}"
@@ -222,6 +278,13 @@ class VWAPProStrategy(EliteStrategy):
                         f"🔐 STRIKE LOCK: {symbol} blocked | Active={self._strike_lock[lock_key]}",
                         extra={"event": "vwap_pro_strike_lock", "symbol": symbol},
                     )
+                self._log_no_signal_reason(
+                    "strike_lock_active",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=indicators.get("vwap"),
+                    context={"active_symbol": self._strike_lock.get(lock_key)},
+                )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -234,6 +297,17 @@ class VWAPProStrategy(EliteStrategy):
                         f"Remaining={self.COOLDOWN_SECONDS - (now - last_fire):.0f}s",
                         extra={"event": "vwap_pro_cooldown", "symbol": symbol},
                     )
+                self._log_no_signal_reason(
+                    "cooldown_active",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=indicators.get("vwap"),
+                    context={
+                        "cooldown_remaining_s": max(
+                            0.0, self.COOLDOWN_SECONDS - (now - last_fire)
+                        )
+                    },
+                )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -265,6 +339,13 @@ class VWAPProStrategy(EliteStrategy):
                         "INVALID INDEX DATA — blocking signal", extra={"symbol": symbol}
                     )
                     self._index_bias_missing_logged = True
+                self._log_no_signal_reason(
+                    "index_bias_invalid",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
+                    context={"index_ltp": index_ltp, "index_vwap": index_vwap},
+                )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -284,6 +365,17 @@ class VWAPProStrategy(EliteStrategy):
                         f"Need={'BULL' if is_ce else 'BEAR'}",
                         extra={"event": "vwap_pro_bias_reject", "symbol": symbol},
                     )
+                self._log_no_signal_reason(
+                    "index_bias_invalid",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
+                    context={
+                        "index_ltp": index_ltp,
+                        "index_vwap": index_vwap,
+                        "direction": direction,
+                    },
+                )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -294,6 +386,12 @@ class VWAPProStrategy(EliteStrategy):
                         f"⚠️ VWAP ZERO: {symbol} | price={current_price:.2f} vwap={vwap:.2f}",
                         extra={"event": "vwap_pro_zero_block", "symbol": symbol},
                     )
+                self._log_no_signal_reason(
+                    "vwap_zero_or_invalid",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
+                )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -308,6 +406,12 @@ class VWAPProStrategy(EliteStrategy):
                         f"Price={current_price:.2f} VWAP={vwap:.2f}",
                         extra={"event": "vwap_pro_opt_vwap_reject", "symbol": symbol},
                     )
+                self._log_no_signal_reason(
+                    "price_below_vwap",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
+                )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -326,6 +430,13 @@ class VWAPProStrategy(EliteStrategy):
                                 "symbol": symbol,
                             },
                         )
+                    self._log_no_signal_reason(
+                        "overextension_filter",
+                        symbol=symbol,
+                        ltp=current_price,
+                        vwap=vwap,
+                        context={"vwap_std": vwap_std, "z_score": z},
+                    )
                     self._vwap_acceptance_tracker[acc_key] = 0
                     return None
 
@@ -371,6 +482,24 @@ class VWAPProStrategy(EliteStrategy):
                                 "symbol": symbol,
                             },
                         )
+                        LOGGER.debug(
+                            "volume_below_threshold",
+                            extra={
+                                "event": "volume_below_threshold",
+                                "symbol": symbol,
+                                "vol": vol,
+                                "avg_vol": avg_vol,
+                                "required_volume": None,
+                            },
+                        )
+                    self._log_no_signal_reason(
+                        "volume_below_threshold",
+                        symbol=symbol,
+                        ltp=current_price,
+                        vwap=vwap,
+                        vol=vol,
+                        avg_vol=avg_vol,
+                    )
                     self._vwap_acceptance_tracker[acc_key] = 0
                     return None
             vol_thresh = self._dynamic_volume_threshold()
@@ -384,6 +513,29 @@ class VWAPProStrategy(EliteStrategy):
                         f"🔊 VOL GATE: {symbol} | vol={vol:.0f} < avg={avg_vol:.0f}×{vol_thresh}={avg_vol*vol_thresh:.0f}",
                         extra={"event": "vwap_pro_vol_reject", "symbol": symbol},
                     )
+                    LOGGER.debug(
+                        "volume_below_threshold",
+                        extra={
+                            "event": "volume_below_threshold",
+                            "symbol": symbol,
+                            "vol": vol,
+                            "avg_vol": avg_vol,
+                            "volume_threshold": vol_thresh,
+                            "required_volume": avg_vol * vol_thresh,
+                        },
+                    )
+                self._log_no_signal_reason(
+                    "volume_below_threshold",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
+                    vol=vol,
+                    avg_vol=avg_vol,
+                    context={
+                        "volume_threshold": vol_thresh,
+                        "required_volume": avg_vol * vol_thresh,
+                    },
+                )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None
 
@@ -394,6 +546,16 @@ class VWAPProStrategy(EliteStrategy):
                     f"⏳ ACCEPTANCE: {symbol} {direction} | "
                     f"Bar {self._vwap_acceptance_tracker[acc_key]}/{self.VWAP_ACCEPTANCE_BARS}",
                     extra={"event": "vwap_pro_acceptance", "symbol": symbol},
+                )
+                self._log_no_signal_reason(
+                    "acceptance_bars_insufficient",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
+                    context={
+                        "acceptance_bars": self._vwap_acceptance_tracker[acc_key],
+                        "required_bars": self.VWAP_ACCEPTANCE_BARS,
+                    },
                 )
                 return None
 
@@ -425,6 +587,13 @@ class VWAPProStrategy(EliteStrategy):
                         "tp": tp2,
                         "atr": atr,
                     },
+                )
+                self._log_no_signal_reason(
+                    "overextension_filter",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
+                    context={"sl": sl, "tp": tp2, "atr": atr},
                 )
                 self._vwap_acceptance_tracker[acc_key] = 0
                 return None

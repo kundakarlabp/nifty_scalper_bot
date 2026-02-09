@@ -1708,9 +1708,33 @@ class RuntimeSelfChecker:
                         extra={
                             "event": "runtime_self_check_data_freshness",
                             "symbol": symbol,
+                            "symbol_checked": symbol,
+                            "adaptive_ms": adaptive_ms,
                             "detail": detail,
+                            "detail_code": detail,
                         },
                     )
+                    if not ok:
+                        backoff_seconds = max(0.0, float(adaptive_ms) * 2.0 / 1000.0)
+                        runner = getattr(self._context, "strategy_runner", None)
+                        if runner is not None:
+                            try:
+                                runner.set_data_freshness_backoff(
+                                    backoff_seconds,
+                                    detail_code=detail,
+                                    symbol=symbol,
+                                )
+                            except Exception as exc:
+                                self._logger.error(
+                                    "Failure in RuntimeSelfChecker data freshness backoff: %s",
+                                    exc,
+                                    extra={
+                                        "event": "runtime_self_check_backoff_error",
+                                        "check": "data_freshness",
+                                        "symbol": symbol,
+                                    },
+                                    exc_info=exc,
+                                )
                     return ok, detail, payload
 
             ok, detail, meta = assess_datahub_fresh(
@@ -1728,9 +1752,33 @@ class RuntimeSelfChecker:
                 extra={
                     "event": "runtime_self_check_data_freshness",
                     "symbol": symbol,
+                    "symbol_checked": symbol,
+                    "adaptive_ms": adaptive_ms,
                     "detail": detail,
+                    "detail_code": detail,
                 },
             )
+            if not ok:
+                backoff_seconds = max(0.0, float(adaptive_ms) * 2.0 / 1000.0)
+                runner = getattr(self._context, "strategy_runner", None)
+                if runner is not None:
+                    try:
+                        runner.set_data_freshness_backoff(
+                            backoff_seconds,
+                            detail_code=detail,
+                            symbol=symbol,
+                        )
+                    except Exception as exc:
+                        self._logger.error(
+                            "Failure in RuntimeSelfChecker data freshness backoff: %s",
+                            exc,
+                            extra={
+                                "event": "runtime_self_check_backoff_error",
+                                "check": "data_freshness",
+                                "symbol": symbol,
+                            },
+                            exc_info=exc,
+                        )
 
             return ok, detail, payload
         except Exception as exc:
