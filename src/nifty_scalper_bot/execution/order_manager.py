@@ -1902,12 +1902,18 @@ class OrderManager:
                     self._register_order(details)
 
                     # C. Auto-Register Bracket
-                    if self._bracket_manager and (stop_loss or take_profit):
-                        # ... (Bracket logic same as before) ...
+                    # SKIP if caller will register separately (e.g. place_bracket_order)
+                    # Detect via tag or explicit flag — place_bracket_order always calls
+                    # register_virtual_bracket itself with tp1/trailing params.
+                    _caller_manages_bracket = any(
+                        x in normalized_tag for x in ["virtual_bracket"]
+                    ) if normalized_tag else False
+                    
+                    if self._bracket_manager and (stop_loss or take_profit) and not _caller_manages_bracket:
                         self._bracket_manager.register_virtual_bracket(
                             order_id=order_id,
                             symbol=normalized_symbol,
-                            side=normalized_side, # Use string side
+                            side=normalized_side,
                             qty=quantity,
                             price=float(price or 0.0),
                             sl=float(stop_loss) if stop_loss else 0.0,
@@ -2571,7 +2577,7 @@ class OrderManager:
         tp1_price: float | None = None,
         tp1_qty: int | None = None,
         trailing_atr_mult: float | None = None,
-    ) -> tuple[str, str, str]:
+    ) -> str | None:
         """
         Places a PHYSICAL Entry and registers a VIRTUAL Bracket.
         World-Class Upgrade: Replaces legacy OCO with internal Sniper execution.
@@ -2591,14 +2597,16 @@ class OrderManager:
             quantity=quantity,
             order_type=order_type,
             price=entry_price if entry_price > 0 else None,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             product=product or "MIS",
-            tag=tag,
+            tag=f"virtual_bracket_{tag}" if tag else "virtual_bracket",
             check_risk=True
         )
 
         if not entry_id:
             self._logger.error(f"❌ Bracket Entry Failed for {symbol}")
-            return "", "", ""
+            return None
 
         # 2. Register Virtual Bracket (Pending Fill)
         # The BracketManager will wait for 'confirm_entry_fill' to activate triggers
@@ -2622,7 +2630,7 @@ class OrderManager:
              self._logger.warning("⚠️ BracketManager not attached! Trade is naked.")
 
         # Return Entry ID (Stop/TP IDs are empty because they are virtual/dynamic)
-        return entry_id, "", ""
+        return entry_id
 
     def _register_bracket_state(self, state: BracketState) -> None:
         """Persist bracket metadata and index child orders.
