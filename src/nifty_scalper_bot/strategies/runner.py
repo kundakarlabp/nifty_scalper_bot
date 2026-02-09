@@ -2513,7 +2513,8 @@ class StrategyRunner:
             )
             if is_index_symbol:
                 self._logger.debug(
-                    "Condition met: strategy_eval_skipped_index_symbol",
+                    "DEBUG skip_strategy_eval index_symbol=%s",
+                    symbol,
                     extra={
                         "event": "strategy_eval_skipped_index_symbol",
                         "symbol": symbol,
@@ -2748,6 +2749,21 @@ class StrategyRunner:
             )
             if until > current_until:
                 self._data_freshness_backoff_until = until
+            logged_until = float(
+                getattr(self, "_data_freshness_backoff_logged_until", 0.0)
+            )
+            if until > logged_until:
+                self._data_freshness_backoff_logged_until = until
+                self._logger.info(
+                    "⏸️ STRATEGY PAUSED — Data freshness degraded",
+                    extra={
+                        "event": "strategy_eval_backoff_active",
+                        "backoff_until": self._data_freshness_backoff_until,
+                        "backoff_seconds": seconds,
+                        "detail_code": detail_code,
+                        "symbol_checked": symbol,
+                    },
+                )
             self._data_freshness_backoff_detail = detail_code
             self._data_freshness_backoff_symbol = symbol
             self._logger.debug(

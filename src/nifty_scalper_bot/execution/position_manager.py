@@ -224,6 +224,7 @@ class Position:
     trailing_stop_distance: float | None = None
     order_id: str | None = None
     realized_pnl: float = 0.0
+    state: str | None = None  # intent: track lifecycle overrides like force-closed SL
 
     @property
     def unrealized_pnl(self) -> float:
@@ -267,6 +268,7 @@ class Position:
             "trailing_stop_distance": self.trailing_stop_distance,
             "order_id": self.order_id,
             "realized_pnl": self.realized_pnl,
+            "state": self.state,
         }
 
     @staticmethod
@@ -291,6 +293,7 @@ class Position:
                 else None
             ),
             realized_pnl=float(payload.get("realized_pnl", 0.0)),
+            state=str(payload.get("state")) if payload.get("state") is not None else None,
         )
 
 

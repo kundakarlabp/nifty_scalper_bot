@@ -4636,6 +4636,7 @@ class OrderManager:
         Emit a rich, insightful 'Situation Room' report every 60 seconds.
         Shows active positions, P&L, distance to stops, and current battle plan.
         """
+        # intent: suppress log spam by emitting only on meaningful state changes
         try:
             # 1. Gather Active Positions
             positions = list(self._positions.get_open_positions())
@@ -4644,6 +4645,11 @@ class OrderManager:
                 return
 
             report = ["\n📊 ------------------ SITUATION REPORT ------------------"]
+            state_changed = False
+            state_cache = getattr(self, "_last_status_report_state", None)
+            if state_cache is None:
+                state_cache = {}
+                self._last_status_report_state = state_cache
             
             total_unrealized_pnl = 0.0
             
@@ -4740,6 +4746,33 @@ class OrderManager:
                         else:
                             insight = "⚠️ BracketManager not available"
 
+                # Track meaningful state change triggers
+                pnl_sign = "profit" if raw_pnl > 0 else "loss"
+                danger_flag = False
+                if ltp > 0 and sl_info not in {"NONE ⚠️", "NONE"} and entry > 0:
+                    try:
+                        sl_val = float(sl_info)
+                        risk_gap = abs(entry - sl_val) if entry > 0 else 0.0
+                        dist_to_sl = abs(ltp - sl_val)
+                        danger_flag = risk_gap > 0 and dist_to_sl < (risk_gap * 0.25)
+                    except (TypeError, ValueError):
+                        danger_flag = False
+                insight_severity = "neutral"
+                if "DANGER" in insight or "ORPHAN" in insight:
+                    insight_severity = "high"
+                elif "Sniper" in insight or "Trailing" in insight:
+                    insight_severity = "medium"
+
+                prev_state = state_cache.get(symbol)
+                current_state = {
+                    "pnl_sign": pnl_sign,
+                    "danger": danger_flag,
+                    "insight_severity": insight_severity,
+                }
+                if prev_state != current_state:
+                    state_cache[symbol] = current_state
+                    state_changed = True
+
                 # Format the Block
                 line = (
                     f"{status_icon} {symbol} | {side} {qty} Qty | Strat: {tag}\n"
@@ -4752,8 +4785,8 @@ class OrderManager:
 
             report.append(f"\n💰 Total Active P&L: {total_unrealized_pnl:+.2f}")
             report.append("-------------------------------------------------------")
-            
-            self._logger.info("\n".join(report))
+            if state_changed:
+                self._logger.info("\n".join(report))
 
         except Exception as e:
             self._logger.error(f"Status Report Failed: {e}")
@@ -5098,6 +5131,9 @@ class OrderManager:
                     # ✅ FIX: Kill stuck orders
                     self._check_zombie_orders()
                     last_poll_time = now
+
+                # intent: central stop-loss monitoring independent of strategy cadence
+                self._check_force_stop_losses()
                 
                 # Slow Status Report (Every 60 seconds)
                 if now - last_report_time >= 60.0:
@@ -5108,6 +5144,97 @@ class OrderManager:
                 self._logger.error(f"Monitor loop error: {exc}", exc_info=True)
                 time.sleep(1.0)
         self._logger.info("Order monitoring thread stopped")
+
+    def _check_force_stop_losses(self) -> None:
+        """Args: None. Returns: None. Raises: Exception."""
+        self._logger.debug(
+            "Entered OrderManager._check_force_stop_losses",
+            extra={"event": "order_manager_force_sl_enter"},
+        )
+        try:
+            positions = list(self._positions.get_open_positions())
+            if not positions:
+                return
+            for pos in positions:
+                symbol = getattr(pos, "symbol", "") or ""
+                side = getattr(pos, "side", "LONG")
+                qty = int(getattr(pos, "quantity", 0) or 0)
+                stop_loss = getattr(pos, "stop_loss", None)
+                if qty <= 0 or stop_loss is None or float(stop_loss) <= 0:
+                    continue
+                if getattr(pos, "state", None) == "force_closed_by_sl":
+                    continue
+                ltp = None
+                if self._market_data is not None:
+                    ltp = self._market_data.get_latest_price(symbol)
+                if ltp is None:
+                    ltp = getattr(pos, "current_price", None)
+                if ltp is None:
+                    continue
+                ltp_val = float(ltp)
+                if ltp_val <= 0:
+                    continue
+                stop_val = float(stop_loss)
+                sl_hit = (
+                    side == "LONG" and ltp_val <= stop_val
+                ) or (side == "SHORT" and ltp_val >= stop_val)
+                if not sl_hit:
+                    continue
+                pos.state = "force_closed_by_sl"
+                try:
+                    self._positions.save_state()
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        "Failure in OrderManager._check_force_stop_losses: %s",
+                        exc,
+                        extra={
+                            "event": "order_manager_force_sl_state_error",
+                            "symbol": symbol,
+                        },
+                        exc_info=exc,
+                    )
+                self._logger.info(
+                    f"❌ STOP LOSS HIT → FORCE EXIT | symbol={symbol} "
+                    f"entry={float(getattr(pos, 'entry_price', 0.0)):.2f} "
+                    f"sl={stop_val:.2f} ltp={ltp_val:.2f}",
+                    extra={
+                        "event": "force_stop_loss_exit",
+                        "symbol": symbol,
+                        "entry": float(getattr(pos, "entry_price", 0.0)),
+                        "sl": stop_val,
+                        "ltp": ltp_val,
+                        "side": side,
+                        "quantity": qty,
+                    },
+                )
+                exit_side = "SELL" if side == "LONG" else "BUY"
+                try:
+                    self._place_exit_order(
+                        symbol=symbol,
+                        side=exit_side,
+                        quantity=abs(qty),
+                        product=getattr(pos, "product", "MIS"),
+                        tag="FORCE_SL_EXIT",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        "Failure in OrderManager._check_force_stop_losses: %s",
+                        exc,
+                        extra={
+                            "event": "force_stop_loss_exit_failed",
+                            "symbol": symbol,
+                            "side": exit_side,
+                            "quantity": qty,
+                        },
+                        exc_info=exc,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in OrderManager._check_force_stop_losses: %s",
+                exc,
+                extra={"event": "order_manager_force_sl_error"},
+                exc_info=exc,
+            )
 
     def _handle_order_filled(self, order: OrderDetails) -> None:
         """Callback when order is filled."""
