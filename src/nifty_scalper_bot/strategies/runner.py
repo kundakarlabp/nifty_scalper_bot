@@ -1925,11 +1925,6 @@ class StrategyRunner:
             extra={"event": "tick_enter", "symbol": symbol},
         )
         try:
-            now = datetime.now(timezone.utc)
-
-            if "FUT" in symbol.upper():
-                return
-
             # =================================================================
             # PHASE -1: BRACKET MANAGER TICK FORWARDING (MUST be before ANY return)
             # =================================================================
@@ -1953,6 +1948,9 @@ class StrategyRunner:
                         f"Bracket tick forward failed: {_bm_err}",
                         extra={"event": "bracket_tick_error", "symbol": symbol},
                     )
+
+            if "FUT" in symbol.upper():
+                return
 
             # =================================================================
             # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
