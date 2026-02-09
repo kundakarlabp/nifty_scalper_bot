@@ -62,33 +62,23 @@ _THROTTLE_LOCK = threading.Lock()
 
 
 def log_throttled(
-    logger: Any,
-    key: str,
-    msg: str,
-    interval_sec: float = 60.0,
-    level: int | str = logging.INFO,
-    extra: dict[str, Any] | None = None,
+    logger: Any, key: str, msg: str, interval_sec: float = 60.0, level: str = "info"
 ) -> None:
-    """Log throttled message. Args: logger, key, msg. Returns: None. Raises: Exception."""
-    try:
-        with _THROTTLE_LOCK:
-            now = time.time()
-            last_time = _THROTTLE_CACHE.get(key, 0.0)
-            if now - last_time < interval_sec:
-                return
-            _THROTTLE_CACHE[key] = now
+    """Log a message only if 'interval_sec' has passed since the last log for 'key'."""
+    with _THROTTLE_LOCK:
+        now = time.time()
+        last_time = _THROTTLE_CACHE.get(key, 0.0)
+        if now - last_time < interval_sec:
+            return
+        _THROTTLE_CACHE[key] = now
 
-        # Normalize log level (accept str or logging.* int)
-        if isinstance(level, int):
-            logger.log(level, msg, extra=extra or {})
-        else:
-            log_method = getattr(logger, str(level).lower(), logger.info)
-            if extra:
-                log_method(msg, extra=extra)
-            else:
-                log_method(msg)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failure in log_throttled: %s", exc, exc_info=True)
+    # Normalize log level (accept str or logging.* int)
+    if isinstance(level, int):
+        log_method = logger.log
+        log_method(level, msg)
+    else:
+        log_method = getattr(logger, str(level).lower(), logger.info)
+        log_method(msg)
 
 
 _STRATEGY_SKIP_COUNTER = Counter(
@@ -1662,9 +1652,7 @@ class StrategyRunner:
             # Check if symbol or underlying has pending order
             if symbol in self._orders_in_flight:
                 elapsed = now - self._orders_in_flight[symbol]
-                self._logger.debug(
-                    f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s"
-                )
+                self._logger.debug(f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s")
                 return True
 
             if (
@@ -1925,32 +1913,37 @@ class StrategyRunner:
             extra={"event": "tick_enter", "symbol": symbol},
         )
         try:
+            now = datetime.now(timezone.utc)
+
+            if "FUT" in symbol.upper():
+                return
+
             # =================================================================
-            # PHASE -1: BRACKET MANAGER TICK FORWARDING (MUST be before ANY return)
+            # BRACKET MANAGER TICK FORWARDING (CRITICAL — MUST BE FIRST)
+            # The bracket manager must receive every tick for active positions
+            # BEFORE any early return (market closed, stale tick, etc.)
+            # Without this, SL/TP/trailing logic never fires.
             # =================================================================
-            # CRITICAL: The bracket manager monitors SL/TP/trailing for ALL
-            # active positions. It MUST receive every tick regardless of
-            # market hours, stale-tick status, or any other condition.
-            # Without this, stop losses and take profits NEVER fire.
             if self._bracket_manager:
                 try:
-                    _ltp_raw = (
+                    _ltp = (
                         tick.get("ltp")
                         or tick.get("last_price")
                         or tick.get("price")
                         or 0.0
                     )
-                    _ltp = float(_ltp_raw)
-                    if _ltp > 0:
-                        self._bracket_manager.on_tick(symbol, _ltp)
-                except Exception as _bm_err:
+                    _ltp_f = float(_ltp)
+                    if _ltp_f > 0:
+                        self._bracket_manager.on_tick(symbol, _ltp_f)
+                except Exception as _bm_exc:
                     self._logger.debug(
-                        f"Bracket tick forward failed: {_bm_err}",
-                        extra={"event": "bracket_tick_error", "symbol": symbol},
+                        "BracketManager tick-forward failed: %s",
+                        _bm_exc,
+                        extra={
+                            "event": "bracket_tick_forward_error",
+                            "symbol": symbol,
+                        },
                     )
-
-            if "FUT" in symbol.upper():
-                return
 
             # =================================================================
             # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
@@ -1973,6 +1966,17 @@ class StrategyRunner:
                         if hasattr(self, "_adopt_orphan_positions"):
                             self._adopt_orphan_positions()
                         # ✅ DO NOT return — tick must continue flowing for bracket SL/TP monitoring
+
+            # 2. Market Time Check (Now 'now' is valid!)
+            if not self._is_market_open(now):
+                log_throttled(
+                    self._logger,
+                    f"market_closed_{symbol}",
+                    "Condition met: market_closed",
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                )
+                return
 
             # =================================================================
             # PHASE 1: EXTRACT DATA FIRST (Must happen before any logging)
@@ -2038,31 +2042,16 @@ class StrategyRunner:
                 "last_traded_qty",
             )
             source = tick.get("source", "unknown")
-            is_seed = bool(tick.get("seed"))
-
-            if is_seed and price <= 0:
-                log_throttled(
-                    self._logger,
-                    f"seed_tick_price_zero_{symbol}",
-                    f"Condition met: seed_tick_price_missing for {symbol}",
-                    interval_sec=120.0,
-                    level=logging.INFO,
-                )
-                return
 
             # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
             volume = 0
-            first_tick_seen = symbol not in self._last_cumulative_volume
             if raw_volume > 0:
                 last_cum = self._last_cumulative_volume.get(
                     symbol, -1
                 )  # ✅ Sentinel -1 (not 0)
                 if last_cum < 0:  # ✅ First tick detected by sentinel
                     # FIRST tick for this symbol — store baseline, DON'T use as bar volume
-                    if last_quantity > 0:
-                        volume = last_quantity
-                    else:
-                        volume = raw_volume
+                    volume = 0  # ✅ Bar 1 gets volume=0, not 318M
                 elif raw_volume >= last_cum:
                     volume = raw_volume - last_cum  # Normal delta
                 else:
@@ -2073,21 +2062,28 @@ class StrategyRunner:
                 volume = last_quantity
                 log_throttled(
                     self._logger,
-                    f'tick_volume_fallback_{symbol}',
-                    'Condition met: tick_volume_last_quantity',
+                    f"tick_volume_fallback_{symbol}",
+                    "Condition met: tick_volume_last_quantity",
                     interval_sec=60.0,
                     level=logging.INFO,
                 )
-            elif first_tick_seen:
-                volume = 1
-                self._last_cumulative_volume[symbol] = raw_volume
+
+            # =================================================================
+            # PHASE 2: DATA VALIDATION
+            # =================================================================
+
+            # Stale tick check (increased threshold for REST polling to prevent false positives)
+            stale_threshold = 30.0 if source in ("rest", "polling") else 10.0
+
+            if tick_age > stale_threshold:
                 log_throttled(
                     self._logger,
-                    f'tick_volume_seeded_{symbol}',
-                    'Condition met: tick_volume_seeded_first_tick',
-                    interval_sec=60.0,
-                    level=logging.INFO,
+                    f"stale_tick_{symbol}",
+                    f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, threshold={stale_threshold}s)",
+                    interval_sec=30.0,
+                    level=logging.WARNING,
                 )
+                return
 
             price_source = "ltp"
             price_from_cache = False
@@ -2162,39 +2158,6 @@ class StrategyRunner:
                     interval_sec=60.0,
                     level=logging.WARNING,
                 )
-                return
-
-            if self._bracket_manager and price > 0:
-                self._bracket_manager.on_tick(symbol, price)
-
-            skip_strategy = False
-            if not self._is_market_open(now):
-                log_throttled(
-                    self._logger,
-                    f'market_closed_{symbol}',
-                    'Condition met: market_closed',
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                )
-                skip_strategy = True
-
-            # Stale tick check (increased threshold for REST polling to prevent false positives)
-            stale_threshold = 30.0 if source in ('rest', 'polling') else 10.0
-
-            if tick_age > stale_threshold:
-                log_throttled(
-                    self._logger,
-                    f'stale_tick_{symbol}',
-                    (
-                        f'⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, '
-                        f'threshold={stale_threshold}s)'
-                    ),
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                )
-                skip_strategy = True
-
-            if skip_strategy:
                 return
 
             # Volume validity check (relaxed warnings for REST mode)
@@ -2525,44 +2488,6 @@ class StrategyRunner:
             # =================================================================
 
             signal = generated_signal
-            upper_symbol = symbol.upper()
-            is_index_symbol = (
-                upper_symbol.startswith("NSE:")
-                and "NIFTY" in upper_symbol
-                and "CE" not in upper_symbol
-                and "PE" not in upper_symbol
-                and "FUT" not in upper_symbol
-            )
-            if is_index_symbol:
-                self._logger.debug(
-                    "DEBUG skip_strategy_eval index_symbol=%s",
-                    symbol,
-                    extra={
-                        "event": "strategy_eval_skipped_index_symbol",
-                        "symbol": symbol,
-                    },
-                )
-                return
-
-            backoff_until = float(getattr(self, "_data_freshness_backoff_until", 0.0))
-            if backoff_until and time_module.time() < backoff_until:
-                remaining = max(0.0, backoff_until - time_module.time())
-                self._logger.debug(
-                    "strategy_eval_skipped_stale_data",
-                    extra={
-                        "event": "strategy_eval_skipped_stale_data",
-                        "symbol": symbol,
-                        "backoff_until": backoff_until,
-                        "remaining_s": remaining,
-                        "detail_code": getattr(
-                            self, "_data_freshness_backoff_detail", None
-                        ),
-                        "symbol_checked": getattr(
-                            self, "_data_freshness_backoff_symbol", None
-                        ),
-                    },
-                )
-                return
 
             # If no immediate signal, delegate to complex StrategyManager
             if signal is None and self._config.min_indicator_bars:
@@ -2574,28 +2499,18 @@ class StrategyRunner:
                         last_bar_ts = self._last_bar_ts.get(symbol)
                         if last_bar_ts and state._last_eval_bar_ts:
                             if last_bar_ts <= state._last_eval_bar_ts:
-                                logged_map = getattr(
-                                    self, "_same_bar_skip_logged", None
+                                log_throttled(
+                                    self._logger,
+                                    f"strategy_eval_skip_bar_{symbol}",
+                                    "Condition met: strategy_eval_skipped_same_bar",
+                                    interval_sec=30.0,
+                                    level=logging.INFO,
+                                    extra={
+                                        "event": "strategy_eval_skipped_same_bar",
+                                        "symbol": symbol,
+                                        "bar_ts": last_bar_ts.isoformat(),
+                                    },
                                 )
-                                if logged_map is None:
-                                    logged_map = {}
-                                    self._same_bar_skip_logged = logged_map
-                                extra_payload = {
-                                    "event": "strategy_eval_skipped_same_bar",
-                                    "symbol": symbol,
-                                    "bar_ts": last_bar_ts.isoformat(),
-                                }
-                                if logged_map.get(symbol) == last_bar_ts:
-                                    self._logger.debug(
-                                        "Condition met: strategy_eval_skipped_same_bar",
-                                        extra=extra_payload,
-                                    )
-                                else:
-                                    logged_map[symbol] = last_bar_ts
-                                    self._logger.info(
-                                        "Condition met: strategy_eval_skipped_same_bar",
-                                        extra=extra_payload,
-                                    )
                                 return
                         if last_bar_ts:
                             bar_age = (now - last_bar_ts).total_seconds()
@@ -2617,31 +2532,6 @@ class StrategyRunner:
                         # Limit evaluation frequency (max 2 per second)
                         if last_eval and (now - last_eval).total_seconds() < 0.5:
                             return
-                        cooldown_map = getattr(self, "_pyramid_reject_cooldown", {})
-                        if cooldown_map:
-                            now_ts = time_module.time()
-                            cooldown_symbol = self._normalize_symbol(symbol)
-                            directions = (
-                                ["BUY"] if self._options_long_only else ["BUY", "SELL"]
-                            )
-                            for direction in directions:
-                                cooldown_key = (cooldown_symbol, direction)
-                                cooldown_until = cooldown_map.get(cooldown_key)
-                                if cooldown_until and now_ts < cooldown_until:
-                                    self._logger.debug(
-                                        "pyramid_cooldown_active",
-                                        extra={
-                                            "event": "pyramid_cooldown_active",
-                                            "symbol": cooldown_symbol,
-                                            "direction": direction,
-                                            "cooldown_remaining_s": max(
-                                                0.0, cooldown_until - now_ts
-                                            ),
-                                        },
-                                    )
-                                    return
-                                if cooldown_until and now_ts >= cooldown_until:
-                                    cooldown_map.pop(cooldown_key, None)
                         state._last_strategy_eval = now
                         if last_bar_ts:
                             state._last_eval_bar_ts = last_bar_ts
@@ -2656,6 +2546,7 @@ class StrategyRunner:
                         interval_sec=30.0,
                         level=logging.INFO,
                     )
+
                     is_ready = self._indicator_engine.is_ready(
                         symbol, self._config.min_indicator_bars
                     )
@@ -2671,52 +2562,14 @@ class StrategyRunner:
                         )
 
                         signal = self._strategy_manager.generate_signal(symbol, price)
-                        cycle_stats = getattr(self, "_strategy_cycle_stats", None)
-                        if cycle_stats is None:
-                            cycle_stats = {}
-                            self._strategy_cycle_stats = cycle_stats
-                        bar_key = (
-                            last_bar_ts.isoformat() if last_bar_ts else now.isoformat()
-                        )
-                        cycle = cycle_stats.setdefault(
-                            bar_key,
-                            {
-                                "symbols": set(),
-                                "total_signals": 0,
-                                "reject_reason_counts": defaultdict(int),
-                            },
-                        )
-                        cycle["symbols"].add(symbol)
                         if signal is None:
-                            cycle["reject_reason_counts"]["no_signal"] += 1
-                        else:
-                            cycle["total_signals"] += 1
-                        expected_symbols = [
-                            sym
-                            for sym in self._active_symbols
-                            if not (
-                                sym.upper().startswith("NSE:")
-                                and "NIFTY" in sym.upper()
-                                and "CE" not in sym.upper()
-                                and "PE" not in sym.upper()
-                                and "FUT" not in sym.upper()
+                            log_throttled(
+                                self._logger,
+                                f"no_signal_manager_{symbol}",
+                                f"📉 Strategy Manager evaluated {symbol}: NO SIGNAL",
+                                interval_sec=30.0,
+                                level=logging.INFO,
                             )
-                        ]
-                        if expected_symbols and len(cycle["symbols"]) >= len(
-                            expected_symbols
-                        ):
-                            self._logger.info(
-                                "strategy_cycle_summary",
-                                extra={
-                                    "event": "strategy_cycle_summary",
-                                    "total_symbols": len(cycle["symbols"]),
-                                    "total_signals": cycle["total_signals"],
-                                    "reject_reason_counts": dict(
-                                        cycle["reject_reason_counts"]
-                                    ),
-                                },
-                            )
-                            cycle_stats.pop(bar_key, None)
                     else:
                         # ✅ DIAGNOSTIC LOG: Explain why no evaluation happened
                         log_throttled(
@@ -2753,58 +2606,6 @@ class StrategyRunner:
         except Exception as e:
             self._logger.error("Failure in _on_tick: %s", e, exc_info=True)
             return
-
-    def set_data_freshness_backoff(
-        self,
-        backoff_seconds: float,
-        *,
-        detail_code: str | None = None,
-        symbol: str | None = None,
-    ) -> None:
-        """Args: backoff_seconds, detail_code, symbol. Returns: None. Raises: Exception."""
-        try:
-            seconds = max(float(backoff_seconds), 0.0)
-            now_ts = time_module.time()
-            until = now_ts + seconds
-            current_until = float(
-                getattr(self, "_data_freshness_backoff_until", 0.0)
-            )
-            if until > current_until:
-                self._data_freshness_backoff_until = until
-            logged_until = float(
-                getattr(self, "_data_freshness_backoff_logged_until", 0.0)
-            )
-            if until > logged_until:
-                self._data_freshness_backoff_logged_until = until
-                self._logger.info(
-                    "⏸️ STRATEGY PAUSED — Data freshness degraded",
-                    extra={
-                        "event": "strategy_eval_backoff_active",
-                        "backoff_until": self._data_freshness_backoff_until,
-                        "backoff_seconds": seconds,
-                        "detail_code": detail_code,
-                        "symbol_checked": symbol,
-                    },
-                )
-            self._data_freshness_backoff_detail = detail_code
-            self._data_freshness_backoff_symbol = symbol
-            self._logger.debug(
-                "Condition met: strategy_eval_backoff_set",
-                extra={
-                    "event": "strategy_eval_backoff_set",
-                    "backoff_seconds": seconds,
-                    "backoff_until": self._data_freshness_backoff_until,
-                    "detail_code": detail_code,
-                    "symbol_checked": symbol,
-                },
-            )
-        except Exception as exc:
-            self._logger.error(
-                "Failure in StrategyRunner.set_data_freshness_backoff: %s",
-                exc,
-                extra={"event": "strategy_eval_backoff_error"},
-                exc_info=exc,
-            )
 
     def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
         """
@@ -3221,24 +3022,6 @@ class StrategyRunner:
                         f"Already active on {active_contract.symbol} | "
                         "Pyramiding Disabled",
                         extra={"event": "signal_pyramid_reject", "symbol": base_symbol},
-                    )
-                    cooldown_seconds = 15.0
-                    cooldown_map = getattr(self, "_pyramid_reject_cooldown", None)
-                    if cooldown_map is None:
-                        cooldown_map = {}
-                        self._pyramid_reject_cooldown = cooldown_map
-                    cooldown_key = (base_symbol, signal.action)
-                    cooldown_map[cooldown_key] = (
-                        time_module.time() + cooldown_seconds
-                    )
-                    self._logger.debug(
-                        "Condition met: pyramid_reject_cooldown_set",
-                        extra={
-                            "event": "pyramid_reject_cooldown_set",
-                            "symbol": base_symbol,
-                            "direction": signal.action,
-                            "cooldown_seconds": cooldown_seconds,
-                        },
                     )
                     with self._lock:
                         if state:
