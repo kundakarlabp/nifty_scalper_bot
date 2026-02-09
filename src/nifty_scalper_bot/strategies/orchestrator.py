@@ -10,9 +10,9 @@ Strategy orchestration utilities for capital and correlation controls.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import os
 from threading import RLock
 from typing import Any, Iterable, Mapping
 
@@ -34,7 +34,7 @@ class ActiveAllocation:
     """Track strategies actively controlling an underlying."""
 
     strategy: str
-    tags: tuple[str, ...]
+    tags: tuple[str, ...] 
     timestamp: datetime
 
 
@@ -100,19 +100,9 @@ class StrategyOrchestrator:
         indicators: Mapping[str, Any],
         position_manager: Any,
     ) -> Any | None:
-        """Return signal when allowed else ``None`` if blocked.
-
-        Args:
-            signal: Strategy signal payload to evaluate.
-            indicators: Market indicator snapshot for the symbol.
-            position_manager: Position tracker for exposure checks.
-
-        Returns:
-            The original signal when allowed; otherwise ``None``.
-
-        Raises:
-            None.
-
+        """
+        Return signal when allowed else ``None`` if blocked.
+        
         ✅ PRODUCTION FIX v2:
         - All filter rejections now log at INFO level for visibility
         - Reduced default rate limits for better signal throughput
@@ -122,13 +112,13 @@ class StrategyOrchestrator:
         - Added single-underlying constraint
         """
         import time
-
+        
         symbol = getattr(signal, "symbol", "")
         action = getattr(signal, "action", "")
         confidence = getattr(signal, "confidence", 0.0)
-
+        
         self._skip_reason = ""  # Reset skip reason
-
+        
         self._logger.debug(
             f"🔍 Orchestrator evaluating: {symbol} | {action} | conf={confidence:.2f}",
             extra={
@@ -137,34 +127,31 @@ class StrategyOrchestrator:
                 "action": action,
             },
         )
-
+        
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX 1: EARLY TIME GUARD
         # ═══════════════════════════════════════════════════════════
         try:
-            from nifty_scalper_bot.utils.market_hours import (
-                get_time_status,
-                is_market_hours_cached,
-            )
-
+            from nifty_scalper_bot.utils.market_hours import is_market_hours_cached, get_time_status
+            
             if not is_market_hours_cached():
                 _, reason = get_time_status()
                 self._logger.info(
                     f"⏰ MARKET CLOSED: {symbol} blocked | Reason: {reason}",
-                    extra={"event": "orchestrator_market_closed", "symbol": symbol},
+                    extra={"event": "orchestrator_market_closed", "symbol": symbol}
                 )
                 self._set_skip_reason("market_closed")
                 return None
         except ImportError:
             pass
-
+        
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX 2: BLOCK FUTURES TRADING
         # ═══════════════════════════════════════════════════════════
         if self._is_futures(symbol):
             self._logger.info(
                 f"🚫 FUTURES BLOCKED: {symbol} (Options Only Mode)",
-                extra={"event": "orchestrator_futures_blocked", "symbol": symbol},
+                extra={"event": "orchestrator_futures_blocked", "symbol": symbol}
             )
             self._set_skip_reason("futures_blocked")
             return None
@@ -173,10 +160,10 @@ class StrategyOrchestrator:
         # 🛡️ FIX 3: BLOCK SELL SIGNALS FOR OPTIONS BUYING STRATEGY
         # ═══════════════════════════════════════════════════════════
         options_long_only = os.getenv("OPTIONS_LONG_ONLY", "true").lower() == "true"
-
+        
         if options_long_only and action == "SELL":
             is_position_close = False
-
+            
             if position_manager:
                 try:
                     pos = position_manager.get_position(symbol)
@@ -184,27 +171,24 @@ class StrategyOrchestrator:
                         is_position_close = True
                 except Exception:
                     pass
-
+            
             if not is_position_close:
                 self._logger.info(
                     f"🛡️ SELL BLOCKED: {symbol} (Options Long Only mode, no position to close)",
-                    extra={"event": "orchestrator_sell_blocked", "symbol": symbol},
+                    extra={"event": "orchestrator_sell_blocked", "symbol": symbol}
                 )
                 self._set_skip_reason("sell_blocked_long_only")
                 return None
-
+        
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX 6: DIRECTION CONFLICT GUARD (No simultaneous CE+PE)
         # ✅ Added 6 Feb 2026: Prevents bot from taking both CE and PE trades
         # ═══════════════════════════════════════════════════════════
-        _direction = None
         if action == "BUY":
             import time as _t
-
             _sym_upper = symbol.upper()
             _direction = (
-                "CE"
-                if _sym_upper.endswith("CE")
+                "CE" if _sym_upper.endswith("CE")
                 else ("PE" if _sym_upper.endswith("PE") else None)
             )
             _dir_cooldown = float(os.getenv("DIRECTION_LOCK_SECONDS", "600"))  # 10 min
@@ -228,57 +212,45 @@ class StrategyOrchestrator:
                     self._set_skip_reason("direction_conflict")
                     return None
 
+            # Direction lock deferred to after ALL checks pass (was here before,
+            # but capital/correlation rejections would leave direction locked)
+
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX 4: SIGNAL FLOOD PREVENTION (Rate Limiting)
         # ✅ CHANGED: Default reduced from 5.0 to 2.0 seconds
         # ✅ CHANGED: Log level from DEBUG to INFO
         # ═══════════════════════════════════════════════════════════
-        signal_cooldown = float(
-            os.getenv("ORCHESTRATOR_SIGNAL_COOLDOWN", "2.0")
-        )  # ✅ Reduced
+        signal_cooldown = float(os.getenv("ORCHESTRATOR_SIGNAL_COOLDOWN", "2.0"))  # ✅ Reduced
         now = time.time()
-
-        if (
-            action in {"BUY", "SELL"}
-            and (now - self._last_signal_time) < signal_cooldown
-        ):
+        
+        if action in {"BUY", "SELL"} and (now - self._last_signal_time) < signal_cooldown:
             elapsed = now - self._last_signal_time
             self._logger.info(  # ✅ CHANGED: DEBUG → INFO
                 f"⏳ RATE LIMIT: {symbol} | Wait {signal_cooldown - elapsed:.1f}s (global {signal_cooldown}s cooldown)",
-                extra={
-                    "event": "orchestrator_rate_limit",
-                    "symbol": symbol,
-                    "cooldown": signal_cooldown,
-                },
+                extra={"event": "orchestrator_rate_limit", "symbol": symbol, "cooldown": signal_cooldown}
             )
             self._set_skip_reason("global_rate_limit")
             return None
-
+        
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX 5: SINGLE UNDERLYING CONSTRAINT
         # ✅ CHANGED: Default reduced from 30.0 to 10.0 seconds
         # ✅ CHANGED: Log level from DEBUG to INFO
         # ═══════════════════════════════════════════════════════════
         underlying = self._normalize_underlying(symbol)
-
-        pending_cooldown = float(
-            os.getenv("UNDERLYING_SIGNAL_COOLDOWN", "10.0")
-        )  # ✅ Reduced
+        
+        pending_cooldown = float(os.getenv("UNDERLYING_SIGNAL_COOLDOWN", "10.0"))  # ✅ Reduced
         last_underlying_signal = self._pending_underlyings.get(underlying, 0.0)
-
+        
         if action in {"BUY"} and (now - last_underlying_signal) < pending_cooldown:
             elapsed = now - last_underlying_signal
             self._logger.info(  # ✅ CHANGED: DEBUG → INFO
                 f"🛡️ UNDERLYING LIMIT: {symbol} | {underlying} | Wait {pending_cooldown - elapsed:.1f}s",
-                extra={
-                    "event": "orchestrator_underlying_limit",
-                    "symbol": symbol,
-                    "underlying": underlying,
-                },
+                extra={"event": "orchestrator_underlying_limit", "symbol": symbol, "underlying": underlying}
             )
             self._set_skip_reason("underlying_rate_limit")
             return None
-
+        
         # ═══════════════════════════════════════════════════════════
         # STRATEGY ALLOCATION CHECKS
         # ═══════════════════════════════════════════════════════════
@@ -289,10 +261,10 @@ class StrategyOrchestrator:
                 self._pending_underlyings[underlying] = now
             self._logger.info(
                 f"✅ SIGNAL PASSED (no strategy allocation): {symbol} | {action}",
-                extra={"event": "orchestrator_pass_no_allocation", "symbol": symbol},
+                extra={"event": "orchestrator_pass_no_allocation", "symbol": symbol}
             )
             return signal
-
+            
         allocation = self._allocations.get(strategy_name)
         if allocation is None:
             if action in {"BUY"}:
@@ -300,13 +272,13 @@ class StrategyOrchestrator:
                 self._pending_underlyings[underlying] = now
             self._logger.info(
                 f"✅ SIGNAL PASSED (strategy not registered): {symbol} | {action} | {strategy_name}",
-                extra={"event": "orchestrator_pass_unregistered", "symbol": symbol},
+                extra={"event": "orchestrator_pass_unregistered", "symbol": symbol}
             )
             return signal
-
+            
         if action not in {"BUY", "SELL"}:
             return signal
-
+            
         if not underlying:
             return signal
 
@@ -321,7 +293,7 @@ class StrategyOrchestrator:
             )
             self._set_skip_reason("orchestrator_capital")
             return None
-
+            
         if self._is_correlated(underlying, position_manager):
             self._logger.info(
                 f"🔗 CORRELATION BLOCK: {symbol} | {underlying} already active",
@@ -333,50 +305,35 @@ class StrategyOrchestrator:
             )
             self._set_skip_reason("orchestrator_correlation")
             return None
-
+            
         if not self._futures_context_ready(indicators):
             self._logger.debug(
                 "Futures context missing, but allowing Option trade.",
-                extra={
-                    "event": "orchestrator_futures_context_missing",
-                    "symbol": symbol,
-                },
+                extra={"event": "orchestrator_futures_context_missing", "symbol": symbol}
             )
 
         # Update rate limit timestamps on successful pass
         if action in {"BUY"}:
             self._last_signal_time = now
             self._pending_underlyings[underlying] = now
-
+            
+            # Lock direction ONLY after ALL checks pass
+            _sym_upper = symbol.upper()
+            _final_direction = (
+                "CE" if _sym_upper.endswith("CE")
+                else ("PE" if _sym_upper.endswith("PE") else None)
+            )
+            if _final_direction:
+                import time as _t
+                self._active_direction = _final_direction
+                self._active_direction_symbol = symbol
+                self._direction_lock_time = _t.time()
+        
         self._logger.info(
             f"✅ SIGNAL APPROVED: {symbol} | {action} | conf={confidence:.2f} | Strategy: {strategy_name}",
-            extra={
-                "event": "orchestrator_approved",
-                "symbol": symbol,
-                "action": action,
-            },
+            extra={"event": "orchestrator_approved", "symbol": symbol, "action": action}
         )
-
-        if action in {"BUY"} and _direction:
-            try:
-                self._active_direction = _direction
-                self._active_direction_symbol = symbol
-                self._direction_lock_time = time.time()
-                self._logger.info(
-                    "Condition met: orchestrator_direction_lock_set",
-                    extra={
-                        "event": "orchestrator_direction_lock_set",
-                        "symbol": symbol,
-                        "direction": _direction,
-                    },
-                )
-            except Exception as exc:
-                self._logger.error(
-                    "Failure in StrategyOrchestrator.filter_signal: %s",
-                    exc,
-                    exc_info=True,
-                )
-
+        
         return signal
 
     def notify_submission(self, signal: Any, underlying: str) -> None:
@@ -429,10 +386,10 @@ class StrategyOrchestrator:
     def _is_futures(self, symbol: str) -> bool:
         """Check if symbol is a futures contract."""
         normalized = symbol.strip().upper()
-
+        
         if normalized.endswith("CE") or normalized.endswith("PE"):
             return False
-
+            
         return "FUT" in normalized
 
     def _resolve_strategy_name(self, signal: Any) -> str:
@@ -449,13 +406,13 @@ class StrategyOrchestrator:
     ) -> bool:
         """
         Check if there is remaining capital for this strategy allocation.
-
+        
         ✅ PRODUCTION FIX: Excludes orphan/manual positions from exposure calculation.
         This prevents orphan trades from blocking ALL new signals.
         """
         balance = float(getattr(self._risk_manager, "current_balance", 0.0) or 0.0)
         max_allocation = balance * allocation.capital_fraction
-
+        
         # ✅ FIX: Calculate exposure excluding orphan positions
         exposure = 0.0
         tracked_exposure = 0.0
@@ -466,49 +423,44 @@ class StrategyOrchestrator:
         get_all = getattr(position_manager, "get_all_positions", None)
         if callable(get_all):
             positions = get_all()
-
+            
             for pos in positions or []:
                 try:
                     qty = abs(float(getattr(pos, "quantity", 0) or 0))
                     price = float(
-                        getattr(pos, "entry_price", 0)
-                        or getattr(pos, "avg_price", 0)
-                        or 0
+                        getattr(pos, "entry_price", 0) or 
+                        getattr(pos, "avg_price", 0) or 0
                     )
                     pos_exposure = qty * price
-
+                    
                     if pos_exposure <= 0:
                         continue
-
+                    
                     # Check if this is an orphan position
                     strategy = (
-                        getattr(pos, "strategy", "")
-                        or getattr(pos, "strategy_name", "")
-                        or ""
+                        getattr(pos, "strategy", "") or 
+                        getattr(pos, "strategy_name", "") or ""
                     )
-
+                    
                     # Identify orphan positions
-                    is_orphan = not strategy or strategy.lower().strip() in (
-                        "manual",
-                        "unknown",
-                        "manual/unknown",
-                        "none",
-                        "",
+                    is_orphan = (
+                        not strategy or 
+                        strategy.lower().strip() in ("manual", "unknown", "manual/unknown", "none", "")
                     )
-
+                    
                     if is_orphan:
                         orphan_exposure += pos_exposure
                         orphan_count += 1
                     else:
                         tracked_exposure += pos_exposure
                         tracked_count += 1
-
+                        
                 except (TypeError, ValueError, AttributeError):
                     continue
-
+        
         total_exposure = tracked_exposure + orphan_exposure
         result = tracked_exposure < max_allocation
-
+        
         self._logger.info(
             f"💰 Capital Check: tracked={tracked_exposure:.2f} | orphan={orphan_exposure:.2f} | "
             f"max={max_allocation:.2f} | balance={balance:.2f} | "
@@ -520,15 +472,15 @@ class StrategyOrchestrator:
                 "orphan_exposure": orphan_exposure,
                 "max_allocation": max_allocation,
                 "result": result,
-            },
+            }
         )
-
+        
         # ✅ Only check tracked exposure, not orphan exposure
         return result
 
     def _has_capital_headroom_quick(self) -> bool:
         """
-        Quick check used by base_elite.py.
+        Quick check used by base_elite.py. 
         ✅ FIX: Was missing, causing AttributeError.
         """
         balance = float(getattr(self._risk_manager, "current_balance", 0.0) or 0.0)
@@ -537,15 +489,15 @@ class StrategyOrchestrator:
     def _is_correlated(self, underlying: str, position_manager: Any) -> bool:
         """
         Check if taking position in *underlying* would violate correlation rules.
-
+        
         ✅ PRODUCTION FIX: Excludes orphan positions from correlation blocking.
         """
         with self._lock:
             active = self._active.get(underlying)
-
+        
         if active is None:
             return False
-
+            
         # Check if the active position is an orphan
         get_all = getattr(position_manager, "get_all_positions", None)
         if callable(get_all):
@@ -554,38 +506,31 @@ class StrategyOrchestrator:
                 try:
                     pos_symbol = getattr(pos, "symbol", "")
                     pos_underlying = self._normalize_underlying(pos_symbol)
-
+                    
                     if pos_underlying != underlying:
                         continue
-
+                        
                     strategy = (
-                        getattr(pos, "strategy", "")
-                        or getattr(pos, "strategy_name", "")
-                        or ""
+                        getattr(pos, "strategy", "") or 
+                        getattr(pos, "strategy_name", "") or ""
                     )
-
-                    is_orphan = not strategy or strategy.lower().strip() in (
-                        "manual",
-                        "unknown",
-                        "manual/unknown",
-                        "none",
-                        "",
+                    
+                    is_orphan = (
+                        not strategy or 
+                        strategy.lower().strip() in ("manual", "unknown", "manual/unknown", "none", "")
                     )
-
+                    
                     if is_orphan:
                         # Don't block correlation for orphan positions
                         self._logger.debug(
                             f"Ignoring orphan position in correlation check: {pos_symbol}",
-                            extra={
-                                "event": "correlation_orphan_skip",
-                                "symbol": pos_symbol,
-                            },
+                            extra={"event": "correlation_orphan_skip", "symbol": pos_symbol}
                         )
                         return False
-
+                        
                 except (TypeError, ValueError, AttributeError):
                     continue
-
+        
         return True
 
     def _futures_context_ready(self, indicators: Mapping[str, Any]) -> bool:
@@ -603,18 +548,18 @@ class StrategyOrchestrator:
         if not symbol:
             return ""
         normalized = symbol.strip().upper()
-
+        
         # Remove exchange prefix
         for prefix in ("NFO:", "NSE:", "BSE:"):
             if normalized.startswith(prefix):
-                normalized = normalized[len(prefix) :]
+                normalized = normalized[len(prefix):]
                 break
-
+        
         # Extract underlying (e.g., "NIFTY" from "NIFTY2620324650CE")
         for underlying in ("NIFTY", "BANKNIFTY", "FINNIFTY"):
             if normalized.startswith(underlying):
                 return underlying
-
+        
         return normalized.split()[0] if normalized else ""
 
 
