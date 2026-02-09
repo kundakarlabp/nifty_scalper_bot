@@ -89,6 +89,7 @@ class SMCStrategy(EliteStrategy):
             avg_vol = float(indicators.get("avg_volume") or 1.0) # Avoid div/0
             atr = float(indicators.get("atr") or 0.0)
             vwap = float(indicators.get("vwap") or current_price)
+            now = time_module.time()
             
             # Candle OHLC (needed for wick detection)
             high = float(indicators.get("high") or current_price)
