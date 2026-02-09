@@ -1931,6 +1931,30 @@ class StrategyRunner:
                 return
 
             # =================================================================
+            # PHASE -1: BRACKET MANAGER TICK FORWARDING (MUST be before ANY return)
+            # =================================================================
+            # CRITICAL: The bracket manager monitors SL/TP/trailing for ALL
+            # active positions. It MUST receive every tick regardless of
+            # market hours, stale-tick status, or any other condition.
+            # Without this, stop losses and take profits NEVER fire.
+            if self._bracket_manager:
+                try:
+                    _ltp_raw = (
+                        tick.get("ltp")
+                        or tick.get("last_price")
+                        or tick.get("price")
+                        or 0.0
+                    )
+                    _ltp = float(_ltp_raw)
+                    if _ltp > 0:
+                        self._bracket_manager.on_tick(symbol, _ltp)
+                except Exception as _bm_err:
+                    self._logger.debug(
+                        f"Bracket tick forward failed: {_bm_err}",
+                        extra={"event": "bracket_tick_error", "symbol": symbol},
+                    )
+
+            # =================================================================
             # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
             # =================================================================
 
