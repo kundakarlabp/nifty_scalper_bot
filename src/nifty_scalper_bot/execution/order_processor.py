@@ -6,7 +6,7 @@ Production-Grade: Handles Risk Checks, Thread Safety, Position Awareness, and Ex
 import asyncio
 from datetime import datetime, timezone
 import os
-from typing import Any, Dict, Literal, cast
+from typing import Any, Dict, Literal, Mapping, cast
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
@@ -131,6 +131,214 @@ class OrderProcessor:
             )
         return 0.0
 
+    def _resolve_atr(self, symbol: str, metadata: Mapping[str, Any] | None) -> float:
+        """Resolve ATR for a symbol. Args: symbol, metadata. Returns: float. Raises: None."""
+        LOGGER.debug(
+            'Entered OrderProcessor._resolve_atr',
+            extra={'event': 'order_processor_resolve_atr', 'symbol': symbol},
+        )
+        default_atr = 10.0
+        symbol_upper = symbol.upper()
+        if 'NIFTY' in symbol_upper and 'BANK' not in symbol_upper:
+            default_atr = 50.0
+        elif 'BANKNIFTY' in symbol_upper or 'FINNIFTY' in symbol_upper:
+            default_atr = 150.0
+        try:
+            if metadata:
+                for key in ('atr', 'avg_true_range', 'atr_value'):
+                    value = metadata.get(key)
+                    if value is not None:
+                        return float(value)
+            if self.data_hub is not None:
+                indicator_fn = getattr(self.data_hub, 'get_indicator', None)
+                if callable(indicator_fn):
+                    atr_value = indicator_fn(symbol, 'atr')
+                    if atr_value is not None:
+                        return float(atr_value)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                'Failure in OrderProcessor._resolve_atr: %s',
+                exc,
+                extra={'event': 'order_processor_resolve_atr_error', 'symbol': symbol},
+                exc_info=exc,
+            )
+            return default_atr
+        LOGGER.info(
+            'Condition met: default_atr_applied',
+            extra={
+                'event': 'order_processor_default_atr',
+                'symbol': symbol,
+                'atr': default_atr,
+            },
+        )
+        return default_atr
+
+    def _resolve_regime(self, symbol: str, metadata: Mapping[str, Any] | None) -> str:
+        """Resolve market regime for a symbol. Args: symbol, metadata. Returns: str. Raises: None."""
+        LOGGER.debug(
+            'Entered OrderProcessor._resolve_regime',
+            extra={'event': 'order_processor_resolve_regime', 'symbol': symbol},
+        )
+        try:
+            if metadata:
+                for key in ('regime', 'market_regime', 'trend_state', 'market_state'):
+                    value = metadata.get(key)
+                    if value:
+                        return str(value)
+            if self.data_hub is not None:
+                indicator_fn = getattr(self.data_hub, 'get_indicator', None)
+                if callable(indicator_fn):
+                    regime_value = indicator_fn(symbol, 'regime')
+                    if regime_value:
+                        return str(regime_value)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                'Failure in OrderProcessor._resolve_regime: %s',
+                exc,
+                extra={
+                    'event': 'order_processor_resolve_regime_error',
+                    'symbol': symbol,
+                },
+                exc_info=exc,
+            )
+            return 'UNKNOWN'
+        LOGGER.info(
+            'Condition met: default_regime_applied',
+            extra={
+                'event': 'order_processor_default_regime',
+                'symbol': symbol,
+                'regime': 'UNKNOWN',
+            },
+        )
+        return 'UNKNOWN'
+
+    def _build_protection_levels(
+        self,
+        symbol: str,
+        side: str,
+        price: float,
+        stop_loss: float,
+        take_profit: float,
+        metadata: Mapping[str, Any] | None,
+    ) -> tuple[float, float, float | None, str]:
+        """Build protection levels. Args: symbol, side, price, stop_loss, take_profit, metadata. Returns: tuple. Raises: None."""
+        LOGGER.debug(
+            'Entered OrderProcessor._build_protection_levels',
+            extra={'event': 'order_processor_protection_enter', 'symbol': symbol},
+        )
+        try:
+            if price <= 0:
+                return stop_loss, take_profit, None, 'UNKNOWN'
+
+            side = side.upper()
+            atr = self._resolve_atr(symbol, metadata)
+            regime = self._resolve_regime(symbol, metadata)
+            regime_upper = regime.upper()
+            trailing_atr_mult = None
+            if metadata:
+                trailing_atr_mult = metadata.get('trailing_atr_mult') or metadata.get(
+                    'trail_atr_mult'
+                )
+            if trailing_atr_mult is not None:
+                try:
+                    trailing_atr_mult = float(trailing_atr_mult)
+                except (TypeError, ValueError) as exc:
+                    LOGGER.warning(
+                        'Condition met: trailing_mult_invalid',
+                        extra={
+                            'event': 'order_processor_trailing_mult_invalid',
+                            'symbol': symbol,
+                            'value': trailing_atr_mult,
+                            'error': str(exc),
+                        },
+                    )
+                    trailing_atr_mult = None
+            default_sl_pct = float(os.getenv('DEFAULT_SL_PCT', '1.0'))
+
+            sl_mult = 1.2
+            tp_mult = 2.0
+            trail_mult = 1.5
+            if any(
+                key in regime_upper for key in ('TREND', 'BREAKOUT', 'MOMENTUM')
+            ):
+                sl_mult = 1.3
+                tp_mult = 3.0
+                trail_mult = 1.2
+            elif any(key in regime_upper for key in ('RANGE', 'CHOP', 'MEAN')):
+                sl_mult = 1.0
+                tp_mult = 1.8
+                trail_mult = 1.8
+            elif 'VOL' in regime_upper or 'SPIKE' in regime_upper:
+                sl_mult = 1.5
+                tp_mult = 2.5
+                trail_mult = 1.4
+
+            base_distance = atr if atr > 0 else price * (default_sl_pct / 100.0)
+            if base_distance <= 0:
+                base_distance = max(price * 0.005, 1.0)
+
+            resolved_sl = stop_loss
+            resolved_tp = take_profit
+            used_fallback = False
+            if resolved_sl <= 0:
+                used_fallback = True
+                if side == 'BUY':
+                    resolved_sl = price - (base_distance * sl_mult)
+                else:
+                    resolved_sl = price + (base_distance * sl_mult)
+
+            if resolved_tp <= 0:
+                used_fallback = True
+                if side == 'BUY':
+                    resolved_tp = price + (base_distance * tp_mult)
+                else:
+                    resolved_tp = price - (base_distance * tp_mult)
+
+            if side == 'BUY' and resolved_sl >= price:
+                resolved_sl = price - base_distance
+                used_fallback = True
+            if side == 'SELL' and resolved_sl <= price:
+                resolved_sl = price + base_distance
+                used_fallback = True
+
+            if side == 'BUY' and resolved_tp <= price:
+                resolved_tp = price + (base_distance * tp_mult)
+                used_fallback = True
+            if side == 'SELL' and resolved_tp >= price:
+                resolved_tp = price - (base_distance * tp_mult)
+                used_fallback = True
+
+            if trailing_atr_mult is None:
+                trailing_atr_mult = trail_mult
+            if trailing_atr_mult is not None and trailing_atr_mult <= 0:
+                trailing_atr_mult = None
+
+            if used_fallback:
+                LOGGER.info(
+                    'Condition met: protection_defaults_applied',
+                    extra={
+                        'event': 'order_processor_defaults_applied',
+                        'symbol': symbol,
+                        'regime': regime,
+                        'atr': atr,
+                        'stop_loss': resolved_sl,
+                        'take_profit': resolved_tp,
+                        'trailing_atr_mult': trailing_atr_mult,
+                    },
+                )
+            return resolved_sl, resolved_tp, trailing_atr_mult, regime
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                'Failure in OrderProcessor._build_protection_levels: %s',
+                exc,
+                extra={
+                    'event': 'order_processor_protection_error',
+                    'symbol': symbol,
+                },
+                exc_info=exc,
+            )
+            return stop_loss, take_profit, None, 'UNKNOWN'
+
     async def on_strategy_signal(self, message: Message) -> None:
         """Handle incoming strategy signals with enforced bracket logic. Args: message. Returns: None. Raises: None."""
         if not self._running:
@@ -163,6 +371,29 @@ class OrderProcessor:
             )
             return
         price = self._resolve_trade_price(symbol, price)
+        stop_loss, take_profit, trailing_atr_mult, regime = (
+            self._build_protection_levels(
+                symbol=str(symbol),
+                side=str(side),
+                price=float(price),
+                stop_loss=float(stop_loss),
+                take_profit=float(take_profit),
+                metadata=metadata,
+            )
+        )
+        if trailing_spec is None and trailing_atr_mult:
+            trailing_spec = {'kind': 'atr', 'mult': trailing_atr_mult}
+        LOGGER.info(
+            'Condition met: protection_resolved',
+            extra={
+                'event': 'order_processor_protection_resolved',
+                'symbol': symbol,
+                'regime': regime,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'trailing_atr_mult': trailing_atr_mult,
+            },
+        )
 
         # ================= OPTION ENTRY LIMIT (ENV CONTROLLED) =================
         if self._max_active_option_trades > 0 and symbol.startswith("NFO:"):
@@ -289,7 +520,7 @@ class OrderProcessor:
                         entry_price=price if order_type == OrderType.LIMIT else None,
                         stop_loss=stop_loss,
                         take_profit=take_profit,
-                        trailing_atr_mult=1.5,  # Conservative default for auto-trail
+                        trailing_atr_mult=trailing_atr_mult,
                         tag=strategy_name,
                         trailing_spec=trailing_spec,
                     )
