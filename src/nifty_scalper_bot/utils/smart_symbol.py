@@ -7,7 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 EXCHANGE_PREFIX = "NFO"
 UNDERLYING = "NIFTY"
-WEEKLY_EXPIRY_WEEKDAY = 2  # Wednesday (0=Mon)
+WEEKLY_EXPIRY_WEEKDAY = 1  # Tuesday (0=Mon)
 
 IST = ZoneInfo("Asia/Kolkata")
 
