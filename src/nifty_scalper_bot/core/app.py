@@ -1651,41 +1651,96 @@ class RuntimeSelfChecker:
         }
 
     def _check_data_freshness(self) -> tuple[bool, str, dict[str, object]]:
-        """Verify recent quote availability for active trading symbols."""
-        hub = self._context.data_hub
-        if hub is None:
-            return True, "no_data_hub", {}
+        """Check data freshness for active symbols. Args: None. Returns: status tuple. Raises: None."""
+        self._logger.debug(
+            "Entered RuntimeSelfChecker._check_data_freshness",
+            extra={"event": "runtime_self_check_entry", "check": "data_freshness"},
+        )
+        try:
+            hub = self._context.data_hub
+            if hub is None:
+                return True, "no_data_hub", {}
 
-        # [FIX] Use actually tracked symbols from DataHub to prevent false negatives
-        # Accessing protected member _quotes is necessary here for introspection
-        symbols = list(getattr(hub, "_quotes", {}).keys())
+            # [FIX] Use actually tracked symbols from DataHub to prevent false negatives
+            # Accessing protected member _quotes is necessary here for introspection
+            symbols = list(getattr(hub, "_quotes", {}).keys())
 
-        # During startup / hydration, do NOT block trading if no quotes yet
-        if not symbols:
-            return True, "no_symbols_yet", {}
+            # During startup / hydration, do NOT block trading if no quotes yet
+            if not symbols:
+                return True, "no_symbols_yet", {}
 
-        # Pick the most liquid / reliable symbol (Spot index preferred)
-        symbol = None
-        for s in symbols:
-            if "NIFTY" in s and "NSE" in s:
-                symbol = s
-                break
+            # Pick the most liquid / reliable symbol (Spot index preferred)
+            symbol = None
+            for s in symbols:
+                if "NIFTY" in s and "NSE" in s:
+                    symbol = s
+                    break
 
-        # Fallback to any available symbol if index not found
-        if symbol is None:
-            symbol = symbols[0]
+            # Fallback to any available symbol if index not found
+            if symbol is None:
+                symbol = symbols[0]
 
-        interval = getattr(self._context.streamer, "_interval_s", 0.7) or 0.7
-        # Adaptive threshold: 2.5x poll interval, clamped 2s-5s
-        adaptive_ms = max(2000, min(5000, int(float(interval) * 1000.0 * 2.5)))
+            interval = getattr(self._context.streamer, "_interval_s", 0.7) or 0.7
+            # Adaptive threshold: 2.5x poll interval, clamped 2s-5s
+            adaptive_ms = max(2000, min(5000, int(float(interval) * 1000.0 * 2.5)))
 
-        ok, detail, meta = assess_datahub_fresh(hub, symbol, freshness_ms=adaptive_ms)
+            if hasattr(hub, "is_fresh"):
+                try:
+                    ok, meta = hub.is_fresh(symbol, threshold_ms=float(adaptive_ms))
+                except Exception as exc:
+                    self._logger.error(
+                        "Failure in RuntimeSelfChecker._check_data_freshness: %s",
+                        exc,
+                        extra={
+                            "event": "runtime_self_check_error",
+                            "check": "data_freshness",
+                            "symbol": symbol,
+                        },
+                        exc_info=exc,
+                    )
+                else:
+                    detail = cast(str, meta.get("reason") or "ok")
+                    payload = cast(dict[str, object], dict(meta or {}))
+                    payload["symbol_checked"] = symbol
+                    payload["adaptive_ms"] = adaptive_ms
+                    self._logger.info(
+                        "Condition met: runtime_self_check_data_freshness",
+                        extra={
+                            "event": "runtime_self_check_data_freshness",
+                            "symbol": symbol,
+                            "detail": detail,
+                        },
+                    )
+                    return ok, detail, payload
 
-        payload = cast(dict[str, object], dict(meta or {}))
-        payload["symbol_checked"] = symbol
-        payload["adaptive_ms"] = adaptive_ms
+            ok, detail, meta = assess_datahub_fresh(
+                hub,
+                symbol,
+                freshness_ms=adaptive_ms,
+            )
 
-        return ok, detail, payload
+            payload = cast(dict[str, object], dict(meta or {}))
+            payload["symbol_checked"] = symbol
+            payload["adaptive_ms"] = adaptive_ms
+
+            self._logger.info(
+                "Condition met: runtime_self_check_data_freshness",
+                extra={
+                    "event": "runtime_self_check_data_freshness",
+                    "symbol": symbol,
+                    "detail": detail,
+                },
+            )
+
+            return ok, detail, payload
+        except Exception as exc:
+            self._logger.error(
+                "Failure in RuntimeSelfChecker._check_data_freshness: %s",
+                exc,
+                extra={"event": "runtime_self_check_error", "check": "data_freshness"},
+                exc_info=exc,
+            )
+            return False, f"exception:{exc}"[:256], {"error": str(exc)}
 
     def _check_streamer(self) -> tuple[bool, str, dict[str, object]]:
         """Assess market data streamer connectivity and backlog state.
