@@ -1551,27 +1551,24 @@ class OrderManager:
         if take_profit is not None and take_profit > 0:
             take_profit = self._round_to_tick(take_profit)
         # ---------------------------------------------------------
-        # 🛡️ CIRCUIT BREAKER CHECK
-        # ---------------------------------------------------------
-        if self._consecutive_failures >= self._max_failures:
-            self._logger.critical(
-                f"💀 KILL SWITCH ENGAGED: {self._consecutive_failures} consecutive broker errors. "
-                "Trading Halted to prevent API ban / account blowup."
-            )
-            return None
-        # =========================================================
-        # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
-        # =========================================================
-        # Logic: We block any "Naked" Intraday Entry. 
-        # Every entry MUST have a defined Stop Loss to create a bracket.
-        
-        # 1. Identify Entry vs Exit (For Option Buying Strategy)
-        # BUY = Entry. SELL = Exit.
-        # We also check the 'tag' to ensure we don't block internal system exits.
+        # 🛡️ DETECT EXIT vs ENTRY (must be BEFORE any guard)
         normalized_tag = (tag or "").lower()
         is_system_exit = any(x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"])
-        
-        # It is an entry if it's a BUY and NOT a system-generated exit
+
+        # 🛡️ CIRCUIT BREAKER CHECK — skipped for system exits
+        if self._consecutive_failures >= self._max_failures:
+            if is_system_exit:
+                self._logger.warning(
+                    f"⚠️ Circuit breaker active but ALLOWING system exit for {symbol}",
+                    extra={"event": "circuit_breaker_exit_bypass", "symbol": symbol}
+                )
+            else:
+                self._logger.critical(
+                    f"💀 KILL SWITCH ENGAGED: {self._consecutive_failures} consecutive broker errors. "
+                    "Trading Halted to prevent API ban / account blowup."
+                )
+                return None
+        # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
         is_entry = (side == "BUY") and not is_system_exit
 
         # 2. Identify Intraday Context
@@ -1659,7 +1656,7 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 2. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
         # ---------------------------------------------------------------------
-        if variety == "regular":
+        if variety == "regular" and not is_system_exit:
             try:
                 ist = ZoneInfo("Asia/Kolkata")
                 now = datetime.now(ist).time()
@@ -1686,12 +1683,13 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 3. TRADING SWITCH GUARD
         # ---------------------------------------------------------------------
-        switch_instance = trading_switch() if callable(trading_switch) else trading_switch
-        checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
-        
-        if callable(checker) and not checker():
-            self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
-            return None
+        if not is_system_exit:
+            switch_instance = trading_switch() if callable(trading_switch) else trading_switch
+            checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
+            
+            if callable(checker) and not checker():
+                self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
+                return None
 
         # ---------------------------------------------------------------------
         # 4. RISK MANAGER VALIDATION
