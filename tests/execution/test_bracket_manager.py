@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.execution.bracket_manager import BracketManager, BracketState
 
 
 class TestBracketManager:
@@ -54,19 +54,19 @@ class TestBracketManager:
         manager = BracketManager(broker_client=broker)
 
         order_id = manager.create_bracket(
-            symbol='NIFTYTEST',
-            side='LONG',
+            symbol="NIFTYTEST",
+            side="LONG",
             entry_price=100.0,
             stop_loss=0.0,
             take_profit=0.0,
             quantity=1,
-            strategy='unit_test',
+            strategy="unit_test",
         )
 
         bracket = manager.get_bracket(order_id)
 
         assert bracket is not None
-        assert bracket.side == 'BUY'
+        assert bracket.side == "BUY"
         assert bracket.sl_trigger_price == pytest.approx(95.0)
         assert bracket.tp_trigger_price == pytest.approx(110.0)
 
@@ -106,3 +106,26 @@ class TestBracketManager:
         target_thread.join()
 
         assert broker.cancel_order.call_count == 1
+
+    def test_trailing_math_repairs_sell_lowest_ltp_inf(self) -> None:
+        """Trailing math should repair invalid low-water marks for SELL."""
+
+        order_manager = Mock()
+        manager = BracketManager(order_manager=order_manager)
+        bracket = BracketState(
+            entry_order_id="entry-4",
+            symbol="NIFTYTEST",
+            side="SELL",
+            quantity=75,
+            entry_price=100.0,
+            sl_trigger_price=110.0,
+            tp_trigger_price=90.0,
+            trailing_enabled=True,
+            last_ltp=98.0,
+            lowest_ltp=float("inf"),
+        )
+
+        manager._apply_trailing_math(bracket)
+
+        assert bracket.lowest_ltp != float("inf")
+        assert bracket.lowest_ltp == pytest.approx(98.0)

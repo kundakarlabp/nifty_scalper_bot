@@ -895,8 +895,8 @@ class BracketManager:
     def _fire_exits_batch(self, exits: list) -> None:
         """Args: exits. Returns: None. Raises: Exception."""
         LOGGER.debug(
-            'Entered BracketManager._fire_exits_batch',
-            extra={'event': 'bracket_manager_fire_exits_batch_enter'},
+            "Entered BracketManager._fire_exits_batch",
+            extra={"event": "bracket_manager_fire_exits_batch_enter"},
         )
         try:
             import time
@@ -911,7 +911,7 @@ class BracketManager:
                     # Check cooldown (per batch, avoid stale state across loops)
                     last_attempt = batch_cooldowns.get(bracket.entry_order_id, 0.0)
                     if now - last_attempt < 5.0:
-                        LOGGER.debug('⏳ Cooldown active for %s', bracket.symbol)
+                        LOGGER.debug("⏳ Cooldown active for %s", bracket.symbol)
                         continue
 
                     # Check if still valid
@@ -923,32 +923,32 @@ class BracketManager:
                     processed_ids.add(bracket.entry_order_id)
 
                     LOGGER.info(
-                        'Condition met: exit_batch_queued',
+                        "Condition met: exit_batch_queued",
                         extra={
-                            'event': 'bracket_manager_exit_batch_queued',
-                            'symbol': bracket.symbol,
-                            'entry_id': bracket.entry_order_id,
+                            "event": "bracket_manager_exit_batch_queued",
+                            "symbol": bracket.symbol,
+                            "entry_id": bracket.entry_order_id,
                         },
                     )
 
-                    exit_type = action['type']
-                    qty = action['qty']
-                    reason = action['reason']
+                    exit_type = action["type"]
+                    qty = action["qty"]
+                    reason = action["reason"]
 
                     # Update state
                     bracket.remaining_quantity -= qty
 
                     if (
-                        exit_type in {'SL', 'FINAL_TP'}
+                        exit_type in {"SL", "FINAL_TP"}
                         or bracket.remaining_quantity <= 0
                     ):
                         bracket.active = False
 
                     # Handle partial target marking
-                    if exit_type == 'PARTIAL_TP' and 'target' in action:
-                        action['target'].executed = True
+                    if exit_type == "PARTIAL_TP" and "target" in action:
+                        action["target"].executed = True
                         # Move SL to breakeven after TP1
-                        if action['target'].name == 'TP1':
+                        if action["target"].name == "TP1":
                             self._move_sl_to_breakeven(bracket)
 
             # Persist state once (outside lock)
@@ -956,9 +956,9 @@ class BracketManager:
                 self.save_state()
             except Exception as e:
                 LOGGER.error(
-                    'Failure in BracketManager._fire_exits_batch: %s',
+                    "Failure in BracketManager._fire_exits_batch: %s",
                     e,
-                    extra={'event': 'bracket_manager_exit_batch_persist_error'},
+                    extra={"event": "bracket_manager_exit_batch_persist_error"},
                     exc_info=e,
                 )
 
@@ -968,15 +968,15 @@ class BracketManager:
                 if bracket.entry_order_id not in processed_ids:
                     continue
 
-                exit_type = action['type']
-                qty = action['qty']
-                reason = action['reason']
+                exit_type = action["type"]
+                qty = action["qty"]
+                reason = action["reason"]
 
-                exit_side = 'SELL' if bracket.side == 'BUY' else 'BUY'
-                is_partial = exit_type == 'PARTIAL_TP'
+                exit_side = "SELL" if bracket.side == "BUY" else "BUY"
+                is_partial = exit_type == "PARTIAL_TP"
 
                 LOGGER.warning(
-                    '⚡ EXIT FIRED: %s | %s %s | Type: %s | Reason: %s',
+                    "⚡ EXIT FIRED: %s | %s %s | Type: %s | Reason: %s",
                     bracket.symbol,
                     exit_side,
                     qty,
@@ -984,14 +984,14 @@ class BracketManager:
                     reason,
                 )
                 self._notify_event(
-                    'BRACKET_EXIT_FIRED',
+                    "BRACKET_EXIT_FIRED",
                     {
-                        'symbol': bracket.symbol,
-                        'side': exit_side,
-                        'qty': qty,
-                        'exit_type': exit_type,
-                        'reason': reason,
-                        'ltp': round(float(action.get('price', 0.0) or 0.0), 2),
+                        "symbol": bracket.symbol,
+                        "side": exit_side,
+                        "qty": qty,
+                        "exit_type": exit_type,
+                        "reason": reason,
+                        "ltp": round(float(action.get("price", 0.0) or 0.0), 2),
                     },
                 )
 
@@ -1001,15 +1001,15 @@ class BracketManager:
                         bracket, qty, exit_side, reason, is_partial, exit_type
                     )
                 except Exception as e:
-                    LOGGER.critical('🛑 EXIT ORDER FAILED: %s', e)
+                    LOGGER.critical("🛑 EXIT ORDER FAILED: %s", e)
                     self._notify_event(
-                        'BRACKET_EXIT_FAILED',
+                        "BRACKET_EXIT_FAILED",
                         {
-                            'symbol': bracket.symbol,
-                            'side': exit_side,
-                            'qty': qty,
-                            'exit_type': exit_type,
-                            'reason': reason,
+                            "symbol": bracket.symbol,
+                            "side": exit_side,
+                            "qty": qty,
+                            "exit_type": exit_type,
+                            "reason": reason,
                         },
                     )
                     # Revert state
@@ -1019,9 +1019,9 @@ class BracketManager:
                             bracket.active = True
         except Exception as e:
             LOGGER.error(
-                'Failure in BracketManager._fire_exits_batch: %s',
+                "Failure in BracketManager._fire_exits_batch: %s",
                 e,
-                extra={'event': 'bracket_manager_exit_batch_error'},
+                extra={"event": "bracket_manager_exit_batch_error"},
                 exc_info=e,
             )
 
@@ -1134,94 +1134,119 @@ class BracketManager:
         """
         import os
 
-        if not bracket.trailing_enabled:
-            return
-
-        ltp = bracket.last_ltp
-        if not ltp or ltp <= 0:
-            return
-
-        entry = bracket.entry_price
-        if entry <= 0:
-            return
-
-        current_sl = bracket.sl_trigger_price
-
-        # Get ATR for trailing calculations
-        atr = self._get_current_atr(bracket.symbol)
-
-        # Calculate profit metrics
-        if bracket.side == "BUY":
-            profit_pct = ((ltp - entry) / entry) * 100
-            high_water = bracket.highest_ltp
-            profit_points = ltp - entry
-        else:
-            profit_pct = ((entry - ltp) / entry) * 100
-            high_water = bracket.lowest_ltp
-            profit_points = entry - ltp
-
-        # Calculate new SL based on tiered system
-        new_sl = self._calculate_tiered_trailing_sl(
-            bracket=bracket,
-            ltp=ltp,
-            profit_pct=profit_pct,
-            high_water=high_water,
-            atr=atr,
+        LOGGER.debug(
+            "Entered BracketManager._apply_trailing_math",
+            extra={"event": "bracket_apply_trailing_math", "symbol": bracket.symbol},
         )
 
-        if new_sl is None:
-            return
+        try:
+            if not bracket.trailing_enabled:
+                return
 
-        # Apply the new SL (only if it improves protection)
-        with self._lock:
+            ltp = bracket.last_ltp
+            if not ltp or ltp <= 0:
+                return
+
+            entry = bracket.entry_price
+            if entry <= 0:
+                return
+
+            current_sl = bracket.sl_trigger_price
+
+            # Get ATR for trailing calculations
+            atr = self._get_current_atr(bracket.symbol)
+
+            # Calculate profit metrics
             if bracket.side == "BUY":
-                if new_sl > current_sl:
-                    old_sl = bracket.sl_trigger_price
-                    bracket.sl_trigger_price = round(new_sl, 2)
-                    bracket.updated_at = time.time()
-
+                profit_pct = ((ltp - entry) / entry) * 100
+                high_water = bracket.highest_ltp
+                profit_points = ltp - entry
+            else:
+                profit_pct = ((entry - ltp) / entry) * 100
+                high_water = bracket.lowest_ltp
+                profit_points = entry - ltp
+                if high_water == float("inf") or high_water <= 0:
+                    repaired = min(ltp, entry)
+                    with self._lock:
+                        bracket.lowest_ltp = repaired
+                    high_water = repaired
                     LOGGER.info(
-                        f"📈 TRAIL UPDATE {bracket.symbol}: "
-                        f"SL {old_sl:.2f} → {new_sl:.2f} | "
-                        f"Profit: {profit_pct:.1f}% | LTP: {ltp:.2f}"
+                        "Condition met: bracket_lowest_ltp_repaired",
+                        extra={
+                            "event": "bracket_lowest_ltp_repaired",
+                            "symbol": bracket.symbol,
+                            "repaired": repaired,
+                        },
                     )
-                    if self._should_notify_trail(
-                        bracket.entry_order_id, bracket.sl_trigger_price, old_sl
-                    ):
-                        self._notify_event(
-                            "BRACKET_TRAIL_UPDATE",
-                            {
-                                "symbol": bracket.symbol,
-                                "side": bracket.side,
-                                "sl": round(bracket.sl_trigger_price, 2),
-                                "ltp": round(ltp, 2),
-                                "profit_pct": round(profit_pct, 2),
-                            },
-                        )
-            else:  # SELL
-                if new_sl < current_sl:
-                    old_sl = bracket.sl_trigger_price
-                    bracket.sl_trigger_price = round(new_sl, 2)
-                    bracket.updated_at = time.time()
 
-                    LOGGER.info(
-                        f"📉 TRAIL UPDATE {bracket.symbol}: "
-                        f"SL {old_sl:.2f} → {new_sl:.2f} | "
-                        f"Profit: {profit_pct:.1f}% | LTP: {ltp:.2f}"
-                    )
-                    if self._should_notify_trail(
-                        bracket.entry_order_id, bracket.sl_trigger_price, old_sl
-                    ):
-                        self._notify_event(
-                            "BRACKET_TRAIL_UPDATE",
-                            {
-                                "symbol": bracket.symbol,
-                                "side": bracket.side,
-                                "sl": round(bracket.sl_trigger_price, 2),
-                                "ltp": round(ltp, 2),
-                                "profit_pct": round(profit_pct, 2),
-                            },
+            # Calculate new SL based on tiered system
+            new_sl = self._calculate_tiered_trailing_sl(
+                bracket=bracket,
+                ltp=ltp,
+                profit_pct=profit_pct,
+                high_water=high_water,
+                atr=atr,
+            )
+
+            if new_sl is None:
+                return
+
+            # Apply the new SL (only if it improves protection)
+            with self._lock:
+                if bracket.side == "BUY":
+                    if new_sl > current_sl:
+                        old_sl = bracket.sl_trigger_price
+                        bracket.sl_trigger_price = round(new_sl, 2)
+                        bracket.updated_at = time.time()
+
+                        LOGGER.info(
+                            f"📈 TRAIL UPDATE {bracket.symbol}: "
+                            f"SL {old_sl:.2f} → {new_sl:.2f} | "
+                            f"Profit: {profit_pct:.1f}% | LTP: {ltp:.2f}"
                         )
+                        if self._should_notify_trail(
+                            bracket.entry_order_id, bracket.sl_trigger_price, old_sl
+                        ):
+                            self._notify_event(
+                                "BRACKET_TRAIL_UPDATE",
+                                {
+                                    "symbol": bracket.symbol,
+                                    "side": bracket.side,
+                                    "sl": round(bracket.sl_trigger_price, 2),
+                                    "ltp": round(ltp, 2),
+                                    "profit_pct": round(profit_pct, 2),
+                                },
+                            )
+                else:  # SELL
+                    if new_sl < current_sl:
+                        old_sl = bracket.sl_trigger_price
+                        bracket.sl_trigger_price = round(new_sl, 2)
+                        bracket.updated_at = time.time()
+
+                        LOGGER.info(
+                            f"📉 TRAIL UPDATE {bracket.symbol}: "
+                            f"SL {old_sl:.2f} → {new_sl:.2f} | "
+                            f"Profit: {profit_pct:.1f}% | LTP: {ltp:.2f}"
+                        )
+                        if self._should_notify_trail(
+                            bracket.entry_order_id, bracket.sl_trigger_price, old_sl
+                        ):
+                            self._notify_event(
+                                "BRACKET_TRAIL_UPDATE",
+                                {
+                                    "symbol": bracket.symbol,
+                                    "side": bracket.side,
+                                    "sl": round(bracket.sl_trigger_price, 2),
+                                    "ltp": round(ltp, 2),
+                                    "profit_pct": round(profit_pct, 2),
+                                },
+                            )
+        except Exception as exc:
+            LOGGER.error(
+                "Failure in BracketManager._apply_trailing_math: %s",
+                exc,
+                exc_info=True,
+            )
 
     def _calculate_tiered_trailing_sl(
         self,
@@ -2186,46 +2211,46 @@ class BracketManager:
         """Create a virtual bracket with provided SL/TP. Args/Returns/Raises."""
         import time
 
-        LOGGER.debug('Entered create_bracket')
+        LOGGER.debug("Entered create_bracket")
 
         try:
             # Normalize side to BUY/SELL
             normalized_side = _normalize_bracket_side(side)
         except Exception as e:
-            LOGGER.error('Failure in create_bracket: %s', e)
-            normalized_side = 'BUY'
-            LOGGER.info('Condition met: defaulted side to BUY after normalization')
+            LOGGER.error("Failure in create_bracket: %s", e)
+            normalized_side = "BUY"
+            LOGGER.info("Condition met: defaulted side to BUY after normalization")
 
         # Validate side
-        if normalized_side not in ('BUY', 'SELL'):
+        if normalized_side not in ("BUY", "SELL"):
             LOGGER.warning(
-                f'⚠️ create_bracket: Invalid side \'{side}\', defaulting to BUY'
+                f"⚠️ create_bracket: Invalid side '{side}', defaulting to BUY"
             )
-            normalized_side = 'BUY'
-            LOGGER.info('Condition met: defaulted side to BUY after validation')
+            normalized_side = "BUY"
+            LOGGER.info("Condition met: defaulted side to BUY after validation")
 
         # Auto-generate order_id if not provided
         if not order_id:
-            safe_symbol = symbol.replace(':', '_')[:20]
-            order_id = f'bracket_{int(time.time() * 1000)}_{safe_symbol}'
+            safe_symbol = symbol.replace(":", "_")[:20]
+            order_id = f"bracket_{int(time.time() * 1000)}_{safe_symbol}"
 
         # Validate SL/TP (use defaults if invalid)
         if stop_loss <= 0:
             LOGGER.warning(
-                f'⚠️ create_bracket: Invalid SL={stop_loss}, using 5% default'
+                f"⚠️ create_bracket: Invalid SL={stop_loss}, using 5% default"
             )
-            LOGGER.info('Condition met: defaulted stop_loss based on entry_price')
+            LOGGER.info("Condition met: defaulted stop_loss based on entry_price")
             stop_loss = (
-                entry_price * 0.95 if normalized_side == 'BUY' else entry_price * 1.05
+                entry_price * 0.95 if normalized_side == "BUY" else entry_price * 1.05
             )
 
         if take_profit <= 0:
             LOGGER.warning(
-                f'⚠️ create_bracket: Invalid TP={take_profit}, using 10% default'
+                f"⚠️ create_bracket: Invalid TP={take_profit}, using 10% default"
             )
-            LOGGER.info('Condition met: defaulted take_profit based on entry_price')
+            LOGGER.info("Condition met: defaulted take_profit based on entry_price")
             take_profit = (
-                entry_price * 1.10 if normalized_side == 'BUY' else entry_price * 0.90
+                entry_price * 1.10 if normalized_side == "BUY" else entry_price * 0.90
             )
 
         try:
@@ -2243,13 +2268,13 @@ class BracketManager:
                 activate_immediately=True,  # Start monitoring immediately
             )
         except Exception as e:
-            LOGGER.error('Failure in create_bracket: %s', e)
+            LOGGER.error("Failure in create_bracket: %s", e)
             return order_id
 
         LOGGER.info(
-            f'✅ create_bracket: {symbol} | {normalized_side} | '
-            f'Entry={entry_price:.2f} | SL={stop_loss:.2f} | TP={take_profit:.2f} | '
-            f'ID={order_id}'
+            f"✅ create_bracket: {symbol} | {normalized_side} | "
+            f"Entry={entry_price:.2f} | SL={stop_loss:.2f} | TP={take_profit:.2f} | "
+            f"ID={order_id}"
         )
 
         return order_id
