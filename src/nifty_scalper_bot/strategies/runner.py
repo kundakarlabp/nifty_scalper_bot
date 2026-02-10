@@ -2168,8 +2168,9 @@ class StrategyRunner:
                 )
                 return
 
-            if self._bracket_manager and price > 0:
-                self._bracket_manager.on_tick(symbol, price)
+            # Bracket tick forwarding already happened at function entry.
+            # Keep a single forward per tick so protective handlers do not churn
+            # duplicate state transitions during stressed periods.
 
             # Global breaker latch: once tripped, keep running only protective paths
             # (brackets + position reconciliation) and skip strategy/indicator work.
