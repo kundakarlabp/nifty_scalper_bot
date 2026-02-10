@@ -452,6 +452,8 @@ class StrategyRunner:
         self._callbacks: MutableMapping[str, Callable[[dict], None]] = {}
         self._bar_builders: Dict[str, OneMinuteBarBuilder] = {}
         self._last_bar_ts: dict[str, datetime] = {}
+        self._gating_log_bar_cache: dict[tuple[str, str], datetime] = {}
+        self._hydration_log_bar_cache: dict[str, datetime] = {}
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
         self._orders_in_flight: dict[str, float] = {}  # symbol -> timestamp
@@ -1922,6 +1924,78 @@ class StrategyRunner:
                 f"✅ Emergency Backfill complete. Ingested {total_bars} bars."
             )
 
+    def _hydrate_missing_bars(self, symbol: str, min_bars: int) -> list[dict[str, Any]]:
+        """Fetch missing candles for *symbol* and return normalized OHLC bars."""
+        needed_bars = max(0, min_bars - len(self._indicator_engine.get_history(symbol)))
+        last_bar_ts = self._last_bar_ts.get(symbol)
+        if needed_bars <= 0:
+            return []
+        if last_bar_ts and self._hydration_log_bar_cache.get(symbol) != last_bar_ts:
+            self._hydration_log_bar_cache[symbol] = last_bar_ts
+            self._logger.info(
+                'Hydrating historical data',
+                extra={
+                    'symbol': symbol,
+                    'needed_bars': needed_bars,
+                    'have_bars': len(self._indicator_engine.get_history(symbol)),
+                },
+            )
+        fetch_coro: Any | None = None
+        if self._data_hub and hasattr(self._data_hub, 'fetch_history'):
+            fetch_coro = self._data_hub.fetch_history(
+                symbol, interval='minute', days=5
+            )
+        elif self._orchestrator and hasattr(self._orchestrator, 'fetch_history'):
+            fetch_coro = self._orchestrator.fetch_history(
+                symbol, interval='minute', days=5
+            )
+        if fetch_coro is None or self._main_loop is None:
+            return []
+        try:
+            rows = asyncio.run_coroutine_threadsafe(
+                fetch_coro,
+                self._main_loop,
+            ).result(timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                'Historical hydration unavailable',
+                extra={'event': 'indicator_hydration_failed', 'symbol': symbol, 'error': str(exc)},
+            )
+            return []
+        normalized: list[dict[str, Any]] = []
+        for row in rows or []:
+            try:
+                ts = row.get('timestamp') or row.get('date')
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                normalized.append(
+                    {
+                        'open': float(row.get('open', 0.0) or 0.0),
+                        'high': float(row.get('high', 0.0) or 0.0),
+                        'low': float(row.get('low', 0.0) or 0.0),
+                        'close': float(row.get('close', 0.0) or 0.0),
+                        'volume': int(row.get('volume', 0) or 0),
+                        'timestamp': ts,
+                    }
+                )
+            except Exception:
+                continue
+        return normalized
+
+    def _log_once_per_symbol_per_bar(self, symbol: str, event: str, reason: str) -> None:
+        """Emit edge-triggered per-symbol per-bar logs for noisy gates."""
+        bar_ts = self._last_bar_ts.get(symbol)
+        if bar_ts is None:
+            return
+        cache_key = (symbol, event)
+        if self._gating_log_bar_cache.get(cache_key) == bar_ts:
+            return
+        self._gating_log_bar_cache[cache_key] = bar_ts
+        self._logger.info(
+            event,
+            extra={'event': event, 'symbol': symbol, 'reason': reason, 'bar_ts': bar_ts.isoformat()},
+        )
+
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
         self._logger.debug(
@@ -2697,11 +2771,27 @@ class StrategyRunner:
                         interval_sec=30.0,
                         level=logging.INFO,
                     )
-                    is_ready = self._indicator_engine.is_ready(
+                    self._indicator_engine.ensure_min_bars(
+                        symbol,
+                        self._config.min_indicator_bars,
+                        hydrate=self._hydrate_missing_bars,
+                    )
+                    index_indicators_ready = bool(
+                        getattr(self._orchestrator, 'index_indicators_ready', True)
+                    )
+                    is_ready = self._indicator_engine.has_min_bars(
                         symbol, self._config.min_indicator_bars
                     )
 
-                    if is_ready:
+                    if not (index_indicators_ready and is_ready):
+                        reason = (
+                            'index_indicators_not_ready'
+                            if not index_indicators_ready
+                            else 'min_bars_not_ready'
+                        )
+                        self._log_once_per_symbol_per_bar(symbol, 'strategy_gated', reason)
+                        signal = None
+                    else:
                         # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
                         log_throttled(
                             self._logger,
@@ -2758,15 +2848,7 @@ class StrategyRunner:
                                 },
                             )
                             cycle_stats.pop(bar_key, None)
-                    else:
-                        # ✅ DIAGNOSTIC LOG: Explain why no evaluation happened
-                        log_throttled(
-                            self._logger,
-                            f"not_ready_{symbol}",
-                            f"⏳ INDICATORS NOT READY: {symbol} (Need {self._config.min_indicator_bars} bars)",
-                            interval_sec=30.0,
-                            level=logging.WARNING,
-                        )
+                    
 
             # =================================================================
             # PHASE 10: EXECUTE SIGNAL

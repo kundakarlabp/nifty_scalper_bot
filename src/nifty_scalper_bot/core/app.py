@@ -46,6 +46,7 @@ from nifty_scalper_bot.data.robust_provider import (
 from nifty_scalper_bot.infra.watchdog import start_watchdog
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
+SYNC_LOCK = threading.Lock()
 
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -2128,7 +2129,7 @@ def _get_symbols(
         universe = OptionUniverseManager(universe_config)
 
     universe.update_underlying(float(ltp))
-    final_symbols = universe.get_current_universe()
+    final_symbols = universe.get_filtered_universe(float(ltp))
     LOGGER.debug('OptionUniv: Universe refreshed -> %s', final_symbols)
 
     if _LATEST_CTX:
@@ -5534,9 +5535,11 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                         spot = ctx.market_data_manager.get_latest_price('NSE:NIFTY 50') if ctx.market_data_manager else None
                         if spot and spot > 0:
-                            ctx.option_universe.update_underlying(float(spot))
-
-                        latest_symbols = set(ctx.option_universe.get_current_universe())
+                            latest_symbols = set(
+                                ctx.option_universe.get_filtered_universe(float(spot))
+                            )
+                        else:
+                            latest_symbols = set(ctx.option_universe.get_current_universe())
                         add_symbols = sorted(latest_symbols - dynamic_option_symbols)
                         drop_symbols = sorted(dynamic_option_symbols - latest_symbols)
 
@@ -5830,37 +5833,34 @@ async def _reconcile_state(ctx: BotContext) -> None:
     Syncs local state with Broker (Orders & Positions).
     Features: Non-Blocking Execution, Position Sync, and Auto-Guarding of Orphans.
     """
-    # 1. SYNC ORDERS (Non-Blocking Thread)
-    if ctx.order_manager:
+    def safe_sync_fetch() -> list[Mapping[str, Any]]:
+        """Synchronize broker orders/positions under a global non-blocking lock."""
+        if not SYNC_LOCK.acquire(False):
+            return []
         try:
-            await asyncio.to_thread(ctx.order_manager.reconcile_open_orders_with_broker)
-        except Exception as exc:
-            LOGGER.debug(f"Order Reconcile Warning: {exc}")
-
-    # 2. SYNC POSITIONS & AUTO-GUARD ORPHANS
-    if ctx.position_manager:
-        try:
-            # A. Fetch Broker Positions (REQUIRED STEP)
-            raw_data = await ctx.broker_client.get_positions()
-            broker_positions = []
-
-            # Robust Parsing of Broker Data
-            if isinstance(raw_data, list):
-                broker_positions = [p for p in raw_data if isinstance(p, Mapping)]
-            elif isinstance(raw_data, Mapping):
-                # Handle 'net' or 'day' keys common in broker APIs
-                src = raw_data.get("net", raw_data)
+            if ctx.order_manager:
+                ctx.order_manager.reconcile_open_orders_with_broker()
+            raw = ctx.broker_client.get_positions()
+            broker_positions: list[Mapping[str, Any]] = []
+            if isinstance(raw, list):
+                broker_positions = [p for p in raw if isinstance(p, Mapping)]
+            elif isinstance(raw, Mapping):
+                src = raw.get('net', raw)
                 if isinstance(src, list):
                     broker_positions = [p for p in src if isinstance(p, Mapping)]
-                else:
+                elif isinstance(src, Mapping):
                     broker_positions = [src]
+            if ctx.position_manager:
+                ctx.position_manager.synchronize_with_broker(broker_positions)
+            return broker_positions
+        finally:
+            SYNC_LOCK.release()
 
-            # B. Sync Broker Positions (Pass data to Manager)
-            # We run this in a thread to keep the bot responsive
-            await asyncio.to_thread(
-                ctx.position_manager.synchronize_with_broker, broker_positions
-            )
-
+    # 1/2. SYNC ORDERS + POSITIONS & AUTO-GUARD ORPHANS
+    if ctx.position_manager:
+        try:
+            broker_positions = await asyncio.to_thread(safe_sync_fetch)
+            # A. Fetch Broker Positions (REQUIRED STEP)
             # C. Auto-Guard Orphans (CRITICAL SAFETY LOGIC)
             if ctx.order_manager and ctx.order_manager._bracket_manager:
                 om = ctx.order_manager

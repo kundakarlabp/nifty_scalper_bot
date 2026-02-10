@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, time, timedelta, timezone
-from typing import Any, Deque, Dict, Iterable, Mapping, Sequence
+from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -629,8 +629,48 @@ class IndicatorEngine:
 
     def is_ready(self, symbol: str, min_bars: int = 50) -> bool:
         """Check if enough data exists for indicator calculation."""
+        return self.has_min_bars(symbol, min_bars)
+
+    def has_min_bars(self, symbol: str, min_bars: int) -> bool:
+        """Return whether the internal history satisfies *min_bars*."""
         history = self._histories.get(symbol)
         return history is not None and len(history) >= min_bars
+
+    def ensure_min_bars(
+        self,
+        symbol: str,
+        min_bars: int,
+        hydrate: Callable[[str, int], list[dict[str, Any]]] | None = None,
+    ) -> bool:
+        """Hydrate missing bars for *symbol* via callback before evaluation."""
+        if self.has_min_bars(symbol, min_bars):
+            return True
+        if hydrate is None:
+            return False
+        for bar in hydrate(symbol, min_bars):
+            try:
+                self.update_price(
+                    symbol,
+                    {
+                        'open': float(bar.get('open', 0.0) or 0.0),
+                        'high': float(bar.get('high', 0.0) or 0.0),
+                        'low': float(bar.get('low', 0.0) or 0.0),
+                        'close': float(bar.get('close', 0.0) or 0.0),
+                    },
+                    volume=int(bar.get('volume', 0) or 0),
+                    timestamp=bar.get('timestamp'),
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error(
+                    'Failure in IndicatorEngine.ensure_min_bars: %s',
+                    exc,
+                    extra={
+                        'event': 'indicator_engine_hydrate_bar_failed',
+                        'symbol': symbol,
+                    },
+                    exc_info=exc,
+                )
+        return self.has_min_bars(symbol, min_bars)
 
     def get_opening_range(
         self, symbol: str, minutes: int = 30

@@ -22,6 +22,7 @@ class OptionUniverseConfig:
     expiry_roll_hours: float = 12.0
     market_close_hour: int = 15
     market_close_minute: int = 30
+    spot_recalc_threshold_points: float = 25.0
 
 
 class OptionUniverseManager:
@@ -55,6 +56,7 @@ class OptionUniverseManager:
         self._atm_strike: int | None = None
         self._current_expiry: date | None = None
         self._current_universe: list[str] = []
+        self._last_recalc_spot: float | None = None
 
     def update_underlying(self, spot_price: float) -> None:
         """Refresh ATM, expiry and universe based on latest underlying spot.
@@ -133,6 +135,25 @@ class OptionUniverseManager:
         """
         return self.get_current_universe()
 
+    def get_filtered_universe(self, spot_ltp: float) -> list[str]:
+        """Return ATM-window symbols for nearest weekly and next monthly expiry."""
+        if spot_ltp <= 0:
+            return list(self._current_universe)
+        threshold = max(1.0, float(self._config.spot_recalc_threshold_points))
+        if self._last_recalc_spot is None or abs(spot_ltp - self._last_recalc_spot) >= threshold:
+            self.update_underlying(spot_ltp)
+            self._last_recalc_spot = float(spot_ltp)
+        atm = self._atm_strike
+        if atm is None:
+            return list(self._current_universe)
+        weekly, monthly = self._resolve_weekly_monthly_expiries(self._now_fn())
+        symbols: list[str] = []
+        for expiry in (weekly, monthly):
+            if expiry is None:
+                continue
+            symbols.extend(self._build_universe(atm, expiry))
+        return list(dict.fromkeys(symbols)) if symbols else list(self._current_universe)
+
     def _coerce_config(self, config: OptionUniverseConfig | dict[str, Any] | Any) -> OptionUniverseConfig:
         """Normalize external config objects into :class:`OptionUniverseConfig`."""
         if isinstance(config, OptionUniverseConfig):
@@ -148,6 +169,9 @@ class OptionUniverseManager:
                 'expiry_roll_hours': getattr(config, 'expiry_roll_hours', 12.0),
                 'market_close_hour': getattr(config, 'market_close_hour', 15),
                 'market_close_minute': getattr(config, 'market_close_minute', 30),
+                'spot_recalc_threshold_points': getattr(
+                    config, 'spot_recalc_threshold_points', 25.0
+                ),
             }
         return OptionUniverseConfig(
             underlying=str(payload.get('underlying', 'NIFTY')).upper(),
@@ -157,7 +181,21 @@ class OptionUniverseManager:
             expiry_roll_hours=float(payload.get('expiry_roll_hours', 12.0)),
             market_close_hour=int(payload.get('market_close_hour', 15)),
             market_close_minute=int(payload.get('market_close_minute', 30)),
+            spot_recalc_threshold_points=float(
+                payload.get('spot_recalc_threshold_points', 25.0)
+            ),
         )
+
+    def _resolve_weekly_monthly_expiries(
+        self, now: datetime
+    ) -> tuple[date | None, date | None]:
+        """Resolve nearest weekly then next monthly expiry candidates."""
+        calendar = self._build_expiry_calendar(now.date())
+        roll_delta = timedelta(hours=self._config.expiry_roll_hours)
+        weekly = next((item for item in calendar if (datetime.combine(item, time(self._config.market_close_hour, self._config.market_close_minute)) - now) > roll_delta), None)
+        monthly_candidates = [item for item in self._monthly_expiries(now.date(), months=8) if item >= now.date()]
+        monthly = next((item for item in monthly_candidates if weekly is None or item > weekly), None)
+        return weekly, monthly
 
     def _build_universe(self, atm_strike: int, expiry: date) -> list[str]:
         """Build CE/PE symbol list for configured strike range and expiry."""
