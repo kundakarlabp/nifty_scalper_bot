@@ -466,6 +466,10 @@ class StrategyRunner:
         self._post_exit_cooldown_seconds: float = float(
             os.getenv("POST_EXIT_COOLDOWN_SECONDS", "60.0")
         )
+        # Global risk-halt latch keeps control-plane work quiet once breaker trips.
+        # We intentionally keep this sticky so per-symbol loops cannot spam checks/logs.
+        self._risk_halt_active = False
+        self._risk_halt_logged = False
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -2166,6 +2170,39 @@ class StrategyRunner:
 
             if self._bracket_manager and price > 0:
                 self._bracket_manager.on_tick(symbol, price)
+
+            # Global breaker latch: once tripped, keep running only protective paths
+            # (brackets + position reconciliation) and skip strategy/indicator work.
+            if not self._risk_halt_active and self._risk_manager is not None:
+                try:
+                    tripped, _reason = self._risk_manager.is_circuit_breaker_tripped()
+                except Exception as exc:
+                    self._logger.debug(
+                        "Failure in global breaker check: %s",
+                        exc,
+                        extra={"event": "risk_halt_check_error", "symbol": symbol},
+                    )
+                    tripped = False
+                    _reason = ""
+                if tripped:
+                    self._risk_halt_active = True
+                    if not self._risk_halt_logged:
+                        self._risk_halt_logged = True
+                        self._logger.error(
+                            "Condition met: global risk halt latched",
+                            extra={
+                                "event": "risk_halt_latched",
+                                "symbol": symbol,
+                                "reason": _reason,
+                            },
+                        )
+            if self._risk_halt_active:
+                if hasattr(self._position_manager, "update_position_price"):
+                    try:
+                        self._position_manager.update_position_price(symbol, price)
+                    except Exception:
+                        pass
+                return
 
             skip_strategy = False
             if not self._is_market_open(now):
