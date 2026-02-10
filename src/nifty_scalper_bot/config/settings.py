@@ -851,6 +851,28 @@ class LiquiditySettings:
             raise ConfigurationError("min_top3_depth must be non-negative")
 
 
+@dataclass(slots=True)
+class OptionUniverseSettings:
+    """Dynamic option universe construction parameters."""
+
+    underlying: str = "NIFTY"
+    exchange: str = "NFO"
+    strike_step: int = 50
+    strikes_around_atm: int = 3
+    expiry_roll_hours: float = 12.0
+    market_close_hour: int = 15
+    market_close_minute: int = 30
+
+    def __post_init__(self) -> None:
+        self.underlying = (self.underlying or "NIFTY").strip().upper()
+        self.exchange = (self.exchange or "NFO").strip().upper()
+        self.strike_step = max(1, int(self.strike_step))
+        self.strikes_around_atm = max(0, int(self.strikes_around_atm))
+        self.expiry_roll_hours = max(0.0, float(self.expiry_roll_hours))
+        self.market_close_hour = min(max(0, int(self.market_close_hour)), 23)
+        self.market_close_minute = min(max(0, int(self.market_close_minute)), 59)
+
+
 class InstrumentSettings(BaseSettings):
     """Settings governing instrument cache warm-up and refresh."""
 
@@ -880,6 +902,7 @@ class Settings:
     replay: ReplaySettings = field(default_factory=ReplaySettings)
     selector: SelectorSettings = field(default_factory=SelectorSettings)
     liquidity: LiquiditySettings = field(default_factory=LiquiditySettings)
+    option_universe: OptionUniverseSettings = field(default_factory=OptionUniverseSettings)
     instruments: InstrumentSettings = field(default_factory=InstrumentSettings)
     elite: EliteStrategiesSettings = field(default_factory=EliteStrategiesSettings)
     poll_batch_size: int = 50
@@ -1284,6 +1307,27 @@ def _build_liquidity_settings() -> LiquiditySettings:
     )
 
 
+def _build_option_universe_settings() -> OptionUniverseSettings:
+    return OptionUniverseSettings(
+        underlying=_env_str("OPTION_UNIVERSE__UNDERLYING", default="NIFTY")
+        or "NIFTY",
+        exchange=_env_str("OPTION_UNIVERSE__EXCHANGE", default="NFO") or "NFO",
+        strike_step=_env_int("OPTION_UNIVERSE__STRIKE_STEP", default=50, minimum=1),
+        strikes_around_atm=_env_int(
+            "OPTION_UNIVERSE__STRIKES_AROUND_ATM", default=3, minimum=0
+        ),
+        expiry_roll_hours=_env_float(
+            "OPTION_UNIVERSE__EXPIRY_ROLL_HOURS", default=12.0, minimum=0.0
+        ),
+        market_close_hour=_env_int(
+            "OPTION_UNIVERSE__MARKET_CLOSE_HOUR", default=15, minimum=0
+        ),
+        market_close_minute=_env_int(
+            "OPTION_UNIVERSE__MARKET_CLOSE_MINUTE", default=30, minimum=0
+        ),
+    )
+
+
 def _build_instrument_settings() -> InstrumentSettings:
     """Construct instrument cache configuration from environment.
 
@@ -1345,6 +1389,7 @@ def get_settings() -> Settings:
         replay=_build_replay_settings(),
         selector=_build_selector_settings(),
         liquidity=_build_liquidity_settings(),
+        option_universe=_build_option_universe_settings(),
         instruments=_build_instrument_settings(),
         elite=_build_elite_settings(),
         execution=ExecutionSettings(
