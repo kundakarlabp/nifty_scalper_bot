@@ -1947,11 +1947,19 @@ class StrategyRunner:
                     _ltp = float(_ltp_raw)
                     if _ltp > 0:
                         self._bracket_manager.on_tick(symbol, _ltp)
+                        tick_err_map = getattr(self._bracket_manager, "_tick_error_logged", None)
+                        if isinstance(tick_err_map, dict):
+                            tick_err_map[symbol] = False
                 except Exception as _bm_err:
-                    self._logger.debug(
-                        f"Bracket tick forward failed: {_bm_err}",
-                        extra={"event": "bracket_tick_error", "symbol": symbol},
-                    )
+                    tick_err_map = getattr(self._bracket_manager, "_tick_error_logged", None)
+                    already_logged = bool(isinstance(tick_err_map, dict) and tick_err_map.get(symbol))
+                    if not already_logged:
+                        self._logger.error(
+                            "Bracket tick handler error",
+                            extra={"event": "bracket_tick_handler_error", "symbol": symbol, "error": str(_bm_err)},
+                        )
+                        if isinstance(tick_err_map, dict):
+                            tick_err_map[symbol] = True
 
             if "FUT" in symbol.upper():
                 return
@@ -2623,12 +2631,7 @@ class StrategyRunner:
                                     "symbol": symbol,
                                     "bar_ts": last_bar_ts.isoformat(),
                                 }
-                                if logged_map.get(symbol) == last_bar_ts:
-                                    self._logger.debug(
-                                        "Condition met: strategy_eval_skipped_same_bar",
-                                        extra=extra_payload,
-                                    )
-                                else:
+                                if logged_map.get(symbol) != last_bar_ts:
                                     logged_map[symbol] = last_bar_ts
                                     self._logger.info(
                                         "Condition met: strategy_eval_skipped_same_bar",
@@ -3297,20 +3300,65 @@ class StrategyRunner:
                     and abs(getattr(p, "quantity", 0) or 0) > 0
                 ]
                 if len(_nifty_active) >= _max_nifty_positions:
-                    self._logger.info(
-                        f"🛡️ CROSS-STRIKE REJECT: {base_symbol} | "
-                        f"Already {len(_nifty_active)} NIFTY positions active "
-                        f"(max={_max_nifty_positions}) | "
-                        f"Active: {[getattr(p, 'symbol', '?') for p in _nifty_active]}",
-                        extra={
-                            "event": "signal_cross_strike_reject",
-                            "symbol": base_symbol,
-                        },
+                    candidate_signal_confidence = self._normalize_confidence(
+                        float(getattr(signal, "confidence", 0.0) or 0.0)
                     )
-                    with self._lock:
-                        if state:
-                            state.last_signal_at = timestamp
-                    return
+                    active_position = _nifty_active[0] if _nifty_active else None
+                    active_position_confidence = 0.0
+                    if active_position is not None:
+                        active_position_confidence = self._normalize_confidence(
+                            float(getattr(active_position, "confidence", 0.0) or 0.0)
+                        )
+                    if (
+                        active_position is not None
+                        and candidate_signal_confidence > active_position_confidence
+                        and hasattr(self._order_manager, "exit_position")
+                    ):
+                        active_qty = int(abs(getattr(active_position, "quantity", 0) or 0))
+                        if active_qty > 0:
+                            self._logger.info(
+                                "signal_cross_strike_replace",
+                                extra={
+                                    "event": "signal_cross_strike_replace",
+                                    "symbol": base_symbol,
+                                    "active_symbol": getattr(active_position, "symbol", ""),
+                                    "candidate_confidence": candidate_signal_confidence,
+                                    "active_confidence": active_position_confidence,
+                                },
+                            )
+                            self._order_manager.exit_position(
+                                symbol=getattr(active_position, "symbol", ""),
+                                quantity=active_qty,
+                                tag="cross_strike_replace",
+                            )
+                        else:
+                            self._logger.info(
+                                "signal_cross_strike_reject",
+                                extra={
+                                    "event": "signal_cross_strike_reject",
+                                    "symbol": base_symbol,
+                                    "reason": "active_qty_invalid",
+                                },
+                            )
+                            with self._lock:
+                                if state:
+                                    state.last_signal_at = timestamp
+                            return
+                    else:
+                        self._logger.info(
+                            f"🛡️ CROSS-STRIKE REJECT: {base_symbol} | "
+                            f"Already {len(_nifty_active)} NIFTY positions active "
+                            f"(max={_max_nifty_positions}) | "
+                            f"Active: {[getattr(p, 'symbol', '?') for p in _nifty_active]}",
+                            extra={
+                                "event": "signal_cross_strike_reject",
+                                "symbol": base_symbol,
+                            },
+                        )
+                        with self._lock:
+                            if state:
+                                state.last_signal_at = timestamp
+                        return
 
             side = "LONG" if signal.action == "BUY" else "SHORT"
             confidence = self._calculate_signal_score(signal.symbol, side, trade_price)

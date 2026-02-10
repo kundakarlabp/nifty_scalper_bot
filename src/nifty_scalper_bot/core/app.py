@@ -2340,6 +2340,16 @@ def _bind_ws_mdm(ctx: BotContext) -> None:
         try:
             mdm.set_ws_connected(True)
             mdm.bump_heartbeat()
+            # Rehydrate bracket runtime state after reconnect to keep trailing/exit tracking continuous.
+            runner = getattr(ctx, "strategy_runner", None)
+            bracket_manager = getattr(runner, "_bracket_manager", None)
+            position_manager = getattr(runner, "_position_manager", None)
+            if bracket_manager and position_manager and hasattr(position_manager, "get_all_positions"):
+                for pos in position_manager.get_all_positions():
+                    symbol = getattr(pos, "symbol", "")
+                    bracket = getattr(bracket_manager, "active_brackets", {}).get(symbol)
+                    if bracket and hasattr(bracket, "rehydrate_state_from_position"):
+                        bracket.rehydrate_state_from_position(pos)
         except Exception as exc:
             LOGGER.warning(
                 f"Failed to set WS connected state: {exc}",
