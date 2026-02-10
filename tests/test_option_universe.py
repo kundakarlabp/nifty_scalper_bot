@@ -53,3 +53,32 @@ def test_primary_symbols_matches_current_universe() -> None:
     manager.update_underlying(22540.0)
 
     assert manager.get_primary_symbols() == manager.get_current_universe()
+
+
+def test_filtered_universe_uses_weekly_and_monthly() -> None:
+    manager = OptionUniverseManager(
+        OptionUniverseConfig(strike_step=50, strikes_around_atm=1),
+        now_fn=lambda: datetime(2026, 2, 2, 10, 0, 0),
+    )
+
+    symbols = manager.get_filtered_universe(18630.0)
+
+    assert symbols
+    assert len(symbols) == 12
+    assert any(symbol.endswith('18650CE') for symbol in symbols)
+
+
+def test_filtered_universe_reuses_spot_within_threshold() -> None:
+    manager = OptionUniverseManager(
+        OptionUniverseConfig(
+            strike_step=50,
+            strikes_around_atm=1,
+            spot_recalc_threshold_points=1000.0,
+        ),
+        now_fn=lambda: datetime(2026, 2, 2, 10, 0, 0),
+    )
+
+    first = manager.get_filtered_universe(18600.0)
+    second = manager.get_filtered_universe(18640.0)
+
+    assert first == second

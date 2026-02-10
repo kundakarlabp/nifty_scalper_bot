@@ -5,11 +5,26 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, Mapping, Protocol, Sequence, cast, runtime_checkable
 
-from nifty_scalper_bot.utils.errors import BrokerError
+from nifty_scalper_bot.utils.errors import BrokerError, RateLimitError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
 LOGGER = get_logger(__name__)
+
+
+class ExponentialBackoff:
+    """Deterministic exponential backoff helper."""
+
+    def __init__(self, initial: float = 0.5, maximum: float = 10.0) -> None:
+        self._initial = max(0.0, float(initial))
+        self._maximum = max(self._initial, float(maximum))
+        self._current = self._initial
+
+    def next(self) -> float:
+        """Return next delay in seconds."""
+        delay = self._current
+        self._current = min(self._maximum, max(self._initial, self._current * 2))
+        return delay
 
 
 @runtime_checkable
@@ -64,10 +79,25 @@ class ThrottledBrokerClient:
         **kwargs: Any,
     ) -> Any:
         last_error: Exception | None = None
+        backoff = ExponentialBackoff(initial=0.5, maximum=10.0)
         for attempt in range(1, tries + 1):
             self._limiter.acquire(bucket, timeout=timeout)
             try:
                 return fn(*args, **kwargs)
+            except RateLimitError as exc:
+                last_error = exc
+                if attempt >= tries:
+                    break
+                delay = backoff.next()
+                self._logger.warning(
+                    'Rate limit backoff',
+                    extra={
+                        'symbol': str(args[0]) if args else '',
+                        'service': bucket,
+                        'backoff_ms': int(delay * 1000),
+                    },
+                )
+                time.sleep(delay)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 self._logger.warning(

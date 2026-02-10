@@ -219,6 +219,32 @@ def test_atr_matches_reference(engine: IndicatorEngine) -> None:
     assert atr == pytest.approx(expected_atr, rel=1e-12)
 
 
+def test_ensure_min_bars_uses_hydrator(engine: IndicatorEngine) -> None:
+    payload = [
+        {
+            'open': 100.0,
+            'high': 101.0,
+            'low': 99.0,
+            'close': 100.5,
+            'volume': 1,
+            'timestamp': datetime(2024, 1, 1, tzinfo=timezone.utc),
+        },
+        {
+            'open': 100.5,
+            'high': 102.0,
+            'low': 100.0,
+            'close': 101.0,
+            'volume': 1,
+            'timestamp': datetime(2024, 1, 1, 0, 1, tzinfo=timezone.utc),
+        },
+    ]
+
+    ready = engine.ensure_min_bars('TEST', 2, hydrate=lambda _s, _m: payload)
+
+    assert ready is True
+    assert engine.has_min_bars('TEST', 2) is True
+
+
 def _atr_reference(
     highs: list[float], lows: list[float], closes: list[float], period: int
 ) -> float:
