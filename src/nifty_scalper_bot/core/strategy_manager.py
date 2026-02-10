@@ -1729,10 +1729,12 @@ class StrategyManager(_BaseStrategyManager):
                 }
                 if context:
                     payload.update(context)
-                log.info(
-                    "📉 NO SIGNAL | symbol=%s reason=%s",
-                    symbol,
-                    reason_code,
+                throttle_key = f"strategy_no_signal_{symbol}_{reason_code}"
+                log_throttled(
+                    log,
+                    throttle_key,
+                    f"📉 NO SIGNAL | symbol={symbol} reason={reason_code}",
+                    interval_sec=60.0,
                     extra=payload,
                 )
             except Exception as exc:  # noqa: BLE001

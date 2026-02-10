@@ -2707,7 +2707,7 @@ class StrategyRunner:
                                 }
                                 if logged_map.get(symbol) != last_bar_ts:
                                     logged_map[symbol] = last_bar_ts
-                                    self._logger.info(
+                                    self._logger.debug(
                                         "Condition met: strategy_eval_skipped_same_bar",
                                         extra=extra_payload,
                                     )
@@ -2769,7 +2769,7 @@ class StrategyRunner:
                         f"strategy_eval_{symbol}",
                         f"🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._config.min_indicator_bars}",
                         interval_sec=30.0,
-                        level=logging.INFO,
+                        level=logging.DEBUG,
                     )
                     self._indicator_engine.ensure_min_bars(
                         symbol,
@@ -2798,7 +2798,7 @@ class StrategyRunner:
                             f"indicators_ready_{symbol}",
                             f"✅ INDICATORS READY: {symbol} | Calling StrategyManager...",
                             interval_sec=60.0,
-                            level=logging.INFO,
+                            level=logging.DEBUG,
                         )
 
                         signal = self._strategy_manager.generate_signal(symbol, price)
