@@ -30,6 +30,41 @@ def test_price_history_capacity() -> None:
     assert history.get_closes() == [5.0, 6.0, 7.0, 8.0, 9.0]
 
 
+def test_get_history_returns_closes(engine: IndicatorEngine) -> None:
+    """Verify history retrieval. Args: engine. Returns: None. Raises: Exception."""
+    engine.update_price(
+        'HISTORY',
+        101.5,
+        volume=5,
+        timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    engine.update_price(
+        'HISTORY',
+        102.5,
+        volume=6,
+        timestamp=datetime(2024, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    assert engine.get_history('HISTORY') == [101.5, 102.5]
+    assert engine.get_history('HISTORY', count=1) == [102.5]
+    assert engine.get_history('MISSING') == []
+
+
+def test_price_history_get_opens() -> None:
+    """Verify open price retrieval. Args: None. Returns: None. Raises: Exception."""
+    history = PriceHistory(max_length=3)
+    history.add_tick(
+        {'open': 100.0, 'high': 101.0, 'low': 99.0, 'close': 100.5},
+        volume=1,
+        timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    history.add_tick(
+        {'open': 101.0, 'high': 102.0, 'low': 100.0, 'close': 101.5},
+        volume=1,
+        timestamp=datetime(2024, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    assert history.get_opens() == [100.0, 101.0]
+    assert history.get_opens(1) == [101.0]
+
 def test_rsi_matches_reference(engine: IndicatorEngine) -> None:
     closes = [
         44.34,

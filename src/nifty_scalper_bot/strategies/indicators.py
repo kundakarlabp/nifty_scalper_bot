@@ -86,6 +86,10 @@ class PriceHistory:
         """Get high prices."""
         return self._get_tail(self._highs, count)
 
+    def get_opens(self, count: int | None = None) -> list[float]:
+        """Get open prices."""
+        return self._get_tail(self._opens, count)
+
     def get_lows(self, count: int | None = None) -> list[float]:
         """Get low prices."""
         return self._get_tail(self._lows, count)
@@ -164,6 +168,37 @@ class IndicatorEngine:
         timestamp = timestamp or datetime.now(timezone.utc)
         history.add_tick(price, volume, timestamp)
         self._cache.pop(symbol, None)
+
+    def get_history(self, symbol: str, count: int | None = None) -> list[float]:
+        """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
+        LOGGER.debug(
+            'Entered IndicatorEngine.get_history',
+            extra={'event': 'indicator_engine_get_history_enter', 'symbol': symbol},
+        )
+        try:
+            history = self._histories.get(symbol)
+            if history is None:
+                LOGGER.info(
+                    'Condition met: indicator_history_missing',
+                    extra={
+                        'event': 'indicator_engine_history_missing',
+                        'symbol': symbol,
+                    },
+                )
+                return []
+            closes = history.get_closes(count)
+            LOGGER.info(
+                'Condition met: indicator_history_resolved',
+                extra={
+                    'event': 'indicator_engine_history_resolved',
+                    'symbol': symbol,
+                    'bars': len(closes),
+                },
+            )
+            return closes
+        except Exception as e:  # noqa: BLE001
+            LOGGER.error('Failure in IndicatorEngine.get_history: %s', e, exc_info=True)
+            return []
 
     def get_indicators(
         self, symbol: str, names: Iterable[str] | None = None
