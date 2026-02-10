@@ -55,6 +55,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.settings import Settings, get_settings
+from nifty_scalper_bot.core.option_universe import OptionUniverseManager
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
@@ -1444,6 +1445,7 @@ class BotContext:
     underlying_spot_prices: OrderedDict[str, float] = field(
         default_factory=lambda: OrderedDict()
     )
+    option_universe: OptionUniverseManager | None = None
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -2040,46 +2042,30 @@ def _get_symbols(
     config: AppConfig,
     resolver: InstrumentResolver | None = None,
     broker: Any | None = None,
+    option_universe: OptionUniverseManager | None = None,
 ) -> list[str]:
-    """
-    Return validated option symbols for trading.
+    """Return validated option symbols for trading."""
+    LOGGER.info('=' * 60)
+    LOGGER.info('🔍 _get_symbols() STARTING - Symbol Resolution')
 
-    PRODUCTION FIX v2.0:
-    - Fixed 'contracts' undefined bug
-    - Guaranteed option symbol generation
-    - Robust price fetching with multiple fallbacks
-    """
-    import calendar
-    import datetime
-    from datetime import timedelta
-
-    LOGGER.info("=" * 60)
-    LOGGER.info("🔍 _get_symbols() STARTING - Symbol Resolution")
-
-    # 1. Check for explicit configuration (highest priority)
-    symbols = getattr(config, "symbols", None)
+    symbols = getattr(config, 'symbols', None)
     if symbols:
         if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
             result = [str(s).strip() for s in symbols if str(s).strip()]
-            LOGGER.info(f"✅ Using configured SYMBOLS env: {result}")
-            LOGGER.info("=" * 60)
+            LOGGER.info('✅ Using configured SYMBOLS env: %s', result)
+            LOGGER.info('=' * 60)
             return result
         result = [str(symbols)]
-        LOGGER.info(f"✅ Using configured SYMBOLS env: {result}")
-        LOGGER.info("=" * 60)
+        LOGGER.info('✅ Using configured SYMBOLS env: %s', result)
+        LOGGER.info('=' * 60)
         return result
 
-    final_symbols: list[str] = []
-    atm_price: int | None = None
     ltp: float = 0.0
-
-    # 2. Fetch Live Spot Price
     if broker:
         try:
             token_candidates = [256265]
-            str_candidates = ["NSE:NIFTY 50", "NIFTY 50", "NIFTY 50 INDEX"]
-
-            inner = getattr(broker, "client", getattr(broker, "_broker", broker))
+            str_candidates = ['NSE:NIFTY 50', 'NIFTY 50', 'NIFTY 50 INDEX']
+            inner = getattr(broker, 'client', getattr(broker, '_broker', broker))
 
             def parse_price(data: Any) -> float:
                 if not data:
@@ -2087,7 +2073,7 @@ def _get_symbols(
                 if isinstance(data, (int, float)):
                     return float(data)
                 if isinstance(data, dict):
-                    for key in ("last_price", "ltp", "close"):
+                    for key in ('last_price', 'ltp', 'close'):
                         val = data.get(key)
                         if val:
                             try:
@@ -2096,198 +2082,60 @@ def _get_symbols(
                                 continue
                 return 0.0
 
-            # Strategy A: get_ltp_bulk
-            if ltp == 0 and hasattr(inner, "get_ltp_bulk"):
-                try:
-                    response = inner.get_ltp_bulk(token_candidates)
-                    if response:
-                        for t in token_candidates:
-                            val = response.get(t) or response.get(str(t))
-                            price = parse_price(val)
-                            if price > 0:
-                                ltp = price
-                                LOGGER.info(f"✅ NIFTY price via get_ltp_bulk: {ltp}")
-                                break
-                except Exception as e:
-                    LOGGER.debug(f"get_ltp_bulk failed: {e}")
-
-            # Strategy B: get_ltp
-            if ltp == 0 and hasattr(inner, "get_ltp"):
-                for s in str_candidates:
-                    try:
-                        p = inner.get_ltp(s)
-                        price = parse_price(p)
+            if ltp == 0 and hasattr(inner, 'get_ltp_bulk'):
+                response = inner.get_ltp_bulk(token_candidates)
+                if response:
+                    for t in token_candidates:
+                        val = response.get(t) or response.get(str(t))
+                        price = parse_price(val)
                         if price > 0:
                             ltp = price
-                            LOGGER.info(f"✅ NIFTY price via get_ltp: {ltp}")
+                            break
+
+            if ltp == 0 and hasattr(inner, 'get_ltp'):
+                for candidate in str_candidates:
+                    try:
+                        price = parse_price(inner.get_ltp(candidate))
+                        if price > 0:
+                            ltp = price
                             break
                     except Exception:
-                        pass
+                        continue
 
-            # Strategy C: Standard Kite .ltp()
-            if ltp == 0 and hasattr(inner, "ltp"):
+            if ltp == 0 and hasattr(inner, 'ltp'):
                 try:
                     q = inner.ltp(str_candidates)
-                    for k in str_candidates:
-                        if k in q:
-                            price = parse_price(q[k])
+                    for candidate in str_candidates:
+                        if candidate in q:
+                            price = parse_price(q[candidate])
                             if price > 0:
                                 ltp = price
-                                LOGGER.info(f"✅ NIFTY price via .ltp(): {ltp}")
                                 break
-                except Exception as e:
-                    LOGGER.debug(f".ltp() failed: {e}")
-
-            # Strategy D: quote()
-            if ltp == 0 and hasattr(inner, "quote"):
-                try:
-                    q = inner.quote(str_candidates)
-                    for k in str_candidates:
-                        if k in q:
-                            price = parse_price(q[k])
-                            if price > 0:
-                                ltp = price
-                                LOGGER.info(f"✅ NIFTY price via .quote(): {ltp}")
-                                break
-                except Exception as e:
-                    LOGGER.debug(f".quote() failed: {e}")
-
-            if ltp > 0:
-                atm_price = round(ltp / 50) * 50
-                LOGGER.info(f"✅ Live NIFTY Spot: {ltp} -> ATM Strike: {atm_price}")
-                global _LATEST_CTX
-                if _LATEST_CTX:
-                    _LATEST_CTX.update_spot_price("NIFTY", ltp)
-            else:
-                LOGGER.warning("⚠️ Could not fetch live NIFTY price from broker")
-
+                except Exception:
+                    pass
         except Exception as exc:
-            LOGGER.error(f"Error fetching live price: {exc}", exc_info=True)
+            LOGGER.error('Error fetching live price: %s', exc, exc_info=True)
 
-    # 3. Fallback ATM price (Update based on current NIFTY ~25200)
-    if atm_price is None or atm_price < 15000:
-        fallback_base = 25200
-        LOGGER.warning(f"⚠️ Using fallback ATM: {fallback_base}")
-        atm_price = fallback_base
+    if ltp <= 0:
+        ltp = 25200.0
+        LOGGER.warning('⚠️ Using fallback ATM from default spot %.2f', ltp)
 
-    # 4. Generate strike range
-    strike_step = 50
-    strikes_to_fetch = [
-        atm_price - strike_step,
-        atm_price,
-        atm_price + strike_step,
-    ]
-    LOGGER.info(f"📊 Strikes to fetch: {strikes_to_fetch}")
+    global _LATEST_CTX
+    universe = option_universe
+    if universe is None:
+        settings = getattr(_LATEST_CTX, 'settings', None)
+        universe_config = getattr(settings, 'option_universe', {})
+        universe = OptionUniverseManager(universe_config)
 
-    # 5. Try Smart Resolution (FIXED: contracts initialization)
-    try:
-        from nifty_scalper_bot.utils.smart_symbol import get_next_valid_symbols
+    universe.update_underlying(float(ltp))
+    final_symbols = universe.get_current_universe()
+    LOGGER.debug('OptionUniv: Universe refreshed -> %s', final_symbols)
 
-        contract_map = {}
-        contracts: list = []  # FIX: Initialize contracts list
+    if _LATEST_CTX:
+        _LATEST_CTX.update_spot_price('NIFTY', float(ltp))
 
-        if resolver:
-            if hasattr(resolver, "option_contracts"):
-                try:
-                    contracts = resolver.option_contracts("NIFTY") or []
-                    LOGGER.info(
-                        f"📦 Got {len(contracts)} contracts from option_contracts()"
-                    )
-                except Exception as e:
-                    LOGGER.debug(f"option_contracts() failed: {e}")
-                    contracts = []
-
-            if not contracts and hasattr(resolver, "_option_contracts"):
-                try:
-                    raw = getattr(resolver, "_option_contracts", {})
-                    for c_list in raw.values():
-                        if isinstance(c_list, list):
-                            contracts.extend(c_list)
-                    LOGGER.info(
-                        f"📦 Got {len(contracts)} contracts from _option_contracts"
-                    )
-                except Exception as e:
-                    LOGGER.debug(f"_option_contracts access failed: {e}")
-
-            for c in contracts:
-                t = c.get("instrument_token")
-                if t:
-                    try:
-                        contract_map[int(t)] = c
-                    except (ValueError, TypeError):
-                        pass
-
-        if contract_map and get_next_valid_symbols:
-            LOGGER.info(
-                f"🔍 Trying smart resolution with {len(contract_map)} contracts"
-            )
-            results = get_next_valid_symbols(
-                strikes_to_fetch, opt_types=("CE", "PE"), instrument_map=contract_map
-            )
-            for inst in results:
-                ts = inst.get("tradingsymbol") or inst.get("symbol")
-                if ts:
-                    prefix = "NFO:" if not ts.startswith("NFO:") else ""
-                    final_symbols.append(f"{prefix}{ts}")
-
-            if final_symbols:
-                LOGGER.info(
-                    f"✅ Smart resolution found {len(final_symbols)} symbols: {final_symbols}"
-                )
-
-    except Exception as exc:
-        LOGGER.warning(f"Smart resolution skipped: {exc}")
-
-    # 6. GUARANTEED Fallback - Always generate options if none found
-    if not final_symbols:
-        LOGGER.warning("⚠️ Smart resolution failed. Using GUARANTEED fallback.")
-
-        now = datetime.datetime.now()
-        today = now.date()
-
-        # Find next Tuesday (weekly expiry)
-        target_weekday = 1  # Tuesday
-        days_ahead = target_weekday - today.weekday()
-        if days_ahead < 0:
-            days_ahead += 7
-        if days_ahead == 0 and now.hour >= 16:
-            days_ahead += 7
-
-        next_expiry = today + timedelta(days=days_ahead)
-
-        # Check if monthly expiry (last Tuesday of month)
-        last_day_of_month = calendar.monthrange(next_expiry.year, next_expiry.month)[1]
-        potential_monthly = datetime.date(
-            next_expiry.year, next_expiry.month, last_day_of_month
-        )
-        while potential_monthly.weekday() != target_weekday:
-            potential_monthly -= timedelta(days=1)
-
-        is_monthly = next_expiry == potential_monthly
-
-        # Format expiry code (Zerodha convention)
-        if is_monthly:
-            date_code = next_expiry.strftime("%y%b").upper()
-        else:
-            y = next_expiry.strftime("%y")
-            d = next_expiry.strftime("%d")
-            m_map = {10: "O", 11: "N", 12: "D"}
-            m = m_map.get(next_expiry.month, str(next_expiry.month))
-            date_code = f"{y}{m}{d}"
-
-        LOGGER.info(
-            f"📅 Expiry: {next_expiry} | Type: {'Monthly' if is_monthly else 'Weekly'} | Code: {date_code}"
-        )
-
-        for strike in strikes_to_fetch:
-            for kind in ("CE", "PE"):
-                sym = f"NFO:NIFTY{date_code}{strike}{kind}"
-                final_symbols.append(sym)
-
-        LOGGER.info(f"✅ Generated fallback symbols: {final_symbols}")
-
-    LOGGER.info(f"🎯 FINAL SYMBOLS TO TRADE: {final_symbols}")
-    LOGGER.info("=" * 60)
+    LOGGER.info('🎯 FINAL SYMBOLS TO TRADE: %s', final_symbols)
+    LOGGER.info('=' * 60)
     return final_symbols
 
 
@@ -4433,6 +4281,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     health_app = create_health_app(health_state)
 
+    option_universe_manager = OptionUniverseManager(settings.option_universe)
+
     ctx = BotContext(
         settings=settings,
         config=config,
@@ -4479,6 +4329,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         telegram_notifier=notifier,
         health_app=health_app,
         session_guard=session_guard,
+        option_universe=option_universe_manager,
     )
 
     resolver_candidate = ctx.instrument_resolver
@@ -5477,6 +5328,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.config,
                 ctx.instrument_resolver,
                 ctx.broker_client,
+                option_universe=ctx.option_universe,
             )
 
             # ---------- Futures rollover logic (unchanged) ----------
@@ -5666,6 +5518,58 @@ async def startup_sequence(ctx: BotContext) -> None:
                 asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
             else:
                 LOGGER.info("📡 MDM polling disabled (PollingStreamer is active)")
+
+            dynamic_option_symbols = {
+                sym for sym in targets if sym.startswith('NFO:NIFTY') and (sym.endswith('CE') or sym.endswith('PE'))
+            }
+
+            async def _option_universe_sync_loop() -> None:
+                """Keep option subscriptions aligned with the dynamic option universe."""
+                nonlocal dynamic_option_symbols
+                while True:
+                    try:
+                        if not ctx.option_universe:
+                            await asyncio.sleep(30)
+                            continue
+
+                        spot = ctx.market_data_manager.get_latest_price('NSE:NIFTY 50') if ctx.market_data_manager else None
+                        if spot and spot > 0:
+                            ctx.option_universe.update_underlying(float(spot))
+
+                        latest_symbols = set(ctx.option_universe.get_current_universe())
+                        add_symbols = sorted(latest_symbols - dynamic_option_symbols)
+                        drop_symbols = sorted(dynamic_option_symbols - latest_symbols)
+
+                        if add_symbols or drop_symbols:
+                            LOGGER.debug(
+                                'OptionUniv: subscription update add=%s drop=%s',
+                                add_symbols,
+                                drop_symbols,
+                                extra={'event': 'option_universe_subscriptions_update'},
+                            )
+
+                        for sym in add_symbols:
+                            if ctx.market_data_manager:
+                                ctx.market_data_manager.ensure_tracking(sym)
+                            tok = ctx.instrument_resolver.resolve(sym) if ctx.instrument_resolver else None
+                            if tok and ctx.streamer and hasattr(ctx.streamer, 'subscribe'):
+                                ctx.streamer.subscribe([tok])
+                            if ctx.strategy_runner:
+                                ctx.strategy_runner.add_symbol(sym)
+
+                        for sym in drop_symbols:
+                            tok = ctx.instrument_resolver.resolve(sym) if ctx.instrument_resolver else None
+                            if tok and ctx.streamer and hasattr(ctx.streamer, 'unsubscribe'):
+                                ctx.streamer.unsubscribe([tok])
+                            if ctx.strategy_runner:
+                                ctx.strategy_runner.remove_symbol(sym)
+
+                        dynamic_option_symbols = latest_symbols
+                    except Exception as exc:
+                        LOGGER.error('Failure in option universe sync loop: %s', exc, exc_info=exc)
+                    await asyncio.sleep(30)
+
+            asyncio.create_task(_option_universe_sync_loop())
         except Exception as e:
             LOGGER.error("Hydration/Tracking failed", exc_info=True)
 
