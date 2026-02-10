@@ -277,7 +277,7 @@ class TelegramEnhancedNotifier:
             if elapsed >= retry_window_s:
                 # Latch degraded state so callers stop retrying until cooldown expires.
                 self._telegram_degraded = True
-                self._telegram_degraded_until = _current_loop_time() + 60.0
+                self._telegram_degraded_until = _current_loop_time() + retry_window_s
                 if not self._telegram_degraded_logged:
                     self._telegram_degraded_logged = True
                     self._logger.error(
@@ -285,7 +285,7 @@ class TelegramEnhancedNotifier:
                         extra={
                             "event": "telegram_notifier_degraded",
                             "chat_id": chat_id,
-                            "cooldown_s": 60.0,
+                            "cooldown_s": retry_window_s,
                         },
                     )
                 return
@@ -328,6 +328,20 @@ class TelegramEnhancedNotifier:
                             "err": str(exc),
                         },
                     )
+                    # Repeated hard failures indicate transport degradation; latch
+                    # to avoid retry spam from every caller until cooldown expires.
+                    self._telegram_degraded = True
+                    self._telegram_degraded_until = _current_loop_time() + retry_window_s
+                    if not self._telegram_degraded_logged:
+                        self._telegram_degraded_logged = True
+                        self._logger.error(
+                            "telegram_notifier_degraded",
+                            extra={
+                                "event": "telegram_notifier_degraded",
+                                "chat_id": chat_id,
+                                "cooldown_s": retry_window_s,
+                            },
+                        )
                     return
                 delay = min(2.0**attempt, 30.0)
                 self._logger.warning(
@@ -364,6 +378,20 @@ class TelegramEnhancedNotifier:
                             "err": str(exc),
                         },
                     )
+                    # Generic Telegram transport failures are latched as degraded so
+                    # recovery waits for cooldown instead of immediate retry storms.
+                    self._telegram_degraded = True
+                    self._telegram_degraded_until = _current_loop_time() + retry_window_s
+                    if not self._telegram_degraded_logged:
+                        self._telegram_degraded_logged = True
+                        self._logger.error(
+                            "telegram_notifier_degraded",
+                            extra={
+                                "event": "telegram_notifier_degraded",
+                                "chat_id": chat_id,
+                                "cooldown_s": retry_window_s,
+                            },
+                        )
                     return
                 delay = min(2.0**attempt, 30.0)
                 self._logger.warning(
