@@ -45,6 +45,8 @@ class VWAPProStrategy(EliteStrategy):
         "_last_valid_volume_ts",
         "_reject_reason_counts",
         "_index_bias_degraded_logged",
+        "_last_valid_index_vwap",
+        "_bias_failover_logged_bar",
     )
 
     def __init__(
@@ -80,6 +82,8 @@ class VWAPProStrategy(EliteStrategy):
         self._reject_reason_counts: Dict[str, int] = {}
         self._index_bias_missing_logged: bool = False
         self._index_bias_degraded_logged: bool = False
+        self._last_valid_index_vwap: float = 0.0
+        self._bias_failover_logged_bar: Dict[str, str] = {}
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -258,14 +262,25 @@ class VWAPProStrategy(EliteStrategy):
             def _emit_no_signal(reason_code: str) -> None:
                 """Args: reason_code. Returns: None. Raises: Exception."""
                 try:
+                    vol_val = float(indicators.get("volume") or 0.0)
+                    avg_vol_val = float(indicators.get("avg_volume") or 0.0)
+                    accept_count = int(self._vwap_acceptance_tracker.get(acc_key, 0) or 0)
+                    vwap_diff = float(current_price - vwap)
                     LOGGER.info(
-                        "📉 NO SIGNAL | symbol=%s reason=%s",
+                        "📉 NO SIGNAL | %s reason=%s",
                         symbol,
                         reason_code,
                         extra={
                             "event": "vwap_pro_no_signal",
                             "symbol": symbol,
                             "reason_code": reason_code,
+                            "ltp": current_price,
+                            "vwap": vwap,
+                            "vwap_diff": vwap_diff,
+                            "vol": vol_val,
+                            "avg_vol": avg_vol_val,
+                            "vol_avg_ratio": (vol_val / avg_vol_val) if avg_vol_val > 0 else 0.0,
+                            "accept": accept_count,
                         },
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -398,6 +413,37 @@ class VWAPProStrategy(EliteStrategy):
                 or 0.0
             )
             index_volume = float(indicators.get("futures_volume") or 0.0)
+            if index_vwap > 0:
+                self._last_valid_index_vwap = index_vwap
+            bar_marker = str(
+                indicators.get("bar_ts")
+                or indicators.get("timestamp")
+                or indicators.get("bar_time")
+                or int(now // 60)
+            )
+            if index_vwap <= 0:
+                failover_vwap = 0.0
+                failover_source = "none"
+                if self._last_valid_index_vwap > 0:
+                    failover_vwap = float(self._last_valid_index_vwap)
+                    failover_source = "last_valid_index_vwap"
+                elif float(indicators.get("nifty_fut_vwap") or 0.0) > 0:
+                    failover_vwap = float(indicators.get("nifty_fut_vwap") or 0.0)
+                    failover_source = "futures_vwap"
+                if failover_vwap > 0:
+                    index_vwap = failover_vwap
+                    if self._bias_failover_logged_bar.get(symbol) != bar_marker:
+                        self._bias_failover_logged_bar[symbol] = bar_marker
+                        LOGGER.info(
+                            "Failover bias used",
+                            extra={
+                                "event": "vwap_pro_bias_failover",
+                                "symbol": symbol,
+                                "source": failover_source,
+                                "index_vwap": index_vwap,
+                                "bar": bar_marker,
+                            },
+                        )
 
             if index_vwap <= 0 or index_volume <= 0:
                 if not self._index_bias_degraded_logged:

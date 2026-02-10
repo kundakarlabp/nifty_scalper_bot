@@ -133,6 +133,8 @@ class TelegramEnhancedNotifier:
     _telegram_degraded: bool = field(init=False, repr=False, default=False)
     _telegram_degraded_until: float = field(init=False, repr=False, default=0.0)
     _telegram_degraded_logged: bool = field(init=False, repr=False, default=False)
+    _telegram_backoff_active: bool = field(init=False, repr=False, default=False)
+    _telegram_backoff_until: float = field(init=False, repr=False, default=0.0)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
@@ -266,6 +268,11 @@ class TelegramEnhancedNotifier:
 
         # Circuit-breaker latch prevents unbounded retry storms during outages.
         now = _current_loop_time()
+        if self._telegram_backoff_active and now < self._telegram_backoff_until:
+            return
+        if self._telegram_backoff_active and now >= self._telegram_backoff_until:
+            self._telegram_backoff_active = False
+            self._telegram_backoff_until = 0.0
         if self._telegram_degraded and now < self._telegram_degraded_until:
             return
         if self._telegram_degraded and now >= self._telegram_degraded_until:
@@ -302,6 +309,8 @@ class TelegramEnhancedNotifier:
                 self._telegram_degraded = False
                 self._telegram_degraded_logged = False
                 self._telegram_degraded_until = 0.0
+                self._telegram_backoff_active = False
+                self._telegram_backoff_until = 0.0
                 return
             except RetryAfter as exc:  # pragma: no cover - depends on API
                 delay = float(getattr(exc, "retry_after", 1.0) or 1.0)
@@ -315,6 +324,8 @@ class TelegramEnhancedNotifier:
                         "delay": delay,
                     },
                 )
+                self._telegram_backoff_active = True
+                self._telegram_backoff_until = _current_loop_time() + delay
                 await asyncio.sleep(delay)
                 attempt += 1
             except (TimedOut, NetworkError) as exc:  # pragma: no cover - network
@@ -354,6 +365,8 @@ class TelegramEnhancedNotifier:
                         "err": str(exc),
                     },
                 )
+                self._telegram_backoff_active = True
+                self._telegram_backoff_until = _current_loop_time() + delay
                 await asyncio.sleep(delay)
                 attempt += 1
             except Forbidden as exc:
@@ -404,6 +417,8 @@ class TelegramEnhancedNotifier:
                         "err": str(exc),
                     },
                 )
+                self._telegram_backoff_active = True
+                self._telegram_backoff_until = _current_loop_time() + delay
                 await asyncio.sleep(delay)
                 attempt += 1
 
