@@ -3327,6 +3327,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         default_symbols=list(poll_symbols or ["NSE:NIFTY 50"]),
         autostart=True,
         monitor_interval_s=300.0,
+        # Keep stream supervisor passive during breaker halts to avoid restart churn.
+        risk_halt_getter=lambda: bool(
+            _require_component(ctx.risk_manager, "risk_manager").is_circuit_breaker_tripped()[0]
+        ),
     )
     stream_supervisor.bootstrap()
     stream_supervisor.ensure_started()
@@ -6187,6 +6191,8 @@ class NiftyScalperApp:
         self._telegram_task: asyncio.Task[None] | None = None
         self._telegram_application_started = False
         self._self_test_interval = 300.0
+        # Edge-trigger runtime self-check state to avoid repeated failure floods.
+        self._last_self_check_ok: bool | None = None
 
     @property
     def config(self) -> AppConfig:
@@ -6450,6 +6456,17 @@ class NiftyScalperApp:
                         exc,
                         extra={"event": "runtime_self_test_execute_error"},
                         exc_info=exc,
+                    )
+                    continue
+                current_ok = all(bool(result.get("ok")) for result in results.values())
+                previous_ok = self._last_self_check_ok
+                self._last_self_check_ok = current_ok
+                if previous_ok is not None and current_ok == previous_ok:
+                    continue
+                if current_ok:
+                    LOGGER.info(
+                        "Condition met: runtime self-test recovered",
+                        extra={"event": "runtime_self_test_recovered"},
                     )
                     continue
                 for name, result in results.items():

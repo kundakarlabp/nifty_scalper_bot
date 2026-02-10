@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -52,6 +52,7 @@ class StreamSupervisor:
         default_symbols: Sequence[str] | None = None,
         autostart: bool = True,
         monitor_interval_s: float = 300.0,
+        risk_halt_getter: Callable[[], bool] | None = None,
     ) -> None:
         self.streamer = streamer
         self.resolver = resolver
@@ -62,6 +63,7 @@ class StreamSupervisor:
         ]
         self._autostart = bool(autostart)
         self._monitor_interval = max(float(monitor_interval_s), 0.2)
+        self._risk_halt_getter = risk_halt_getter
 
         self._tokens: set[int] = set()
         self._lock = threading.RLock()
@@ -74,6 +76,7 @@ class StreamSupervisor:
         self._consecutive_failures = 0
         self._start_count = 0
         self._last_error: str | None = None
+        self._risk_halt_restart_logged = False
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
@@ -404,7 +407,25 @@ class StreamSupervisor:
             if self.is_running():
                 with self._lock:
                     self._consecutive_failures = 0
+                self._risk_halt_restart_logged = False
                 continue
+            risk_halt_active = False
+            if self._risk_halt_getter is not None:
+                try:
+                    risk_halt_active = bool(self._risk_halt_getter())
+                except Exception:  # noqa: BLE001 - defensive callback surface
+                    risk_halt_active = False
+            if risk_halt_active:
+                # During a global risk halt we intentionally avoid transport churn,
+                # because protective lifecycle handling remains active without restarts.
+                if not self._risk_halt_restart_logged:
+                    self._risk_halt_restart_logged = True
+                    LOG.warning(
+                        "Stream restart suppressed due to risk halt",
+                        extra={"event": "stream_supervisor_restart_suppressed"},
+                    )
+                continue
+            self._risk_halt_restart_logged = False
             LOG.warning(
                 "stream_supervisor_restart",
                 extra={"event": "stream_supervisor_restart"},

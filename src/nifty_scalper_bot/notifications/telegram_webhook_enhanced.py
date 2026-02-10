@@ -130,6 +130,9 @@ class TelegramEnhancedNotifier:
     _last_refill: float = field(init=False, repr=False)
     _chat_whitelist: set[int] = field(init=False, repr=False)
     _user_whitelist: set[int] = field(init=False, repr=False)
+    _telegram_degraded: bool = field(init=False, repr=False, default=False)
+    _telegram_degraded_until: float = field(init=False, repr=False, default=0.0)
+    _telegram_degraded_logged: bool = field(init=False, repr=False, default=False)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
@@ -258,8 +261,34 @@ class TelegramEnhancedNotifier:
     async def _send_single(self, chat_id: int, text: str) -> None:
         attempt = 1
         max_attempts = 5
+        retry_window_s = 300.0
+        retry_window_start = _current_loop_time()
+
+        # Circuit-breaker latch prevents unbounded retry storms during outages.
+        now = _current_loop_time()
+        if self._telegram_degraded and now < self._telegram_degraded_until:
+            return
+        if self._telegram_degraded and now >= self._telegram_degraded_until:
+            self._telegram_degraded = False
+            self._telegram_degraded_logged = False
 
         while True:
+            elapsed = _current_loop_time() - retry_window_start
+            if elapsed >= retry_window_s:
+                # Latch degraded state so callers stop retrying until cooldown expires.
+                self._telegram_degraded = True
+                self._telegram_degraded_until = _current_loop_time() + 60.0
+                if not self._telegram_degraded_logged:
+                    self._telegram_degraded_logged = True
+                    self._logger.error(
+                        "telegram_notifier_degraded",
+                        extra={
+                            "event": "telegram_notifier_degraded",
+                            "chat_id": chat_id,
+                            "cooldown_s": 60.0,
+                        },
+                    )
+                return
             try:
                 await self.bot.send_message(
                     chat_id=chat_id,
@@ -270,6 +299,9 @@ class TelegramEnhancedNotifier:
                     "telegram_send_success",
                     extra={"event": "send", "chat_id": chat_id, "attempt": attempt},
                 )
+                self._telegram_degraded = False
+                self._telegram_degraded_logged = False
+                self._telegram_degraded_until = 0.0
                 return
             except RetryAfter as exc:  # pragma: no cover - depends on API
                 delay = float(getattr(exc, "retry_after", 1.0) or 1.0)
