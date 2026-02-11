@@ -2760,6 +2760,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     websocket_manager: WebSocketManager | None = None
     streamer: Any
     stream_supervisor: StreamSupervisor | None = None
+    risk_manager_ref: dict[str, RiskManager | None] = {"instance": None}
+    stream_supervisor_started = False
+    risk_manager_data_hub_attached = False
+    margin_engine_data_hub_attached = False
+    bracket_manager_attached = False
     data_hub: DataHub | None = None
     hub_store: HubStore | None = None
     try:
@@ -3195,6 +3200,37 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     LOGGER.info("DataHub initialized. Snapshot deferred to startup sequence.")
 
     # Initialize Supervisor
+    def _risk_halt_active() -> bool:
+        """Return whether the circuit breaker currently requests a stream halt.
+
+        Args:
+            None.
+
+        Returns:
+            bool: True when the circuit breaker is tripped, False otherwise.
+
+        Raises:
+            None.
+        """
+
+        manager = risk_manager_ref.get("instance")
+        if manager is None:
+            LOGGER.warning(
+                "Condition met: risk manager unavailable during stream halt check",
+                extra={"event": "stream_risk_halt_check_skipped"},
+            )
+            return False
+        try:
+            return bool(manager.is_circuit_breaker_tripped()[0])
+        except Exception as exc:  # noqa: BLE001 - defensive stream guard
+            LOGGER.error(
+                "Failure in _risk_halt_active: %s",
+                exc,
+                extra={"event": "stream_risk_halt_check_failed"},
+                exc_info=exc,
+            )
+            return False
+
     stream_supervisor = StreamSupervisor(
         streamer=streamer,
         resolver=instrument_resolver,
@@ -3202,13 +3238,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         autostart=True,
         monitor_interval_s=300.0,
         # Keep stream supervisor passive during breaker halts to avoid restart churn.
-        risk_halt_getter=lambda: bool(
-            _require_component(ctx.risk_manager, "risk_manager").is_circuit_breaker_tripped()[0]
-        ),
+        risk_halt_getter=_risk_halt_active,
     )
     stream_supervisor.bootstrap()
     stream_supervisor.ensure_started()
-    ctx.stream_supervisor_started = True
+    stream_supervisor_started = True
 
     # Initialize Indicators & Regime
     indicator_engine = IndicatorEngine()
@@ -3363,6 +3397,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         position_manager=position_manager,
         account_balance=initial_balance,
     )
+    risk_manager_ref["instance"] = risk_manager
 
     # 2. Attach Broker (Safe Try/Except)
     try:
@@ -3377,10 +3412,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         LOGGER.error("risk_manager_attach_mdm_failed: %s", exc)
 
     # 4. Attach Data Hub once to avoid duplicate listeners across warm restarts.
-    if not getattr(ctx, "risk_manager_data_hub_attached", False):
+    if not risk_manager_data_hub_attached:
         try:
             risk_manager.attach_data_hub(data_hub)
-            ctx.risk_manager_data_hub_attached = True
+            risk_manager_data_hub_attached = True
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("risk_manager_attach_data_hub_failed: %s", exc)
 
@@ -3471,10 +3506,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         indicator_engine=indicator_engine,  # <--- THIS IS THE CRITICAL ADDITION
     )
     order_manager.set_market_data_manager(market_data_manager)
-    if not getattr(ctx, "margin_engine_data_hub_attached", False):
+    if not margin_engine_data_hub_attached:
         # OrderManager owns MarginEngine wiring; attach once to avoid duplicate callbacks.
         order_manager.attach_data_hub(data_hub)
-        ctx.margin_engine_data_hub_attached = True
+        margin_engine_data_hub_attached = True
     order_manager.set_instrument_resolver(instrument_resolver)
     order_manager.set_risk_manager(risk_manager)
     order_manager.attach_persistent_state(persistent_state)
@@ -3500,9 +3535,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             )
 
             # Attach once; duplicate attachment can duplicate bracket listeners.
-            if not getattr(ctx, "bracket_manager_attached", False):
+            if not bracket_manager_attached:
                 order_manager.set_bracket_manager(bracket_manager=bracket_manager)
-                ctx.bracket_manager_attached = True
+                bracket_manager_attached = True
                 LOGGER.info("✅ BracketManager initialized and attached.")
 
         except Exception as exc:
@@ -4354,6 +4389,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         health_app=health_app,
         session_guard=session_guard,
         option_universe=option_universe_manager,
+        stream_supervisor_started=stream_supervisor_started,
+        margin_engine_data_hub_attached=margin_engine_data_hub_attached,
+        risk_manager_data_hub_attached=risk_manager_data_hub_attached,
+        bracket_manager_attached=bracket_manager_attached,
     )
 
     resolver_candidate = ctx.instrument_resolver

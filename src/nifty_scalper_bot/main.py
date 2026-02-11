@@ -108,15 +108,6 @@ print(f"   🔧 DATA_DIR = {os.getenv('DATA_DIR', 'NOT_SET')}", flush=True)
 
 
 # -------------------------------------------------------
-# HARD EXIT (CRITICAL FOR TRADING SAFETY)
-# -------------------------------------------------------
-
-def _fatal_exit(reason: str, exc: Exception | None = None) -> None:
-    LOG.critical(f"❌ FATAL BOT EXIT: {reason}", exc_info=exc)
-    os._exit(1)
-
-
-# -------------------------------------------------------
 # FASTAPI LIFESPAN (SUPERVISOR ONLY)
 # -------------------------------------------------------
 
@@ -148,9 +139,11 @@ async def lifespan(app: FastAPI):
 
         except Exception as exc:
             app.state.bot_error = str(exc)
-            print(f"❌ FATAL BOT CRASH: {exc}", flush=True)
-            LOG.critical("Bot crash during startup", exc_info=True)
-            _fatal_exit("Core bot crashed during startup", exc)
+            print(f"⚠️ BOT STARTUP WARNING: {exc}", flush=True)
+            LOG.error("Failure in run_bot_background: %s", exc, exc_info=exc)
+            LOG.warning(
+                "Condition met: bot entered degraded mode after startup failure"
+            )
 
     task = asyncio.create_task(run_bot_background())
     yield
@@ -183,7 +176,7 @@ def root():
 def health():
     if app.state.bot_error:
         return {
-            "status": "crashed",
+            "status": "degraded",
             "error": app.state.bot_error,
         }
 
@@ -222,6 +215,6 @@ def trading_status():
         "enable_live": enable_live,
         "execution_mode": exec_mode,
         "will_trade": enable_live and exec_mode.upper() == "LIVE",
-        "bot_status": "running" if app.state.bot else ("crashed" if app.state.bot_error else "starting"),
+        "bot_status": "running" if app.state.bot else ("degraded" if app.state.bot_error else "starting"),
         "warning": None if enable_live else "⚠️ ENABLE_LIVE is not 'true' - bot will NOT execute real trades!",
     }
