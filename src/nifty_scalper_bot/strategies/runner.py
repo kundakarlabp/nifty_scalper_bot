@@ -6,7 +6,8 @@ import asyncio
 import calendar
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from enum import Enum
 import logging
 import os
 import threading
@@ -213,9 +214,18 @@ class StrategyRunnerConfig:
             raise ValueError(msg)
 
 
+class SymbolState(Enum):
+    """Hydration lifecycle state maintained per symbol."""
+
+    INIT = 0
+    HYDRATING = 1
+    READY = 2
+    TRADING = 3
+
+
 @dataclass(slots=True)
-class SymbolState:
-    """Mutable state maintained per symbol."""
+class SymbolRuntimeState:
+    """Mutable runtime data maintained per symbol."""
 
     symbol: str
     history_limit: int
@@ -451,7 +461,7 @@ class StrategyRunner:
         self._running = False
         self._trading_paused = False
         self._active_symbols: set[str] = set()
-        self._symbol_state: Dict[str, SymbolState] = {}
+        self._symbol_state: Dict[str, SymbolRuntimeState] = {}
         self._callbacks: MutableMapping[str, Callable[[dict], None]] = {}
         self._bar_builders: Dict[str, OneMinuteBarBuilder] = {}
         self._last_bar_ts: dict[str, datetime] = {}
@@ -486,6 +496,9 @@ class StrategyRunner:
         )
         self._history_gate_failed: bool = False
         self._history_ready_by_symbol: dict[str, bool] = {}
+        self._symbol_states: dict[str, SymbolState] = {}
+        self._frozen_universe: set[str] = set()
+        self._vwap_state: dict[str, dict[str, Any]] = {}
         self._rate_limit_backoff_until_by_symbol: dict[str, float] = {}
         self._hydration_attempted_symbols: set[str] = set()
         self._strategy_slot_limit: int = max(
@@ -503,11 +516,14 @@ class StrategyRunner:
             self._running = True
             self._trading_paused = False
             symbols = list(self._active_symbols)
-            # Dynamic mode keeps runtime universe mutable instead of freezing at start.
+            self._frozen_universe = set(symbols)
             self._universe_controller.update(symbols)
             self._history_gate_failed = False
             self._history_ready_by_symbol = {symbol: False for symbol in symbols}
+            for symbol in symbols:
+                self._symbol_states.setdefault(symbol, SymbolState.INIT)
             self._rate_limit_backoff_until_by_symbol = {}
+            self._vwap_state = {}
 
         # Capture the loop if called from async context (optional safety)
         try:
@@ -591,7 +607,7 @@ class StrategyRunner:
         with self._lock:
             state = self._symbol_state.get(normalized)
             if state is None:
-                state = SymbolState(
+                state = SymbolRuntimeState(
                     symbol=normalized,
                     history_limit=self._config.max_trade_history,
                 )
@@ -600,6 +616,7 @@ class StrategyRunner:
                 state.active = True
 
             self._active_symbols.add(normalized)
+            self._symbol_states.setdefault(normalized, SymbolState.INIT)
             # Update tracked universe snapshot only when membership changes.
             self._universe_controller.update(self._active_symbols)
 
@@ -627,6 +644,9 @@ class StrategyRunner:
 
             state.active = False
             self._active_symbols.discard(normalized)
+            self._frozen_universe.discard(normalized)
+            self._symbol_states.pop(normalized, None)
+            self._vwap_state.pop(normalized, None)
             # Dynamic diffing avoids legacy frozen-universe drift conflicts.
             self._universe_controller.update(self._active_symbols)
             callback = self._callbacks.pop(normalized, None)
@@ -860,7 +880,7 @@ class StrategyRunner:
             with self._lock:
                 state = self._symbol_state.get(symbol)
                 if state is None:
-                    state = SymbolState(
+                    state = SymbolRuntimeState(
                         symbol=symbol,
                         history_limit=self._config.max_trade_history,
                     )
@@ -951,9 +971,10 @@ class StrategyRunner:
             with self._lock:
                 self._active_symbols.add(data["symbol"])
                 if data["symbol"] not in self._symbol_state:
-                    self._symbol_state[data["symbol"]] = SymbolState(
+                    self._symbol_state[data["symbol"]] = SymbolRuntimeState(
                         symbol=data["symbol"], history_limit=2000
                     )
+                self._symbol_states.setdefault(data["symbol"], SymbolState.INIT)
 
         except Exception as exc:
             self._logger.error(
@@ -972,9 +993,11 @@ class StrategyRunner:
 
                 # 2. Ensure SymbolState exists (Critical for Strategy Context)
                 if sym not in self._symbol_state:
-                    self._symbol_state[sym] = SymbolState(
+                    self._symbol_state[sym] = SymbolRuntimeState(
                         symbol=sym, history_limit=2000
                     )
+                self._symbol_states.setdefault(sym, SymbolState.INIT)
+                self._set_symbol_hydration_state(sym, SymbolState.READY)
 
                 # 3. Initialize BarBuilder (Prevent KeyErrors in internal checks)
                 if sym not in self._bar_builders:
@@ -988,6 +1011,51 @@ class StrategyRunner:
         self._startup_hydrated = True
 
         self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
+
+    def _set_symbol_hydration_state(
+        self,
+        symbol: str,
+        next_state: SymbolState,
+        *,
+        allow_downgrade: bool = False,
+    ) -> SymbolState:
+        """Update per-symbol hydration state with READY downgrade protection."""
+        current = self._symbol_states.get(symbol, SymbolState.INIT)
+        if (
+            current in {SymbolState.READY, SymbolState.TRADING}
+            and next_state == SymbolState.HYDRATING
+            and not allow_downgrade
+        ):
+            return current
+        self._symbol_states[symbol] = next_state
+        self._history_ready_by_symbol[symbol] = next_state in {
+            SymbolState.READY,
+            SymbolState.TRADING,
+        }
+        return next_state
+
+    def _refresh_symbol_hydration_state(self, symbol: str) -> SymbolState:
+        """Set INIT/HYDRATING/READY from available indicator history size."""
+        try:
+            history_size = len(self._indicator_engine.get_history(symbol))
+        except Exception:
+            history_size = 0
+        if history_size >= self._required_candles:
+            return self._set_symbol_hydration_state(symbol, SymbolState.READY)
+        return self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+
+    def _ensure_symbol_vwap_state(self, symbol: str, now: datetime) -> dict[str, Any]:
+        """Return session-scoped VWAP accumulator for symbol."""
+        session_date = now.date()
+        state = self._vwap_state.setdefault(
+            symbol,
+            {"cum_pv": 0.0, "cum_vol": 0.0, "last_reset_date": session_date},
+        )
+        if state.get("last_reset_date") != session_date:
+            state["cum_pv"] = 0.0
+            state["cum_vol"] = 0.0
+            state["last_reset_date"] = session_date
+        return state
 
     def _ingest_bar(
         self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False
@@ -1049,7 +1117,7 @@ class StrategyRunner:
                             "required": self._required_candles,
                         },
                     )
-                self._history_ready_by_symbol[symbol] = True
+                self._set_symbol_hydration_state(symbol, SymbolState.READY)
 
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
@@ -1720,7 +1788,9 @@ class StrategyRunner:
             # Check if symbol or underlying has pending order
             if symbol in self._orders_in_flight:
                 elapsed = now - self._orders_in_flight[symbol]
-                self._logger.debug(f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s")
+                self._logger.debug(
+                    f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s"
+                )
                 return True
 
             if (
@@ -1963,17 +2033,17 @@ class StrategyRunner:
                         for bar_data in history:
                             self.ingest_historical_bar(bar_data)
                             total_bars += 1
-                        self._history_ready_by_symbol[symbol] = True
+                        self._set_symbol_hydration_state(symbol, SymbolState.READY)
                         self._logger.info(
                             f"✅ Fallback backfill: Ingested {len(history)} bars for {symbol}"
                         )
                     else:
-                        self._history_ready_by_symbol[symbol] = False
+                        self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
 
                     await asyncio.sleep(0.5)
 
                 except Exception as e:
-                    self._history_ready_by_symbol[symbol] = False
+                    self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
                     self._logger.error(f"❌ Fallback fetch failed for {symbol}: {e}")
 
         except Exception as exc:
@@ -2052,7 +2122,7 @@ class StrategyRunner:
                 continue
         normalized.sort(key=lambda row: cast(datetime, row["timestamp"]))
         if len(normalized) < self._required_candles:
-            self._history_ready_by_symbol[symbol] = False
+            self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
             self._warn_symbol_gate(
                 "insufficient_history",
                 symbol,
@@ -2065,7 +2135,7 @@ class StrategyRunner:
         if self._data_hub and hasattr(self._data_hub, "history_freshness"):
             fresh, meta = self._data_hub.history_freshness(symbol, "minute")
             if not fresh:
-                self._history_ready_by_symbol[symbol] = False
+                self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
                 self._warn_symbol_gate(
                     "insufficient_history",
                     symbol,
@@ -2074,7 +2144,7 @@ class StrategyRunner:
                     meta=meta,
                 )
                 return []
-        self._history_ready_by_symbol[symbol] = True
+        self._set_symbol_hydration_state(symbol, SymbolState.READY)
         return normalized
 
     def _log_once_per_symbol_per_bar(
@@ -2145,11 +2215,7 @@ class StrategyRunner:
             }
             if context:
                 sanitized_context = {
-                    (
-                        f"context_{key}"
-                        if key in reserved_extra_keys
-                        else key
-                    ): value
+                    (f"context_{key}" if key in reserved_extra_keys else key): value
                     for key, value in context.items()
                 }
                 payload.update(sanitized_context)
@@ -2178,7 +2244,7 @@ class StrategyRunner:
             extra={"event": "symbol_unready_mark_enter", "symbol": symbol},
         )
         try:
-            self._history_ready_by_symbol[symbol] = False
+            self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
             state_transition = False
             with self._lock:
                 state = self._symbol_state.get(symbol)
@@ -2234,7 +2300,12 @@ class StrategyRunner:
                 )
                 self._mark_symbol_unready(symbol, "universe_violation")
                 return False
-            # Frozen-universe enforcement is intentionally removed in dynamic mode.
+            if self._frozen_universe and symbol not in self._frozen_universe:
+                self._logger.debug(
+                    "Symbol ignored (not in frozen universe)",
+                    extra={"event": "symbol_ignored_frozen_universe", "symbol": symbol},
+                )
+                return False
             if symbol not in active_set:
                 self._logger.debug(
                     "Symbol outside active universe",
@@ -2745,14 +2816,21 @@ class StrategyRunner:
                 return
             if not self._validate_symbol_for_cycle(symbol):
                 return
-            if not self._history_ready_by_symbol.get(symbol, False):
-                self._warn_symbol_gate(
-                    "insufficient_history",
-                    symbol,
+            hydration_state = self._refresh_symbol_hydration_state(symbol)
+            if hydration_state != SymbolState.READY:
+                log_throttled(
+                    self._logger,
+                    f"history_not_ready_{symbol}",
                     "Historical data is not ready for symbol",
-                    reason="history_not_ready",
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "insufficient_history",
+                        "symbol": symbol,
+                        "reason": "history_not_ready",
+                        "state": hydration_state.name,
+                    },
                 )
-                self._mark_symbol_unready(symbol, "insufficient_history")
                 return
 
             with self._lock:
@@ -2772,13 +2850,17 @@ class StrategyRunner:
                 if state is None or not state.active:
                     return
 
+                vwap_state = self._ensure_symbol_vwap_state(symbol, now)
                 if volume > 0:
-                    state.session_vwap_volume += int(volume)
-                    state.session_vwap_turnover += float(price) * float(volume)
-                    if state.session_vwap_volume > 0:
-                        state.vwap = (
-                            state.session_vwap_turnover / state.session_vwap_volume
-                        )
+                    vwap_state["cum_vol"] = float(
+                        vwap_state.get("cum_vol", 0.0)
+                    ) + float(volume)
+                    vwap_state["cum_pv"] = float(vwap_state.get("cum_pv", 0.0)) + (
+                        float(price) * float(volume)
+                    )
+                cum_vol = float(vwap_state.get("cum_vol", 0.0))
+                if cum_vol > 0:
+                    state.vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
 
                 # Heartbeat logging for derivatives (confirms data flow)
                 if "NIFTY" in symbol and any(x in symbol for x in ["FUT", "CE", "PE"]):
@@ -2902,16 +2984,17 @@ class StrategyRunner:
 
                 # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
                 if generated_signal is None and (not state.vwap or state.vwap <= 0):
-                    self._warn_symbol_gate(
-                        "vwap_invalid",
-                        symbol,
-                        "VWAP unavailable or invalid; skipping symbol strategy evaluation",
-                        reason="vwap_missing_or_non_positive",
-                    )
-                    self._mark_symbol_unready(
-                        symbol,
-                        "vwap_invalid",
-                        low_confidence=True,
+                    log_throttled(
+                        self._logger,
+                        f"vwap_unavailable_{symbol}",
+                        "VWAP unavailable; skipping signal",
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                        extra={
+                            "event": "vwap_invalid",
+                            "symbol": symbol,
+                            "reason": "vwap_missing_or_non_positive",
+                        },
                     )
                     return
 
@@ -2986,6 +3069,8 @@ class StrategyRunner:
                 return
 
             # If no immediate signal, delegate to complex StrategyManager
+            if self._symbol_states.get(symbol, SymbolState.INIT) != SymbolState.READY:
+                return
             if signal is None and self._required_candles:
                 should_evaluate = False
                 with self._lock:
@@ -3185,7 +3270,10 @@ class StrategyRunner:
             # =================================================================
 
             if signal and signal.action != "HOLD":
-                if signal.action in {"BUY", "SELL"} and not self._strategy_slots_available():
+                if (
+                    signal.action in {"BUY", "SELL"}
+                    and not self._strategy_slots_available()
+                ):
                     self._warn_symbol_gate(
                         "strategy_slots_full",
                         symbol,
@@ -4734,6 +4822,7 @@ __all__ = [
     "StrategyRunner",
     "StrategyRunnerConfig",
     "SymbolState",
+    "SymbolRuntimeState",
     "TradeRecord",
     "OrderRouter",
 ]
