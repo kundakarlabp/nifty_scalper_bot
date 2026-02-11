@@ -7,7 +7,7 @@ from nifty_scalper_bot.options.strike_selector import SelectedContract
 from nifty_scalper_bot.strategies.runner import (
     StrategyRunner,
     StrategyRunnerConfig,
-    SymbolState,
+    SymbolRuntimeState,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
 
@@ -78,7 +78,7 @@ def _make_runner(selector: _StubSelector) -> StrategyRunner:
         data_hub=data_hub,
         strike_selector=selector,
     )
-    runner._symbol_state["NIFTY"] = SymbolState(symbol="NIFTY", history_limit=5)
+    runner._symbol_state["NIFTY"] = SymbolRuntimeState(symbol="NIFTY", history_limit=5)
     runner._symbol_state["NIFTY"].active = True
     runner._symbol_state["NIFTY"].strategy_data["last_signal"] = {}
     return runner
