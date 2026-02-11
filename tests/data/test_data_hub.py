@@ -92,6 +92,16 @@ def hub_with_store(
     )
 
 
+
+
+def test_hub_store_default_uses_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    store = HubStore()
+    try:
+        assert store._path == tmp_path / "hub.db"  # noqa: SLF001 - test introspection
+    finally:
+        store.close()
 def test_get_available_balance_uses_available_cash(
     hub: DataHub, stub_mdm: _StubMarketDataManager
 ) -> None:

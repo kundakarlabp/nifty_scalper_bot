@@ -18,7 +18,7 @@ class OptionUniverseConfig:
     underlying: str = 'NIFTY'
     exchange: str = 'NFO'
     strike_step: int = 50
-    strikes_around_atm: int = 3
+    strikes_around_atm: int = 2
     expiry_roll_hours: float = 12.0
     market_close_hour: int = 15
     market_close_minute: int = 30
@@ -119,7 +119,7 @@ class OptionUniverseManager:
         Raises:
             None.
         """
-        return list(self._current_universe)
+        return list(self._current_universe)[:8]
 
     def get_primary_symbols(self) -> list[str]:
         """Return ATM-centered symbols used as primary scan targets.
@@ -136,23 +136,22 @@ class OptionUniverseManager:
         return self.get_current_universe()
 
     def get_filtered_universe(self, spot_ltp: float) -> list[str]:
-        """Return ATM-window symbols for nearest weekly and next monthly expiry."""
+        """Return a throttled ATM-window universe for the nearest weekly expiry."""
         if spot_ltp <= 0:
-            return list(self._current_universe)
+            return list(self._current_universe)[:8]
         threshold = max(1.0, float(self._config.spot_recalc_threshold_points))
         if self._last_recalc_spot is None or abs(spot_ltp - self._last_recalc_spot) >= threshold:
             self.update_underlying(spot_ltp)
             self._last_recalc_spot = float(spot_ltp)
         atm = self._atm_strike
         if atm is None:
-            return list(self._current_universe)
-        weekly, monthly = self._resolve_weekly_monthly_expiries(self._now_fn())
-        symbols: list[str] = []
-        for expiry in (weekly, monthly):
-            if expiry is None:
-                continue
-            symbols.extend(self._build_universe(atm, expiry))
-        return list(dict.fromkeys(symbols)) if symbols else list(self._current_universe)
+            return list(self._current_universe)[:8]
+        weekly, _ = self._resolve_weekly_monthly_expiries(self._now_fn())
+        if weekly is None:
+            return list(self._current_universe)[:8]
+        symbols = self._build_universe(atm, weekly)
+        # Hard cap to control quote fanout and broker rate-limit pressure.
+        return list(dict.fromkeys(symbols))[:8]
 
     def _coerce_config(self, config: OptionUniverseConfig | dict[str, Any] | Any) -> OptionUniverseConfig:
         """Normalize external config objects into :class:`OptionUniverseConfig`."""

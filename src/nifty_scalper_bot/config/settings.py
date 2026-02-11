@@ -858,7 +858,7 @@ class OptionUniverseSettings:
     underlying: str = "NIFTY"
     exchange: str = "NFO"
     strike_step: int = 50
-    strikes_around_atm: int = 3
+    strikes_around_atm: int = 2
     expiry_roll_hours: float = 12.0
     market_close_hour: int = 15
     market_close_minute: int = 30
@@ -1314,7 +1314,7 @@ def _build_option_universe_settings() -> OptionUniverseSettings:
         exchange=_env_str("OPTION_UNIVERSE__EXCHANGE", default="NFO") or "NFO",
         strike_step=_env_int("OPTION_UNIVERSE__STRIKE_STEP", default=50, minimum=1),
         strikes_around_atm=_env_int(
-            "OPTION_UNIVERSE__STRIKES_AROUND_ATM", default=3, minimum=0
+            "OPTION_UNIVERSE__STRIKES_AROUND_ATM", default=2, minimum=0
         ),
         expiry_roll_hours=_env_float(
             "OPTION_UNIVERSE__EXPIRY_ROLL_HOURS", default=12.0, minimum=0.0

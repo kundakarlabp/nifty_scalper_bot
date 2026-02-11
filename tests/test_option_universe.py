@@ -55,7 +55,7 @@ def test_primary_symbols_matches_current_universe() -> None:
     assert manager.get_primary_symbols() == manager.get_current_universe()
 
 
-def test_filtered_universe_uses_weekly_and_monthly() -> None:
+def test_filtered_universe_uses_nearest_weekly_and_caps_size() -> None:
     manager = OptionUniverseManager(
         OptionUniverseConfig(strike_step=50, strikes_around_atm=1),
         now_fn=lambda: datetime(2026, 2, 2, 10, 0, 0),
@@ -64,7 +64,7 @@ def test_filtered_universe_uses_weekly_and_monthly() -> None:
     symbols = manager.get_filtered_universe(18630.0)
 
     assert symbols
-    assert len(symbols) == 12
+    assert len(symbols) <= 8
     assert any(symbol.endswith('18650CE') for symbol in symbols)
 
 
