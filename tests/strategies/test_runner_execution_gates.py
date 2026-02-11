@@ -154,6 +154,30 @@ def test_warn_symbol_gate_emits_structured_warning(caplog) -> None:
     assert getattr(record, "symbol", "") == "NIFTY25JAN25000CE"
 
 
+
+
+def test_warn_symbol_gate_sanitizes_reserved_logrecord_context_keys(caplog) -> None:
+    runner = _runner()
+
+    with caplog.at_level("WARNING", logger=runner._logger.name):
+        runner._warn_symbol_gate(
+            "indicator_invalid",
+            "NIFTY25JAN25000CE",
+            "Indicators are invalid",
+            reason="min_bars_not_ready",
+            message="reserved_message",
+        )
+
+    match = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "indicator_invalid"
+    ]
+    assert match
+    record = match[0]
+    assert getattr(record, "gate_message", "") == "Indicators are invalid"
+    assert getattr(record, "context_message", "") == "reserved_message"
+
 def test_on_tick_insufficient_history_warns_and_skips_symbol(
     caplog, monkeypatch
 ) -> None:

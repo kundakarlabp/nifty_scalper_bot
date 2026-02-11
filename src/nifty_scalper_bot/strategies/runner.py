@@ -2109,16 +2109,25 @@ class StrategyRunner:
             extra={"event": "symbol_gate_warn_enter", "symbol": symbol},
         )
         try:
+            reserved_extra_keys = set(logging.makeLogRecord({}).__dict__)
             payload = {
                 "level": "WARNING",
                 "symbol": symbol,
                 "event": event_code,
-                "message": message,
+                "gate_message": message,
                 "reason": reason,
                 "time": datetime.now(timezone.utc).isoformat(),
             }
             if context:
-                payload.update(context)
+                sanitized_context = {
+                    (
+                        f"context_{key}"
+                        if key in reserved_extra_keys
+                        else key
+                    ): value
+                    for key, value in context.items()
+                }
+                payload.update(sanitized_context)
             self._logger.warning(message, extra=payload)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
