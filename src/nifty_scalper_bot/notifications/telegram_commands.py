@@ -82,6 +82,128 @@ def _extract_argument(update: Update) -> str:
     return parts[1].strip() if len(parts) >= 2 else ""
 
 
+def _parse_chain_argument(argument: str) -> tuple[str, str | None]:
+    """Parse chain argument. Args: argument. Returns: underlying and optional expiry. Raises: never."""
+
+    LOG.debug('Entered _parse_chain_argument')
+    try:
+        raw = argument.strip()
+        if not raw:
+            LOG.info('Condition met: empty chain argument')
+            return '', None
+        if ':' not in raw:
+            return raw.upper(), None
+        underlying, expiry = raw.split(':', maxsplit=1)
+        parsed_underlying = underlying.strip().upper()
+        parsed_expiry = expiry.strip() or None
+        LOG.info('Condition met: parsed chain argument for %s', parsed_underlying)
+        return parsed_underlying, parsed_expiry
+    except Exception as exc:
+        LOG.error('Failure in _parse_chain_argument: %s', exc, exc_info=True)
+        return '', None
+
+
+def _format_orderbook_snapshot(symbol: str, snapshot: Mapping[str, Any]) -> str:
+    """Format orderbook. Args: symbol,snapshot. Returns: compact text summary. Raises: never."""
+
+    LOG.debug('Entered _format_orderbook_snapshot')
+    try:
+        best_bid = float(snapshot.get('best_bid', 0.0))
+        best_ask = float(snapshot.get('best_ask', 0.0))
+        spread = float(snapshot.get('spread', best_ask - best_bid))
+        liquidity_score = float(snapshot.get('liquidity_score', 0.0))
+
+        buy_levels = cast(Sequence[Mapping[str, Any]], snapshot.get('buy', []))
+        sell_levels = cast(Sequence[Mapping[str, Any]], snapshot.get('sell', []))
+
+        buy_repr = ', '.join(
+            f"{idx + 1}:{float(level.get('price', 0.0)):.2f}@{int(float(level.get('quantity', 0.0)))}"
+            for idx, level in enumerate(buy_levels[:3])
+        )
+        sell_repr = ', '.join(
+            f"{idx + 1}:{float(level.get('price', 0.0)):.2f}@{int(float(level.get('quantity', 0.0)))}"
+            for idx, level in enumerate(sell_levels[:3])
+        )
+        LOG.info('Condition met: formatted orderbook snapshot for %s', symbol)
+        return (
+            f"{symbol} order book | bid={best_bid:.2f} ask={best_ask:.2f} spread={spread:.2f} "
+            f"liq={liquidity_score:.1f}\n"
+            f"buy: {buy_repr or 'n/a'}\n"
+            f"sell: {sell_repr or 'n/a'}"
+        )
+    except Exception as exc:
+        LOG.error('Failure in _format_orderbook_snapshot: %s', exc, exc_info=True)
+        return f'{symbol} order book unavailable'
+
+
+def _format_chain_summary(
+    chain: Sequence[Mapping[str, Any]], underlying: str, expiry: str | None
+) -> str:
+    """Format option chain. Args: chain,underlying,expiry. Returns: compact analytics summary. Raises: never."""
+
+    LOG.debug('Entered _format_chain_summary')
+    try:
+        if not chain:
+            LOG.info('Condition met: empty chain data for %s', underlying)
+            return f'{underlying} chain unavailable'
+
+        total_oi = 0.0
+        total_trades = 0.0
+        ce_ivs: list[float] = []
+        pe_ivs: list[float] = []
+        strike_volume: dict[float, float] = defaultdict(float)
+        liquidity: dict[float, float] = defaultdict(float)
+
+        for contract in chain:
+            strike = float(contract.get('strike', 0.0))
+            oi = float(contract.get('open_interest', 0.0))
+            trades = float(contract.get('trades', 0.0))
+            bid = float(contract.get('bid', 0.0))
+            ask = float(contract.get('ask', 0.0))
+            iv = float(contract.get('iv', 0.0))
+
+            total_oi += oi
+            total_trades += trades
+            strike_volume[strike] += trades
+
+            option_type = str(contract.get('option_type', '')).upper()
+            if option_type == 'CE' and iv > 0:
+                ce_ivs.append(iv)
+            if option_type == 'PE' and iv > 0:
+                pe_ivs.append(iv)
+
+            spread = max(ask - bid, 0.0)
+            if spread > 0:
+                liquidity[strike] += oi / spread
+
+            depth = cast(Mapping[str, Sequence[Mapping[str, Any]]], contract.get('depth', {}))
+            for side in ('buy', 'sell'):
+                for level in depth.get(side, []):
+                    liquidity[strike] += float(level.get('quantity', 0.0))
+
+        hot_strikes = sorted(strike_volume.items(), key=lambda item: item[1], reverse=True)[:3]
+        liquid_strikes = sorted(liquidity.items(), key=lambda item: item[1], reverse=True)[:3]
+        hot_text = ', '.join(f'{int(strike)}:{int(volume)}' for strike, volume in hot_strikes) or 'n/a'
+        liquid_text = ', '.join(
+            f'{int(strike)}:{score:.1f}' for strike, score in liquid_strikes
+        ) or 'n/a'
+
+        ce_iv = (sum(ce_ivs) / len(ce_ivs)) if ce_ivs else 0.0
+        pe_iv = (sum(pe_ivs) / len(pe_ivs)) if pe_ivs else 0.0
+
+        expiry_suffix = f' {expiry}' if expiry else ''
+        LOG.info('Condition met: formatted chain summary for %s%s', underlying, expiry_suffix)
+        return (
+            f'{underlying}{expiry_suffix} chain | total_oi={int(total_oi)} total_trades={int(total_trades)}\n'
+            f'Volume heatmap: {hot_text}\n'
+            f'Liquidity focus: {liquid_text}\n'
+            f'IV% CE={ce_iv:.2f} PE={pe_iv:.2f}'
+        )
+    except Exception as exc:
+        LOG.error('Failure in _format_chain_summary: %s', exc, exc_info=True)
+        return f'{underlying} chain unavailable'
+
+
 # --- COMMAND IMPLEMENTATIONS ---
 
 def cmd_mode(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
