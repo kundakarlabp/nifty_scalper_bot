@@ -16,10 +16,10 @@ clear error messages to ease troubleshooting in Railway deployments.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import time
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Set
 
@@ -60,24 +60,24 @@ LOGGER = get_logger(__name__)
 
 def _ensure_env_loaded_before_settings() -> None:
     """Load .env file before any settings are built.
-    
+
     ✅ CRITICAL FIX: This MUST run at import time!
-    
+
     Problem: Python imports settings.py which calls _build_order_settings()
     at module level. If load_dotenv() hasn't run yet, os.getenv("ENABLE_LIVE")
     returns None, and the bot starts in SHADOW mode.
-    
+
     Solution: Load .env here, before any settings classes are built.
     """
     from dotenv import load_dotenv
-    
+
     search_paths = [
         Path.cwd() / ".env",
         Path("/app/.env"),
         Path(__file__).resolve().parent.parent.parent / ".env",  # src/../.env
         Path(__file__).resolve().parent.parent / ".env",
     ]
-    
+
     for env_path in search_paths:
         try:
             if env_path.exists() and env_path.is_file():
@@ -89,13 +89,15 @@ def _ensure_env_loaded_before_settings() -> None:
         except Exception as e:
             print(f"⚠️ [SETTINGS] Error loading {env_path}: {e}", flush=True)
             continue
-    
+
     # Fallback
     load_dotenv(override=True)
     print("⚠️ [SETTINGS] No .env found, using system environment", flush=True)
 
+
 # ✅ EXECUTE IMMEDIATELY when settings.py is imported
 _ensure_env_loaded_before_settings()
+
 
 def _sanitize_token(raw: str) -> str:
     token = raw.strip().strip('"').strip("'")
@@ -902,13 +904,16 @@ class Settings:
     replay: ReplaySettings = field(default_factory=ReplaySettings)
     selector: SelectorSettings = field(default_factory=SelectorSettings)
     liquidity: LiquiditySettings = field(default_factory=LiquiditySettings)
-    option_universe: OptionUniverseSettings = field(default_factory=OptionUniverseSettings)
+    option_universe: OptionUniverseSettings = field(
+        default_factory=OptionUniverseSettings
+    )
     instruments: InstrumentSettings = field(default_factory=InstrumentSettings)
     elite: EliteStrategiesSettings = field(default_factory=EliteStrategiesSettings)
     poll_batch_size: int = 50
     poll_interval_ms_jitter_pct: float = 0.15
     feature_order_without_token: bool = True
     feature_resolver_learn_from_quotes: bool = True
+    universe_dynamic_mode: bool = True
 
 
 def _build_elite_settings() -> EliteStrategiesSettings:
@@ -923,7 +928,7 @@ def _build_elite_settings() -> EliteStrategiesSettings:
             min_confidence=_env_float("SMC_MIN_CONFIDENCE", default=45.0),
             cooldown_seconds=_env_float("SMC_COOLDOWN", default=60.0),
             sweep_distance_points=_env_float("SMC_SWEEP_DISTANCE", default=15.0),
-            volume_spike_mult=_env_float("SMC_VOLUME_SPIKE", default=2.0)
+            volume_spike_mult=_env_float("SMC_VOLUME_SPIKE", default=2.0),
         )
 
         # 2. VWAP Pro
@@ -931,25 +936,29 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         vwap_cfg = VWAPProStrategyConfig(
             enabled=_env_bool("VWAP_PRO_ENABLED", "VWAP_ENABLED", default=True),
             min_confidence=_env_float("VWAP_MIN_CONFIDENCE", default=40.0),
-            ema_period=int(_env_float("VWAP_EMA_PERIOD", default=50.0)), 
-            proximity_pct=_env_float("VWAP_PROXIMITY_PCT", default=0.15)
+            ema_period=int(_env_float("VWAP_EMA_PERIOD", default=50.0)),
+            proximity_pct=_env_float("VWAP_PROXIMITY_PCT", default=0.15),
         )
 
         # 3. RSI Divergence
         # ✅ FIX: Use int(_env_float(...)) for period and lookback
         rsi_cfg = RSIDivergenceStrategyConfig(
             enabled=_env_bool("RSI_DIV_ENABLED", default=True),
-            min_confidence=_env_float("RSI_MIN_CONFIDENCE", "RSI_DIV_MIN_CONFIDENCE", default=48.0),
+            min_confidence=_env_float(
+                "RSI_MIN_CONFIDENCE", "RSI_DIV_MIN_CONFIDENCE", default=48.0
+            ),
             rsi_period=int(_env_float("RSI_PERIOD", default=14.0)),
         )
 
         # 4. ORB Pro
-        # ✅ CRITICAL FIX: The specific line causing your crash. 
+        # ✅ CRITICAL FIX: The specific line causing your crash.
         # We parse "15.0" as float first, then cast to int.
         orb_cfg = ORBProStrategyConfig(
             enabled=_env_bool("ORB_ENABLED", default=True),
             min_confidence=_env_float("ORB_MIN_CONFIDENCE", default=55.0),
-            orb_minutes=int(_env_float("ORB_DURATION_MIN", "ORB_MINUTES", default=15.0))
+            orb_minutes=int(
+                _env_float("ORB_DURATION_MIN", "ORB_MINUTES", default=15.0)
+            ),
         )
 
         # 5. Straddle / Theta
@@ -957,49 +966,61 @@ def _build_elite_settings() -> EliteStrategiesSettings:
             enabled=_env_bool("STRADDLE_ENABLED", default=False),
             min_confidence=_env_float("STRADDLE_MIN_CONFIDENCE", default=73.0),
             adx_threshold=_env_float("STRADDLE_ADX_LIMIT", default=25.0),
-            min_iv=_env_float("STRADDLE_MIN_IV", default=12.0)
+            min_iv=_env_float("STRADDLE_MIN_IV", default=12.0),
         )
 
         # 6. Gamma Scalping
         gamma_cfg = GammaScalpingStrategyConfig(
             enabled=_env_bool("GAMMA_ENABLED", default=False),
             min_confidence=_env_float("GAMMA_MIN_CONFIDENCE", default=65.0),
-            min_gamma=_env_float("GAMMA_THRESHOLD", default=0.0005)
+            min_gamma=_env_float("GAMMA_THRESHOLD", default=0.0005),
         )
 
         # 7. OI Max Pain (Unlocked)
         oi_cfg = OIMaxPainStrategyConfig(
             enabled=_env_bool("OI_MAX_PAIN_ENABLED", default=True),
             min_confidence=_env_float("OI_MIN_CONFIDENCE", default=40.0),
-            min_deviation_pct=_env_float("OI_MIN_DISTANCE_POINTS", default=50.0)
+            min_deviation_pct=_env_float("OI_MIN_DISTANCE_POINTS", default=50.0),
         )
 
         # 8. CPR Breakout (Unlocked)
         cpr_cfg = CPRBreakoutStrategyConfig(
             enabled=_env_bool("CPR_ENABLED", default=True),
             min_confidence=_env_float("CPR_MIN_CONFIDENCE", default=55.0),
-            narrow_cpr_threshold=_env_float("CPR_NARROW_THRESHOLD_PCT", default=0.25)
+            narrow_cpr_threshold=_env_float("CPR_NARROW_THRESHOLD_PCT", default=0.25),
         )
 
         # 9. Order Flow (Unlocked)
         of_cfg = OrderFlowStrategyConfig(
             enabled=_env_bool("ORDER_FLOW_ENABLED", default=True),
             min_confidence=_env_float("ORDER_FLOW_MIN_CONFIDENCE", default=60.0),
-            imbalance_ratio_min=_env_float("ORDER_FLOW_IMBALANCE_RATIO_BUY", default=2.8),
-            large_order_threshold_pct=_env_float("ORDER_FLOW_LARGE_ORDER_PCT", default=15.0)
+            imbalance_ratio_min=_env_float(
+                "ORDER_FLOW_IMBALANCE_RATIO_BUY", default=2.8
+            ),
+            large_order_threshold_pct=_env_float(
+                "ORDER_FLOW_LARGE_ORDER_PCT", default=15.0
+            ),
         )
 
         # 10. BB Squeeze (Unlocked)
         bb_cfg = BBSqueezeStrategyConfig(
             enabled=_env_bool("BB_SQUEEZE_ENABLED", default=True),
             min_confidence=_env_float("BB_MIN_CONFIDENCE", default=55.0),
-            squeeze_threshold_pct=_env_float("BB_SQUEEZE_BANDWIDTH", default=0.4)
+            squeeze_threshold_pct=_env_float("BB_SQUEEZE_BANDWIDTH", default=0.4),
         )
 
         # 11. Aggregate into Settings
         return EliteStrategiesSettings(
-            max_concurrent_strategies=int(_env_float("ELITE_MAX_CONCURRENT_STRATEGIES", "MAX_CONCURRENT_STRATS", default=10.0)),
-            position_size_pct=_env_float("ELITE_POSITION_SIZE_PCT", "STRAT_POS_SIZE_PCT", default=1.5),
+            max_concurrent_strategies=int(
+                _env_float(
+                    "ELITE_MAX_CONCURRENT_STRATEGIES",
+                    "MAX_CONCURRENT_STRATS",
+                    default=10.0,
+                )
+            ),
+            position_size_pct=_env_float(
+                "ELITE_POSITION_SIZE_PCT", "STRAT_POS_SIZE_PCT", default=1.5
+            ),
             smc=smc_cfg,
             vwap=vwap_cfg,
             rsi_div=rsi_cfg,
@@ -1009,12 +1030,15 @@ def _build_elite_settings() -> EliteStrategiesSettings:
             oi_max_pain=oi_cfg,
             cpr=cpr_cfg,
             order_flow=of_cfg,
-            bb_squeeze=bb_cfg
+            bb_squeeze=bb_cfg,
         )
 
     except Exception as exc:
         from nifty_scalper_bot.utils.logging import get_logger
-        get_logger(__name__).error(f"❌ Critical Error in _build_elite_settings: {exc}", exc_info=True)
+
+        get_logger(__name__).error(
+            f"❌ Critical Error in _build_elite_settings: {exc}", exc_info=True
+        )
         return EliteStrategiesSettings()
 
 
@@ -1134,7 +1158,9 @@ def _build_risk_settings() -> RiskSettings:
         atr_stop_multiple=atr_multiple,
         contract_lot_size=contract_lot_size,
         allow_pyramiding=_env_bool("RISK_ALLOW_PYRAMIDING", default=False),
-        signal_debounce_seconds=_env_float("RISK_SIGNAL_DEBOUNCE_SECONDS", default=60.0),
+        signal_debounce_seconds=_env_float(
+            "RISK_SIGNAL_DEBOUNCE_SECONDS", default=60.0
+        ),
     )
 
 
@@ -1309,8 +1335,7 @@ def _build_liquidity_settings() -> LiquiditySettings:
 
 def _build_option_universe_settings() -> OptionUniverseSettings:
     return OptionUniverseSettings(
-        underlying=_env_str("OPTION_UNIVERSE__UNDERLYING", default="NIFTY")
-        or "NIFTY",
+        underlying=_env_str("OPTION_UNIVERSE__UNDERLYING", default="NIFTY") or "NIFTY",
         exchange=_env_str("OPTION_UNIVERSE__EXCHANGE", default="NFO") or "NFO",
         strike_step=_env_int("OPTION_UNIVERSE__STRIKE_STEP", default=50, minimum=1),
         strikes_around_atm=_env_int(
@@ -1418,6 +1443,7 @@ def get_settings() -> Settings:
         feature_resolver_learn_from_quotes=_env_bool(
             "FEATURE_RESOLVER_LEARN_FROM_QUOTES", default=True
         ),
+        universe_dynamic_mode=_env_bool("UNIVERSE_DYNAMIC_MODE", default=True),
     )
 
     try:

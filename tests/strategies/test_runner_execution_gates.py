@@ -49,36 +49,6 @@ def test_validate_symbol_universe_accepts_index_and_options() -> None:
     assert runner._validate_symbol_universe() is True
 
 
-def test_validate_symbol_universe_rejects_expected_count_deviation() -> None:
-    runner = _runner()
-    runner._active_symbols = {
-        "NSE:NIFTY 50",
-        "NIFTY25JAN25000CE",
-        "NIFTY25JAN25000PE",
-    }
-    runner._frozen_symbol_universe = set(runner._active_symbols)
-    runner._expected_symbol_count = 2
-
-    assert runner._validate_symbol_universe() is False
-
-
-def test_validate_symbol_universe_rejects_frozen_universe_deviation() -> None:
-    runner = _runner()
-    runner._active_symbols = {
-        "NSE:NIFTY 50",
-        "NIFTY25JAN25000CE",
-        "NIFTY25JAN25000PE",
-    }
-    runner._frozen_symbol_universe = {
-        "NSE:NIFTY 50",
-        "NIFTY25JAN25000CE",
-        "NIFTY25JAN25100PE",
-    }
-    runner._expected_symbol_count = 3
-
-    assert runner._validate_symbol_universe() is False
-
-
 def test_mark_symbol_unready_sets_state_flags() -> None:
     runner = _runner()
     symbol = "NIFTY25JAN25000CE"
@@ -92,21 +62,19 @@ def test_mark_symbol_unready_sets_state_flags() -> None:
     assert state.strategy_data["low_confidence"] is True
 
 
-def test_validate_symbol_for_cycle_warns_and_skips_on_universe_violation(
+def test_validate_symbol_for_cycle_debugs_and_skips_when_symbol_not_active(
     caplog,
 ) -> None:
     runner = _runner()
     symbol = "NIFTY25JAN25000CE"
-    runner._active_symbols = {symbol}
-    runner._frozen_symbol_universe = {"NIFTY25JAN25000PE"}
-    runner._expected_symbol_count = 1
+    runner._active_symbols = {"NIFTY25JAN25000PE"}
 
-    with caplog.at_level("WARNING", logger=runner._logger.name):
+    with caplog.at_level("DEBUG", logger=runner._logger.name):
         ok = runner._validate_symbol_for_cycle(symbol)
 
     assert ok is False
     assert any(
-        getattr(record, "event", "") == "universe_violation"
+        getattr(record, "event", "") == "symbol_outside_active_universe"
         for record in caplog.records
     )
 
@@ -154,8 +122,6 @@ def test_warn_symbol_gate_emits_structured_warning(caplog) -> None:
     assert getattr(record, "symbol", "") == "NIFTY25JAN25000CE"
 
 
-
-
 def test_warn_symbol_gate_sanitizes_reserved_logrecord_context_keys(caplog) -> None:
     runner = _runner()
 
@@ -178,6 +144,7 @@ def test_warn_symbol_gate_sanitizes_reserved_logrecord_context_keys(caplog) -> N
     assert getattr(record, "gate_message", "") == "Indicators are invalid"
     assert getattr(record, "context_message", "") == "reserved_message"
 
+
 def test_on_tick_insufficient_history_warns_and_skips_symbol(
     caplog, monkeypatch
 ) -> None:
@@ -185,9 +152,7 @@ def test_on_tick_insufficient_history_warns_and_skips_symbol(
     symbol = "NIFTY25JAN25000CE"
     runner.add_symbol(symbol)
     runner._startup_timestamp = 0.0
-    runner._frozen_symbol_universe = {symbol, "NSE:NIFTY 50"}
     runner._active_symbols = {symbol, "NSE:NIFTY 50"}
-    runner._expected_symbol_count = 2
     runner._history_ready_by_symbol[symbol] = False
     monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
 
@@ -208,9 +173,7 @@ def test_on_tick_missing_finalized_bar_warns_and_skips_symbol(
     symbol = "NIFTY25JAN25000CE"
     runner.add_symbol(symbol)
     runner._startup_timestamp = 0.0
-    runner._frozen_symbol_universe = {symbol, "NSE:NIFTY 50"}
     runner._active_symbols = {symbol, "NSE:NIFTY 50"}
-    runner._expected_symbol_count = 2
     runner._history_ready_by_symbol[symbol] = True
     runner._required_candles = 1
     runner._symbol_state[symbol].vwap = 100.0
@@ -232,9 +195,7 @@ def test_on_tick_invalid_vwap_warns_and_skips_symbol(caplog, monkeypatch) -> Non
     symbol = "NIFTY25JAN25000CE"
     runner.add_symbol(symbol)
     runner._startup_timestamp = 0.0
-    runner._frozen_symbol_universe = {symbol, "NSE:NIFTY 50"}
     runner._active_symbols = {symbol, "NSE:NIFTY 50"}
-    runner._expected_symbol_count = 2
     runner._history_ready_by_symbol[symbol] = True
     runner._required_candles = 1
     monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
@@ -255,9 +216,7 @@ def test_rate_limit_backoff_skips_only_target_symbol(caplog, monkeypatch) -> Non
     runner.add_symbol(blocked_symbol)
     runner.add_symbol(ready_symbol)
     runner._startup_timestamp = 0.0
-    runner._frozen_symbol_universe = {blocked_symbol, ready_symbol, "NSE:NIFTY 50"}
     runner._active_symbols = {blocked_symbol, ready_symbol, "NSE:NIFTY 50"}
-    runner._expected_symbol_count = 3
     runner._required_candles = 1
     runner._history_ready_by_symbol[blocked_symbol] = True
     runner._history_ready_by_symbol[ready_symbol] = True
