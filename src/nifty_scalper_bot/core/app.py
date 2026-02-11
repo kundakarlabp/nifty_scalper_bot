@@ -62,11 +62,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.settings import Settings, get_settings
-from nifty_scalper_bot.core.option_universe import OptionUniverseManager
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
+from nifty_scalper_bot.core.option_universe import OptionUniverseManager
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.unified_manager import UnifiedManager
+from nifty_scalper_bot.core.universe_controller import UniverseController
 from nifty_scalper_bot.data import (
     InstrumentResolver,
     InstrumentUniverseStatus,
@@ -5585,6 +5586,8 @@ async def startup_sequence(ctx: BotContext) -> None:
             dynamic_option_symbols = {
                 sym for sym in targets if sym.startswith('NFO:NIFTY') and (sym.endswith('CE') or sym.endswith('PE'))
             }
+            option_universe_controller = UniverseController()
+            option_universe_controller.update(dynamic_option_symbols)
 
             async def _option_universe_sync_loop() -> None:
                 """Keep option subscriptions aligned with the dynamic option universe."""
@@ -5602,16 +5605,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                         else:
                             latest_symbols = set(ctx.option_universe.get_current_universe())
-                        add_symbols = sorted(latest_symbols - dynamic_option_symbols)
-                        drop_symbols = sorted(dynamic_option_symbols - latest_symbols)
-
-                        if add_symbols or drop_symbols:
-                            LOGGER.debug(
-                                'OptionUniv: subscription update add=%s drop=%s',
-                                add_symbols,
-                                drop_symbols,
-                                extra={'event': 'option_universe_subscriptions_update'},
-                            )
+                        added, removed = option_universe_controller.update(latest_symbols)
+                        add_symbols = sorted(added)
+                        drop_symbols = sorted(removed)
 
                         for sym in add_symbols:
                             if ctx.market_data_manager:

@@ -30,6 +30,7 @@ from typing import (
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.constants import OPTION_ALIAS_SUFFIX
@@ -478,9 +479,11 @@ class StrategyRunner:
             self._config.min_indicator_bars,
             int(os.getenv("REQUIRED_CANDLES", str(self._config.min_indicator_bars))),
         )
-        self._frozen_symbol_universe: set[str] = set()
-        self._expected_symbol_count: int = 0
         self._max_symbol_count: int = int(os.getenv("STRATEGY_MAX_SYMBOL_COUNT", "32"))
+        self._universe_controller = UniverseController()
+        self._universe_dynamic_mode = bool(
+            getattr(get_settings(), "universe_dynamic_mode", True)
+        )
         self._history_gate_failed: bool = False
         self._history_ready_by_symbol: dict[str, bool] = {}
         self._rate_limit_backoff_until_by_symbol: dict[str, float] = {}
@@ -500,8 +503,8 @@ class StrategyRunner:
             self._running = True
             self._trading_paused = False
             symbols = list(self._active_symbols)
-            self._frozen_symbol_universe = set(symbols)
-            self._expected_symbol_count = len(symbols)
+            # Dynamic mode keeps runtime universe mutable instead of freezing at start.
+            self._universe_controller.update(symbols)
             self._history_gate_failed = False
             self._history_ready_by_symbol = {symbol: False for symbol in symbols}
             self._rate_limit_backoff_until_by_symbol = {}
@@ -597,6 +600,8 @@ class StrategyRunner:
                 state.active = True
 
             self._active_symbols.add(normalized)
+            # Update tracked universe snapshot only when membership changes.
+            self._universe_controller.update(self._active_symbols)
 
         running = False
         with self._lock:
@@ -622,6 +627,8 @@ class StrategyRunner:
 
             state.active = False
             self._active_symbols.discard(normalized)
+            # Dynamic diffing avoids legacy frozen-universe drift conflicts.
+            self._universe_controller.update(self._active_symbols)
             callback = self._callbacks.pop(normalized, None)
 
         try:
@@ -2185,7 +2192,7 @@ class StrategyRunner:
             )
 
     def _validate_symbol_for_cycle(self, symbol: str) -> bool:
-        """Validate symbol against frozen universe without aborting global loop.
+        """Validate symbol against active dynamic universe without aborting loop.
 
         Args: symbol. Returns: bool. Raises: None.
         """
@@ -2196,8 +2203,7 @@ class StrategyRunner:
         try:
             with self._lock:
                 symbols = sorted(self._active_symbols)
-                frozen = set(self._frozen_symbol_universe)
-                expected_count = self._expected_symbol_count
+                active_set = set(symbols)
 
             if self._max_symbol_count > 0 and len(symbols) > self._max_symbol_count:
                 self._warn_symbol_gate(
@@ -2210,32 +2216,14 @@ class StrategyRunner:
                 )
                 self._mark_symbol_unready(symbol, "universe_violation")
                 return False
-            if expected_count and len(symbols) != expected_count:
-                self._warn_symbol_gate(
-                    "universe_violation",
-                    symbol,
-                    "Session universe count deviated from frozen expectation",
-                    reason="expected_count_mismatch",
-                    actual_count=len(symbols),
-                    expected_count=expected_count,
-                )
-                self._mark_symbol_unready(symbol, "universe_violation")
-                return False
-            if frozen and symbol not in frozen:
-                self._warn_symbol_gate(
-                    "universe_violation",
-                    symbol,
-                    "Symbol not present in frozen session universe",
-                    reason="symbol_not_in_frozen_universe",
-                )
-                self._mark_symbol_unready(symbol, "universe_violation")
-                return False
-            if frozen and set(symbols) != frozen:
-                self._warn_symbol_gate(
-                    "universe_violation",
-                    symbol,
-                    "Active symbols deviate from frozen universe",
-                    reason="frozen_universe_deviation",
+            # Frozen-universe enforcement is intentionally removed in dynamic mode.
+            if symbol not in active_set:
+                self._logger.debug(
+                    "Symbol outside active universe",
+                    extra={
+                        "event": "symbol_outside_active_universe",
+                        "symbol": symbol,
+                    },
                 )
                 self._mark_symbol_unready(symbol, "universe_violation")
                 return False
@@ -2262,11 +2250,9 @@ class StrategyRunner:
         return "other"
 
     def _validate_symbol_universe(self) -> bool:
-        """Validate frozen index and option symbol universe before strategy eval."""
+        """Validate index/option composition with non-blocking dynamic diagnostics."""
         with self._lock:
             symbols = sorted(self._active_symbols)
-            frozen = set(self._frozen_symbol_universe)
-            expected_count = self._expected_symbol_count
         if self._max_symbol_count > 0 and len(symbols) > self._max_symbol_count:
             self._logger.error(
                 "Condition met: symbol_universe_mismatch",
@@ -2278,30 +2264,15 @@ class StrategyRunner:
                 },
             )
             return False
-        if expected_count and len(symbols) != expected_count:
-            self._logger.error(
-                "Condition met: symbol_universe_mismatch",
+        if self._universe_dynamic_mode:
+            # Keep diagnostics informative, but avoid frozen snapshot gating.
+            self._logger.debug(
+                "Condition met: symbol_universe_dynamic_validation",
                 extra={
-                    "event": "symbol_universe_mismatch",
-                    "reason": "expected_count_mismatch",
-                    "actual_count": len(symbols),
-                    "expected_count": expected_count,
-                    "frozen_symbols": sorted(frozen),
+                    "event": "symbol_universe_dynamic_validation",
                     "all_symbols": symbols,
                 },
             )
-            return False
-        if frozen and set(symbols) != frozen:
-            self._logger.error(
-                "Condition met: symbol_universe_mismatch",
-                extra={
-                    "event": "symbol_universe_mismatch",
-                    "reason": "frozen_universe_deviation",
-                    "frozen_symbols": sorted(frozen),
-                    "all_symbols": symbols,
-                },
-            )
-            return False
         index_symbols = [
             sym for sym in symbols if self._classify_symbol(sym) == "index"
         ]
@@ -2309,7 +2280,7 @@ class StrategyRunner:
             sym for sym in symbols if self._classify_symbol(sym) == "option"
         ]
         if not option_symbols:
-            self._logger.error(
+            self._logger.info(
                 "Condition met: symbol_universe_mismatch",
                 extra={
                     "event": "symbol_universe_mismatch",
@@ -2321,7 +2292,7 @@ class StrategyRunner:
             )
             return False
         if len(index_symbols) != 1:
-            self._logger.error(
+            self._logger.info(
                 "Condition met: symbol_universe_mismatch",
                 extra={
                     "event": "symbol_universe_mismatch",
@@ -2768,11 +2739,13 @@ class StrategyRunner:
 
             with self._lock:
                 if symbol not in self._active_symbols:
-                    self._warn_symbol_gate(
-                        "universe_violation",
-                        symbol,
-                        "Feed symbol is not tracked in active universe",
-                        reason="symbol_not_tracked",
+                    self._logger.debug(
+                        "Symbol outside active universe",
+                        extra={
+                            "event": "symbol_outside_active_universe",
+                            "symbol": symbol,
+                            "reason": "symbol_not_tracked",
+                        },
                     )
                     self._mark_symbol_unready(symbol, "universe_violation")
                     return
