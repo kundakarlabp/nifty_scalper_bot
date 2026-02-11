@@ -669,7 +669,60 @@ class IndicatorEngine:
     def has_min_bars(self, symbol: str, min_bars: int) -> bool:
         """Return whether the internal history satisfies *min_bars*."""
         history = self._histories.get(symbol)
-        return history is not None and len(history) >= min_bars
+        if history is None or len(history) < min_bars:
+            return False
+        return self._validate_history_integrity(symbol, history, min_bars=min_bars)
+
+    def _validate_history_integrity(
+        self,
+        symbol: str,
+        history: PriceHistory,
+        *,
+        min_bars: int,
+    ) -> bool:
+        """Validate indicator inputs before strategy evaluation."""
+        timestamps = history.get_timestamps()
+        if len(timestamps) < min_bars:
+            LOGGER.error(
+                'Condition met: indicator_integrity_short_history',
+                extra={
+                    'event': 'indicator_integrity_short_history',
+                    'symbol': symbol,
+                    'have': len(timestamps),
+                    'need': min_bars,
+                },
+            )
+            return False
+        if any(ts is None for ts in timestamps):
+            LOGGER.error(
+                'Condition met: indicator_integrity_missing_timestamp',
+                extra={'event': 'indicator_integrity_missing_timestamp', 'symbol': symbol},
+            )
+            return False
+        for prev, curr in zip(timestamps, timestamps[1:]):
+            if curr <= prev:
+                LOGGER.error(
+                    'Condition met: indicator_integrity_non_monotonic',
+                    extra={
+                        'event': 'indicator_integrity_non_monotonic',
+                        'symbol': symbol,
+                        'prev': prev.isoformat(),
+                        'curr': curr.isoformat(),
+                    },
+                )
+                return False
+            gap_seconds = (curr - prev).total_seconds()
+            if gap_seconds > 120:
+                LOGGER.error(
+                    'Condition met: indicator_integrity_missing_candle',
+                    extra={
+                        'event': 'indicator_integrity_missing_candle',
+                        'symbol': symbol,
+                        'gap_seconds': gap_seconds,
+                    },
+                )
+                return False
+        return True
 
     def ensure_min_bars(
         self,

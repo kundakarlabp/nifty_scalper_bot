@@ -472,6 +472,10 @@ class StrategyRunner:
         # We intentionally keep this sticky so per-symbol loops cannot spam checks/logs.
         self._risk_halt_active = False
         self._risk_halt_logged = False
+        self._required_candles = max(
+            self._config.min_indicator_bars,
+            int(os.getenv('REQUIRED_CANDLES', str(self._config.min_indicator_bars))),
+        )
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -1870,6 +1874,12 @@ class StrategyRunner:
                 return
 
             # 2. FALLBACK: Only runs if App.py failed
+            if not self._risk_allows_trading(None):
+                self._logger.warning(
+                    'Condition met: backfill_short_circuited_by_risk',
+                    extra={'event': 'backfill_short_circuited_by_risk'},
+                )
+                return
             self._logger.warning(
                 "⚠️ StrategyRunner memory is empty! Triggering fallback backfill..."
             )
@@ -1963,11 +1973,19 @@ class StrategyRunner:
             )
             return []
         normalized: list[dict[str, Any]] = []
+        seen_ts: set[datetime] = set()
         for row in rows or []:
             try:
                 ts = row.get('timestamp') or row.get('date')
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                if not isinstance(ts, datetime):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts in seen_ts:
+                    continue
+                seen_ts.add(ts)
                 normalized.append(
                     {
                         'open': float(row.get('open', 0.0) or 0.0),
@@ -1980,6 +1998,26 @@ class StrategyRunner:
                 )
             except Exception:
                 continue
+        normalized.sort(key=lambda row: cast(datetime, row['timestamp']))
+        if len(normalized) < self._required_candles:
+            self._logger.info(
+                'Condition met: hydrate_excluded_insufficient_candles',
+                extra={
+                    'event': 'hydrate_excluded_insufficient_candles',
+                    'symbol': symbol,
+                    'candles': len(normalized),
+                    'required_candles': self._required_candles,
+                },
+            )
+            return []
+        if self._data_hub and hasattr(self._data_hub, 'history_freshness'):
+            fresh, meta = self._data_hub.history_freshness(symbol, 'minute')
+            if not fresh:
+                self._logger.warning(
+                    'Condition met: hydrate_history_stale',
+                    extra={'event': 'hydrate_history_stale', 'symbol': symbol, 'meta': meta},
+                )
+                return []
         return normalized
 
     def _log_once_per_symbol_per_bar(self, symbol: str, event: str, reason: str) -> None:
@@ -1995,6 +2033,70 @@ class StrategyRunner:
             event,
             extra={'event': event, 'symbol': symbol, 'reason': reason, 'bar_ts': bar_ts.isoformat()},
         )
+
+    def _classify_symbol(self, symbol: str) -> str:
+        """Classify symbol into index, option or other buckets."""
+        upper = symbol.upper()
+        if upper.startswith('NSE:') and all(tok not in upper for tok in ('CE', 'PE', 'FUT')):
+            return 'index'
+        if upper.endswith('CE') or upper.endswith('PE'):
+            return 'option'
+        return 'other'
+
+    def _validate_symbol_universe(self) -> bool:
+        """Validate index and option symbol separation before strategy eval."""
+        with self._lock:
+            symbols = sorted(self._active_symbols)
+        index_symbols = [sym for sym in symbols if self._classify_symbol(sym) == 'index']
+        option_symbols = [sym for sym in symbols if self._classify_symbol(sym) == 'option']
+        if not option_symbols:
+            self._logger.error(
+                'Condition met: symbol_universe_mismatch',
+                extra={
+                    'event': 'symbol_universe_mismatch',
+                    'reason': 'missing_option_symbols',
+                    'all_symbols': symbols,
+                    'index_symbols': index_symbols,
+                    'option_symbols': option_symbols,
+                },
+            )
+            return False
+        if len(index_symbols) != 1:
+            self._logger.error(
+                'Condition met: symbol_universe_mismatch',
+                extra={
+                    'event': 'symbol_universe_mismatch',
+                    'reason': 'index_count_mismatch',
+                    'all_symbols': symbols,
+                    'index_symbols': index_symbols,
+                    'option_symbols': option_symbols,
+                },
+            )
+            return False
+        return True
+
+    def _risk_allows_trading(self, symbol: str | None) -> bool:
+        """Return whether risk engine allows entering strategy flow."""
+        try:
+            rm = self._risk_manager
+            if rm is None:
+                return True
+            if hasattr(rm, 'is_circuit_breaker_tripped'):
+                tripped, _ = rm.is_circuit_breaker_tripped()
+                if tripped:
+                    return False
+            if hasattr(rm, 'can_trade'):
+                return bool(rm.can_trade(symbol or 'GLOBAL'))
+            if hasattr(rm, 'risk_gate_should_trade'):
+                result = rm.risk_gate_should_trade()
+                return bool(result[0] if isinstance(result, tuple) else result)
+            if hasattr(rm, 'can_trade_now'):
+                result = rm.can_trade_now()
+                return bool(result[0] if isinstance(result, tuple) else result)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error('Failure in _risk_allows_trading: %s', exc, exc_info=True)
+            return False
+        return False
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
@@ -2387,48 +2489,25 @@ class StrategyRunner:
             # PHASE 6: RISK CHECK (Block trading if risk conditions not met)
             # =================================================================
 
-            # Only check risk if not in warmup
-            if not in_warmup:
-                try:
-                    is_allowed = False
-                    rm = self._risk_manager
-
-                    if rm:
-                        if hasattr(rm, "can_trade"):
-                            is_allowed = rm.can_trade(symbol)
-                        elif hasattr(rm, "risk_gate_should_trade"):
-                            res = rm.risk_gate_should_trade()
-                            is_allowed = res[0] if isinstance(res, tuple) else bool(res)
-                        elif hasattr(rm, "can_trade_now"):
-                            res = rm.can_trade_now()
-                            is_allowed = res[0] if isinstance(res, tuple) else bool(res)
-                        else:
-                            is_allowed = False
-                    else:
-                        # No risk manager = allow trading
-                        is_allowed = True
-
-                    if not is_allowed:
-                        log_throttled(
-                            self._logger,
-                            f"risk_block_{symbol}",
-                            f"⛔ Risk Block Active: {symbol}. Trading Halted.",
-                            interval_sec=30.0,
-                            level=logging.WARNING,
-                        )
-                        return
-
-                except Exception as e:
-                    self._logger.error(
-                        f"Critical error in risk check for {symbol}: {e}"
-                    )
-                    return
+            if not self._risk_allows_trading(symbol):
+                log_throttled(
+                    self._logger,
+                    f"risk_block_{symbol}",
+                    f"⛔ Risk Block Active: {symbol}. Trading Halted.",
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
+                return
 
             # =================================================================
             # PHASE 7: STRATEGY PREPARATION (Skip during warmup)
             # =================================================================
 
             if in_warmup:
+                return
+            if not self._is_market_open(now):
+                return
+            if not self._validate_symbol_universe():
                 return
 
             with self._lock:
@@ -2685,7 +2764,7 @@ class StrategyRunner:
                 return
 
             # If no immediate signal, delegate to complex StrategyManager
-            if signal is None and self._config.min_indicator_bars:
+            if signal is None and self._required_candles:
                 should_evaluate = False
                 with self._lock:
                     state = self._symbol_state.get(symbol)
@@ -2767,20 +2846,20 @@ class StrategyRunner:
                     log_throttled(
                         self._logger,
                         f"strategy_eval_{symbol}",
-                        f"🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._config.min_indicator_bars}",
+                        f"🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._required_candles}",
                         interval_sec=30.0,
                         level=logging.DEBUG,
                     )
                     self._indicator_engine.ensure_min_bars(
                         symbol,
-                        self._config.min_indicator_bars,
+                        self._required_candles,
                         hydrate=self._hydrate_missing_bars,
                     )
                     index_indicators_ready = bool(
                         getattr(self._orchestrator, 'index_indicators_ready', True)
                     )
                     is_ready = self._indicator_engine.has_min_bars(
-                        symbol, self._config.min_indicator_bars
+                        symbol, self._required_candles
                     )
 
                     if not (index_indicators_ready and is_ready):
@@ -4337,14 +4416,14 @@ class StrategyRunner:
         """Normalize symbol to uppercase trimmed string."""
         normalized = symbol.strip().upper()
         if not normalized:
-            msg = "symbol must not be empty"
+            msg = 'symbol must not be empty'
             raise ValueError(msg)
 
-        # ✅ FIX: Strip 'NFO:' or 'NSE:' prefix if present
-        if ":" in normalized:
-            normalized = normalized.split(":", 1)[1]
+        if ':' in normalized:
+            normalized = normalized.split(':', 1)[1]
 
         return normalized
+
 
     def _update_last_signal_selection(
         self, symbol: str, selection: SelectedContract

@@ -6,6 +6,7 @@ import os
 import re
 import time
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Callable, Iterable, Mapping, Optional, TypedDict, cast
@@ -75,6 +76,27 @@ _ORDER_STATE_MACHINE: dict[str, set[str]] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoryCacheKey:
+    """Key for option-chain-aware historical cache entries."""
+
+    symbol_root: str
+    expiry: str
+    interval: str
+
+
+@dataclass(slots=True)
+class _HistoryCacheEntry:
+    """Cached history rows and fetch timestamp."""
+
+    rows: list[dict[str, Any]]
+    fetched_at: float
+
+    def is_fresh(self, max_age_seconds: float, now: float) -> bool:
+        """Return True when this cache entry is still fresh."""
+        return (now - self.fetched_at) <= max_age_seconds
+
+
 class DataHub:
     """Central in-memory state cache for the trading bot."""
 
@@ -113,6 +135,14 @@ class DataHub:
         # Subscribers
         self._tick_subscribers: dict[str, set[TickListener]] = {}
         self._order_subscribers: list[OrderListener] = []
+        self._history_cache_lock = RLock()
+        self._history_cache: dict[_HistoryCacheKey, _HistoryCacheEntry] = {}
+        self._history_cache_ttl_seconds = float(
+            os.getenv('HISTORY_CACHE_TTL_SECONDS', '120')
+        )
+        self._history_freshness_max_age_seconds = float(
+            os.getenv('HISTORY_FRESHNESS_MAX_AGE_SECONDS', '120')
+        )
 
     # ----------------------------------------------------------------
     # Ingestion (Write Path)
@@ -541,23 +571,109 @@ class DataHub:
     # ----------------------------------------------------------------
     
     async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
-        """
-        Proxies historical data requests to the MarketDataManager.
-        Essential for 'Cold Start' indicator priming.
-        """
-        # 1. Resolve the underlying manager
-        mdm = getattr(self, "_mdm", None) or getattr(self, "_market_data", None)
-        
-        # 2. Check capability
-        if mdm and hasattr(mdm, "fetch_history"):
-            try:
-                # 3. Await the result (MDM.fetch_history is async)
-                return await mdm.fetch_history(symbol, interval, days)
-            except Exception as e:
-                LOGGER.error(f"DataHub Proxy Error: fetch_history failed for {symbol}: {e}")
-                return []
-        
-        LOGGER.warning(f"DataHub: Underlying MDM missing 'fetch_history' for {symbol}")
-        return []
+        """Fetch cached historical candles with option-chain aware pooling."""
+        root, expiry = self._extract_history_group(symbol)
+        cache_key = _HistoryCacheKey(symbol_root=root, expiry=expiry, interval=interval)
+        now = time.time()
+
+        with self._history_cache_lock:
+            entry = self._history_cache.get(cache_key)
+            if entry and entry.is_fresh(self._history_cache_ttl_seconds, now):
+                LOGGER.debug(
+                    'Condition met: history_cache_hit',
+                    extra={
+                        'event': 'history_cache_hit',
+                        'symbol': symbol,
+                        'root': root,
+                        'expiry': expiry,
+                        'interval': interval,
+                        'age_seconds': round(now - entry.fetched_at, 3),
+                    },
+                )
+                return [dict(row) for row in entry.rows]
+
+        mdm = getattr(self, '_mdm', None) or getattr(self, '_market_data', None)
+        if not (mdm and hasattr(mdm, 'fetch_history')):
+            LOGGER.warning(
+                'DataHub: Underlying MDM missing fetch_history',
+                extra={'event': 'history_fetcher_missing', 'symbol': symbol},
+            )
+            return []
+
+        try:
+            rows = await mdm.fetch_history(symbol, interval, days)
+        except Exception as e:  # noqa: BLE001
+            LOGGER.error(
+                'DataHub Proxy Error: fetch_history failed for %s: %s',
+                symbol,
+                e,
+                extra={'event': 'history_fetch_failed', 'symbol': symbol},
+                exc_info=True,
+            )
+            return []
+
+        normalized_rows = [dict(row) for row in (rows or []) if isinstance(row, Mapping)]
+        with self._history_cache_lock:
+            self._history_cache[cache_key] = _HistoryCacheEntry(
+                rows=normalized_rows,
+                fetched_at=now,
+            )
+
+        return [dict(row) for row in normalized_rows]
+
+    def history_freshness(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        max_age_seconds: float | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Return freshness diagnostics for historical cache groups."""
+        root, expiry = self._extract_history_group(symbol)
+        cache_key = _HistoryCacheKey(symbol_root=root, expiry=expiry, interval=interval)
+        now = time.time()
+        age_limit = (
+            float(max_age_seconds)
+            if max_age_seconds is not None
+            else self._history_freshness_max_age_seconds
+        )
+        with self._history_cache_lock:
+            entry = self._history_cache.get(cache_key)
+
+        if entry is None:
+            return False, {
+                'ok': False,
+                'reason': 'missing',
+                'symbol_root': root,
+                'expiry': expiry,
+                'interval': interval,
+                'max_age_seconds': age_limit,
+            }
+
+        age_seconds = max(0.0, now - entry.fetched_at)
+        is_fresh = age_seconds <= age_limit
+        return is_fresh, {
+            'ok': is_fresh,
+            'reason': None if is_fresh else 'stale',
+            'symbol_root': root,
+            'expiry': expiry,
+            'interval': interval,
+            'age_seconds': round(age_seconds, 3),
+            'max_age_seconds': age_limit,
+            'candles': len(entry.rows),
+        }
+
+    @staticmethod
+    def _extract_history_group(symbol: str) -> tuple[str, str]:
+        """Return ``(symbol_root, expiry)`` grouping keys for history caching."""
+        normalized = (symbol or '').strip().upper()
+        clean = normalized.split(':')[-1]
+        match = re.match(
+            r'^(?P<root>[A-Z]+)(?P<expiry>(?:\d{2}[A-Z]\d{2}|\d{2}[A-Z]{3}|\d{2}[A-Z]{3}\d{2}))\d+(?:CE|PE)$',
+            clean,
+        )
+        if match:
+            return match.group('root'), match.group('expiry')
+        return clean, 'SPOT'
 
 __all__ = ["DataHub", "Tick", "OrderListener", "TickListener"]
