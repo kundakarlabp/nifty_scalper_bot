@@ -7,6 +7,7 @@ that calculates common technical indicators from the stored price history.
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Sequence
@@ -216,7 +217,7 @@ class IndicatorEngine:
                 )
                 return []
             closes = history.get_closes(count)
-            LOGGER.info(
+            LOGGER.debug(
                 "Condition met: indicator_history_resolved",
                 extra={
                     "event": "indicator_engine_history_resolved",
@@ -765,15 +766,19 @@ class IndicatorEngine:
                 return False
             gap_seconds = (curr - prev).total_seconds()
             if gap_seconds > 120:
-                LOGGER.error(
+                log_throttled(
+                    LOGGER,
+                    f"indicator_gap_{symbol}",
                     "Condition met: indicator_integrity_missing_candle",
+                    interval_sec=60.0,
+                    level=logging.WARNING,
                     extra={
                         "event": "indicator_integrity_missing_candle",
                         "symbol": symbol,
                         "gap_seconds": gap_seconds,
                     },
                 )
-                return False
+                continue
         return True
 
     def ensure_min_bars(
@@ -1192,7 +1197,17 @@ class IndicatorEngine:
         price_arr = np.asarray(prices, dtype=float)
         total_volume = volume_arr.sum()
         if np.isclose(total_volume, 0.0):
-            return None
+            if price_arr.size == 0:
+                return None
+            log_throttled(
+                LOGGER,
+                "indicator_vwap_zero_volume",
+                "Condition met: indicator_vwap_zero_volume_fallback",
+                interval_sec=60.0,
+                level=logging.WARNING,
+                extra={"event": "indicator_vwap_zero_volume_fallback"},
+            )
+            return float(price_arr.mean())
         vwap = float(np.dot(price_arr, volume_arr) / total_volume)
         return vwap
 
@@ -1243,7 +1258,6 @@ class IndicatorEngine:
         - Added fallback ATR calculation (1.5% of price)
         """
         # Lazy import to avoid circular dependency
-        from nifty_scalper_bot.indicators.atr_provider import ATRSnapshot
 
         hist = self._histories.get(symbol)
 
