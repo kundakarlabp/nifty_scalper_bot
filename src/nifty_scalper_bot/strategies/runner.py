@@ -1033,6 +1033,24 @@ class StrategyRunner:
                     is_provisional=False,
                 )
 
+            try:
+                history_size = len(self._indicator_engine.get_history(symbol))
+            except Exception:
+                history_size = 0
+
+            if history_size >= self._required_candles:
+                if not self._history_ready_by_symbol.get(symbol, False):
+                    self._logger.info(
+                        "Condition met: history_ready_from_live_bars",
+                        extra={
+                            "event": "history_ready_from_live_bars",
+                            "symbol": symbol,
+                            "bars": history_size,
+                            "required": self._required_candles,
+                        },
+                    )
+                self._history_ready_by_symbol[symbol] = True
+
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
                 # Compute ATR (Period 14 is standard)
@@ -2634,9 +2652,6 @@ class StrategyRunner:
                 )
                 skip_strategy = True
 
-            if skip_strategy:
-                return
-
             # Volume validity check (relaxed warnings for REST mode)
             if volume < 0:
                 log_throttled(
@@ -2715,6 +2730,9 @@ class StrategyRunner:
                     interval_sec=30.0,
                     level=logging.WARNING,
                 )
+                return
+
+            if skip_strategy:
                 return
 
             # =================================================================
