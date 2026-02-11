@@ -48,6 +48,12 @@ from nifty_scalper_bot.infra.watchdog import start_watchdog
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 SYNC_LOCK = threading.Lock()
 
+
+def _run_sync_locked(operation: Callable[[], Any]) -> Any:
+    """Run synchronization-critical broker operations under a process-wide lock."""
+    with SYNC_LOCK:
+        return operation()
+
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -684,7 +690,8 @@ def _fetch_positions_with_retry(
     ):
         attempt += 1
         try:
-            snapshot = get_positions()
+            # Startup/scheduler/stream loops share this lock to prevent parallel broker sync.
+            snapshot = _run_sync_locked(get_positions)
             positions = _normalize_broker_positions(snapshot)
             LOGGER.info(
                 "Condition met: broker_position_sync_success",
@@ -1447,6 +1454,11 @@ class BotContext:
         default_factory=lambda: OrderedDict()
     )
     option_universe: OptionUniverseManager | None = None
+    subsystems_started: bool = False
+    stream_supervisor_started: bool = False
+    margin_engine_data_hub_attached: bool = False
+    risk_manager_data_hub_attached: bool = False
+    bracket_manager_attached: bool = False
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -2261,7 +2273,10 @@ async def reconcile_positions_on_startup(
 
     try:
         broker_snapshot: list[Mapping[str, Any]] = []
-        raw_positions = broker_client.get_positions()
+        raw_positions = await asyncio.to_thread(
+            _run_sync_locked,
+            broker_client.get_positions,
+        )
         for entry in raw_positions:
             if isinstance(entry, Mapping):
                 broker_snapshot.append(entry)
@@ -3193,6 +3208,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     stream_supervisor.bootstrap()
     stream_supervisor.ensure_started()
+    ctx.stream_supervisor_started = True
 
     # Initialize Indicators & Regime
     indicator_engine = IndicatorEngine()
@@ -3360,11 +3376,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     except Exception as exc:  # noqa: BLE001
         LOGGER.error("risk_manager_attach_mdm_failed: %s", exc)
 
-    # 4. Attach Data Hub (Safe Try/Except)
-    try:
-        risk_manager.attach_data_hub(data_hub)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.error("risk_manager_attach_data_hub_failed: %s", exc)
+    # 4. Attach Data Hub once to avoid duplicate listeners across warm restarts.
+    if not getattr(ctx, "risk_manager_data_hub_attached", False):
+        try:
+            risk_manager.attach_data_hub(data_hub)
+            ctx.risk_manager_data_hub_attached = True
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("risk_manager_attach_data_hub_failed: %s", exc)
 
     # 5. [FIX] Wire Lot Size Provider (Unconditional)
     # We define this logic regardless of resolver state to ensure sizing always works.
@@ -3453,7 +3471,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         indicator_engine=indicator_engine,  # <--- THIS IS THE CRITICAL ADDITION
     )
     order_manager.set_market_data_manager(market_data_manager)
-    order_manager.attach_data_hub(data_hub)
+    if not getattr(ctx, "margin_engine_data_hub_attached", False):
+        # OrderManager owns MarginEngine wiring; attach once to avoid duplicate callbacks.
+        order_manager.attach_data_hub(data_hub)
+        ctx.margin_engine_data_hub_attached = True
     order_manager.set_instrument_resolver(instrument_resolver)
     order_manager.set_risk_manager(risk_manager)
     order_manager.attach_persistent_state(persistent_state)
@@ -3478,9 +3499,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 settings.execution, "bracket_stale_cleanup_seconds", 86400
             )
 
-            # Attach to OrderManager
-            order_manager.set_bracket_manager(bracket_manager=bracket_manager)
-            LOGGER.info("✅ BracketManager initialized and attached.")
+            # Attach once; duplicate attachment can duplicate bracket listeners.
+            if not getattr(ctx, "bracket_manager_attached", False):
+                order_manager.set_bracket_manager(bracket_manager=bracket_manager)
+                ctx.bracket_manager_attached = True
+                LOGGER.info("✅ BracketManager initialized and attached.")
 
         except Exception as exc:
             LOGGER.error(f"Failed to initialize BracketManager: {exc}")
@@ -5577,32 +5600,36 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.error("Hydration/Tracking failed", exc_info=True)
 
     # ---------------------------------------------------------
-    # 4. Start subsystems (UNCHANGED)
+    # 4. Start subsystems (guarded singleton startup)
     # ---------------------------------------------------------
     if broker_ready:
         try:
-            # 🚨 CRITICAL FIX: Start MessageBus Dispatchers FIRST 🚨
-            # Without this, ingested ticks sit in the queue forever.
-            if ctx.message_bus:
-                LOGGER.info("🚀 Starting MessageBus Dispatchers...")
-                ctx.message_bus.start()
+            if not ctx.subsystems_started:
+                # 🚨 CRITICAL FIX: Start MessageBus Dispatchers FIRST 🚨
+                # Without this, ingested ticks sit in the queue forever.
+                if ctx.message_bus:
+                    LOGGER.info("🚀 Starting MessageBus Dispatchers...")
+                    ctx.message_bus.start()
 
-            if ctx.order_manager:
-                ctx.order_manager.start_monitoring()
-            if ctx.strategy_runner:
-                ctx.strategy_runner.start()
-            if ctx.stream_supervisor:
-                ctx.stream_supervisor.start()
-            elif hasattr(ctx.streamer, "start"):
-                res = ctx.streamer.start()
-                if inspect.isawaitable(res):
-                    await res
+                if ctx.order_manager:
+                    ctx.order_manager.start_monitoring()
+                if ctx.strategy_runner:
+                    ctx.strategy_runner.start()
+                if ctx.stream_supervisor and not ctx.stream_supervisor_started:
+                    ctx.stream_supervisor.start()
+                    ctx.stream_supervisor_started = True
+                elif hasattr(ctx.streamer, "start") and not ctx.stream_supervisor_started:
+                    res = ctx.streamer.start()
+                    if inspect.isawaitable(res):
+                        await res
+                    ctx.stream_supervisor_started = True
 
-            if ctx.telegram_bot:
-                LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
-                await ctx.telegram_bot.start()
+                if ctx.telegram_bot:
+                    LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
+                    await ctx.telegram_bot.start()
 
-            LOGGER.info("✅ All subsystems started.")
+                ctx.subsystems_started = True
+                LOGGER.info("✅ All subsystems started.")
         except Exception as e:
             LOGGER.critical(f"Subsystem start failed: {e}")
 
@@ -5611,7 +5638,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     # ---------------------------------------------------------
     if broker_ready:
         try:
-            orders = await asyncio.to_thread(ctx.broker_client.get_orders)
+            orders = await asyncio.to_thread(_run_sync_locked, ctx.broker_client.get_orders)
             for o in orders:
                 if o.get("status") == "OPEN":
                     await asyncio.to_thread(
@@ -5834,10 +5861,8 @@ async def _reconcile_state(ctx: BotContext) -> None:
     Features: Non-Blocking Execution, Position Sync, and Auto-Guarding of Orphans.
     """
     def safe_sync_fetch() -> list[Mapping[str, Any]]:
-        """Synchronize broker orders/positions under a global non-blocking lock."""
-        if not SYNC_LOCK.acquire(False):
-            return []
-        try:
+        """Synchronize broker orders/positions under the global sync lock."""
+        def _sync_operation() -> list[Mapping[str, Any]]:
             if ctx.order_manager:
                 ctx.order_manager.reconcile_open_orders_with_broker()
             raw = ctx.broker_client.get_positions()
@@ -5853,8 +5878,8 @@ async def _reconcile_state(ctx: BotContext) -> None:
             if ctx.position_manager:
                 ctx.position_manager.synchronize_with_broker(broker_positions)
             return broker_positions
-        finally:
-            SYNC_LOCK.release()
+
+        return cast(list[Mapping[str, Any]], _run_sync_locked(_sync_operation))
 
     # 1/2. SYNC ORDERS + POSITIONS & AUTO-GUARD ORPHANS
     if ctx.position_manager:

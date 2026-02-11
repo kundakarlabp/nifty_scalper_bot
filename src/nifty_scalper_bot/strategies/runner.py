@@ -484,6 +484,11 @@ class StrategyRunner:
         self._history_gate_failed: bool = False
         self._history_ready_by_symbol: dict[str, bool] = {}
         self._rate_limit_backoff_until_by_symbol: dict[str, float] = {}
+        self._hydration_attempted_symbols: set[str] = set()
+        self._strategy_slot_limit: int = max(
+            1,
+            int(os.getenv("MAX_CONCURRENT_STRATEGIES", "3")),
+        )
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -2068,6 +2073,24 @@ class StrategyRunner:
             },
         )
 
+    def _regime_manager_ready(self) -> bool:
+        """Return True when regime manager has produced an actionable snapshot."""
+        regime_manager = getattr(self._strategy_manager, "_regime_manager", None)
+        if regime_manager is None:
+            return True
+        snapshot = getattr(regime_manager, "get_latest_snapshot", lambda: None)()
+        return snapshot is not None
+
+    def _strategy_slots_available(self) -> bool:
+        """Return True when active strategy slots are available for new entries."""
+        try:
+            active_positions = len(self._position_manager.get_open_positions())
+        except Exception:
+            active_positions = 0
+        with self._lock:
+            inflight = len(self._orders_in_flight)
+        return (active_positions + inflight) < self._strategy_slot_limit
+
     def _warn_symbol_gate(
         self,
         event_code: str,
@@ -2122,24 +2145,28 @@ class StrategyRunner:
         )
         try:
             self._history_ready_by_symbol[symbol] = False
+            state_transition = False
             with self._lock:
                 state = self._symbol_state.get(symbol)
                 if state is not None:
+                    previous_reason = state.strategy_data.get("unready_reason")
                     state.strategy_data["unready_reason"] = reason
                     state.strategy_data["unready_at"] = datetime.now(
                         timezone.utc
                     ).isoformat()
+                    state_transition = previous_reason != reason
                     if low_confidence:
                         state.strategy_data["low_confidence"] = True
-            self._logger.info(
-                "Condition met: symbol_marked_unready",
-                extra={
-                    "event": "symbol_marked_unready",
-                    "symbol": symbol,
-                    "reason": reason,
-                    "low_confidence": low_confidence,
-                },
-            )
+            if state_transition:
+                self._logger.info(
+                    "symbol_unready_transition",
+                    extra={
+                        "event": "symbol_unready_transition",
+                        "symbol": symbol,
+                        "reason": reason,
+                        "low_confidence": low_confidence,
+                    },
+                )
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in StrategyRunner._mark_symbol_unready: %s",
@@ -3054,28 +3081,43 @@ class StrategyRunner:
                         interval_sec=30.0,
                         level=logging.DEBUG,
                     )
-                    self._indicator_engine.ensure_min_bars(
-                        symbol,
-                        self._required_candles,
-                        hydrate=self._hydrate_missing_bars,
-                    )
+                    if not self._indicator_engine.has_min_bars(
+                        symbol, self._required_candles
+                    ):
+                        # Hydrate at most once per symbol per startup to avoid repeated API stress.
+                        if symbol not in self._hydration_attempted_symbols:
+                            self._hydration_attempted_symbols.add(symbol)
+                            self._hydrate_missing_bars(symbol, self._required_candles)
+                        self._log_once_per_symbol_per_bar(
+                            symbol,
+                            "indicator_hydration_pending",
+                            "min_bars_not_ready",
+                        )
+                        self._mark_symbol_unready(symbol, "indicator_hydration_pending")
+                        return
+
                     index_indicators_ready = bool(
                         getattr(self._orchestrator, "index_indicators_ready", True)
                     )
-                    is_ready = self._indicator_engine.has_min_bars(
+                    symbol_indicators_ready = self._indicator_engine.has_min_bars(
                         symbol, self._required_candles
                     )
+                    regime_ready = self._regime_manager_ready()
 
-                    if not (index_indicators_ready and is_ready):
-                        reason = (
-                            "index_indicators_not_ready"
-                            if not index_indicators_ready
-                            else "min_bars_not_ready"
-                        )
+                    if not (
+                        index_indicators_ready
+                        and symbol_indicators_ready
+                        and regime_ready
+                    ):
+                        reason = "index_indicators_not_ready"
+                        if not symbol_indicators_ready:
+                            reason = "symbol_indicators_not_ready"
+                        elif not regime_ready:
+                            reason = "regime_manager_not_ready"
                         self._warn_symbol_gate(
                             "indicator_invalid",
                             symbol,
-                            "Indicators are incomplete or invalid for this cycle",
+                            "Indicators/regime are incomplete for this cycle",
                             reason=reason,
                         )
                         self._mark_symbol_unready(symbol, "indicator_invalid")
@@ -3143,6 +3185,15 @@ class StrategyRunner:
             # =================================================================
 
             if signal and signal.action != "HOLD":
+                if signal.action in {"BUY", "SELL"} and not self._strategy_slots_available():
+                    self._warn_symbol_gate(
+                        "strategy_slots_full",
+                        symbol,
+                        "Strategy execution slots are full; rejecting new entry signal",
+                        reason="max_concurrent_strategies_reached",
+                        max_slots=self._strategy_slot_limit,
+                    )
+                    return
                 with self._lock:
                     state = self._symbol_state.get(symbol)
                     if state:

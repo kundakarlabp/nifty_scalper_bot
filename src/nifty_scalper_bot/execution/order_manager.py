@@ -4952,16 +4952,12 @@ class OrderManager:
 
     
     def _restore_virtual_brackets(self) -> None:
-        """Hydrates virtual brackets from SQLite on startup."""
+        """Hydrate brackets from SQLite and reconcile against live broker positions."""
         try:
             saved_brackets = self._bracket_store.load_all_brackets()
-            if not saved_brackets:
-                return
-
-            restored_count = 0
-            for b_data in saved_brackets:
-                # Ensure the BracketManager is available
-                if self._bracket_manager:
+            restored_symbols: set[str] = set()
+            if self._bracket_manager and saved_brackets:
+                for b_data in saved_brackets:
                     try:
                         self._bracket_manager.restore_bracket(
                             order_id=b_data['order_id'],
@@ -4969,18 +4965,73 @@ class OrderManager:
                             side=b_data['side'],
                             qty=b_data['qty'],
                             entry_price=b_data['entry_price'],
-                            sl=b_data['current_sl'], # Ensure mapping matches DB schema
+                            sl=b_data['current_sl'],
                             tp=b_data.get('tp1'),
                             trailing_enabled=b_data.get('trailing_active', False),
                             highest_ltp=b_data.get('highest_ltp', 0.0),
-                            tag=b_data.get('tag')
+                            tag=b_data.get('tag'),
                         )
-                        restored_count += 1
+                        restored_symbols.add(str(b_data.get('symbol', '')).upper())
                     except Exception as e:
-                        self._logger.warning(f"Skipped restoring bracket {b_data.get('order_id')}: {e}")
-            
-            if restored_count > 0:
-                self._logger.info(f"✅ Restored {restored_count} Virtual Brackets from SQLite.")
+                        self._logger.warning(
+                            f"Skipped restoring bracket {b_data.get('order_id')}: {e}"
+                        )
+
+            broker_positions: list[dict[str, Any]] = []
+            try:
+                if hasattr(self._broker, 'get_positions'):
+                    raw_positions = self._broker.get_positions()
+                    if isinstance(raw_positions, list):
+                        broker_positions = [p for p in raw_positions if isinstance(p, dict)]
+                    elif isinstance(raw_positions, dict):
+                        net = raw_positions.get('net', raw_positions)
+                        if isinstance(net, list):
+                            broker_positions = [p for p in net if isinstance(p, dict)]
+            except Exception as exc:
+                self._logger.error('Failed broker position fetch during bracket recovery: %s', exc)
+
+            live_symbols: set[str] = set()
+            for payload in broker_positions:
+                symbol = str(payload.get('tradingsymbol') or payload.get('symbol') or '').upper()
+                qty_raw = payload.get('net_qty') or payload.get('quantity') or payload.get('net_quantity')
+                try:
+                    qty = int(float(qty_raw or 0))
+                except (TypeError, ValueError):
+                    qty = 0
+                if symbol and qty != 0:
+                    live_symbols.add(symbol)
+                    if self._bracket_manager and symbol not in restored_symbols:
+                        # Reconstruct missing brackets for broker-live positions.
+                        if hasattr(self._bracket_manager, 'attach_orphan_position'):
+                            side = 'LONG' if qty > 0 else 'SHORT'
+                            entry = float(payload.get('average_price') or payload.get('avg_price') or 0.0)
+                            if entry > 0:
+                                try:
+                                    self._bracket_manager.attach_orphan_position(
+                                        symbol=symbol,
+                                        side=side,
+                                        qty=abs(qty),
+                                        entry_price=entry,
+                                    )
+                                    self._logger.info('Recovered missing bracket for %s', symbol)
+                                except Exception as exc:
+                                    self._logger.error('Failed to recover orphan bracket %s: %s', symbol, exc)
+
+            # Purge stale persisted brackets when broker no longer has matching position.
+            for b_data in saved_brackets:
+                symbol = str(b_data.get('symbol', '')).upper()
+                if symbol and symbol not in live_symbols:
+                    try:
+                        self._bracket_store.delete_bracket(str(b_data.get('order_id', '')))
+                    except Exception as exc:
+                        self._logger.error('Failed stale bracket purge for %s: %s', symbol, exc)
+
+            if saved_brackets:
+                self._logger.info(
+                    'Bracket recovery complete persisted=%d live_positions=%d',
+                    len(saved_brackets),
+                    len(live_symbols),
+                )
 
         except Exception as e:
             self._logger.error(f"❌ Failed to restore virtual brackets: {e}")

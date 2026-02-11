@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -18,37 +19,29 @@ class HubStore:
     """Simple SQLite-backed snapshot and WAL store for hub state."""
 
     def __init__(self, path: str | Path | None = None) -> None:
-        import os
-        
-        # ✅ FIX: Use environment variable or fallback to /tmp (always writable on Railway)
         if path is None:
-            path = os.getenv("HUB_STORE_PATH")
-            if not path:
-                # Check if /tmp exists (Railway/Docker), otherwise use data/
-                if os.path.isdir("/tmp"):
-                    path = "/tmp/hub.db"
-                else:
-                    path = "data/hub.db"
-                log.info(f"HubStore using path: {path}")
-        
+            configured = os.getenv("HUB_STORE_PATH")
+            if configured:
+                path = configured
+            else:
+                # Persist inside DATA_DIR so hub state survives restarts.
+                data_dir = os.getenv("DATA_DIR", "data")
+                path = Path(data_dir) / "hub.db"
+                log.info("HubStore using path: %s", path)
+
         self._path = Path(path)
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            log.warning(f"Could not create parent dir for {self._path}: {e}")
-            # Fallback to /tmp
-            self._path = Path("/tmp/hub.db")
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            
+            log.warning("Could not create parent dir for %s: %s", self._path, e)
+            raise
+
         self._lock = RLock()
         try:
             self._conn = sqlite3.connect(self._path, check_same_thread=False)
         except sqlite3.OperationalError as e:
-            log.error(f"Failed to open SQLite at {self._path}: {e}")
-            # Last resort fallback
-            self._path = Path("/tmp/hub_fallback.db")
-            self._conn = sqlite3.connect(self._path, check_same_thread=False)
-            log.warning(f"Using fallback SQLite path: {self._path}")
+            log.error("Failed to open SQLite at %s: %s", self._path, e)
+            raise
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(

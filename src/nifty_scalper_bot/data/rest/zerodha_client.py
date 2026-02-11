@@ -61,6 +61,7 @@ from nifty_scalper_bot.utils.retry import (
 T = TypeVar("T")
 
 LOGGER = get_logger(__name__)
+_BROKER_SYNC_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -959,13 +960,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
         should_retry, on_retry = self._build_retry_handlers(endpoint="/orders")
 
         def _operation() -> list[dict]:
-            self._acquire_bucket(self._GENERAL_BUCKET)
-            payload = self._ensure_json(
-                self._make_request(
-                    "GET", "/orders", operation_label=label, with_retry=False
+            with _BROKER_SYNC_LOCK:
+                self._acquire_bucket(self._GENERAL_BUCKET)
+                payload = self._ensure_json(
+                    self._make_request(
+                        "GET", "/orders", operation_label=label, with_retry=False
+                    )
                 )
-            )
-            orders = cast(list[dict], payload.get("data", []))
+                orders = cast(list[dict], payload.get("data", []))
 
             # [FIX] Only log INFO if we actually have orders, otherwise DEBUG
             if orders:
@@ -1008,14 +1010,15 @@ class ZerodhaKiteClient(BaseBrokerClient):
         should_retry, on_retry = self._build_retry_handlers(endpoint=endpoint)
 
         def _operation() -> list[dict[str, Any]]:
-            self._acquire_bucket(self._GENERAL_BUCKET)
-            response = self._ensure_json(
-                self._make_request(
-                    "GET", endpoint, operation_label=label, with_retry=False
+            with _BROKER_SYNC_LOCK:
+                self._acquire_bucket(self._GENERAL_BUCKET)
+                response = self._ensure_json(
+                    self._make_request(
+                        "GET", endpoint, operation_label=label, with_retry=False
+                    )
                 )
-            )
-            payload = response.get("data")
-            normalized: list[dict[str, Any]] = []
+                payload = response.get("data")
+                normalized: list[dict[str, Any]] = []
 
             # Case A: Payload is a Dict (net/day keys)
             if isinstance(payload, dict):
@@ -2197,7 +2200,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         """
 
         def _should_retry(exc: Exception) -> bool:
-            return isinstance(exc, (RetryableError, httpx.RequestError))
+            return isinstance(exc, (RetryableError, httpx.RequestError, RateLimitError))
 
         def _on_retry(attempt: int, exc: Exception, delay: float) -> None:
             status: int | None = None
@@ -2257,7 +2260,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         try:
             return retry_with_backoff(
                 operation=operation,
-                retries=self._max_retries + self._transient_retry_bonus,
+                retries=min(5, self._max_retries + self._transient_retry_bonus),
                 base_delay=self._retry_base_delay,
                 max_delay=self._retry_max_delay,
                 jitter=self._retry_jitter,
