@@ -47,8 +47,18 @@ class PriceHistory:
         self._closes: Deque[float] = deque(maxlen=max_length)
         self._volumes: Deque[int] = deque(maxlen=max_length)
         self._timestamps: Deque[datetime] = deque(maxlen=max_length)
+        self._is_complete: Deque[bool] = deque(maxlen=max_length)
+        self._is_provisional: Deque[bool] = deque(maxlen=max_length)
 
-    def add_tick(self, price: PriceInput, volume: int, timestamp: datetime) -> None:
+    def add_tick(
+        self,
+        price: PriceInput,
+        volume: int,
+        timestamp: datetime,
+        *,
+        is_complete: bool = True,
+        is_provisional: bool = False,
+    ) -> None:
         """Add a new price tick.
 
         Parameters
@@ -77,6 +87,8 @@ class PriceHistory:
         self._closes.append(close_price)
         self._volumes.append(int(volume))
         self._timestamps.append(timestamp)
+        self._is_complete.append(bool(is_complete))
+        self._is_provisional.append(bool(is_provisional))
 
     def get_closes(self, count: int | None = None) -> list[float]:
         """Get closing prices."""
@@ -101,6 +113,14 @@ class PriceHistory:
     def get_timestamps(self, count: int | None = None) -> list[datetime]:
         """Return timestamps for stored bars."""
         return self._get_tail(self._timestamps, count)
+
+    def get_completeness(self, count: int | None = None) -> list[bool]:
+        """Return completeness flags for stored bars."""
+        return self._get_tail(self._is_complete, count)
+
+    def get_provisional_flags(self, count: int | None = None) -> list[bool]:
+        """Return provisional flags for stored bars."""
+        return self._get_tail(self._is_provisional, count)
 
     @property
     def last_timestamp(self) -> datetime | None:
@@ -162,42 +182,51 @@ class IndicatorEngine:
         price: PriceInput,
         volume: int = 0,
         timestamp: datetime | None = None,
+        *,
+        is_complete: bool = True,
+        is_provisional: bool = False,
     ) -> None:
         """Update price for symbol and invalidate cache."""
         history = self._histories.setdefault(symbol, PriceHistory())
         timestamp = timestamp or datetime.now(timezone.utc)
-        history.add_tick(price, volume, timestamp)
+        history.add_tick(
+            price,
+            volume,
+            timestamp,
+            is_complete=is_complete,
+            is_provisional=is_provisional,
+        )
         self._cache.pop(symbol, None)
 
     def get_history(self, symbol: str, count: int | None = None) -> list[float]:
         """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
         LOGGER.debug(
-            'Entered IndicatorEngine.get_history',
-            extra={'event': 'indicator_engine_get_history_enter', 'symbol': symbol},
+            "Entered IndicatorEngine.get_history",
+            extra={"event": "indicator_engine_get_history_enter", "symbol": symbol},
         )
         try:
             history = self._histories.get(symbol)
             if history is None:
                 LOGGER.info(
-                    'Condition met: indicator_history_missing',
+                    "Condition met: indicator_history_missing",
                     extra={
-                        'event': 'indicator_engine_history_missing',
-                        'symbol': symbol,
+                        "event": "indicator_engine_history_missing",
+                        "symbol": symbol,
                     },
                 )
                 return []
             closes = history.get_closes(count)
             LOGGER.info(
-                'Condition met: indicator_history_resolved',
+                "Condition met: indicator_history_resolved",
                 extra={
-                    'event': 'indicator_engine_history_resolved',
-                    'symbol': symbol,
-                    'bars': len(closes),
+                    "event": "indicator_engine_history_resolved",
+                    "symbol": symbol,
+                    "bars": len(closes),
                 },
             )
             return closes
         except Exception as e:  # noqa: BLE001
-            LOGGER.error('Failure in IndicatorEngine.get_history: %s', e, exc_info=True)
+            LOGGER.error("Failure in IndicatorEngine.get_history: %s", e, exc_info=True)
             return []
 
     def get_indicators(
@@ -205,8 +234,8 @@ class IndicatorEngine:
     ) -> dict[str, float | tuple[float, float, float] | None]:
         """Args: symbol, names. Returns: indicators dict. Raises: Exception."""
         LOGGER.debug(
-            'Entered IndicatorEngine.get_indicators',
-            extra={'event': 'indicator_engine_get_indicators_enter', 'symbol': symbol},
+            "Entered IndicatorEngine.get_indicators",
+            extra={"event": "indicator_engine_get_indicators_enter", "symbol": symbol},
         )
         try:
             indicators: dict[str, float | tuple[float, float, float] | None] = {}
@@ -247,16 +276,16 @@ class IndicatorEngine:
                 highs = history.get_highs(1)
                 lows = history.get_lows(1)
                 opens = (
-                    history.get_opens(1) if hasattr(history, 'get_opens') else closes
+                    history.get_opens(1) if hasattr(history, "get_opens") else closes
                 )
                 if closes:
-                    indicators.setdefault('close', float(closes[-1]))
+                    indicators.setdefault("close", float(closes[-1]))
                 if highs:
-                    indicators.setdefault('high', float(highs[-1]))
+                    indicators.setdefault("high", float(highs[-1]))
                 if lows:
-                    indicators.setdefault('low', float(lows[-1]))
+                    indicators.setdefault("low", float(lows[-1]))
                 if opens:
-                    indicators.setdefault('open', float(opens[-1]))
+                    indicators.setdefault("open", float(opens[-1]))
             _always_include = {
                 "vwap",
                 "atr",
@@ -279,12 +308,12 @@ class IndicatorEngine:
             if names is None:
                 log_throttled(
                     LOGGER,
-                    f'indicator_names_defaulted_{symbol}',
-                    'Condition met: indicator_names_defaulted',
+                    f"indicator_names_defaulted_{symbol}",
+                    "Condition met: indicator_names_defaulted",
                     interval_sec=60.0,
                     extra={
-                        'event': 'indicator_engine_names_defaulted',
-                        'symbol': symbol,
+                        "event": "indicator_engine_names_defaulted",
+                        "symbol": symbol,
                     },
                 )
             else:
@@ -293,20 +322,20 @@ class IndicatorEngine:
                 except TypeError as e:
                     log_throttled(
                         LOGGER,
-                        f'indicator_names_invalid_{symbol}',
-                        'Condition met: indicator_names_invalid',
+                        f"indicator_names_invalid_{symbol}",
+                        "Condition met: indicator_names_invalid",
                         interval_sec=60.0,
                         extra={
-                            'event': 'indicator_engine_names_invalid',
-                            'symbol': symbol,
+                            "event": "indicator_engine_names_invalid",
+                            "symbol": symbol,
                         },
                     )
                     LOGGER.error(
-                        'Failure in IndicatorEngine.get_indicators: %s',
+                        "Failure in IndicatorEngine.get_indicators: %s",
                         e,
                         extra={
-                            'event': 'indicator_engine_names_error',
-                            'symbol': symbol,
+                            "event": "indicator_engine_names_error",
+                            "symbol": symbol,
                         },
                         exc_info=e,
                     )
@@ -320,11 +349,11 @@ class IndicatorEngine:
             return requested
         except Exception as e:
             LOGGER.error(
-                'Failure in IndicatorEngine.get_indicators: %s',
+                "Failure in IndicatorEngine.get_indicators: %s",
                 e,
                 extra={
-                    'event': 'indicator_engine_get_indicators_error',
-                    'symbol': symbol,
+                    "event": "indicator_engine_get_indicators_error",
+                    "symbol": symbol,
                 },
                 exc_info=e,
             )
@@ -684,41 +713,64 @@ class IndicatorEngine:
         timestamps = history.get_timestamps()
         if len(timestamps) < min_bars:
             LOGGER.error(
-                'Condition met: indicator_integrity_short_history',
+                "Condition met: indicator_integrity_short_history",
                 extra={
-                    'event': 'indicator_integrity_short_history',
-                    'symbol': symbol,
-                    'have': len(timestamps),
-                    'need': min_bars,
+                    "event": "indicator_integrity_short_history",
+                    "symbol": symbol,
+                    "have": len(timestamps),
+                    "need": min_bars,
                 },
             )
             return False
         if any(ts is None for ts in timestamps):
             LOGGER.error(
-                'Condition met: indicator_integrity_missing_timestamp',
-                extra={'event': 'indicator_integrity_missing_timestamp', 'symbol': symbol},
+                "Condition met: indicator_integrity_missing_timestamp",
+                extra={
+                    "event": "indicator_integrity_missing_timestamp",
+                    "symbol": symbol,
+                },
+            )
+            return False
+        completeness = history.get_completeness()
+        provisional_flags = history.get_provisional_flags()
+        if not all(completeness):
+            LOGGER.error(
+                "Condition met: indicator_integrity_incomplete_candle",
+                extra={
+                    "event": "indicator_integrity_incomplete_candle",
+                    "symbol": symbol,
+                },
+            )
+            return False
+        if any(provisional_flags):
+            LOGGER.error(
+                "Condition met: indicator_integrity_provisional_candle",
+                extra={
+                    "event": "indicator_integrity_provisional_candle",
+                    "symbol": symbol,
+                },
             )
             return False
         for prev, curr in zip(timestamps, timestamps[1:]):
             if curr <= prev:
                 LOGGER.error(
-                    'Condition met: indicator_integrity_non_monotonic',
+                    "Condition met: indicator_integrity_non_monotonic",
                     extra={
-                        'event': 'indicator_integrity_non_monotonic',
-                        'symbol': symbol,
-                        'prev': prev.isoformat(),
-                        'curr': curr.isoformat(),
+                        "event": "indicator_integrity_non_monotonic",
+                        "symbol": symbol,
+                        "prev": prev.isoformat(),
+                        "curr": curr.isoformat(),
                     },
                 )
                 return False
             gap_seconds = (curr - prev).total_seconds()
             if gap_seconds > 120:
                 LOGGER.error(
-                    'Condition met: indicator_integrity_missing_candle',
+                    "Condition met: indicator_integrity_missing_candle",
                     extra={
-                        'event': 'indicator_integrity_missing_candle',
-                        'symbol': symbol,
-                        'gap_seconds': gap_seconds,
+                        "event": "indicator_integrity_missing_candle",
+                        "symbol": symbol,
+                        "gap_seconds": gap_seconds,
                     },
                 )
                 return False
@@ -740,21 +792,21 @@ class IndicatorEngine:
                 self.update_price(
                     symbol,
                     {
-                        'open': float(bar.get('open', 0.0) or 0.0),
-                        'high': float(bar.get('high', 0.0) or 0.0),
-                        'low': float(bar.get('low', 0.0) or 0.0),
-                        'close': float(bar.get('close', 0.0) or 0.0),
+                        "open": float(bar.get("open", 0.0) or 0.0),
+                        "high": float(bar.get("high", 0.0) or 0.0),
+                        "low": float(bar.get("low", 0.0) or 0.0),
+                        "close": float(bar.get("close", 0.0) or 0.0),
                     },
-                    volume=int(bar.get('volume', 0) or 0),
-                    timestamp=bar.get('timestamp'),
+                    volume=int(bar.get("volume", 0) or 0),
+                    timestamp=bar.get("timestamp"),
                 )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error(
-                    'Failure in IndicatorEngine.ensure_min_bars: %s',
+                    "Failure in IndicatorEngine.ensure_min_bars: %s",
                     exc,
                     extra={
-                        'event': 'indicator_engine_hydrate_bar_failed',
-                        'symbol': symbol,
+                        "event": "indicator_engine_hydrate_bar_failed",
+                        "symbol": symbol,
                     },
                     exc_info=exc,
                 )

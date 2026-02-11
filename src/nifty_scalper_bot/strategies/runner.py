@@ -225,6 +225,8 @@ class SymbolState:
     cooldown_until: datetime | None = None
     strategy_data: dict[str, Any] = field(default_factory=dict)
     vwap: float | None = None
+    session_vwap_volume: int = 0
+    session_vwap_turnover: float = 0.0
     _last_strategy_eval: datetime | None = None  # [FIX] For Throttling strategy calls
     _last_eval_bar_ts: datetime | None = None
     trade_history: Deque[TradeRecord] = field(init=False)
@@ -474,8 +476,14 @@ class StrategyRunner:
         self._risk_halt_logged = False
         self._required_candles = max(
             self._config.min_indicator_bars,
-            int(os.getenv('REQUIRED_CANDLES', str(self._config.min_indicator_bars))),
+            int(os.getenv("REQUIRED_CANDLES", str(self._config.min_indicator_bars))),
         )
+        self._frozen_symbol_universe: set[str] = set()
+        self._expected_symbol_count: int = 0
+        self._max_symbol_count: int = int(os.getenv("STRATEGY_MAX_SYMBOL_COUNT", "32"))
+        self._history_gate_failed: bool = False
+        self._history_ready_by_symbol: dict[str, bool] = {}
+        self._rate_limit_backoff_until_by_symbol: dict[str, float] = {}
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -487,6 +495,11 @@ class StrategyRunner:
             self._running = True
             self._trading_paused = False
             symbols = list(self._active_symbols)
+            self._frozen_symbol_universe = set(symbols)
+            self._expected_symbol_count = len(symbols)
+            self._history_gate_failed = False
+            self._history_ready_by_symbol = {symbol: False for symbol in symbols}
+            self._rate_limit_backoff_until_by_symbol = {}
 
         # Capture the loop if called from async context (optional safety)
         try:
@@ -1000,7 +1013,12 @@ class StrategyRunner:
             else:
                 # Fallback to update_price (Standard API seen in app.py)
                 self._indicator_engine.update_price(
-                    symbol, bar.as_mapping(), volume=bar.volume, timestamp=bar.timestamp
+                    symbol,
+                    bar.as_mapping(),
+                    volume=bar.volume,
+                    timestamp=bar.timestamp,
+                    is_complete=True,
+                    is_provisional=False,
                 )
 
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
@@ -1672,9 +1690,7 @@ class StrategyRunner:
             # Check if symbol or underlying has pending order
             if symbol in self._orders_in_flight:
                 elapsed = now - self._orders_in_flight[symbol]
-                self._logger.debug(
-                    f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s"
-                )
+                self._logger.debug(f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s")
                 return True
 
             if (
@@ -1876,8 +1892,8 @@ class StrategyRunner:
             # 2. FALLBACK: Only runs if App.py failed
             if not self._risk_allows_trading(None):
                 self._logger.warning(
-                    'Condition met: backfill_short_circuited_by_risk',
-                    extra={'event': 'backfill_short_circuited_by_risk'},
+                    "Condition met: backfill_short_circuited_by_risk",
+                    extra={"event": "backfill_short_circuited_by_risk"},
                 )
                 return
             self._logger.warning(
@@ -1917,13 +1933,17 @@ class StrategyRunner:
                         for bar_data in history:
                             self.ingest_historical_bar(bar_data)
                             total_bars += 1
+                        self._history_ready_by_symbol[symbol] = True
                         self._logger.info(
                             f"✅ Fallback backfill: Ingested {len(history)} bars for {symbol}"
                         )
+                    else:
+                        self._history_ready_by_symbol[symbol] = False
 
                     await asyncio.sleep(0.5)
 
                 except Exception as e:
+                    self._history_ready_by_symbol[symbol] = False
                     self._logger.error(f"❌ Fallback fetch failed for {symbol}: {e}")
 
         except Exception as exc:
@@ -1943,21 +1963,19 @@ class StrategyRunner:
         if last_bar_ts and self._hydration_log_bar_cache.get(symbol) != last_bar_ts:
             self._hydration_log_bar_cache[symbol] = last_bar_ts
             self._logger.info(
-                'Hydrating historical data',
+                "Hydrating historical data",
                 extra={
-                    'symbol': symbol,
-                    'needed_bars': needed_bars,
-                    'have_bars': len(self._indicator_engine.get_history(symbol)),
+                    "symbol": symbol,
+                    "needed_bars": needed_bars,
+                    "have_bars": len(self._indicator_engine.get_history(symbol)),
                 },
             )
         fetch_coro: Any | None = None
-        if self._data_hub and hasattr(self._data_hub, 'fetch_history'):
-            fetch_coro = self._data_hub.fetch_history(
-                symbol, interval='minute', days=5
-            )
-        elif self._orchestrator and hasattr(self._orchestrator, 'fetch_history'):
+        if self._data_hub and hasattr(self._data_hub, "fetch_history"):
+            fetch_coro = self._data_hub.fetch_history(symbol, interval="minute", days=5)
+        elif self._orchestrator and hasattr(self._orchestrator, "fetch_history"):
             fetch_coro = self._orchestrator.fetch_history(
-                symbol, interval='minute', days=5
+                symbol, interval="minute", days=5
             )
         if fetch_coro is None or self._main_loop is None:
             return []
@@ -1968,17 +1986,21 @@ class StrategyRunner:
             ).result(timeout=5.0)
         except Exception as exc:  # noqa: BLE001
             self._logger.warning(
-                'Historical hydration unavailable',
-                extra={'event': 'indicator_hydration_failed', 'symbol': symbol, 'error': str(exc)},
+                "Historical hydration unavailable",
+                extra={
+                    "event": "indicator_hydration_failed",
+                    "symbol": symbol,
+                    "error": str(exc),
+                },
             )
             return []
         normalized: list[dict[str, Any]] = []
         seen_ts: set[datetime] = set()
         for row in rows or []:
             try:
-                ts = row.get('timestamp') or row.get('date')
+                ts = row.get("timestamp") or row.get("date")
                 if isinstance(ts, str):
-                    ts = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 if not isinstance(ts, datetime):
                     continue
                 if ts.tzinfo is None:
@@ -1988,39 +2010,46 @@ class StrategyRunner:
                 seen_ts.add(ts)
                 normalized.append(
                     {
-                        'open': float(row.get('open', 0.0) or 0.0),
-                        'high': float(row.get('high', 0.0) or 0.0),
-                        'low': float(row.get('low', 0.0) or 0.0),
-                        'close': float(row.get('close', 0.0) or 0.0),
-                        'volume': int(row.get('volume', 0) or 0),
-                        'timestamp': ts,
+                        "open": float(row.get("open", 0.0) or 0.0),
+                        "high": float(row.get("high", 0.0) or 0.0),
+                        "low": float(row.get("low", 0.0) or 0.0),
+                        "close": float(row.get("close", 0.0) or 0.0),
+                        "volume": int(row.get("volume", 0) or 0),
+                        "timestamp": ts,
                     }
                 )
             except Exception:
                 continue
-        normalized.sort(key=lambda row: cast(datetime, row['timestamp']))
+        normalized.sort(key=lambda row: cast(datetime, row["timestamp"]))
         if len(normalized) < self._required_candles:
-            self._logger.info(
-                'Condition met: hydrate_excluded_insufficient_candles',
-                extra={
-                    'event': 'hydrate_excluded_insufficient_candles',
-                    'symbol': symbol,
-                    'candles': len(normalized),
-                    'required_candles': self._required_candles,
-                },
+            self._history_ready_by_symbol[symbol] = False
+            self._warn_symbol_gate(
+                "insufficient_history",
+                symbol,
+                "Hydration excluded due to insufficient candles",
+                reason="insufficient_hydrated_candles",
+                candles=len(normalized),
+                required_candles=self._required_candles,
             )
             return []
-        if self._data_hub and hasattr(self._data_hub, 'history_freshness'):
-            fresh, meta = self._data_hub.history_freshness(symbol, 'minute')
+        if self._data_hub and hasattr(self._data_hub, "history_freshness"):
+            fresh, meta = self._data_hub.history_freshness(symbol, "minute")
             if not fresh:
-                self._logger.warning(
-                    'Condition met: hydrate_history_stale',
-                    extra={'event': 'hydrate_history_stale', 'symbol': symbol, 'meta': meta},
+                self._history_ready_by_symbol[symbol] = False
+                self._warn_symbol_gate(
+                    "insufficient_history",
+                    symbol,
+                    "Hydrated history failed freshness validation",
+                    reason="hydrated_history_stale",
+                    meta=meta,
                 )
                 return []
+        self._history_ready_by_symbol[symbol] = True
         return normalized
 
-    def _log_once_per_symbol_per_bar(self, symbol: str, event: str, reason: str) -> None:
+    def _log_once_per_symbol_per_bar(
+        self, symbol: str, event: str, reason: str
+    ) -> None:
         """Emit edge-triggered per-symbol per-bar logs for noisy gates."""
         bar_ts = self._last_bar_ts.get(symbol)
         if bar_ts is None:
@@ -2031,45 +2060,239 @@ class StrategyRunner:
         self._gating_log_bar_cache[cache_key] = bar_ts
         self._logger.info(
             event,
-            extra={'event': event, 'symbol': symbol, 'reason': reason, 'bar_ts': bar_ts.isoformat()},
+            extra={
+                "event": event,
+                "symbol": symbol,
+                "reason": reason,
+                "bar_ts": bar_ts.isoformat(),
+            },
         )
+
+    def _warn_symbol_gate(
+        self,
+        event_code: str,
+        symbol: str,
+        message: str,
+        *,
+        reason: str,
+        **context: Any,
+    ) -> None:
+        """Emit structured warning logs for symbol-level guard failures.
+
+        Args: event_code, symbol, message, reason, context. Returns: None. Raises: None.
+        """
+        self._logger.debug(
+            "Entered StrategyRunner._warn_symbol_gate",
+            extra={"event": "symbol_gate_warn_enter", "symbol": symbol},
+        )
+        try:
+            payload = {
+                "level": "WARNING",
+                "symbol": symbol,
+                "event": event_code,
+                "message": message,
+                "reason": reason,
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+            if context:
+                payload.update(context)
+            self._logger.warning(message, extra=payload)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in StrategyRunner._warn_symbol_gate: %s",
+                exc,
+                extra={"event": "symbol_gate_warn_error", "symbol": symbol},
+                exc_info=exc,
+            )
+
+    def _mark_symbol_unready(
+        self,
+        symbol: str,
+        reason: str,
+        *,
+        low_confidence: bool = False,
+    ) -> None:
+        """Mark symbol as unready for the current cycle.
+
+        Args: symbol, reason, low_confidence. Returns: None. Raises: None.
+        """
+        self._logger.debug(
+            "Entered StrategyRunner._mark_symbol_unready",
+            extra={"event": "symbol_unready_mark_enter", "symbol": symbol},
+        )
+        try:
+            self._history_ready_by_symbol[symbol] = False
+            with self._lock:
+                state = self._symbol_state.get(symbol)
+                if state is not None:
+                    state.strategy_data["unready_reason"] = reason
+                    state.strategy_data["unready_at"] = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                    if low_confidence:
+                        state.strategy_data["low_confidence"] = True
+            self._logger.info(
+                "Condition met: symbol_marked_unready",
+                extra={
+                    "event": "symbol_marked_unready",
+                    "symbol": symbol,
+                    "reason": reason,
+                    "low_confidence": low_confidence,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in StrategyRunner._mark_symbol_unready: %s",
+                exc,
+                extra={"event": "symbol_marked_unready_error", "symbol": symbol},
+                exc_info=exc,
+            )
+
+    def _validate_symbol_for_cycle(self, symbol: str) -> bool:
+        """Validate symbol against frozen universe without aborting global loop.
+
+        Args: symbol. Returns: bool. Raises: None.
+        """
+        self._logger.debug(
+            "Entered StrategyRunner._validate_symbol_for_cycle",
+            extra={"event": "symbol_validate_cycle_enter", "symbol": symbol},
+        )
+        try:
+            with self._lock:
+                symbols = sorted(self._active_symbols)
+                frozen = set(self._frozen_symbol_universe)
+                expected_count = self._expected_symbol_count
+
+            if self._max_symbol_count > 0 and len(symbols) > self._max_symbol_count:
+                self._warn_symbol_gate(
+                    "universe_violation",
+                    symbol,
+                    "Session universe exceeds max cap",
+                    reason="max_symbol_count_exceeded",
+                    actual_count=len(symbols),
+                    max_count=self._max_symbol_count,
+                )
+                self._mark_symbol_unready(symbol, "universe_violation")
+                return False
+            if expected_count and len(symbols) != expected_count:
+                self._warn_symbol_gate(
+                    "universe_violation",
+                    symbol,
+                    "Session universe count deviated from frozen expectation",
+                    reason="expected_count_mismatch",
+                    actual_count=len(symbols),
+                    expected_count=expected_count,
+                )
+                self._mark_symbol_unready(symbol, "universe_violation")
+                return False
+            if frozen and symbol not in frozen:
+                self._warn_symbol_gate(
+                    "universe_violation",
+                    symbol,
+                    "Symbol not present in frozen session universe",
+                    reason="symbol_not_in_frozen_universe",
+                )
+                self._mark_symbol_unready(symbol, "universe_violation")
+                return False
+            if frozen and set(symbols) != frozen:
+                self._warn_symbol_gate(
+                    "universe_violation",
+                    symbol,
+                    "Active symbols deviate from frozen universe",
+                    reason="frozen_universe_deviation",
+                )
+                self._mark_symbol_unready(symbol, "universe_violation")
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in StrategyRunner._validate_symbol_for_cycle: %s",
+                exc,
+                extra={"event": "symbol_validate_cycle_error", "symbol": symbol},
+                exc_info=exc,
+            )
+            self._mark_symbol_unready(symbol, "universe_validation_error")
+            return False
 
     def _classify_symbol(self, symbol: str) -> str:
         """Classify symbol into index, option or other buckets."""
         upper = symbol.upper()
-        if upper.startswith('NSE:') and all(tok not in upper for tok in ('CE', 'PE', 'FUT')):
-            return 'index'
-        if upper.endswith('CE') or upper.endswith('PE'):
-            return 'option'
-        return 'other'
+        if upper.startswith("NSE:") and all(
+            tok not in upper for tok in ("CE", "PE", "FUT")
+        ):
+            return "index"
+        if upper.endswith("CE") or upper.endswith("PE"):
+            return "option"
+        return "other"
 
     def _validate_symbol_universe(self) -> bool:
-        """Validate index and option symbol separation before strategy eval."""
+        """Validate frozen index and option symbol universe before strategy eval."""
         with self._lock:
             symbols = sorted(self._active_symbols)
-        index_symbols = [sym for sym in symbols if self._classify_symbol(sym) == 'index']
-        option_symbols = [sym for sym in symbols if self._classify_symbol(sym) == 'option']
+            frozen = set(self._frozen_symbol_universe)
+            expected_count = self._expected_symbol_count
+        if self._max_symbol_count > 0 and len(symbols) > self._max_symbol_count:
+            self._logger.error(
+                "Condition met: symbol_universe_mismatch",
+                extra={
+                    "event": "symbol_universe_mismatch",
+                    "reason": "max_symbol_count_exceeded",
+                    "actual_count": len(symbols),
+                    "max_count": self._max_symbol_count,
+                },
+            )
+            return False
+        if expected_count and len(symbols) != expected_count:
+            self._logger.error(
+                "Condition met: symbol_universe_mismatch",
+                extra={
+                    "event": "symbol_universe_mismatch",
+                    "reason": "expected_count_mismatch",
+                    "actual_count": len(symbols),
+                    "expected_count": expected_count,
+                    "frozen_symbols": sorted(frozen),
+                    "all_symbols": symbols,
+                },
+            )
+            return False
+        if frozen and set(symbols) != frozen:
+            self._logger.error(
+                "Condition met: symbol_universe_mismatch",
+                extra={
+                    "event": "symbol_universe_mismatch",
+                    "reason": "frozen_universe_deviation",
+                    "frozen_symbols": sorted(frozen),
+                    "all_symbols": symbols,
+                },
+            )
+            return False
+        index_symbols = [
+            sym for sym in symbols if self._classify_symbol(sym) == "index"
+        ]
+        option_symbols = [
+            sym for sym in symbols if self._classify_symbol(sym) == "option"
+        ]
         if not option_symbols:
             self._logger.error(
-                'Condition met: symbol_universe_mismatch',
+                "Condition met: symbol_universe_mismatch",
                 extra={
-                    'event': 'symbol_universe_mismatch',
-                    'reason': 'missing_option_symbols',
-                    'all_symbols': symbols,
-                    'index_symbols': index_symbols,
-                    'option_symbols': option_symbols,
+                    "event": "symbol_universe_mismatch",
+                    "reason": "missing_option_symbols",
+                    "all_symbols": symbols,
+                    "index_symbols": index_symbols,
+                    "option_symbols": option_symbols,
                 },
             )
             return False
         if len(index_symbols) != 1:
             self._logger.error(
-                'Condition met: symbol_universe_mismatch',
+                "Condition met: symbol_universe_mismatch",
                 extra={
-                    'event': 'symbol_universe_mismatch',
-                    'reason': 'index_count_mismatch',
-                    'all_symbols': symbols,
-                    'index_symbols': index_symbols,
-                    'option_symbols': option_symbols,
+                    "event": "symbol_universe_mismatch",
+                    "reason": "index_count_mismatch",
+                    "all_symbols": symbols,
+                    "index_symbols": index_symbols,
+                    "option_symbols": option_symbols,
                 },
             )
             return False
@@ -2081,20 +2304,22 @@ class StrategyRunner:
             rm = self._risk_manager
             if rm is None:
                 return True
-            if hasattr(rm, 'is_circuit_breaker_tripped'):
+            if hasattr(rm, "is_circuit_breaker_tripped"):
                 tripped, _ = rm.is_circuit_breaker_tripped()
                 if tripped:
                     return False
-            if hasattr(rm, 'can_trade'):
-                return bool(rm.can_trade(symbol or 'GLOBAL'))
-            if hasattr(rm, 'risk_gate_should_trade'):
+            if hasattr(rm, "can_trade"):
+                return bool(rm.can_trade(symbol or "GLOBAL"))
+            if hasattr(rm, "risk_gate_should_trade"):
                 result = rm.risk_gate_should_trade()
                 return bool(result[0] if isinstance(result, tuple) else result)
-            if hasattr(rm, 'can_trade_now'):
+            if hasattr(rm, "can_trade_now"):
                 result = rm.can_trade_now()
                 return bool(result[0] if isinstance(result, tuple) else result)
         except Exception as exc:  # noqa: BLE001
-            self._logger.error('Failure in _risk_allows_trading: %s', exc, exc_info=True)
+            self._logger.error(
+                "Failure in _risk_allows_trading: %s", exc, exc_info=True
+            )
             return False
         return False
 
@@ -2123,16 +2348,26 @@ class StrategyRunner:
                     _ltp = float(_ltp_raw)
                     if _ltp > 0:
                         self._bracket_manager.on_tick(symbol, _ltp)
-                        tick_err_map = getattr(self._bracket_manager, "_tick_error_logged", None)
+                        tick_err_map = getattr(
+                            self._bracket_manager, "_tick_error_logged", None
+                        )
                         if isinstance(tick_err_map, dict):
                             tick_err_map[symbol] = False
                 except Exception as _bm_err:
-                    tick_err_map = getattr(self._bracket_manager, "_tick_error_logged", None)
-                    already_logged = bool(isinstance(tick_err_map, dict) and tick_err_map.get(symbol))
+                    tick_err_map = getattr(
+                        self._bracket_manager, "_tick_error_logged", None
+                    )
+                    already_logged = bool(
+                        isinstance(tick_err_map, dict) and tick_err_map.get(symbol)
+                    )
                     if not already_logged:
                         self._logger.error(
                             "Bracket tick handler error",
-                            extra={"event": "bracket_tick_handler_error", "symbol": symbol, "error": str(_bm_err)},
+                            extra={
+                                "event": "bracket_tick_handler_error",
+                                "symbol": symbol,
+                                "error": str(_bm_err),
+                            },
                         )
                         if isinstance(tick_err_map, dict):
                             tick_err_map[symbol] = True
@@ -2214,16 +2449,8 @@ class StrategyRunner:
             timestamp = _extract_timestamp(tick, now)
             tick_age = (now - timestamp).total_seconds()
             price = _extract_float(tick, "ltp", "last_price", "close", "price")
-            broker_vwap = _extract_float(tick, "average_price", "vwap")
             raw_volume = _extract_int(
                 tick, "volume", "volume_traded", "volume_traded_today"
-            )
-            last_quantity = _extract_int(
-                tick,
-                "last_quantity",
-                "last_traded_quantity",
-                "last_trade_quantity",
-                "last_traded_qty",
             )
             source = tick.get("source", "unknown")
             is_seed = bool(tick.get("seed"))
@@ -2242,37 +2469,21 @@ class StrategyRunner:
             volume = 0
             first_tick_seen = symbol not in self._last_cumulative_volume
             if raw_volume > 0:
-                last_cum = self._last_cumulative_volume.get(
-                    symbol, -1
-                )  # ✅ Sentinel -1 (not 0)
-                if last_cum < 0:  # ✅ First tick detected by sentinel
-                    # FIRST tick for this symbol — store baseline, DON'T use as bar volume
-                    if last_quantity > 0:
-                        volume = last_quantity
-                    else:
-                        volume = raw_volume
+                last_cum = self._last_cumulative_volume.get(symbol, -1)
+                if last_cum < 0:
+                    volume = 0
                 elif raw_volume >= last_cum:
-                    volume = raw_volume - last_cum  # Normal delta
+                    volume = raw_volume - last_cum
                 else:
-                    # Volume reset (new day or data glitch) — small safe value
-                    volume = min(raw_volume, 1000)  # ✅ Capped reset
+                    volume = min(raw_volume, 1000)
                 self._last_cumulative_volume[symbol] = raw_volume
-            elif last_quantity > 0:
-                volume = last_quantity
-                log_throttled(
-                    self._logger,
-                    f'tick_volume_fallback_{symbol}',
-                    'Condition met: tick_volume_last_quantity',
-                    interval_sec=60.0,
-                    level=logging.INFO,
-                )
             elif first_tick_seen:
-                volume = 1
+                volume = 0
                 self._last_cumulative_volume[symbol] = raw_volume
                 log_throttled(
                     self._logger,
-                    f'tick_volume_seeded_{symbol}',
-                    'Condition met: tick_volume_seeded_first_tick',
+                    f"tick_volume_seeded_{symbol}",
+                    "Condition met: tick_volume_baseline_only_first_tick",
                     interval_sec=60.0,
                     level=logging.INFO,
                 )
@@ -2393,23 +2604,23 @@ class StrategyRunner:
             if not self._is_market_open(now):
                 log_throttled(
                     self._logger,
-                    f'market_closed_{symbol}',
-                    'Condition met: market_closed',
+                    f"market_closed_{symbol}",
+                    "Condition met: market_closed",
                     interval_sec=30.0,
                     level=logging.INFO,
                 )
                 skip_strategy = True
 
             # Stale tick check (increased threshold for REST polling to prevent false positives)
-            stale_threshold = 30.0 if source in ('rest', 'polling') else 10.0
+            stale_threshold = 30.0 if source in ("rest", "polling") else 10.0
 
             if tick_age > stale_threshold:
                 log_throttled(
                     self._logger,
-                    f'stale_tick_{symbol}',
+                    f"stale_tick_{symbol}",
                     (
-                        f'⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, '
-                        f'threshold={stale_threshold}s)'
+                        f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, "
+                        f"threshold={stale_threshold}s)"
                     ),
                     interval_sec=30.0,
                     level=logging.WARNING,
@@ -2507,25 +2718,40 @@ class StrategyRunner:
                 return
             if not self._is_market_open(now):
                 return
-            if not self._validate_symbol_universe():
+            if not self._validate_symbol_for_cycle(symbol):
+                return
+            if not self._history_ready_by_symbol.get(symbol, False):
+                self._warn_symbol_gate(
+                    "insufficient_history",
+                    symbol,
+                    "Historical data is not ready for symbol",
+                    reason="history_not_ready",
+                )
+                self._mark_symbol_unready(symbol, "insufficient_history")
                 return
 
             with self._lock:
-                # Auto-track new symbols
                 if symbol not in self._active_symbols:
-                    self._logger.info(f"🆕 Auto-tracking symbol from feed: {symbol}")
-                    self._active_symbols.add(symbol)
-                    self._symbol_state[symbol] = SymbolState(
-                        symbol=symbol, history_limit=self._config.max_trade_history
+                    self._warn_symbol_gate(
+                        "universe_violation",
+                        symbol,
+                        "Feed symbol is not tracked in active universe",
+                        reason="symbol_not_tracked",
                     )
+                    self._mark_symbol_unready(symbol, "universe_violation")
+                    return
 
                 state = self._symbol_state.get(symbol)
                 if state is None or not state.active:
                     return
 
-                # Update VWAP from broker
-                if broker_vwap and broker_vwap > 0:
-                    state.vwap = broker_vwap
+                if volume > 0:
+                    state.session_vwap_volume += int(volume)
+                    state.session_vwap_turnover += float(price) * float(volume)
+                    if state.session_vwap_volume > 0:
+                        state.vwap = (
+                            state.session_vwap_turnover / state.session_vwap_volume
+                        )
 
                 # Heartbeat logging for derivatives (confirms data flow)
                 if "NIFTY" in symbol and any(x in symbol for x in ["FUT", "CE", "PE"]):
@@ -2648,65 +2874,19 @@ class StrategyRunner:
                             )
 
                 # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
-                if generated_signal is None and (not state.vwap or state.vwap == 0):
-                    prev_ltp = (
-                        _extract_float(state.last_tick, "ltp", "last_price")
-                        if state.last_tick
-                        else None
+                if generated_signal is None and (not state.vwap or state.vwap <= 0):
+                    self._warn_symbol_gate(
+                        "vwap_invalid",
+                        symbol,
+                        "VWAP unavailable or invalid; skipping symbol strategy evaluation",
+                        reason="vwap_missing_or_non_positive",
                     )
-
-                    if prev_ltp and prev_ltp > 0 and price > 0:
-                        price_change_pct = ((price - prev_ltp) / prev_ltp) * 100
-                        MOMENTUM_THRESHOLD_PCT = 0.15
-
-                        # ✅ FIX: Calculate proper stop_loss for momentum signals too
-                        sl_pct = float(os.getenv("MOMENTUM_SL_PCT", "2.0"))
-                        tp_pct = float(os.getenv("MOMENTUM_TP_PCT", "2.5"))
-
-                        if price_change_pct > MOMENTUM_THRESHOLD_PCT:
-                            calculated_sl = price * (1 - sl_pct / 100)
-                            calculated_tp = price * (1 + tp_pct / 100)
-
-                            self._logger.info(
-                                f"🚀 MOMENTUM FALLBACK BUY: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)",
-                                extra={"event": "momentum_fallback", "symbol": symbol},
-                            )
-                            generated_signal = Signal(
-                                action="BUY",
-                                symbol=symbol,
-                                quantity=1,
-                                confidence=0.60,
-                                reason="momentum_breakout_up",
-                                stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
-                                take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
-                                metadata={
-                                    "strategy": "momentum_fallback",
-                                    "price_change_pct": price_change_pct,
-                                    "tag": "fallback_long",
-                                },
-                            )
-                        elif price_change_pct < -MOMENTUM_THRESHOLD_PCT:
-                            calculated_sl = price * (1 + sl_pct / 100)
-                            calculated_tp = price * (1 - tp_pct / 100)
-
-                            self._logger.info(
-                                f"🔻 MOMENTUM FALLBACK SELL: {symbol} | Change={price_change_pct:.3f}% (VWAP=0)",
-                                extra={"event": "momentum_fallback", "symbol": symbol},
-                            )
-                            generated_signal = Signal(
-                                action="SELL",
-                                symbol=symbol,
-                                quantity=1,
-                                confidence=0.60,
-                                reason="momentum_breakout_down",
-                                stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
-                                take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
-                                metadata={
-                                    "strategy": "momentum_fallback",
-                                    "price_change_pct": price_change_pct,
-                                    "tag": "fallback_short",
-                                },
-                            )
+                    self._mark_symbol_unready(
+                        symbol,
+                        "vwap_invalid",
+                        low_confidence=True,
+                    )
+                    return
 
                 # Update last tick
                 state.last_tick = dict(tick)
@@ -2743,6 +2923,21 @@ class StrategyRunner:
                 )
                 return
 
+            symbol_rate_until = float(
+                self._rate_limit_backoff_until_by_symbol.get(symbol, 0.0)
+            )
+            now_ts = time_module.time()
+            if symbol_rate_until and now_ts < symbol_rate_until:
+                self._warn_symbol_gate(
+                    "rate_limit_breach",
+                    symbol,
+                    "Symbol temporarily throttled after broker rate-limit signal",
+                    reason="symbol_rate_limit_backoff_active",
+                    remaining_s=max(0.0, symbol_rate_until - now_ts),
+                )
+                self._mark_symbol_unready(symbol, "rate_limit_breach")
+                return
+
             backoff_until = float(getattr(self, "_data_freshness_backoff_until", 0.0))
             if backoff_until and time_module.time() < backoff_until:
                 remaining = max(0.0, backoff_until - time_module.time())
@@ -2771,6 +2966,15 @@ class StrategyRunner:
                     if state:
                         last_eval = getattr(state, "_last_strategy_eval", None)
                         last_bar_ts = self._last_bar_ts.get(symbol)
+                        if last_bar_ts is None:
+                            self._warn_symbol_gate(
+                                "bar_not_finalized",
+                                symbol,
+                                "No finalized minute bar available for strategy evaluation",
+                                reason="missing_finalized_bar",
+                            )
+                            self._mark_symbol_unready(symbol, "bar_not_finalized")
+                            return
                         if last_bar_ts and state._last_eval_bar_ts:
                             if last_bar_ts <= state._last_eval_bar_ts:
                                 logged_map = getattr(
@@ -2856,7 +3060,7 @@ class StrategyRunner:
                         hydrate=self._hydrate_missing_bars,
                     )
                     index_indicators_ready = bool(
-                        getattr(self._orchestrator, 'index_indicators_ready', True)
+                        getattr(self._orchestrator, "index_indicators_ready", True)
                     )
                     is_ready = self._indicator_engine.has_min_bars(
                         symbol, self._required_candles
@@ -2864,12 +3068,18 @@ class StrategyRunner:
 
                     if not (index_indicators_ready and is_ready):
                         reason = (
-                            'index_indicators_not_ready'
+                            "index_indicators_not_ready"
                             if not index_indicators_ready
-                            else 'min_bars_not_ready'
+                            else "min_bars_not_ready"
                         )
-                        self._log_once_per_symbol_per_bar(symbol, 'strategy_gated', reason)
-                        signal = None
+                        self._warn_symbol_gate(
+                            "indicator_invalid",
+                            symbol,
+                            "Indicators are incomplete or invalid for this cycle",
+                            reason=reason,
+                        )
+                        self._mark_symbol_unready(symbol, "indicator_invalid")
+                        return
                     else:
                         # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
                         log_throttled(
@@ -2927,7 +3137,6 @@ class StrategyRunner:
                                 },
                             )
                             cycle_stats.pop(bar_key, None)
-                    
 
             # =================================================================
             # PHASE 10: EXECUTE SIGNAL
@@ -2968,9 +3177,7 @@ class StrategyRunner:
             seconds = max(float(backoff_seconds), 0.0)
             now_ts = time_module.time()
             until = now_ts + seconds
-            current_until = float(
-                getattr(self, "_data_freshness_backoff_until", 0.0)
-            )
+            current_until = float(getattr(self, "_data_freshness_backoff_until", 0.0))
             if until > current_until:
                 self._data_freshness_backoff_until = until
             logged_until = float(
@@ -2990,6 +3197,23 @@ class StrategyRunner:
                 )
             self._data_freshness_backoff_detail = detail_code
             self._data_freshness_backoff_symbol = symbol
+            if detail_code and "rate" in detail_code.lower():
+                if symbol:
+                    self._rate_limit_backoff_until_by_symbol[symbol] = until
+                    self._mark_symbol_unready(symbol, "rate_limit_breach")
+                self._warn_symbol_gate(
+                    "rate_limit_breach",
+                    symbol or "GLOBAL",
+                    "Broker rate-limit breach signaled; throttling polling/subscriptions",
+                    reason="broker_rate_limit_signal",
+                    detail_code=detail_code,
+                    backoff_seconds=seconds,
+                )
+                update_interval = getattr(
+                    self._market_data, "set_poll_interval_seconds", None
+                )
+                if callable(update_interval):
+                    update_interval(max(seconds, 5.0))
             self._logger.debug(
                 "Condition met: strategy_eval_backoff_set",
                 extra={
@@ -3430,9 +3654,7 @@ class StrategyRunner:
                         cooldown_map = {}
                         self._pyramid_reject_cooldown = cooldown_map
                     cooldown_key = (base_symbol, signal.action)
-                    cooldown_map[cooldown_key] = (
-                        time_module.time() + cooldown_seconds
-                    )
+                    cooldown_map[cooldown_key] = time_module.time() + cooldown_seconds
                     self._logger.debug(
                         "Condition met: pyramid_reject_cooldown_set",
                         extra={
@@ -3475,14 +3697,18 @@ class StrategyRunner:
                         and candidate_signal_confidence > active_position_confidence
                         and hasattr(self._order_manager, "exit_position")
                     ):
-                        active_qty = int(abs(getattr(active_position, "quantity", 0) or 0))
+                        active_qty = int(
+                            abs(getattr(active_position, "quantity", 0) or 0)
+                        )
                         if active_qty > 0:
                             self._logger.info(
                                 "signal_cross_strike_replace",
                                 extra={
                                     "event": "signal_cross_strike_replace",
                                     "symbol": base_symbol,
-                                    "active_symbol": getattr(active_position, "symbol", ""),
+                                    "active_symbol": getattr(
+                                        active_position, "symbol", ""
+                                    ),
                                     "candidate_confidence": candidate_signal_confidence,
                                     "active_confidence": active_position_confidence,
                                 },
@@ -4416,14 +4642,13 @@ class StrategyRunner:
         """Normalize symbol to uppercase trimmed string."""
         normalized = symbol.strip().upper()
         if not normalized:
-            msg = 'symbol must not be empty'
+            msg = "symbol must not be empty"
             raise ValueError(msg)
 
-        if ':' in normalized:
-            normalized = normalized.split(':', 1)[1]
+        if ":" in normalized:
+            normalized = normalized.split(":", 1)[1]
 
         return normalized
-
 
     def _update_last_signal_selection(
         self, symbol: str, selection: SelectedContract
