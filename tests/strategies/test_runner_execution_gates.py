@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-from nifty_scalper_bot.strategies.runner import StrategyRunner, StrategyRunnerConfig
+from nifty_scalper_bot.strategies.runner import (
+    SymbolState,
+    StrategyRunner,
+    StrategyRunnerConfig,
+)
 
 
 def _runner() -> StrategyRunner:
@@ -145,7 +149,7 @@ def test_warn_symbol_gate_sanitizes_reserved_logrecord_context_keys(caplog) -> N
     assert getattr(record, "context_message", "") == "reserved_message"
 
 
-def test_on_tick_insufficient_history_warns_and_skips_symbol(
+def test_on_tick_insufficient_history_skips_symbol_until_hydrated(
     caplog, monkeypatch
 ) -> None:
     runner = _runner()
@@ -160,7 +164,7 @@ def test_on_tick_insufficient_history_warns_and_skips_symbol(
         runner._on_tick(symbol, {"ltp": 101.0, "timestamp": 1_700_000_000})
 
     assert any(
-        getattr(record, "event", "") == "insufficient_history"
+        getattr(record, "event", "") == "symbol_hydrating"
         for record in caplog.records
     )
     assert runner._strategy_manager.generate_signal.call_count == 0
@@ -190,7 +194,7 @@ def test_on_tick_missing_finalized_bar_warns_and_skips_symbol(
     assert runner._strategy_manager.generate_signal.call_count == 0
 
 
-def test_on_tick_invalid_vwap_warns_and_skips_symbol(caplog, monkeypatch) -> None:
+def test_on_tick_invalid_vwap_skips_symbol(caplog, monkeypatch) -> None:
     runner = _runner()
     symbol = "NIFTY25JAN25000CE"
     runner.add_symbol(symbol)
@@ -204,7 +208,8 @@ def test_on_tick_invalid_vwap_warns_and_skips_symbol(caplog, monkeypatch) -> Non
         runner._on_tick(symbol, {"ltp": 101.0, "timestamp": 1_700_000_000})
 
     assert any(
-        getattr(record, "event", "") == "vwap_invalid" for record in caplog.records
+        getattr(record, "event", "") == "symbol_hydrating"
+        for record in caplog.records
     )
     assert runner._strategy_manager.generate_signal.call_count == 0
 
@@ -241,3 +246,39 @@ def test_rate_limit_backoff_skips_only_target_symbol(caplog, monkeypatch) -> Non
         getattr(record, "event", "") == "rate_limit_breach" for record in caplog.records
     )
     assert runner._strategy_manager.generate_signal.call_count == 1
+
+
+def test_update_symbol_hydration_requires_two_valid_bars() -> None:
+    runner = _runner()
+    symbol = "NIFTY25JAN25000CE"
+    runner.add_symbol(symbol)
+    runner._required_candles = 2
+
+    state_one = runner.update_symbol_hydration(
+        symbol,
+        [1.0, 2.0],
+        {symbol: {"vwap": 100.0, "cum_volume": 10}},
+    )
+    state_two = runner.update_symbol_hydration(
+        symbol,
+        [1.0, 2.0],
+        {symbol: {"vwap": 101.0, "cum_volume": 20}},
+    )
+
+    assert state_one.name == "HYDRATING"
+    assert state_two.name == "READY"
+
+
+def test_ready_symbol_does_not_downgrade_without_session_reset() -> None:
+    runner = _runner()
+    symbol = "NIFTY25JAN25000CE"
+    runner.add_symbol(symbol)
+    runner._set_symbol_hydration_state(symbol, SymbolState.READY)
+
+    state = runner.update_symbol_hydration(
+        symbol,
+        [1.0] * runner._required_candles,
+        {symbol: {"vwap": 0.0, "cum_volume": 0}},
+    )
+
+    assert state.name == "READY"
