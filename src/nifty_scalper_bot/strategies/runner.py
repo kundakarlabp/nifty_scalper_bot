@@ -498,9 +498,11 @@ class StrategyRunner:
         self._history_ready_by_symbol: dict[str, bool] = {}
         self._symbol_states: dict[str, SymbolState] = {}
         self._symbol_bar_count: dict[str, int] = {}
+        self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._hydration_ready_streak: dict[str, int] = {}
         self._frozen_universe: set[str] = set()
         self._vwap_state: dict[str, dict[str, Any]] = {}
+        self._last_readiness_update_by_symbol: dict[str, datetime] = {}
         self._rate_limit_backoff_until_by_symbol: dict[str, float] = {}
         self._hydration_attempted_symbols: set[str] = set()
         self._strategy_slot_limit: int = max(
@@ -627,6 +629,7 @@ class StrategyRunner:
                 return
             self._active_symbols.add(normalized)
             self._symbol_states.setdefault(normalized, SymbolState.DISCOVERED)
+            self._set_symbol_hydration_state(normalized, SymbolState.HYDRATING)
             # Update tracked universe snapshot only when membership changes.
             self._universe_controller.update(self._active_symbols)
 
@@ -642,7 +645,18 @@ class StrategyRunner:
         if running:
             self._subscribe_symbol(normalized)
 
+        self._prehydrate_symbol_history(normalized)
+
         self._logger.info("Tracking symbol %s", normalized)
+
+    def _prehydrate_symbol_history(self, symbol: str) -> None:
+        """Fetch startup candles for symbol hydration and indicator readiness."""
+        target = max(self._required_candles, 50)
+        rows = self._hydrate_missing_bars(symbol, target)
+        if not rows:
+            self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+            return
+        self._update_symbol_readiness(symbol)
 
     def remove_symbol(self, symbol: str) -> None:
         """Stop tracking a symbol."""
@@ -1072,6 +1086,15 @@ class StrategyRunner:
         }
         return self.update_symbol_hydration(symbol, bars, indicators)
 
+    def _update_symbol_readiness(self, symbol: str) -> SymbolState:
+        """Update lifecycle state from bar history and cumulative VWAP health."""
+        bars = self._symbol_history.get(symbol, [])
+        vol_sum = sum(float(getattr(bar, "volume", 0)) for bar in bars)
+        state = self._symbol_state.get(symbol)
+        vwap_val = float(state.vwap) if state and state.vwap else 0.0
+        indicators = {symbol: {"vwap": vwap_val, "cum_volume": vol_sum}}
+        return self.update_symbol_hydration(symbol, bars, indicators)
+
     def update_symbol_hydration(
         self,
         symbol: str,
@@ -1149,6 +1172,10 @@ class StrategyRunner:
         # 2. STATE: Update High-Water Mark
         if not last_ts or bar.timestamp > last_ts:
             self._last_bar_ts[symbol] = bar.timestamp
+        history = self._symbol_history.setdefault(symbol, [])
+        history.append(bar)
+        if len(history) > 400:
+            del history[:-400]
 
         try:
             # 3. INDICATORS: Feed the Engine
@@ -1167,23 +1194,7 @@ class StrategyRunner:
                     is_provisional=False,
                 )
 
-            try:
-                history_size = len(self._indicator_engine.get_history(symbol))
-            except Exception:
-                history_size = 0
-
-            if history_size >= self._required_candles:
-                if not self._history_ready_by_symbol.get(symbol, False):
-                    self._logger.info(
-                        "Condition met: history_ready_from_live_bars",
-                        extra={
-                            "event": "history_ready_from_live_bars",
-                            "symbol": symbol,
-                            "bars": history_size,
-                            "required": self._required_candles,
-                        },
-                    )
-                self._set_symbol_hydration_state(symbol, SymbolState.READY)
+            self._update_symbol_readiness(symbol)
 
             # 4. BRACKET MANAGER: Inject Dynamic ATR (Volatility)
             if self._bracket_manager:
@@ -1434,6 +1445,58 @@ class StrategyRunner:
             reason=signal.reason,
             stop_loss=sl,
             take_profit=tp,
+            metadata=signal.metadata,
+        )
+
+    def _anchor_sl_tp_to_execution(
+        self,
+        signal: Signal,
+        *,
+        signal_price: float,
+        execution_price: float,
+        entry_side: OrderSide,
+        atr: float,
+        sl_mult: float = 1.5,
+        tp_mult: float = 3.0,
+    ) -> Signal:
+        """Anchor risk exits to execution price and enforce ordering constraints."""
+        sl = float(signal.stop_loss) if signal.stop_loss is not None else 0.0
+        tp = float(signal.take_profit) if signal.take_profit is not None else 0.0
+        tick_size = 0.05
+        fill_delta = float(execution_price) - float(signal_price)
+        if abs(fill_delta) > tick_size:
+            if sl > 0:
+                sl += fill_delta
+            if tp > 0:
+                tp += fill_delta
+        if atr <= 0:
+            atr = execution_price * 0.015
+
+        if entry_side == "BUY":
+            floor_sl = execution_price - (atr * sl_mult)
+            floor_tp = execution_price + (atr * tp_mult)
+            sl = min(sl if sl > 0 else floor_sl, floor_sl)
+            tp = max(tp if tp > 0 else floor_tp, floor_tp)
+            if not (sl < execution_price < tp):
+                sl = min(sl, execution_price - max(atr * 0.5, tick_size))
+                tp = max(tp, execution_price + max(atr, tick_size))
+        else:
+            ceil_sl = execution_price + (atr * sl_mult)
+            ceil_tp = execution_price - (atr * tp_mult)
+            sl = max(sl if sl > 0 else ceil_sl, ceil_sl)
+            tp = min(tp if tp > 0 else ceil_tp, ceil_tp)
+            if not (tp < execution_price < sl):
+                sl = max(sl, execution_price + max(atr * 0.5, tick_size))
+                tp = min(tp, execution_price - max(atr, tick_size))
+
+        return Signal(
+            action=signal.action,
+            symbol=signal.symbol,
+            quantity=signal.quantity,
+            confidence=signal.confidence,
+            reason=signal.reason,
+            stop_loss=max(0.05, sl),
+            take_profit=max(0.05, tp),
             metadata=signal.metadata,
         )
 
@@ -2912,16 +2975,17 @@ class StrategyRunner:
                 if cum_vol > 0:
                     state.vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
 
-                hydration_state = self.update_symbol_hydration(
-                    symbol,
-                    self._indicator_engine.get_history(symbol),
-                    {
-                        symbol: {
-                            "vwap": state.vwap,
-                            "cum_volume": cum_vol,
-                        }
-                    },
-                )
+                self._last_cumulative_volume[symbol] = int(cum_vol)
+                last_hydration_bar = self._last_readiness_update_by_symbol.get(symbol)
+                if last_hydration_bar != self._last_bar_ts.get(symbol):
+                    self._last_readiness_update_by_symbol[symbol] = self._last_bar_ts.get(
+                        symbol
+                    )
+                    hydration_state = self._update_symbol_readiness(symbol)
+                else:
+                    hydration_state = self._symbol_states.get(
+                        symbol, SymbolState.DISCOVERED
+                    )
                 if hydration_state != SymbolState.READY:
                     return
 
@@ -4166,8 +4230,34 @@ class StrategyRunner:
                 symbol=trade_symbol,
             )
 
+            available_margin = 0.0
+            if self._data_hub is not None:
+                try:
+                    available_margin = float(self._data_hub.get_available_balance() or 0.0)
+                except Exception as exc:
+                    self._logger.error(
+                        "Failure in StrategyRunner._handle_entry_signal_inner margin fetch: %s",
+                        exc,
+                        extra={"event": "margin_fetch_failed", "symbol": trade_symbol},
+                        exc_info=exc,
+                    )
+            margin_per_unit = max(trade_price, 0.0)
+            if hasattr(self._order_manager, "estimate_margin"):
+                try:
+                    margin_per_unit = float(
+                        self._order_manager.estimate_margin(trade_symbol, 1, trade_price)
+                    )
+                except Exception:
+                    margin_per_unit = max(trade_price, 0.0)
+            size_by_margin = int(available_margin // margin_per_unit) if margin_per_unit > 0 else 0
+            if size_by_margin > 0:
+                sized_qty = min(int(sized_qty), size_by_margin)
+
             if sized_qty <= 0:
-                self._logger.warning(f"🔴 Risk Manager returned 0 qty")
+                self._logger.info(
+                    "Insufficient capital",
+                    extra={"event": "insufficient_capital", "symbol": trade_symbol},
+                )
                 return
 
             # Validate Position Limits
@@ -4198,6 +4288,14 @@ class StrategyRunner:
                     # Add 1% "Freak Trade Protection" buffer
                     buffer = 1.01 if entry_side == "BUY" else 0.99
                     execution_price = round(base * buffer, 2)
+
+            signal = self._anchor_sl_tp_to_execution(
+                signal,
+                signal_price=trade_price,
+                execution_price=execution_price,
+                entry_side=entry_side,
+                atr=atr_val,
+            )
 
             self._logger.info(
                 f"🟡 SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty} Limit: {execution_price}"
@@ -4515,16 +4613,28 @@ class StrategyRunner:
                         except (TypeError, ValueError):
                             pass
 
-        # 5. Fallback: Calculate from price
-        # For NIFTY options, typical ATR is ~1-2% of premium
+        # 5. Fallback + spread-aware floor
         if atr_val <= 0:
-            atr_val = current_price * 0.015  # 1.5% of price
+            atr_val = current_price * 0.015
             source = "price_fallback"
 
-            self._logger.warning(
-                f"⚠️ ATR unavailable for {symbol}, using price-based estimate: {atr_val:.2f}",
-                extra={"event": "atr_fallback", "symbol": symbol, "atr": atr_val},
+        spread = 0.0
+        try:
+            quote = self._market_data.get_quote(symbol) if self._market_data else None
+            if quote:
+                ask_price = float(quote.get("ask") or quote.get("ask_price") or 0.0)
+                bid_price = float(quote.get("bid") or quote.get("bid_price") or 0.0)
+                spread = max(0.0, ask_price - bid_price)
+        except Exception as exc:
+            self._logger.error(
+                "Failure in StrategyRunner._get_atr_with_fallback spread read: %s",
+                exc,
+                extra={"event": "atr_spread_read_failed", "symbol": symbol},
+                exc_info=exc,
             )
+
+        min_atr = max(current_price * 0.012, spread * 1.5, 1.0)
+        atr_val = max(atr_val, min_atr)
 
         self._logger.debug(
             f"ATR resolved: {symbol} = {atr_val:.2f} (source: {source})",
