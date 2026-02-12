@@ -217,10 +217,10 @@ class StrategyRunnerConfig:
 class SymbolState(Enum):
     """Hydration lifecycle state maintained per symbol."""
 
-    INIT = 0
-    HYDRATING = 1
-    READY = 2
-    TRADING = 3
+    DISCOVERED = "discovered"
+    HYDRATING = "hydrating"
+    READY = "ready"
+    SUSPENDED = "suspended"
 
 
 @dataclass(slots=True)
@@ -497,6 +497,8 @@ class StrategyRunner:
         self._history_gate_failed: bool = False
         self._history_ready_by_symbol: dict[str, bool] = {}
         self._symbol_states: dict[str, SymbolState] = {}
+        self._symbol_bar_count: dict[str, int] = {}
+        self._hydration_ready_streak: dict[str, int] = {}
         self._frozen_universe: set[str] = set()
         self._vwap_state: dict[str, dict[str, Any]] = {}
         self._rate_limit_backoff_until_by_symbol: dict[str, float] = {}
@@ -521,9 +523,11 @@ class StrategyRunner:
             self._history_gate_failed = False
             self._history_ready_by_symbol = {symbol: False for symbol in symbols}
             for symbol in symbols:
-                self._symbol_states.setdefault(symbol, SymbolState.INIT)
+                self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
             self._rate_limit_backoff_until_by_symbol = {}
             self._vwap_state = {}
+            self._symbol_bar_count = {}
+            self._hydration_ready_streak = {}
 
         # Capture the loop if called from async context (optional safety)
         try:
@@ -615,8 +619,14 @@ class StrategyRunner:
             else:
                 state.active = True
 
+            if self._running and self._frozen_universe and normalized not in self._frozen_universe:
+                self._logger.info(
+                    "Symbol add deferred until next session boundary",
+                    extra={"event": "symbol_add_deferred", "symbol": normalized},
+                )
+                return
             self._active_symbols.add(normalized)
-            self._symbol_states.setdefault(normalized, SymbolState.INIT)
+            self._symbol_states.setdefault(normalized, SymbolState.DISCOVERED)
             # Update tracked universe snapshot only when membership changes.
             self._universe_controller.update(self._active_symbols)
 
@@ -646,6 +656,8 @@ class StrategyRunner:
             self._active_symbols.discard(normalized)
             self._frozen_universe.discard(normalized)
             self._symbol_states.pop(normalized, None)
+            self._symbol_bar_count.pop(normalized, None)
+            self._hydration_ready_streak.pop(normalized, None)
             self._vwap_state.pop(normalized, None)
             # Dynamic diffing avoids legacy frozen-universe drift conflicts.
             self._universe_controller.update(self._active_symbols)
@@ -974,7 +986,7 @@ class StrategyRunner:
                     self._symbol_state[data["symbol"]] = SymbolRuntimeState(
                         symbol=data["symbol"], history_limit=2000
                     )
-                self._symbol_states.setdefault(data["symbol"], SymbolState.INIT)
+                self._symbol_states.setdefault(data["symbol"], SymbolState.DISCOVERED)
 
         except Exception as exc:
             self._logger.error(
@@ -996,7 +1008,7 @@ class StrategyRunner:
                     self._symbol_state[sym] = SymbolRuntimeState(
                         symbol=sym, history_limit=2000
                     )
-                self._symbol_states.setdefault(sym, SymbolState.INIT)
+                self._symbol_states.setdefault(sym, SymbolState.DISCOVERED)
                 self._set_symbol_hydration_state(sym, SymbolState.READY)
 
                 # 3. Initialize BarBuilder (Prevent KeyErrors in internal checks)
@@ -1020,28 +1032,76 @@ class StrategyRunner:
         allow_downgrade: bool = False,
     ) -> SymbolState:
         """Update per-symbol hydration state with READY downgrade protection."""
-        current = self._symbol_states.get(symbol, SymbolState.INIT)
+        current = self._symbol_states.get(symbol, SymbolState.DISCOVERED)
         if (
-            current in {SymbolState.READY, SymbolState.TRADING}
+            current == SymbolState.READY
             and next_state == SymbolState.HYDRATING
             and not allow_downgrade
         ):
             return current
         self._symbol_states[symbol] = next_state
-        self._history_ready_by_symbol[symbol] = next_state in {
-            SymbolState.READY,
-            SymbolState.TRADING,
-        }
+        self._history_ready_by_symbol[symbol] = next_state == SymbolState.READY
+        if current != next_state:
+            if next_state == SymbolState.READY:
+                self._logger.info(
+                    "Symbol became READY",
+                    extra={"event": "symbol_ready", "symbol": symbol},
+                )
+            elif next_state == SymbolState.HYDRATING:
+                self._logger.warning(
+                    "Symbol still hydrating",
+                    extra={"event": "symbol_hydrating", "symbol": symbol},
+                )
         return next_state
 
     def _refresh_symbol_hydration_state(self, symbol: str) -> SymbolState:
-        """Set INIT/HYDRATING/READY from available indicator history size."""
+        """Set DISCOVERED/HYDRATING/READY from bar count and VWAP validity."""
         try:
-            history_size = len(self._indicator_engine.get_history(symbol))
+            bars = self._indicator_engine.get_history(symbol)
         except Exception:
-            history_size = 0
-        if history_size >= self._required_candles:
-            return self._set_symbol_hydration_state(symbol, SymbolState.READY)
+            bars = []
+        with self._lock:
+            runtime_state = self._symbol_state.get(symbol)
+            vwap_value = runtime_state.vwap if runtime_state is not None else None
+        vwap_state = self._vwap_state.get(symbol, {})
+        indicators = {
+            symbol: {
+                "vwap": vwap_value,
+                "cum_volume": float(vwap_state.get("cum_vol", 0.0)),
+            }
+        }
+        return self.update_symbol_hydration(symbol, bars, indicators)
+
+    def update_symbol_hydration(
+        self,
+        symbol: str,
+        bars: list[float],
+        indicators: dict[str, dict[str, Any]],
+    ) -> SymbolState:
+        """Update hydration lifecycle using strict warmup and cumulative VWAP checks."""
+        prev_state = self._symbol_states.get(symbol, SymbolState.DISCOVERED)
+        bar_count = len(bars)
+        self._symbol_bar_count[symbol] = bar_count
+
+        if bar_count < self._required_candles:
+            self._hydration_ready_streak[symbol] = 0
+            return self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+
+        symbol_indicators = indicators.get(symbol, {})
+        raw_vwap = symbol_indicators.get("vwap")
+        vwap_val = float(raw_vwap) if isinstance(raw_vwap, (int, float)) else 0.0
+        raw_volume = symbol_indicators.get("cum_volume", 0)
+        vol_sum = float(raw_volume) if isinstance(raw_volume, (int, float)) else 0.0
+        valid_vwap = vwap_val > 0
+        valid_volume = vol_sum > 0
+
+        if valid_vwap and valid_volume:
+            streak = int(self._hydration_ready_streak.get(symbol, 0)) + 1
+            self._hydration_ready_streak[symbol] = streak
+            if prev_state == SymbolState.READY or streak >= 2:
+                return self._set_symbol_hydration_state(symbol, SymbolState.READY)
+
+        self._hydration_ready_streak[symbol] = 0
         return self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
 
     def _ensure_symbol_vwap_state(self, symbol: str, now: datetime) -> dict[str, Any]:
@@ -1055,6 +1115,12 @@ class StrategyRunner:
             state["cum_pv"] = 0.0
             state["cum_vol"] = 0.0
             state["last_reset_date"] = session_date
+            self._hydration_ready_streak[symbol] = 0
+            self._set_symbol_hydration_state(
+                symbol,
+                SymbolState.HYDRATING,
+                allow_downgrade=True,
+            )
         return state
 
     def _ingest_bar(
@@ -2816,22 +2882,6 @@ class StrategyRunner:
                 return
             if not self._validate_symbol_for_cycle(symbol):
                 return
-            hydration_state = self._refresh_symbol_hydration_state(symbol)
-            if hydration_state != SymbolState.READY:
-                log_throttled(
-                    self._logger,
-                    f"history_not_ready_{symbol}",
-                    "Historical data is not ready for symbol",
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                    extra={
-                        "event": "insufficient_history",
-                        "symbol": symbol,
-                        "reason": "history_not_ready",
-                        "state": hydration_state.name,
-                    },
-                )
-                return
 
             with self._lock:
                 if symbol not in self._active_symbols:
@@ -2861,6 +2911,19 @@ class StrategyRunner:
                 cum_vol = float(vwap_state.get("cum_vol", 0.0))
                 if cum_vol > 0:
                     state.vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
+
+                hydration_state = self.update_symbol_hydration(
+                    symbol,
+                    self._indicator_engine.get_history(symbol),
+                    {
+                        symbol: {
+                            "vwap": state.vwap,
+                            "cum_volume": cum_vol,
+                        }
+                    },
+                )
+                if hydration_state != SymbolState.READY:
+                    return
 
                 # Heartbeat logging for derivatives (confirms data flow)
                 if "NIFTY" in symbol and any(x in symbol for x in ["FUT", "CE", "PE"]):
@@ -2983,19 +3046,8 @@ class StrategyRunner:
                             )
 
                 # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
-                if generated_signal is None and (not state.vwap or state.vwap <= 0):
-                    log_throttled(
-                        self._logger,
-                        f"vwap_unavailable_{symbol}",
-                        "VWAP unavailable; skipping signal",
-                        interval_sec=30.0,
-                        level=logging.WARNING,
-                        extra={
-                            "event": "vwap_invalid",
-                            "symbol": symbol,
-                            "reason": "vwap_missing_or_non_positive",
-                        },
-                    )
+                raw_vwap = state.vwap
+                if generated_signal is None and (raw_vwap is None or raw_vwap <= 0):
                     return
 
                 # Update last tick
@@ -3069,7 +3121,7 @@ class StrategyRunner:
                 return
 
             # If no immediate signal, delegate to complex StrategyManager
-            if self._symbol_states.get(symbol, SymbolState.INIT) != SymbolState.READY:
+            if self._symbol_states.get(symbol, SymbolState.DISCOVERED) != SymbolState.READY:
                 return
             if signal is None and self._required_candles:
                 should_evaluate = False
