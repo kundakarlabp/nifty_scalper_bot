@@ -176,6 +176,7 @@ class IndicatorEngine:
         """Initialize indicator engine."""
         self._histories: Dict[str, PriceHistory] = {}
         self._cache: Dict[str, Dict[str, tuple[Any, datetime]]] = {}
+        self._last_valid_vwap: Dict[str, float] = {}
 
     def update_price(
         self,
@@ -481,11 +482,11 @@ class IndicatorEngine:
         """Calculate VWAP. Returns None if insufficient data."""
         history = self._histories.get(symbol)
         if history is None or len(history) == 0:
-            return None
+            return self._last_valid_vwap.get(symbol)
         # ✅ FIX S6: Use available bars if < period (graceful degradation)
         effective_period = min(period, len(history))
         if effective_period < 3:
-            return None  # Need at least 3 bars for meaningful VWAP
+            return self._last_valid_vwap.get(symbol)  # Preserve numeric fallback
 
         last_timestamp = history.last_timestamp
         if last_timestamp is None:
@@ -497,8 +498,16 @@ class IndicatorEngine:
         prices = history.get_closes(effective_period)
         volumes = history.get_volumes(effective_period)
         value = self._calculate_vwap(prices, volumes)
-        if value is not None:
-            self._set_cache(symbol, cache_key, value, last_timestamp)
+        if value is None or value <= 0:
+            fallback = self._last_valid_vwap.get(symbol)
+            if fallback is not None and fallback > 0:
+                return fallback
+            if prices:
+                value = float(prices[-1])
+            else:
+                return None
+        self._last_valid_vwap[symbol] = float(value)
+        self._set_cache(symbol, cache_key, value, last_timestamp)
         return value
 
     def get_atr_trend(self, symbol: str, period: int = 14) -> float | None:
