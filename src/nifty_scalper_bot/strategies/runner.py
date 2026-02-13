@@ -8,8 +8,10 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
+import json
 import logging
 import os
+from pathlib import Path
 import threading
 import time
 import time as time_module
@@ -220,6 +222,7 @@ class SymbolState(Enum):
     DISCOVERED = "discovered"
     HYDRATING = "hydrating"
     READY = "ready"
+    DEGRADED = "degraded"
     SUSPENDED = "suspended"
 
 
@@ -509,6 +512,10 @@ class StrategyRunner:
             1,
             int(os.getenv("MAX_CONCURRENT_STRATEGIES", "3")),
         )
+        self._history_cache_dir = Path(".cache/candles")
+        self._history_cache_dir.mkdir(parents=True, exist_ok=True)
+        self._hydrate_failures: dict[str, int] = {}
+        self._session_gap_count: dict[str, int] = {}
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -1056,17 +1063,77 @@ class StrategyRunner:
         self._symbol_states[symbol] = next_state
         self._history_ready_by_symbol[symbol] = next_state == SymbolState.READY
         if current != next_state:
-            if next_state == SymbolState.READY:
-                self._logger.info(
-                    "Symbol became READY",
-                    extra={"event": "symbol_ready", "symbol": symbol},
-                )
-            elif next_state == SymbolState.HYDRATING:
-                self._logger.warning(
-                    "Symbol still hydrating",
-                    extra={"event": "symbol_hydrating", "symbol": symbol},
-                )
+            self._logger.info(
+                "hydration_status_transition",
+                extra={
+                    "event": "hydration_status_transition",
+                    "symbol": symbol,
+                    "old_state": current.value,
+                    "new_state": next_state.value,
+                },
+            )
         return next_state
+
+    def _history_cache_path(self, symbol: str) -> Path:
+        """Return per-symbol local candle cache path."""
+        safe = self._normalize_symbol(symbol).replace("/", "_")
+        return self._history_cache_dir / f"{safe}.json"
+
+    def _load_history_cache(self, symbol: str) -> list[dict[str, Any]]:
+        """Load locally cached candles when broker history is unavailable."""
+        path = self._history_cache_path(symbol)
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if not isinstance(payload, list):
+            return []
+        rows: list[dict[str, Any]] = []
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            ts = row.get("timestamp")
+            if isinstance(ts, str):
+                try:
+                    row["timestamp"] = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except Exception:
+                    continue
+            rows.append(row)
+        return rows
+
+    def _write_history_cache(self, symbol: str, rows: list[dict[str, Any]]) -> None:
+        """Persist normalized candles for retry-safe hydration."""
+        serializable: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            ts = item.get("timestamp")
+            if isinstance(ts, datetime):
+                item["timestamp"] = ts.isoformat()
+            serializable.append(item)
+        try:
+            self._history_cache_path(symbol).write_text(
+                json.dumps(serializable),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("history_cache_write_failed: %s", exc)
+
+    def _has_session_candle_gaps(self, symbol: str) -> bool:
+        """Return True when current-session minute history has timestamp gaps."""
+        history = self._symbol_history.get(symbol, [])
+        if len(history) < 2:
+            self._session_gap_count[symbol] = 0
+            return False
+        session_date = datetime.now(timezone.utc).date()
+        session_bars = [bar for bar in history if bar.timestamp.date() == session_date]
+        gaps = 0
+        for prev, curr in zip(session_bars, session_bars[1:]):
+            if (curr.timestamp - prev.timestamp).total_seconds() > 120:
+                gaps += 1
+        self._session_gap_count[symbol] = gaps
+        return gaps > 0
 
     def _refresh_symbol_hydration_state(self, symbol: str) -> SymbolState:
         """Set DISCOVERED/HYDRATING/READY from bar count and VWAP validity."""
@@ -1118,6 +1185,29 @@ class StrategyRunner:
         valid_vwap = vwap_val > 0
         valid_volume = vol_sum > 0
 
+        if self._has_session_candle_gaps(symbol):
+            gap_count = int(self._session_gap_count.get(symbol, 0))
+            if gap_count > 1:
+                self._logger.warning(
+                    "soft_data_issue",
+                    extra={
+                        "event": "soft_data_issue",
+                        "symbol": symbol,
+                        "issue": "repeated_missing_candles",
+                        "gaps": gap_count,
+                    },
+                )
+                return self._set_symbol_hydration_state(symbol, SymbolState.SUSPENDED)
+            self._logger.warning(
+                "soft_data_issue",
+                extra={
+                    "event": "soft_data_issue",
+                    "symbol": symbol,
+                    "issue": "single_missing_candle",
+                },
+            )
+            return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
+
         if valid_vwap and valid_volume:
             streak = int(self._hydration_ready_streak.get(symbol, 0)) + 1
             self._hydration_ready_streak[symbol] = streak
@@ -1125,7 +1215,8 @@ class StrategyRunner:
                 return self._set_symbol_hydration_state(symbol, SymbolState.READY)
 
         self._hydration_ready_streak[symbol] = 0
-        return self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+        # Soft degrade on transient VWAP/volume issues; avoid repeated hard resets.
+        return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
 
     def _ensure_symbol_vwap_state(self, symbol: str, now: datetime) -> dict[str, Any]:
         """Return session-scoped VWAP accumulator for symbol."""
@@ -1238,6 +1329,18 @@ class StrategyRunner:
                         "timestamp": bar.timestamp.timestamp(),
                         "volume": bar.volume,
                     }
+                    vwap_state = self._ensure_symbol_vwap_state(symbol, bar.timestamp)
+                    if bar.volume > 0:
+                        vwap_state["cum_vol"] = float(
+                        vwap_state.get("cum_vol", 0.0)
+                    ) + float(bar.volume)
+                        vwap_state["cum_pv"] = float(
+                        vwap_state.get("cum_pv", 0.0)
+                    ) + (float(bar.close) * float(bar.volume))
+                    cum_vol = float(vwap_state.get("cum_vol", 0.0))
+                    if cum_vol > 0:
+                        state.vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
+                    self._last_cumulative_volume[symbol] = int(cum_vol)
 
             # 🔥 THE TRIGGER: Run Strategy Logic
             # [FIX] Removed .on_bar() call as StrategyManager is signal-driven (via ticks), not bar-driven.
@@ -2208,12 +2311,17 @@ class StrategyRunner:
             )
         if fetch_coro is None or self._main_loop is None:
             return []
+        attempts = int(self._hydrate_failures.get(symbol, 0))
         try:
             rows = asyncio.run_coroutine_threadsafe(
                 fetch_coro,
                 self._main_loop,
             ).result(timeout=5.0)
         except Exception as exc:  # noqa: BLE001
+            self._hydrate_failures[symbol] = attempts + 1
+            time_module.sleep(
+                min(4.0, 0.25 * (2**attempts))
+            )  # bounded exponential backoff
             self._logger.warning(
                 "Historical hydration unavailable",
                 extra={
@@ -2222,7 +2330,7 @@ class StrategyRunner:
                     "error": str(exc),
                 },
             )
-            return []
+            return self._load_history_cache(symbol)
         normalized: list[dict[str, Any]] = []
         seen_ts: set[datetime] = set()
         for row in rows or []:
@@ -2250,6 +2358,12 @@ class StrategyRunner:
             except Exception:
                 continue
         normalized.sort(key=lambda row: cast(datetime, row["timestamp"]))
+        if normalized:
+            self._hydrate_failures[symbol] = 0
+            self._write_history_cache(symbol, normalized)
+        else:
+            normalized = self._load_history_cache(symbol)
+
         if len(normalized) < self._required_candles:
             self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
             self._warn_symbol_gate(
@@ -2273,6 +2387,17 @@ class StrategyRunner:
                     meta=meta,
                 )
                 return []
+        has_gap = any(
+            (
+                cast(datetime, curr["timestamp"])
+                - cast(datetime, prev["timestamp"])
+            ).total_seconds()
+            > 120
+            for prev, curr in zip(normalized, normalized[1:])
+        )
+        if has_gap:
+            self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
+            return normalized
         self._set_symbol_hydration_state(symbol, SymbolState.READY)
         return normalized
 
@@ -2963,16 +3088,10 @@ class StrategyRunner:
                 if state is None or not state.active:
                     return
 
+                # Use bar-close VWAP accumulators from _ingest_bar only to avoid tick noise.
                 vwap_state = self._ensure_symbol_vwap_state(symbol, now)
-                if volume > 0:
-                    vwap_state["cum_vol"] = float(
-                        vwap_state.get("cum_vol", 0.0)
-                    ) + float(volume)
-                    vwap_state["cum_pv"] = float(vwap_state.get("cum_pv", 0.0)) + (
-                        float(price) * float(volume)
-                    )
                 cum_vol = float(vwap_state.get("cum_vol", 0.0))
-                if cum_vol > 0:
+                if state.vwap is None and cum_vol > 0:
                     state.vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
 
                 self._last_cumulative_volume[symbol] = int(cum_vol)
@@ -3185,7 +3304,13 @@ class StrategyRunner:
                 return
 
             # If no immediate signal, delegate to complex StrategyManager
-            if self._symbol_states.get(symbol, SymbolState.DISCOVERED) != SymbolState.READY:
+            current_state = self._symbol_states.get(symbol, SymbolState.DISCOVERED)
+            if current_state != SymbolState.READY:
+                self._log_once_per_symbol_per_bar(
+                    symbol,
+                    "strategy_eval_skipped_not_ready",
+                    f"state={current_state.value}",
+                )
                 return
             if signal is None and self._required_candles:
                 should_evaluate = False

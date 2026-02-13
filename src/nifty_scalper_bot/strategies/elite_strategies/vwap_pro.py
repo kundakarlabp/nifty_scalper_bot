@@ -219,6 +219,14 @@ class VWAPProStrategy(EliteStrategy):
     def _reset_acceptance(self, key: str, *, symbol: str, reason_code: str) -> None:
         """Args: key, symbol, reason_code. Returns: None. Raises: Exception."""
         try:
+            transient_reasons = {
+                "missing_bar",
+                "vwap_zero_or_invalid",
+                "volume_too_low",
+                "filler_data_lag",
+            }
+            if reason_code in transient_reasons:
+                return  # keep acceptance persistence across transient data glitches.
             self._vwap_acceptance_tracker[key] = 0
             LOGGER.debug(
                 "⏳ ACCEPTANCE RESET | symbol=%s reason=%s",
@@ -399,7 +407,14 @@ class VWAPProStrategy(EliteStrategy):
                 _exch_vwap or _rolling_vwap or 0.0
             )  # ✅ Exchange > Rolling > 0
 
-            atr = float(indicators.get("atr") or max(current_price * 0.015, 1.0))
+            raw_atr = float(indicators.get("atr") or 0.0)
+            spread = max(
+                float(indicators.get("ask") or current_price)
+                - float(indicators.get("bid") or current_price),
+                0.0,
+            )
+            min_atr = max(current_price * 0.012, spread * 1.5, 1.0)
+            atr = max(raw_atr, min_atr)
             entropy = float(indicators.get("entropy_5") or 0.5)
 
             index_ltp = float(
@@ -565,7 +580,8 @@ class VWAPProStrategy(EliteStrategy):
                 _emit_no_signal("vwap_zero_or_invalid")
                 return None
 
-            if current_price < vwap:
+            slack = atr * 1.0
+            if current_price < (vwap - slack):
                 self._telemetry["skipped_vwap"] += 1
                 if (
                     self._telemetry["skipped_vwap"] <= 3

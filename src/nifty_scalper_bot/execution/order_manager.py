@@ -2315,6 +2315,27 @@ class OrderManager:
             )
             return "", "", ""
 
+        # Align requested quantity with margin engine sizing to avoid broker-side rejects.
+        try:
+            decision, _ = self._pre_trade_decision(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                product=product,
+                price=entry_price,
+                stop_loss=stop_loss,
+            )
+            if decision.quantity > 0:
+                quantity = min(quantity, int(decision.quantity))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("Failure in execute_bracket_trade sizing: %s", exc)
+        if quantity <= 0:
+            self._logger.warning(
+                "insufficient_margin",
+                extra={"event": "insufficient_margin", "symbol": symbol},
+            )
+            return "", "", ""
+
         entry_order_type = (
             OrderType.MARKET
             if (entry_price is None or float(entry_price) <= 0.0)
@@ -2391,6 +2412,26 @@ class OrderManager:
         effective_entry_price = (
             entry.fill_price or entry.price or float(entry_price or 0.0)
         )
+        tick_size = 0.05
+        delta = float(effective_entry_price) - float(
+            entry_price or effective_entry_price
+        )
+        if abs(delta) > tick_size:
+            stop_loss = float(stop_loss) + delta
+            take_profit = float(take_profit) + delta  # anchor bracket to actual execution.
+        if side == "BUY":
+            if not (stop_loss < effective_entry_price < take_profit):
+                atr = max(abs(float(take_profit) - float(stop_loss)) / 2.0, 1.0)
+                stop_loss = effective_entry_price - (atr * 1.2)
+                take_profit = effective_entry_price + (atr * 1.8)
+        else:
+            if not (take_profit < effective_entry_price < stop_loss):
+                atr = max(abs(float(take_profit) - float(stop_loss)) / 2.0, 1.0)
+                stop_loss = effective_entry_price + (atr * 1.2)
+                take_profit = effective_entry_price - (atr * 1.8)
+        stop_loss = self._round_to_tick(float(stop_loss), tick_size=tick_size)
+        take_profit = self._round_to_tick(float(take_profit), tick_size=tick_size)
+
         child_ids: list[str] = []
         stop_details: OrderDetails
         try:
