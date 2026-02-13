@@ -627,7 +627,19 @@ class MarginEngine:
         qty_by_cap = (
             int(cap_from_pct // price_denominator) if price_denominator > 0 else 0
         )
-        max_units = max(0, min(qty_by_risk, qty_by_cap))
+        qty_by_margin = 0
+        margin_estimator = getattr(self._broker, "estimate_margin", None)
+        if callable(margin_estimator) and price > 0:
+            try:
+                margin_per_unit = float(margin_estimator(inputs.symbol, 1, price))
+                if margin_per_unit > 0:
+                    qty_by_margin = int(balance // margin_per_unit)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "margin_plan_estimate_margin_error",
+                    extra={"event": "margin_plan_estimate_margin_error", "error": str(exc)},
+                )
+        max_units = max(0, min(qty_by_risk, qty_by_cap, qty_by_margin or qty_by_cap))
         lot_size = max(1, int(inputs.lot_size))
         max_lot_units = lot_size * max(int(inputs.max_lots_per_trade), 0)
         if max_lot_units > 0:

@@ -663,7 +663,10 @@ class StrategyRunner:
         if not rows:
             self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
             return
-        self._update_symbol_readiness(symbol)
+        if len(rows) >= target and not self._has_session_candle_gaps(symbol):
+            self._set_symbol_hydration_state(symbol, SymbolState.READY)
+            return
+        self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
 
     def remove_symbol(self, symbol: str) -> None:
         """Stop tracking a symbol."""
@@ -1054,12 +1057,9 @@ class StrategyRunner:
     ) -> SymbolState:
         """Update per-symbol hydration state with READY downgrade protection."""
         current = self._symbol_states.get(symbol, SymbolState.DISCOVERED)
-        if (
-            current == SymbolState.READY
-            and next_state == SymbolState.HYDRATING
-            and not allow_downgrade
-        ):
-            return current
+        if current == SymbolState.READY and not allow_downgrade:
+            if next_state in {SymbolState.HYDRATING, SymbolState.DEGRADED}:
+                return current
         self._symbol_states[symbol] = next_state
         self._history_ready_by_symbol[symbol] = next_state == SymbolState.READY
         if current != next_state:
@@ -1197,7 +1197,7 @@ class StrategyRunner:
                         "gaps": gap_count,
                     },
                 )
-                return self._set_symbol_hydration_state(symbol, SymbolState.SUSPENDED)
+                return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
             self._logger.warning(
                 "soft_data_issue",
                 extra={
@@ -1223,11 +1223,19 @@ class StrategyRunner:
         session_date = now.date()
         state = self._vwap_state.setdefault(
             symbol,
-            {"cum_pv": 0.0, "cum_vol": 0.0, "last_reset_date": session_date},
+            {
+                "cum_pv": 0.0,
+                "cum_vol": 0.0,
+                "last_reset_date": session_date,
+                "last_valid_vwap": 0.0,
+                "mode": "primary",
+            },
         )
         if state.get("last_reset_date") != session_date:
             state["cum_pv"] = 0.0
             state["cum_vol"] = 0.0
+            state["last_valid_vwap"] = 0.0
+            state["mode"] = "primary"
             state["last_reset_date"] = session_date
             self._hydration_ready_streak[symbol] = 0
             self._set_symbol_hydration_state(
@@ -1332,14 +1340,26 @@ class StrategyRunner:
                     vwap_state = self._ensure_symbol_vwap_state(symbol, bar.timestamp)
                     if bar.volume > 0:
                         vwap_state["cum_vol"] = float(
-                        vwap_state.get("cum_vol", 0.0)
-                    ) + float(bar.volume)
+                            vwap_state.get("cum_vol", 0.0)
+                        ) + float(bar.volume)
                         vwap_state["cum_pv"] = float(
-                        vwap_state.get("cum_pv", 0.0)
-                    ) + (float(bar.close) * float(bar.volume))
+                            vwap_state.get("cum_pv", 0.0)
+                        ) + (float(bar.close) * float(bar.volume))
                     cum_vol = float(vwap_state.get("cum_vol", 0.0))
                     if cum_vol > 0:
-                        state.vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
+                        computed_vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
+                        vwap_state["last_valid_vwap"] = computed_vwap
+                        vwap_state["mode"] = "primary"
+                        state.vwap = computed_vwap
+                    else:
+                        last_valid_vwap = float(vwap_state.get("last_valid_vwap", 0.0))
+                        if last_valid_vwap > 0:
+                            vwap_state["mode"] = "degraded"
+                            state.vwap = last_valid_vwap
+                        else:
+                            vwap_state["mode"] = "fallback_last_close"
+                            state.vwap = float(bar.close)
+                            vwap_state["last_valid_vwap"] = float(bar.close)
                     self._last_cumulative_volume[symbol] = int(cum_vol)
 
             # 🔥 THE TRIGGER: Run Strategy Logic

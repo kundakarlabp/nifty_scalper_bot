@@ -865,7 +865,19 @@ class OrderExecutionHub:
             result.fill_price, self._safe_float(request.price)
         )
         metadata = request.metadata or {}
-        atr = self._get_atr_for_symbol(symbol, metadata)
+        raw_atr = self._get_atr_for_symbol(symbol, metadata)
+        signal_price = self._safe_float(metadata.get("signal_price"), fill_price)
+        fill_delta = fill_price - signal_price
+        bid_value = metadata.get("bid")
+        ask_value = metadata.get("ask")
+        bid = self._safe_float(bid_value, 0.0) if bid_value is not None else None
+        ask = self._safe_float(ask_value, 0.0) if ask_value is not None else None
+        atr = self._resolve_spread_aware_atr(
+            raw_atr=raw_atr,
+            execution_price=fill_price,
+            bid=bid,
+            ask=ask,
+        )
         regime = self._get_current_regime(symbol, metadata)
         iv_value = metadata.get("iv") or metadata.get("implied_volatility")
 
@@ -879,6 +891,8 @@ class OrderExecutionHub:
                 "fill_quantity": filled_qty,
                 "atr": atr,
                 "regime": regime,
+                "signal_price": signal_price,
+                "fill_delta": fill_delta,
             },
         )
         try:
@@ -1147,6 +1161,22 @@ class OrderExecutionHub:
             },
         )
         return default_atr
+
+    def _resolve_spread_aware_atr(
+        self,
+        *,
+        raw_atr: float,
+        execution_price: float,
+        bid: float | None,
+        ask: float | None,
+    ) -> float:
+        """Return spread-aware ATR floor for execution safety."""
+
+        spread = 0.0
+        if bid is not None and ask is not None and ask >= bid:
+            spread = float(ask - bid)
+        min_atr = max(float(execution_price) * 0.012, spread * 1.5, 1.0)
+        return max(float(raw_atr), min_atr)
 
     def _get_current_regime(
         self, symbol: str, metadata: Mapping[str, Any] | None = None
