@@ -113,3 +113,43 @@ def test_option_contracts_filters_and_caches() -> None:
     # Force refresh triggers a reload
     resolver.option_contracts("NIFTY", force_refresh=True)
     assert broker.calls == ["NFO", "NFO"]
+
+
+def test_sync_nfo_from_broker_filters_non_option_segments() -> None:
+    resolver = InstrumentResolver(_NoopBroker())
+    rows = [
+        {
+            'exchange': 'NFO',
+            'segment': 'NFO-OPT',
+            'name': 'NIFTY',
+            'instrument_type': 'CE',
+            'instrument_token': 111,
+            'tradingsymbol': 'NIFTY26FEB25000CE',
+            'expiry': '2026-02-26',
+            'strike': 25000,
+            'lot_size': 75,
+        },
+        {
+            'exchange': 'NFO',
+            'segment': 'NFO-FUT',
+            'name': 'NIFTY',
+            'instrument_type': 'CE',
+            'instrument_token': 222,
+            'tradingsymbol': 'NIFTY26FEBFUT',
+        },
+        {
+            'exchange': 'NSE',
+            'segment': 'NFO-OPT',
+            'name': 'NIFTY',
+            'instrument_type': 'PE',
+            'instrument_token': 333,
+            'tradingsymbol': 'NIFTY26FEB25000PE',
+        },
+    ]
+
+    synced = resolver.sync_nfo_from_broker(rows)
+
+    assert synced == 1
+    contracts = resolver.option_contracts('NIFTY')
+    assert len(contracts) == 1
+    assert contracts[0]['tradingsymbol'] == 'NIFTY26FEB25000CE'

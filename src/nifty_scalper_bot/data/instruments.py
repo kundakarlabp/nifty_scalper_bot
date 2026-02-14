@@ -835,8 +835,13 @@ class InstrumentResolver:
                     # Extract fields with multiple fallback names
                     name = (inst.get("name") or inst.get("underlying") or 
                             inst.get("tradingsymbol", "")[:5] or "")
-                    segment = inst.get("segment") or inst.get("exchange") or ""
+                    exchange = str(inst.get("exchange") or "").upper()
+                    segment = str(inst.get("segment") or "").upper()
                     inst_type = inst.get("instrument_type") or ""
+
+                    if exchange != "NFO" or segment != "NFO-OPT":
+                        skipped += 1
+                        continue
                     
                     # Determine base index
                     base = name.upper().replace(" ", "").replace("INDEX", "")
@@ -887,7 +892,7 @@ class InstrumentResolver:
                     
                     synced += 1
                     
-                except Exception as e:
+                except Exception:
                     skipped += 1
                     continue
         

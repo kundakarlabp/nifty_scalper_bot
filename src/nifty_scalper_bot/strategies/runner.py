@@ -2330,19 +2330,23 @@ class StrategyRunner:
                     "have_bars": len(self._indicator_engine.get_history(symbol)),
                 },
             )
-        fetch_coro: Any | None = None
+        if self._main_loop is None:
+            return []
+        fetch_factory: Callable[[], Any] | None = None
         if self._data_hub and hasattr(self._data_hub, "fetch_history"):
-            fetch_coro = self._data_hub.fetch_history(symbol, interval="minute", days=5)
-        elif self._orchestrator and hasattr(self._orchestrator, "fetch_history"):
-            fetch_coro = self._orchestrator.fetch_history(
+            fetch_factory = lambda: self._data_hub.fetch_history(
                 symbol, interval="minute", days=5
             )
-        if fetch_coro is None or self._main_loop is None:
+        elif self._orchestrator and hasattr(self._orchestrator, "fetch_history"):
+            fetch_factory = lambda: self._orchestrator.fetch_history(
+                symbol, interval="minute", days=5
+            )
+        if fetch_factory is None:
             return []
         attempts = int(self._hydrate_failures.get(symbol, 0))
         try:
             rows = asyncio.run_coroutine_threadsafe(
-                fetch_coro,
+                fetch_factory(),
                 self._main_loop,
             ).result(timeout=5.0)
         except Exception as exc:  # noqa: BLE001

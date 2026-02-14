@@ -2078,7 +2078,8 @@ def _get_symbols(
     if broker:
         try:
             token_candidates = [256265]
-            str_candidates = ['NSE:NIFTY 50', 'NIFTY 50', 'NIFTY 50 INDEX']
+            spot_symbol = 'NSE:NIFTY 50'
+            str_candidates = [spot_symbol, 'NIFTY 50', 'NIFTY 50 INDEX']
             inner = getattr(broker, 'client', getattr(broker, '_broker', broker))
 
             def parse_price(data: Any) -> float:
@@ -2119,6 +2120,9 @@ def _get_symbols(
             if ltp == 0 and hasattr(inner, 'ltp'):
                 try:
                     q = inner.ltp(str_candidates)
+                    if spot_symbol not in q:
+                        LOGGER.error('Live NIFTY spot unavailable — aborting cycle')
+                        return []
                     for candidate in str_candidates:
                         if candidate in q:
                             price = parse_price(q[candidate])
@@ -2131,8 +2135,8 @@ def _get_symbols(
             LOGGER.error('Error fetching live price: %s', exc, exc_info=True)
 
     if ltp <= 0:
-        ltp = 25200.0
-        LOGGER.warning('⚠️ Using fallback ATM from default spot %.2f', ltp)
+        LOGGER.error('Live NIFTY spot unavailable — aborting cycle')
+        return []
 
     global _LATEST_CTX
     universe = option_universe
@@ -4844,7 +4848,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if controller is None and settings.notifications.enabled:
         # Create a minimal controller if the HTTP app wasn't started
         try:
-            from nifty_scalper_bot.notifications.telegram_controller import (
+            from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
                 TelegramWebhookController,
             )
 
@@ -5443,6 +5447,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             engine = ctx.market_regime_manager.indicators
             HYDRATION_DELAY_SEC = 1.3  # Zerodha-safe pacing
+            hydrated_counts: dict[str, int] = {}
 
             for idx, sym in enumerate(targets, start=1):
                 try:
@@ -5502,6 +5507,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             count += 1
 
                         LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
+                        hydrated_counts[sym] = count
 
                     await asyncio.sleep(HYDRATION_DELAY_SEC)
 
@@ -5520,21 +5526,36 @@ async def startup_sequence(ctx: BotContext) -> None:
             # =========================================================
             # This commits the hydration so Runner doesn't trigger fallback backfill.
             runner = ctx.strategy_runner
-            if runner:
-                # 1. Collect symbols we attempted to hydrate
-                hydrated_symbols = list(targets)
-
-                # 2. Commit the state
-                if hasattr(runner, "mark_ready"):
-                    runner.mark_ready(hydrated_symbols)
+            ready_symbols: list[str] = []
+            min_required_bars = int(getattr(runner, "_required_candles", 20) if runner else 20)
+            for sym in targets:
+                if hydrated_counts.get(sym, 0) >= min_required_bars:
+                    ready_symbols.append(sym)
+                else:
+                    LOGGER.warning(
+                        "Condition met: startup_hydration_incomplete",
+                        extra={
+                            "event": "startup_hydration_incomplete",
+                            "symbol": sym,
+                            "bars": hydrated_counts.get(sym, 0),
+                            "required": min_required_bars,
+                        },
+                    )
+            if runner and hasattr(runner, "mark_ready") and ready_symbols:
+                runner.mark_ready(ready_symbols)
+            elif runner:
+                LOGGER.error("Startup hydration incomplete for all symbols — runner remains unready")
             # =========================================================
 
             await ctx.market_regime_manager.refresh_from_indicators()
             # -------------------------------------------------
             # MARK INDICATORS AS WARM / READY
             # -------------------------------------------------
-            ctx.market_regime_manager.indicators_ready = True
-            LOGGER.info("🧠 Indicators fully hydrated and READY at startup")
+            ctx.market_regime_manager.indicators_ready = bool(ready_symbols)
+            if ready_symbols:
+                LOGGER.info("🧠 Indicators fully hydrated and READY at startup")
+            else:
+                LOGGER.error("Indicators remain unready because no symbols passed hydration barrier")
 
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
