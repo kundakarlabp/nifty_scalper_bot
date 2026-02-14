@@ -628,7 +628,11 @@ class StrategyRunner:
             else:
                 state.active = True
 
-            if self._running and self._frozen_universe and normalized not in self._frozen_universe:
+            if (
+                self._running
+                and self._frozen_universe
+                and normalized not in self._frozen_universe
+            ):
                 self._logger.info(
                     "Symbol add deferred until next session boundary",
                     extra={"event": "symbol_add_deferred", "symbol": normalized},
@@ -1342,9 +1346,9 @@ class StrategyRunner:
                         vwap_state["cum_vol"] = float(
                             vwap_state.get("cum_vol", 0.0)
                         ) + float(bar.volume)
-                        vwap_state["cum_pv"] = float(
-                            vwap_state.get("cum_pv", 0.0)
-                        ) + (float(bar.close) * float(bar.volume))
+                        vwap_state["cum_pv"] = float(vwap_state.get("cum_pv", 0.0)) + (
+                            float(bar.close) * float(bar.volume)
+                        )
                     cum_vol = float(vwap_state.get("cum_vol", 0.0))
                     if cum_vol > 0:
                         computed_vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
@@ -1529,13 +1533,17 @@ class StrategyRunner:
         if entry_side == "BUY":
             if entry_price - sl < min_sl_distance:
                 sl = entry_price - min_sl_distance
+                corrected = True  # ✅ FIX 5
             if tp - entry_price < min_tp_distance:
                 tp = entry_price + min_tp_distance
+                corrected = True  # ✅ FIX 5
         else:
             if sl - entry_price < min_sl_distance:
                 sl = entry_price + min_sl_distance
+                corrected = True  # ✅ FIX 5
             if entry_price - tp < min_tp_distance:
                 tp = entry_price - min_tp_distance
+                corrected = True  # ✅ FIX 5
 
         # Force positive prices
         sl = max(0.05, sl)
@@ -2409,8 +2417,7 @@ class StrategyRunner:
                 return []
         has_gap = any(
             (
-                cast(datetime, curr["timestamp"])
-                - cast(datetime, prev["timestamp"])
+                cast(datetime, curr["timestamp"]) - cast(datetime, prev["timestamp"])
             ).total_seconds()
             > 120
             for prev, curr in zip(normalized, normalized[1:])
@@ -3117,8 +3124,8 @@ class StrategyRunner:
                 self._last_cumulative_volume[symbol] = int(cum_vol)
                 last_hydration_bar = self._last_readiness_update_by_symbol.get(symbol)
                 if last_hydration_bar != self._last_bar_ts.get(symbol):
-                    self._last_readiness_update_by_symbol[symbol] = self._last_bar_ts.get(
-                        symbol
+                    self._last_readiness_update_by_symbol[symbol] = (
+                        self._last_bar_ts.get(symbol)
                     )
                     hydration_state = self._update_symbol_readiness(symbol)
                 else:
@@ -4378,7 +4385,9 @@ class StrategyRunner:
             available_margin = 0.0
             if self._data_hub is not None:
                 try:
-                    available_margin = float(self._data_hub.get_available_balance() or 0.0)
+                    available_margin = float(
+                        self._data_hub.get_available_balance() or 0.0
+                    )
                 except Exception as exc:
                     self._logger.error(
                         "Failure in StrategyRunner._handle_entry_signal_inner margin fetch: %s",
@@ -4390,11 +4399,15 @@ class StrategyRunner:
             if hasattr(self._order_manager, "estimate_margin"):
                 try:
                     margin_per_unit = float(
-                        self._order_manager.estimate_margin(trade_symbol, 1, trade_price)
+                        self._order_manager.estimate_margin(
+                            trade_symbol, 1, trade_price
+                        )
                     )
                 except Exception:
                     margin_per_unit = max(trade_price, 0.0)
-            size_by_margin = int(available_margin // margin_per_unit) if margin_per_unit > 0 else 0
+            size_by_margin = (
+                int(available_margin // margin_per_unit) if margin_per_unit > 0 else 0
+            )
             if size_by_margin > 0:
                 sized_qty = min(int(sized_qty), size_by_margin)
 
@@ -4433,6 +4446,30 @@ class StrategyRunner:
                     # Add 1% "Freak Trade Protection" buffer
                     buffer = 1.01 if entry_side == "BUY" else 0.99
                     execution_price = round(base * buffer, 2)
+
+            # ✅ FIX 6a: Shift SL/TP when execution_price diverges from trade_price
+            _price_shift = execution_price - trade_price
+            if abs(_price_shift) > 0.01:
+                _new_sl = signal.stop_loss + _price_shift if signal.stop_loss else None
+                _new_tp = (
+                    signal.take_profit + _price_shift if signal.take_profit else None
+                )
+                self._logger.info(
+                    f"📐 SL/TP SHIFTED by {_price_shift:+.2f} | "
+                    f"SL: {signal.stop_loss:.2f}→{_new_sl:.2f} | "
+                    f"TP: {signal.take_profit:.2f}→{_new_tp:.2f}",
+                    extra={"event": "sl_tp_price_shift", "symbol": trade_symbol},
+                )
+                signal = Signal(
+                    action=signal.action,
+                    symbol=signal.symbol,
+                    quantity=signal.quantity,
+                    confidence=signal.confidence,
+                    reason=signal.reason,
+                    stop_loss=_new_sl,
+                    take_profit=_new_tp,
+                    metadata=signal.metadata,
+                )
 
             signal = self._anchor_sl_tp_to_execution(
                 signal,
@@ -4758,10 +4795,28 @@ class StrategyRunner:
                         except (TypeError, ValueError):
                             pass
 
-        # 5. Fallback + spread-aware floor
+        # 5. Fallback: Calculate from price
+        # For NIFTY options, typical ATR is ~1-2% of premium
         if atr_val <= 0:
-            atr_val = current_price * 0.015
+            atr_val = current_price * 0.015  # 1.5% of price
             source = "price_fallback"
+
+        # ✅ FIX 7: Enforce minimum ATR floor regardless of source.
+        # Option 1-min bars produce micro-ATR (e.g. 0.24 for 828₹ option).
+        # Floor at 1% of price ensures meaningful SL/TP distances.
+        _min_atr = max(current_price * 0.01, 1.0)
+        if atr_val < _min_atr:
+            self._logger.info(
+                f"📐 ATR FLOOR: {symbol} | raw={atr_val:.2f} < min={_min_atr:.2f} | source={source}",
+                extra={
+                    "event": "atr_floor_applied",
+                    "symbol": symbol,
+                    "raw_atr": atr_val,
+                    "min_atr": _min_atr,
+                },
+            )
+            atr_val = _min_atr
+            source = f"{source}→floored"
 
         spread = 0.0
         try:
@@ -4778,7 +4833,7 @@ class StrategyRunner:
                 exc_info=exc,
             )
 
-        min_atr = max(current_price * 0.012, spread * 1.5, 1.0)
+        min_atr = max(current_price * 0.01, spread * 1.5, 1.0)
         atr_val = max(atr_val, min_atr)
 
         self._logger.debug(
