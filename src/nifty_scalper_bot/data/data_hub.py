@@ -281,11 +281,15 @@ class DataHub:
         if tick is not None:
             return tick
 
-        # FIX: Restore allow_pull logic to satisfy RuntimeSelfChecker
         if allow_pull and self._mdm and hasattr(self._mdm, "pull_quote"):
             try:
-                # pull_quote usually returns the dict and may trigger ingestion.
-                # We return it directly here to satisfy the caller immediately
+                transport_status = getattr(self._mdm, "transport_status", None)
+                if callable(transport_status):
+                    state = transport_status()
+                    poll_enabled = bool((state or {}).get("polling"))
+                    ws_connected = bool((state or {}).get("websocket"))
+                    if ws_connected and not poll_enabled:
+                        return None
                 return self._mdm.pull_quote(symbol)
             except Exception:
                 pass
