@@ -1115,6 +1115,16 @@ class MarketDataManager:
             None.
         """
 
+        if not self._rest_poll_enabled:
+            self._logger.info(
+                "Condition met: mdm_pull_quote_skipped_ws_primary",
+                extra={
+                    "event": "mdm_pull_quote_skipped_ws_primary",
+                    "symbol": symbol,
+                },
+            )
+            return {"symbol": symbol}
+
         candidates: list[str | int] = self._candidate_quote_keys(symbol)
         if not candidates:
             candidates = [symbol]
@@ -2507,7 +2517,7 @@ class MarketDataManager:
                 "Condition met: mdm_tracking_added",
                 extra={"event": "mdm_tracking_added", "symbol": sym},
             )
-            if seed:
+            if seed and self._rest_poll_enabled:
                 seeded = self._seed_quote_from_broker(sym)
                 if seeded:
                     self._logger.info(

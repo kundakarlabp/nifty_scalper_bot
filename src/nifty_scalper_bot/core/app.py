@@ -2787,7 +2787,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     def _ws_token_issued_at() -> float | None:
         return None
 
-    use_polling = (not websocket_enabled) or streaming_mode in {"polling", "poll", ""}
+    use_polling = (not websocket_enabled) or streaming_mode in {"polling", "poll"}
     # [FIX] Container for direct wiring
     strategy_runner_ref: dict[str, Any] = {}
 
@@ -3126,16 +3126,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         )
         websocket_manager.set_client_factory(_build_ws)
 
-        # Initialize WebSocket Streamer
-        from nifty_scalper_bot.streaming.websocket_streamer import WebSocketStreamer
-
-        streamer = WebSocketStreamer(
-            api_key=config.broker.api_key,
-            access_token_provider=_resolve_ws_token,
-            on_tick=lambda tick: None,  # Handled via managers below
-            subscriptions=set(),
-            reconnect_interval=5.0,
-        )
+        # WebSocketManager is the primary streamer in WS mode.
+        streamer = websocket_manager
 
         # Wire up WebSocket handlers
         market_data_manager = MarketDataManager(
@@ -3152,14 +3144,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             message_bus=message_bus,
         )
 
-        # Register Callbacks
+        # Register callback to MarketDataManager; DataHub receives updates via MDM.
         websocket_manager.on_tick = market_data_manager._handle_tick
-        streamer.register_handler(
-            market_data_manager._handle_tick
-        )  # Redundant but safe
-        streamer.register_handler(
-            lambda tick: asyncio.create_task(data_hub.ingest_tick(tick))
-        )
 
     else:
         LOGGER.info("Initializing Polling Streamer...")
