@@ -1,0 +1,14 @@
+[Unit]
+Description=Nifty Admin UI
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/nifty_scalper_bot
+ExecStart=/home/ubuntu/nifty_scalper_bot/venv/bin/uvicorn admin_ui:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+MemoryMax=200M
+
+[Install]
+WantedBy=multi-user.target
