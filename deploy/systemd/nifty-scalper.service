@@ -5,15 +5,16 @@ Requires=docker.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/nifty-scalper.env
-ExecStart=/usr/bin/docker compose --project-name nifty-scalper -f /opt/nifty-scalper/docker-compose.yml up --build --remove-orphans
-ExecStop=/usr/bin/docker compose --project-name nifty-scalper -f /opt/nifty-scalper/docker-compose.yml down
-WorkingDirectory=/opt/nifty-scalper
+Environment="PYTHONPATH=/home/ubuntu/nifty_scalper_bot"
+ExecStart=/home/ubuntu/nifty_scalper_bot/venv/bin/python -m src.nifty_scalper_bot.main
+WorkingDirectory=/home/ubuntu/nifty_scalper_botr
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=120
 TimeoutStopSec=60
-User=nifty
+MemoryMax=400M
+LimitNOFILE=65535
+User=ubuntu
 Group=nifty
 StandardOutput=append:/var/log/nifty-scalper/bot.log
 StandardError=append:/var/log/nifty-scalper/bot.log
