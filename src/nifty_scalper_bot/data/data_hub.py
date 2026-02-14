@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
-import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Any, Callable, Iterable, Mapping, Optional, TypedDict, cast
-from nifty_scalper_bot.core.message_bus import MessageBus, Message, MessageType
+from typing import Any, Callable, Iterable, Mapping, TypedDict, cast
 
+from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.options_math import (
@@ -97,6 +97,17 @@ class _HistoryCacheEntry:
         return (now - self.fetched_at) <= max_age_seconds
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoryFetchContext:
+    """Input metadata for a history fetch request."""
+
+    symbol: str
+    root: str
+    expiry: str
+    interval: str
+    now: float
+
+
 class DataHub:
     """Central in-memory state cache for the trading bot."""
 
@@ -107,27 +118,26 @@ class DataHub:
         *,
         options_only: bool = True,
         store: HubStore | None = None,
-        message_bus: MessageBus
+        message_bus: MessageBus | None = None,
     ) -> None:
-        
+
         self._mdm = market_data_manager
         self._resolver = instrument_resolver
         self._options_only = options_only
         self._store = store
         self._lock = RLock()
-       
 
         # State Caches
         self._quotes: dict[str, Tick] = {}
         self._orders: dict[str, dict[str, Any]] = {}
         self._positions: dict[str, dict[str, Any]] = {}
         self._message_bus = message_bus
-        
+
         # Derived Metrics Caches
         self._iv_cache: dict[str, float] = {}
         self._oi_cache: dict[str, float] = {}
         self._greeks_cache: dict[str, dict[str, float]] = {}
-        
+
         # Throttling for heavy math (Greeks/IV)
         self._last_greeks_update: dict[str, float] = {}
         self._greeks_throttle_sec = 0.5
@@ -138,10 +148,10 @@ class DataHub:
         self._history_cache_lock = RLock()
         self._history_cache: dict[_HistoryCacheKey, _HistoryCacheEntry] = {}
         self._history_cache_ttl_seconds = float(
-            os.getenv('HISTORY_CACHE_TTL_SECONDS', '120')
+            os.getenv("HISTORY_CACHE_TTL_SECONDS", "120")
         )
         self._history_freshness_max_age_seconds = float(
-            os.getenv('HISTORY_FRESHNESS_MAX_AGE_SECONDS', '120')
+            os.getenv("HISTORY_FRESHNESS_MAX_AGE_SECONDS", "120")
         )
 
     # ----------------------------------------------------------------
@@ -156,7 +166,6 @@ class DataHub:
         except RuntimeError:
             pass
 
-    
     async def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
         symbol = tick.get("symbol")
@@ -171,9 +180,9 @@ class DataHub:
         with self._lock:
             # 1. Update Cache
             self._quotes[symbol] = tick
-            
+
             # Cross-reference token/symbol (Fix for Self-Checker)
-            if str(token) == "256265": 
+            if str(token) == "256265":
                 self._quotes["NSE:NIFTY 50"] = tick
                 self._quotes["NIFTY 50"] = tick
 
@@ -181,7 +190,7 @@ class DataHub:
             try:
                 self._capture_option_metrics(symbol, tick)
             except Exception:
-                pass # Don't let math errors kill the tick
+                pass  # Don't let math errors kill the tick
 
             # 3. Publish to MessageBus (The Critical Fix)
             if self._message_bus:
@@ -192,7 +201,7 @@ class DataHub:
                             type=MessageType.TICK,
                             timestamp=datetime.now(timezone.utc),
                             data=tick,
-                            source="data_hub"
+                            source="data_hub",
                         )
                     )
                 except Exception as exc:
@@ -206,36 +215,37 @@ class DataHub:
                     except Exception as exc:
                         # This is likely where the "Tick callback failed" log comes from
                         LOGGER.error(
-                            f"Tick subscriber failed for {symbol}: {exc}", 
-                            exc_info=True # Prints full traceback to help debug
+                            f"Tick subscriber failed for {symbol}: {exc}",
+                            exc_info=True,  # Prints full traceback to help debug
                         )
 
     def store_quote(
-        self, 
-        symbol: str, 
-        quote_data: dict[str, Any], 
+        self,
+        symbol: str,
+        quote_data: dict[str, Any],
         source: str = "ws",
         seed: bool = False,
     ) -> None:
         """
-        Universal entry point. 
+        Universal entry point.
         Redirects legacy/polling calls to the ACTIVE ingestion pipeline.
         """
         # 1. Defensive Copy & Normalization
         # Prevents reference bugs if the caller reuses the dict
         payload = dict(quote_data)
-        
+
         # 2. Enforce Metadata
         payload["source"] = source
         payload["seed"] = bool(seed)
-        
+
         # Ensure symbol presence
         if "symbol" not in payload:
             payload["symbol"] = symbol
-            
+
         # Ensure timestamp (critical for freshness checks)
         if "timestamp" not in payload:
             import time
+
             payload["timestamp"] = int(time.time() * 1000)
 
         # 3. 🔥 CRITICAL REDIRECT 🔥
@@ -250,7 +260,7 @@ class DataHub:
             sym = p.get("symbol")
             if sym:
                 new_map[sym] = p
-        
+
         with self._lock:
             self._positions = new_map
 
@@ -260,26 +270,26 @@ class DataHub:
 
     def get_quote(self, symbol: str, allow_pull: bool = False) -> Tick | None:
         """Return the latest cached tick for a symbol.
-        
+
         Args:
             symbol: Trading symbol.
             allow_pull: If True and cache is empty, try fetching from broker via MDM.
         """
         with self._lock:
             tick = self._quotes.get(symbol)
-            
+
         if tick is not None:
             return tick
-            
+
         # FIX: Restore allow_pull logic to satisfy RuntimeSelfChecker
         if allow_pull and self._mdm and hasattr(self._mdm, "pull_quote"):
             try:
-                # Note: pull_quote usually returns the dict AND triggers ingestion via callback
+                # pull_quote usually returns the dict and may trigger ingestion.
                 # We return it directly here to satisfy the caller immediately
                 return self._mdm.pull_quote(symbol)
             except Exception:
                 pass
-                
+
         return None
 
     def get_order(self, order_id: str) -> dict[str, Any] | None:
@@ -291,7 +301,7 @@ class DataHub:
         """Return cached position details."""
         with self._lock:
             return self._positions.get(symbol)
-            
+
     def positions(self) -> list[dict[str, Any]]:
         """Return list of all cached positions."""
         with self._lock:
@@ -321,25 +331,23 @@ class DataHub:
     ) -> tuple[bool, dict[str, Any]]:
         """
         Check if the quote for a symbol is fresh (WS-aware, REST-safe).
-        
-        Handles the "Railway Problem" where REST polling is naturally slower 
+
+        Handles the "Railway Problem" where REST polling is naturally slower
         than WebSocket ticks, preventing false-positive 'STALE' blocks.
         """
         quote = self.get_quote(symbol)
+        if not quote:
+            return False, {
+                "ok": False,
+                "reason": "no_quote",
+                "threshold_ms": threshold_ms,
+            }
 
         if quote.get("seed"):
             return True, {
                 "ok": True,
                 "reason": "seed_warmup",
                 "source": quote.get("source"),
-                "threshold_ms": threshold_ms,
-            }
-
-
-        if not quote:
-            return False, {
-                "ok": False,
-                "reason": "no_quote",
                 "threshold_ms": threshold_ms,
             }
 
@@ -382,6 +390,7 @@ class DataHub:
             "source": source,
             "reason": None if is_fresh else "stale",
         }
+
     # ----------------------------------------------------------------
     # Subscription Management
     # ----------------------------------------------------------------
@@ -419,16 +428,16 @@ class DataHub:
         last_update = self._last_greeks_update.get(symbol, 0.0)
         if now - last_update < self._greeks_throttle_sec:
             return
-            
+
         parsed = self._parse_option_symbol(symbol)
         if not parsed:
             return
-        
+
         _base, expiry_ts, strike, is_call = parsed
         ltp = tick.get("ltp") or tick.get("last_price")
         if not isinstance(ltp, (int, float)) or ltp <= 0:
             return
-            
+
         spot_price = self._get_underlying_price(_base)
         if not spot_price:
             return
@@ -438,16 +447,16 @@ class DataHub:
             if dte <= 0:
                 return
 
-            r = 0.07 
+            r = 0.07
             iv = implied_volatility(
                 price=float(ltp),
                 S=spot_price,
                 K=strike,
                 t=dte,
                 r=r,
-                flag="c" if is_call else "p"
+                flag="c" if is_call else "p",
             )
-            
+
             if iv and iv > 0:
                 self._iv_cache[symbol] = iv
                 greeks = black_scholes_greeks(
@@ -456,16 +465,16 @@ class DataHub:
                     t=dte,
                     r=r,
                     sigma=iv,
-                    flag="c" if is_call else "p"
+                    flag="c" if is_call else "p",
                 )
                 self._greeks_cache[symbol] = greeks
-                
+
             oi = tick.get("oi") or tick.get("open_interest")
             if oi:
                 self._oi_cache[symbol] = float(oi)
-                
+
             self._last_greeks_update[symbol] = now
-            
+
         except Exception:
             pass
 
@@ -473,16 +482,19 @@ class DataHub:
         candidates = [base, "NIFTY 50", "NIFTY BANK"]
         if base == "BANKNIFTY":
             candidates = ["NIFTY BANK", "BANKNIFTY"]
-            
+
         with self._lock:
             for cand in candidates:
                 tick = self._quotes.get(cand)
                 if tick:
                     p = tick.get("ltp")
-                    if p: return float(p)
+                    if p:
+                        return float(p)
         return None
 
-    def _parse_option_symbol(self, symbol: str) -> tuple[str, float, float, bool] | None:
+    def _parse_option_symbol(
+        self, symbol: str
+    ) -> tuple[str, float, float, bool] | None:
         clean_sym = symbol.split(":")[-1]
         if self._resolver:
             try:
@@ -493,9 +505,11 @@ class DataHub:
                         ts = expiry_dt.timestamp()
                     else:
                         return None
-                        
+
                     strike = float(meta["strike"])
-                    is_call = meta.get("instrument_type") == "CE" or clean_sym.endswith("CE")
+                    is_call = meta.get("instrument_type") == "CE" or clean_sym.endswith(
+                        "CE"
+                    )
                     base = "NIFTY" if "NIFTY" in clean_sym else "BANKNIFTY"
                     return base, ts, strike, is_call
             except Exception:
@@ -504,11 +518,11 @@ class DataHub:
 
     def _clock(self) -> float:
         return time.time()
-        
+
     # ----------------------------------------------------------------
     # Proxy Methods (Delegation to MDM)
     # ----------------------------------------------------------------
-    
+
     def get_available_balance(self, force: bool = False) -> float | None:
         if self._mdm:
             return self._mdm.get_available_balance(force=force)
@@ -519,29 +533,30 @@ class DataHub:
             return self._mdm.get_account_snapshot(force=force)
         return {}
 
-    def normalize(self, symbol: str) -> str:
-        # Static method in original, but instance method here is fine.
-        # If callers use DataHub.normalize(), make it static.
-        return symbol.strip().upper()
-    
-    # Make normalize static for compatibility with existing calls like DataHub.normalize()
     @staticmethod
     def normalize(symbol: str) -> str:
+        """Normalize symbol. Args: symbol. Returns: upper symbol. Raises: None."""
         return symbol.strip().upper()
 
     # ----------------------------------------------------------------
     # CRITICAL FIX: Option Chain Proxy for Strike Selector
     # ----------------------------------------------------------------
-    
-    def get_option_chain(self, symbol: str, option_type: str | None = None) -> list[dict]:
+
+    def get_option_chain(
+        self, symbol: str, option_type: str | None = None
+    ) -> list[dict]:
         """Retrieves option chain with Traceability Logs."""
-        
+
         # LOG 1: Entry
         if hasattr(self, "_logger"):
             self._logger.info(f"🔍 DataHub: Fetching chain for {symbol}...")
 
-        mdm = getattr(self, "_market_data", None) or getattr(self, "_mdm", None) or getattr(self, "_market_data_manager", None)
-        
+        mdm = (
+            getattr(self, "_market_data", None)
+            or getattr(self, "_mdm", None)
+            or getattr(self, "_market_data_manager", None)
+        )
+
         result = []
         source = "None"
 
@@ -560,66 +575,167 @@ class DataHub:
             if count > 0:
                 self._logger.info(f"✅ DataHub: Found {count} strikes via {source}.")
             else:
-                self._logger.warning(f"⚠️ DataHub: Chain is EMPTY! Source: {source}. (Symbol: {symbol})")
-        
+                self._logger.warning(
+                    f"⚠️ DataHub: Chain is EMPTY! Source: {source}. (Symbol: {symbol})"
+                )
+
         return result
 
     # [INSERT THIS AT THE BOTTOM OF THE DataHub CLASS, BEFORE __all__]
-    
+
     # ----------------------------------------------------------------
     # Historical Data Proxy (CRITICAL FOR BACKFILL)
     # ----------------------------------------------------------------
-    
-    async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
-        """Fetch cached historical candles with option-chain aware pooling."""
-        root, expiry = self._extract_history_group(symbol)
-        cache_key = _HistoryCacheKey(symbol_root=root, expiry=expiry, interval=interval)
-        now = time.time()
+
+    async def fetch_history(
+        self, symbol: str, interval: str, days: int = 3
+    ) -> list[dict]:
+        """Fetch closed candles. Args: inputs. Returns: candles. Raises: None."""
+        context = self._build_history_context(symbol=symbol, interval=interval)
+        cache_key = _HistoryCacheKey(
+            symbol_root=context.root,
+            expiry=context.expiry,
+            interval=context.interval,
+        )
 
         with self._history_cache_lock:
             entry = self._history_cache.get(cache_key)
-            if entry and entry.is_fresh(self._history_cache_ttl_seconds, now):
+            if entry and entry.is_fresh(self._history_cache_ttl_seconds, context.now):
                 LOGGER.debug(
-                    'Condition met: history_cache_hit',
+                    "Condition met: history_cache_hit",
                     extra={
-                        'event': 'history_cache_hit',
-                        'symbol': symbol,
-                        'root': root,
-                        'expiry': expiry,
-                        'interval': interval,
-                        'age_seconds': round(now - entry.fetched_at, 3),
+                        "event": "history_cache_hit",
+                        "symbol": context.symbol,
+                        "root": context.root,
+                        "expiry": context.expiry,
+                        "interval": context.interval,
+                        "age_seconds": round(context.now - entry.fetched_at, 3),
                     },
                 )
                 return [dict(row) for row in entry.rows]
 
-        mdm = getattr(self, '_mdm', None) or getattr(self, '_market_data', None)
-        if not (mdm and hasattr(mdm, 'fetch_history')):
+        mdm = getattr(self, "_mdm", None) or getattr(self, "_market_data", None)
+        if not (mdm and hasattr(mdm, "fetch_history")):
             LOGGER.warning(
-                'DataHub: Underlying MDM missing fetch_history',
-                extra={'event': 'history_fetcher_missing', 'symbol': symbol},
+                "DataHub: Underlying MDM missing fetch_history",
+                extra={"event": "history_fetcher_missing", "symbol": context.symbol},
             )
             return []
 
         try:
-            rows = await mdm.fetch_history(symbol, interval, days)
+            rows = await mdm.fetch_history(context.symbol, context.interval, days)
         except Exception as e:  # noqa: BLE001
             LOGGER.error(
-                'DataHub Proxy Error: fetch_history failed for %s: %s',
-                symbol,
+                "DataHub Proxy Error: fetch_history failed for %s: %s",
+                context.symbol,
                 e,
-                extra={'event': 'history_fetch_failed', 'symbol': symbol},
+                extra={"event": "history_fetch_failed", "symbol": context.symbol},
                 exc_info=True,
             )
-            return []
+            return self._load_cached_history(cache_key)
 
-        normalized_rows = [dict(row) for row in (rows or []) if isinstance(row, Mapping)]
+        normalized_rows = self._normalize_history_rows(rows)
+        if not normalized_rows:
+            return self._load_cached_history(cache_key)
+
         with self._history_cache_lock:
             self._history_cache[cache_key] = _HistoryCacheEntry(
                 rows=normalized_rows,
-                fetched_at=now,
+                fetched_at=context.now,
             )
 
         return [dict(row) for row in normalized_rows]
+
+    def _build_history_context(
+        self, symbol: str, interval: str
+    ) -> _HistoryFetchContext:
+        """Build fetch context. Args: inputs. Returns: context. Raises: None."""
+        root, expiry = self._extract_history_group(symbol)
+        return _HistoryFetchContext(
+            symbol=(symbol or "").strip().upper(),
+            root=root,
+            expiry=expiry,
+            interval=(interval or "").strip().lower() or "minute",
+            now=time.time(),
+        )
+
+    def _load_cached_history(self, cache_key: _HistoryCacheKey) -> list[dict[str, Any]]:
+        """Load stale cache on failure. Args: cache_key. Returns: rows. Raises: None."""
+        with self._history_cache_lock:
+            entry = self._history_cache.get(cache_key)
+            if entry:
+                LOGGER.warning(
+                    "Condition met: history_fetch_using_stale_cache",
+                    extra={
+                        "event": "history_fetch_using_stale_cache",
+                        "symbol_root": cache_key.symbol_root,
+                        "expiry": cache_key.expiry,
+                        "interval": cache_key.interval,
+                        "rows": len(entry.rows),
+                    },
+                )
+                return [dict(row) for row in entry.rows]
+        return []
+
+    def _normalize_history_rows(self, rows: Any) -> list[dict[str, Any]]:
+        """Normalize rows. Args: rows. Returns: clean rows. Raises: None."""
+        if not isinstance(rows, Iterable):
+            return []
+
+        now_utc = datetime.now(timezone.utc)
+        cutoff = now_utc.replace(second=0, microsecond=0)
+        normalized: list[dict[str, Any]] = []
+        seen_timestamps: set[datetime] = set()
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            timestamp = self._coerce_history_timestamp(
+                row.get("timestamp") or row.get("date")
+            )
+            if timestamp is None:
+                continue
+            candle_ts = timestamp.astimezone(timezone.utc).replace(
+                second=0, microsecond=0
+            )
+            if candle_ts >= cutoff:
+                continue
+            if candle_ts in seen_timestamps:
+                continue
+            seen_timestamps.add(candle_ts)
+            normalized.append(
+                {
+                    "timestamp": candle_ts,
+                    "open": float(row.get("open", 0.0) or 0.0),
+                    "high": float(row.get("high", 0.0) or 0.0),
+                    "low": float(row.get("low", 0.0) or 0.0),
+                    "close": float(row.get("close", 0.0) or 0.0),
+                    "volume": float(row.get("volume", 0.0) or 0.0),
+                }
+            )
+        normalized.sort(key=lambda item: cast(datetime, item["timestamp"]))
+        return normalized
+
+    @staticmethod
+    def _coerce_history_timestamp(value: Any) -> datetime | None:
+        """Parse timestamp. Args: value. Returns: UTC datetime. Raises: None."""
+        if isinstance(value, datetime):
+            ts = value
+        elif isinstance(value, str):
+            try:
+                ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        elif isinstance(value, (int, float)):
+            numeric = float(value)
+            if numeric > 1e12:
+                numeric /= 1000.0
+            ts = datetime.fromtimestamp(numeric, tz=timezone.utc)
+        else:
+            return None
+
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts
 
     def history_freshness(
         self,
@@ -642,38 +758,39 @@ class DataHub:
 
         if entry is None:
             return False, {
-                'ok': False,
-                'reason': 'missing',
-                'symbol_root': root,
-                'expiry': expiry,
-                'interval': interval,
-                'max_age_seconds': age_limit,
+                "ok": False,
+                "reason": "missing",
+                "symbol_root": root,
+                "expiry": expiry,
+                "interval": interval,
+                "max_age_seconds": age_limit,
             }
 
         age_seconds = max(0.0, now - entry.fetched_at)
         is_fresh = age_seconds <= age_limit
         return is_fresh, {
-            'ok': is_fresh,
-            'reason': None if is_fresh else 'stale',
-            'symbol_root': root,
-            'expiry': expiry,
-            'interval': interval,
-            'age_seconds': round(age_seconds, 3),
-            'max_age_seconds': age_limit,
-            'candles': len(entry.rows),
+            "ok": is_fresh,
+            "reason": None if is_fresh else "stale",
+            "symbol_root": root,
+            "expiry": expiry,
+            "interval": interval,
+            "age_seconds": round(age_seconds, 3),
+            "max_age_seconds": age_limit,
+            "candles": len(entry.rows),
         }
 
     @staticmethod
     def _extract_history_group(symbol: str) -> tuple[str, str]:
         """Return ``(symbol_root, expiry)`` grouping keys for history caching."""
-        normalized = (symbol or '').strip().upper()
-        clean = normalized.split(':')[-1]
+        normalized = (symbol or "").strip().upper()
+        clean = normalized.split(":")[-1]
         match = re.match(
-            r'^(?P<root>[A-Z]+)(?P<expiry>(?:\d{2}[A-Z]\d{2}|\d{2}[A-Z]{3}|\d{2}[A-Z]{3}\d{2}))\d+(?:CE|PE)$',
+            r"^(?P<root>[A-Z]+)(?P<expiry>(?:\d{2}[A-Z]\d{2}|\d{2}[A-Z]{3}|\d{2}[A-Z]{3}\d{2}))\d+(?:CE|PE)$",
             clean,
         )
         if match:
-            return match.group('root'), match.group('expiry')
-        return clean, 'SPOT'
+            return match.group("root"), match.group("expiry")
+        return clean, "SPOT"
+
 
 __all__ = ["DataHub", "Tick", "OrderListener", "TickListener"]
