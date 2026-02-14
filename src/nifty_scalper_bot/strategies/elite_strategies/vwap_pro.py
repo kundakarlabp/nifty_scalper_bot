@@ -267,12 +267,15 @@ class VWAPProStrategy(EliteStrategy):
             extra={"event": "vwap_pro_signal_enter", "symbol": symbol},
         )
         try:
+
             def _emit_no_signal(reason_code: str) -> None:
                 """Args: reason_code. Returns: None. Raises: Exception."""
                 try:
                     vol_val = float(indicators.get("volume") or 0.0)
                     avg_vol_val = float(indicators.get("avg_volume") or 0.0)
-                    accept_count = int(self._vwap_acceptance_tracker.get(acc_key, 0) or 0)
+                    accept_count = int(
+                        self._vwap_acceptance_tracker.get(acc_key, 0) or 0
+                    )
                     vwap_diff = float(current_price - vwap)
                     LOGGER.info(
                         "📉 NO SIGNAL | %s reason=%s",
@@ -287,7 +290,9 @@ class VWAPProStrategy(EliteStrategy):
                             "vwap_diff": vwap_diff,
                             "vol": vol_val,
                             "avg_vol": avg_vol_val,
-                            "vol_avg_ratio": (vol_val / avg_vol_val) if avg_vol_val > 0 else 0.0,
+                            "vol_avg_ratio": (
+                                (vol_val / avg_vol_val) if avg_vol_val > 0 else 0.0
+                            ),
                             "accept": accept_count,
                         },
                     )
@@ -393,9 +398,7 @@ class VWAPProStrategy(EliteStrategy):
                         )
                     },
                 )
-                self._reset_acceptance(
-                    acc_key, symbol=symbol, reason_code="cooldown_active"
-                )
+                # ✅ FIX 4a: Don't reset acceptance on cooldown (temporary)
                 _emit_no_signal("cooldown_active")
                 return None
 
@@ -407,14 +410,12 @@ class VWAPProStrategy(EliteStrategy):
                 _exch_vwap or _rolling_vwap or 0.0
             )  # ✅ Exchange > Rolling > 0
 
-            raw_atr = float(indicators.get("atr") or 0.0)
-            spread = max(
-                float(indicators.get("ask") or current_price)
-                - float(indicators.get("bid") or current_price),
-                0.0,
-            )
-            min_atr = max(current_price * 0.012, spread * 1.5, 1.0)
-            atr = max(raw_atr, min_atr)
+            # ✅ FIX 1: Enforce minimum ATR floor.
+            # Option 1-min bars produce micro-ATR (e.g. 0.24 for 828₹ option).
+            # Floor at 1% of premium ensures meaningful SL/TP distances.
+            _raw_atr = float(indicators.get("atr") or 0.0)
+            _min_atr = max(current_price * 0.01, 1.0)
+            atr = max(_raw_atr, _min_atr)
             entropy = float(indicators.get("entropy_5") or 0.5)
 
             index_ltp = float(
@@ -520,9 +521,7 @@ class VWAPProStrategy(EliteStrategy):
                     vwap=vwap,
                     context={"index_ltp": index_ltp, "index_vwap": index_vwap},
                 )
-                self._reset_acceptance(
-                    acc_key, symbol=symbol, reason_code="index_bias_invalid"
-                )
+                # ✅ FIX 4b: Don't reset acceptance on transient index data gap
                 _emit_no_signal("index_bias_invalid")
                 return None
 
@@ -530,8 +529,10 @@ class VWAPProStrategy(EliteStrategy):
             if index_vwap > 0 and index_volume > 0:
                 self._index_bias_degraded_logged = False
 
-            if (is_ce and index_ltp < index_vwap) or (
-                not is_ce and index_ltp > index_vwap
+            # ✅ FIX 2: Add 0.15% tolerance band around VWAP
+            _bias_tolerance = index_vwap * 0.0015
+            if (is_ce and index_ltp < (index_vwap - _bias_tolerance)) or (
+                not is_ce and index_ltp > (index_vwap + _bias_tolerance)
             ):
                 self._telemetry["skipped_bias"] += 1
                 if (
@@ -574,14 +575,14 @@ class VWAPProStrategy(EliteStrategy):
                     ltp=current_price,
                     vwap=vwap,
                 )
-                self._reset_acceptance(
-                    acc_key, symbol=symbol, reason_code="vwap_zero_or_invalid"
-                )
+                # ✅ FIX 4c: Don't reset acceptance on VWAP zero (data lag)
                 _emit_no_signal("vwap_zero_or_invalid")
                 return None
 
-            slack = atr * 1.0
-            if current_price < (vwap - slack):
+            # ✅ FIX 3: Allow entry within 1 ATR below VWAP.
+            # Index bias already confirms direction. This only rejects collapsing premiums.
+            _vwap_slack = atr * 1.0
+            if current_price < (vwap - _vwap_slack):
                 self._telemetry["skipped_vwap"] += 1
                 if (
                     self._telemetry["skipped_vwap"] <= 3
@@ -692,9 +693,7 @@ class VWAPProStrategy(EliteStrategy):
                         vol=vol,
                         avg_vol=avg_vol,
                     )
-                    self._reset_acceptance(
-                        acc_key, symbol=symbol, reason_code="volume_below_threshold"
-                    )
+                    # ✅ FIX 4d: Don't reset acceptance on transient volume data gap
                     _emit_no_signal("volume_below_threshold")
                     return None
             vol_thresh = self._dynamic_volume_threshold()
@@ -731,9 +730,7 @@ class VWAPProStrategy(EliteStrategy):
                         "required_volume": avg_vol * vol_thresh,
                     },
                 )
-                self._reset_acceptance(
-                    acc_key, symbol=symbol, reason_code="volume_below_threshold"
-                )
+                # ✅ FIX 4e: Don't reset acceptance on volume dip (can recover)
                 _emit_no_signal("volume_below_threshold")
                 return None
 
