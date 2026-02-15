@@ -5907,7 +5907,29 @@ async def _reconcile_state(ctx: BotContext) -> None:
         def _sync_operation() -> list[Mapping[str, Any]]:
             if ctx.order_manager:
                 ctx.order_manager.reconcile_open_orders_with_broker()
-            raw = ctx.broker_client.get_positions()
+            # ✅ FIX E: get_positions() is async on RobustDataProvider.
+            # Use the underlying sync broker_client instead.
+            _broker = getattr(ctx.broker_client, '_client', ctx.broker_client)
+            _get_pos = getattr(_broker, 'get_positions', None)
+            if _get_pos and callable(_get_pos):
+                import asyncio
+                import inspect
+                if inspect.iscoroutinefunction(_get_pos):
+                    # If still async, run in event loop
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor() as pool:
+                                raw = pool.submit(asyncio.run, _get_pos()).result(timeout=10)
+                        else:
+                            raw = loop.run_until_complete(_get_pos())
+                    except Exception:
+                        raw = {}
+                else:
+                    raw = _get_pos()
+            else:
+                raw = {}
             broker_positions: list[Mapping[str, Any]] = []
             if isinstance(raw, list):
                 broker_positions = [p for p in raw if isinstance(p, Mapping)]
