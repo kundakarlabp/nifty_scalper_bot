@@ -83,7 +83,7 @@ from nifty_scalper_bot.data.market_regime import MarketRegimeDetector
 from nifty_scalper_bot.data.persistent_state import PersistentStateManager
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
 from nifty_scalper_bot.data.rest.zerodha_ws_adapter import build_kite_ticker
-from nifty_scalper_bot.data.websocket.manager import WebSocketManager
+from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 from nifty_scalper_bot.execution.bracket_manager import (
     BracketManager,
     SupportsCancelOrder,

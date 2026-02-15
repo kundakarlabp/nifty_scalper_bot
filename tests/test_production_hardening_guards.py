@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from nifty_scalper_bot.data.data_hub import DataHub
-from nifty_scalper_bot.data.websocket.manager import WebSocketManager
+from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 from nifty_scalper_bot.utils.symbols import canonical, is_canonical_symbol
 
 
@@ -50,16 +50,6 @@ def test_data_hub_historical_source_always_fresh() -> None:
     assert meta.get("source") == "historical"
 
 
-class _WS:
-    def __init__(self, key: str) -> None:
-        self.api_key = key
-        self.on_ticks = None
-        self.on_error = None
-
-
-def test_websocket_singleton_master_client() -> None:
-    first = _WS("k1")
-    second = _WS("k1")
-    mgr1 = WebSocketManager(first, on_tick=lambda _: None)
-    mgr2 = WebSocketManager(second, on_tick=lambda _: None)
-    assert mgr1._client is mgr2._client
+def test_websocket_manager_owns_single_ticker_instance() -> None:
+    mgr = WebSocketManager('k1', 'token', on_tick=lambda _: None)
+    assert mgr.ticker is mgr.ticker

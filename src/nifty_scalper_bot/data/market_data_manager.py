@@ -24,7 +24,7 @@ from typing import (
 )
 
 from nifty_scalper_bot.config.settings import get_settings
-from nifty_scalper_bot.data.websocket.manager import ConnectionState, WebSocketManager
+from nifty_scalper_bot.streaming.websocket_manager import ConnectionState, WebSocketManager
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger

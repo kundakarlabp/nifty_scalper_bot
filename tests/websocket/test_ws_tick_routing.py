@@ -1,52 +1,58 @@
-"""Tests covering WebSocketManager callback wiring for non-Kite clients."""
+"""Tests covering WebSocketManager tick callback routing."""
 
 from __future__ import annotations
 
-from typing import Any, Callable
+import asyncio
+from collections.abc import Callable
+from typing import Any
 
-from nifty_scalper_bot.data.websocket.manager import WebSocketManager
+import pytest
+
+from nifty_scalper_bot.streaming import websocket_manager as ws_module
 
 
-class TickOnlyClient:
-    """Websocket client exposing only an ``on_tick`` callback setter."""
+class FakeKiteTicker:
+    MODE_FULL = 'full'
 
-    def __init__(self) -> None:
-        self._callback: Callable[[dict[str, Any]], None] = lambda _tick: None
-        # Attributes consumed by WebSocketManager during configuration
-        self.on_error = None
-        self.on_close = None
-        self.on_reconnect = None
-        self.on_open = None
-        self.on_connect = None
+    def __init__(self, api_key: str, access_token: str, reconnect: bool = True) -> None:
+        self.api_key = api_key
+        self.access_token = access_token
+        self.reconnect = reconnect
+        self.on_connect: Callable[..., None] | None = None
+        self.on_ticks: Callable[..., None] | None = None
+        self.on_error: Callable[..., None] | None = None
+        self.on_close: Callable[..., None] | None = None
 
-    @property
-    def on_tick(self) -> Callable[[dict[str, Any]], None]:
-        return self._callback
-
-    @on_tick.setter
-    def on_tick(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
-        self._callback = callback or (lambda _tick: None)
-
-    def connect(
-        self, threaded: bool = True
-    ) -> None:  # noqa: ARG002 - parity with real client
-        return None
+    def connect(self, threaded: bool = True) -> None:
+        del threaded
+        if self.on_connect:
+            self.on_connect(self, {'ok': True})
 
     def close(self) -> None:
         return None
 
-    def trigger(self, payload: dict[str, Any]) -> None:
-        self._callback(payload)
+    def subscribe(self, _tokens: list[int]) -> None:
+        return None
+
+    def set_mode(self, _mode: str, _tokens: list[int]) -> None:
+        return None
 
 
-def test_manager_supports_on_tick_only_clients() -> None:
-    """Manager should attach to ``on_tick`` when ``on_ticks`` is unavailable."""
-
+@pytest.mark.asyncio
+async def test_manager_routes_ticks_to_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     received: list[dict[str, Any]] = []
 
-    client = TickOnlyClient()
-    _ = WebSocketManager(client, received.append)
+    async def _callback(tick: dict[str, Any]) -> None:
+        received.append(tick)
 
-    client.trigger({"instrument_token": 101, "last_price": 123.45})
+    monkeypatch.setattr(ws_module, 'KiteTicker', FakeKiteTicker)
+    manager = ws_module.WebSocketManager('key', 'token', on_tick=_callback)
+    await manager.connect()
 
-    assert received == [{"instrument_token": 101, "last_price": 123.45}]
+    assert manager.ticker.on_ticks is not None
+    manager.ticker.on_ticks(manager.ticker, [{'instrument_token': 101}])
+    await asyncio.sleep(0)
+
+    assert received == [{'instrument_token': 101}]
