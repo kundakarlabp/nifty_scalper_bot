@@ -136,6 +136,7 @@ class WebSocketManager:
             "ws_handshake_failures_total",
             "Number of websocket handshake failures",
         )
+        self._m_handshake_timeouts = self._m_handshake_failures
         self._user_on_connect: Callable[[], None] | None = None
         self._user_on_disconnect: Callable[[], None] | None = None
 
@@ -356,15 +357,15 @@ class WebSocketManager:
 
         # ✅ FIX: Skip initial connect outside trading window (weekends, off-hours)
         if not self._is_trading_window():
-            self._transition_state(ConnectionState.DISABLED)
+            self._transition_state(ConnectionState.DISCONNECTED)
             self._logger.info(
                 "WS start deferred: outside trading window",
                 extra={"event": "ws_start_deferred_market_closed"},
             )
-            self._schedule_reconnect_at_market_open("start")
+            self._schedule_reconnect_delayed(60.0)
             return
 
-        self._transition_state(ConnectionState.STARTING)
+        self._transition_state(ConnectionState.CONNECTING)
         self._logger.info("Starting WebSocket connection")
         self._last_heartbeat = time.monotonic()
         self._connecting_since = self._last_heartbeat
@@ -552,7 +553,7 @@ class WebSocketManager:
         self._logger.warning(
             "WS handshake stuck; forcing reconnect",
             extra={
-                "event": "ws_stuck_connecting",
+                "event": "ws_handshake_stuck",
                 "elapsed_s": round(elapsed, 3),
                 "hb_delta_s": round(hb_delta, 3),
                 "failures": self._handshake_failures,
@@ -560,11 +561,11 @@ class WebSocketManager:
             },
         )
         try:
-            self._m_handshake_failures.inc()
+            self._m_handshake_timeouts.inc()
         except Exception:  # pragma: no cover - optional metrics
             pass
         self._increase_backoff()
-        self._transition_state(ConnectionState.RECONNECTING)
+        self._transition_state(ConnectionState.ERROR)
         self._connecting_since = 0.0
         # ✅ FIX C: Use _schedule_reconnect to avoid racing with error callback
         self._schedule_reconnect()
@@ -843,12 +844,11 @@ class WebSocketManager:
         # ✅ FIX: Short-circuit outside trading window to avoid noisy logs
         if not self._is_trading_window():
             self._cancel_reconnect_timer()
-            self._logger.info(
-                "WS reconnect suppressed: outside trading window",
+            self._logger.debug(
+                "WS force-reconnect suppressed: outside trading window",
                 extra={"event": "ws_reconnect_market_closed", "reason": reason},
             )
-            self._transition_state(ConnectionState.DISABLED)
-            self._schedule_reconnect_at_market_open(reason or "reconnect")
+            self._schedule_reconnect_delayed(60.0)
             return
 
         self._cancel_reconnect_timer()
@@ -972,8 +972,11 @@ class WebSocketManager:
         return get_market_state() == MarketState.OPEN
 
     def _schedule_reconnect_at_market_open(self, reason: str) -> None:
-        """Schedule reconnect timer for next market open. Args: reason; Returns: None; Raises: None."""
-        from datetime import datetime, time as dt_time, timedelta
+        """Schedule reconnect timer for next market open.
+
+        Args: reason; Returns: None; Raises: None.
+        """
+        from datetime import datetime, timedelta, time as dt_time
         from zoneinfo import ZoneInfo
 
         self._cancel_reconnect_timer()
@@ -1000,6 +1003,30 @@ class WebSocketManager:
                 "reason": reason,
                 "delay_s": round(delay_s, 3),
                 "next_open": next_open.isoformat(),
+            },
+        )
+
+    def _schedule_reconnect_delayed(self, delay_s: float) -> None:
+        """Schedule a fixed-delay reconnect check.
+
+        Args: delay_s; Returns: None; Raises: None.
+        """
+        self._cancel_reconnect_timer()
+        safe_delay = max(float(delay_s), 1.0)
+        timer = threading.Timer(
+            safe_delay,
+            self._force_reconnect,
+            kwargs={"reason": "market_recheck"},
+        )
+        timer.daemon = True
+        self._reconnect_timer = timer
+        timer.start()
+        self._logger.info(
+            "WS reconnect scheduled (market recheck in %.0fs)",
+            safe_delay,
+            extra={
+                "event": "ws_market_recheck_scheduled",
+                "delay_s": round(safe_delay, 3),
             },
         )
 
