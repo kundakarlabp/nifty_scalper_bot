@@ -2735,6 +2735,8 @@ class StrategyRunner:
 
             if "FUT" in symbol.upper():
                 return
+            if get_market_state() != MarketState.OPEN:
+                return None
 
             # =================================================================
             # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)

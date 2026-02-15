@@ -10,17 +10,26 @@ def canonical(symbol: str) -> str:
     raw = str(symbol or "").strip().upper()
     if not raw:
         return ""
-    compact = "".join(raw.replace("_", " ").split())
-    compact = compact.replace("NIFTY50", "NIFTY").replace("NIFTYBANK", "BANKNIFTY")
-    if ":" in compact:
-        exchange, tradingsymbol = compact.split(":", 1)
+    normalized = raw.replace("_", " ")
+    if ":" in normalized:
+        exchange, tradingsymbol = normalized.split(":", 1)
+        tradingsymbol = " ".join(tradingsymbol.split())
         if not exchange:
             exchange = "NFO" if tradingsymbol.endswith(("CE", "PE", "FUT")) else "NSE"
         return f"{exchange}:{tradingsymbol}"
+    compact = "".join(normalized.split())
     if compact.isdigit():
         return compact
     exchange = "NFO" if compact.endswith(("CE", "PE", "FUT")) else "NSE"
     return f"{exchange}:{compact}"
+
+
+def enforce_canonical(symbol: str) -> str:
+    """Args: symbol; Returns: canonical symbol; Raises: ValueError for malformed values."""
+    value = str(symbol or "").strip()
+    if ":" not in value:
+        raise ValueError(f"Non-canonical symbol: {symbol}")
+    return value
 
 
 def normalize_symbol(symbol: str) -> str:

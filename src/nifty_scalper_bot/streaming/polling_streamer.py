@@ -13,8 +13,8 @@ from typing import Any, Callable, Iterable, Sequence
 # [FIX] Use centralized logging utilities
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
-from nifty_scalper_bot.utils.symbols import canonical
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
+from nifty_scalper_bot.utils.symbols import canonical, enforce_canonical
 
 LOGGER = get_logger(__name__)
 
@@ -268,7 +268,8 @@ class PollingStreamer:
                             symbol = tick.get("symbol")
                             if not symbol:
                                 continue
-                            symbol = canonical(str(symbol))
+                            symbol = enforce_canonical(canonical(str(symbol)))
+                            assert symbol.count(":") == 1
                             tick["symbol"] = symbol
 
                             # 4. Seed DataHub (Synchronous)
@@ -422,12 +423,11 @@ class PollingStreamer:
                         else:
                             symbol = f"NSE:{symbol}"
 
+                    symbol = enforce_canonical(canonical(symbol))
+                    assert symbol.count(":") == 1
                     symbols_for_api.append(symbol)
                     token_to_symbol_map[token] = symbol
                     symbol_to_token_map[symbol] = token
-                    # Also map without exchange for reverse lookup
-                    base_symbol = symbol.split(":", 1)[-1] if ":" in symbol else symbol
-                    symbol_to_token_map[base_symbol] = token
                 else:
                     if token not in self._symbol_lookup_failed_once:
                         self._symbol_lookup_failed_once.add(token)
@@ -496,11 +496,7 @@ class PollingStreamer:
                     token = quote.get("instrument_token")
                     if not token:
                         # Try to find token from our reverse map
-                        token = symbol_to_token_map.get(key)
-                        if not token:
-                            # Try base symbol without exchange
-                            base_key = key.split(":", 1)[-1] if ":" in str(key) else key
-                            token = symbol_to_token_map.get(base_key)
+                        token = symbol_to_token_map.get(str(key))
 
                     if not token:
                         LOGGER.debug(f"[POLL] Cannot determine token for key: {key}")
