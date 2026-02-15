@@ -1818,6 +1818,20 @@ class RuntimeSelfChecker:
         Raises:
             None.
         """
+        # ✅ FIX: Streamer being disconnected outside trading hours is expected
+        from datetime import datetime, time as dt_time
+        from zoneinfo import ZoneInfo
+
+        ist = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        is_trading_window = (
+            now_ist.weekday() < 5
+            and dt_time(9, 0) <= now_ist.time() <= dt_time(15, 45)
+        )
+        if not is_trading_window:
+            return True, "market_closed", cast(
+                dict[str, object], {"connected": False, "market_closed": True}
+            )
 
         streamer = self._context.streamer
         if streamer is None:
@@ -5907,28 +5921,15 @@ async def _reconcile_state(ctx: BotContext) -> None:
         def _sync_operation() -> list[Mapping[str, Any]]:
             if ctx.order_manager:
                 ctx.order_manager.reconcile_open_orders_with_broker()
-            # ✅ FIX E: get_positions() is async on RobustDataProvider.
-            # Use the underlying sync broker_client instead.
-            _broker = getattr(ctx.broker_client, '_client', ctx.broker_client)
-            _get_pos = getattr(_broker, 'get_positions', None)
-            if _get_pos and callable(_get_pos):
-                import asyncio
-                import inspect
-                if inspect.iscoroutinefunction(_get_pos):
-                    # If still async, run in event loop
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            import concurrent.futures
-                            with concurrent.futures.ThreadPoolExecutor() as pool:
-                                raw = pool.submit(asyncio.run, _get_pos()).result(timeout=10)
-                        else:
-                            raw = loop.run_until_complete(_get_pos())
-                    except Exception:
-                        raw = {}
-                else:
-                    raw = _get_pos()
-            else:
+            # ✅ FIX E: ctx.broker_client is RobustDataProvider whose get_positions()
+            # without await returns a coroutine object, not positions.
+            # Access the underlying sync ZerodhaKiteClient directly.
+            _sync_broker = getattr(ctx.broker_client, 'client',
+                                   getattr(ctx.broker_client, '_broker', ctx.broker_client))
+            try:
+                raw = _sync_broker.get_positions()
+            except Exception as _pos_err:
+                LOGGER.warning("Position fetch failed in reconcile: %s", _pos_err)
                 raw = {}
             broker_positions: list[Mapping[str, Any]] = []
             if isinstance(raw, list):
@@ -5944,7 +5945,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
             return broker_positions
 
         return cast(list[Mapping[str, Any]], _run_sync_locked(_sync_operation))
-
+        
     # 1/2. SYNC ORDERS + POSITIONS & AUTO-GUARD ORPHANS
     if ctx.position_manager:
         try:
