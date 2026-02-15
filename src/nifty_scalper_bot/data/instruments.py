@@ -30,6 +30,8 @@ from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from nifty_scalper_bot.utils.symbols import canonical
+
 import logging
 
 LOGGER = logging.getLogger("nifty_scalper_bot.data.instruments")
@@ -48,8 +50,8 @@ WELL_KNOWN: Dict[str, int] = {
 
 # Canonical human-readable names for format_token_as_symbol
 CANONICAL_TOKENS: Dict[int, str] = {
-    256265: "NIFTY 50",
-    260105: "NIFTY BANK",
+    256265: "NIFTY",
+    260105: "BANKNIFTY",
 }
 
 _SQLITE_SCHEMA = """
@@ -502,31 +504,30 @@ class InstrumentResolver:
         return tradingsymbol, exchange, segment
 
     def build_quote_keys(self, symbol: str) -> Tuple[str, List[str]]:
-        """
-        Build canonical symbol and candidate quote keys for broker lookups.
-        """
-        canonical = str(symbol).strip().upper()
-        if ":" in canonical:
-            _pref, canonical = canonical.split(":", 1)
-        canonical = canonical.replace(" ", "")
+        """Build canonical symbol and candidate quote keys for broker lookups."""
+        canonical_symbol = canonical(str(symbol))
+        if ":" in canonical_symbol:
+            _pref, canonical_symbol = canonical_symbol.split(":", 1)
+        canonical_symbol = canonical_symbol.replace(" ", "")
         candidates: List[str] = []
-        # prefer exchange-qualified NFO for options
-        if canonical.endswith("CE") or canonical.endswith("PE"):
-            candidates.append(f"NFO:{canonical}")
-        candidates.append(canonical)
-        return canonical, candidates
+        if canonical_symbol.endswith(("CE", "PE", "FUT")):
+            candidates.append(f"NFO:{canonical_symbol}")
+        else:
+            candidates.append(f"NSE:{canonical_symbol}")
+        candidates.append(canonical_symbol)
+        return canonical_symbol, candidates
 
     def format_token_as_symbol(self, token: int) -> str:
-        """Format token into a human readable exchange:symbol string using canonical tokens."""
+        """Format token into a canonical exchange-qualified symbol."""
         try:
             token_int = int(token)
-            canonical = CANONICAL_TOKENS.get(token_int)
+            canonical_symbol = CANONICAL_TOKENS.get(token_int)
             exchange = self._exchange_by_token.get(token_int, "NSE")
-            if canonical:
-                return f"{exchange}:{canonical}"
+            if canonical_symbol:
+                return canonical(f"{exchange}:{canonical_symbol}")
             base = self._symbol_by_token.get(token_int)
             if base:
-                return f"{exchange}:{base}"
+                return canonical(f"{exchange}:{base}")
             return str(token)
         except Exception:
             return str(token)

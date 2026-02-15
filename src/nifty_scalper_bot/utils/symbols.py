@@ -5,21 +5,27 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 
-def normalize_symbol(symbol: str) -> str:
-    """Args: symbol; Returns: normalized exchange-qualified symbol; Raises: none."""
-    raw = str(symbol or "").strip().upper()
+def canonical(symbol: str) -> str:
+    """Args: symbol; Returns: canonical EXCHANGE:SYMBOL; Raises: none."""
+    raw = str(symbol or '').strip().upper()
     if not raw:
-        return ""
-    compact = " ".join(raw.replace("_", " ").split())
-    if ":" in compact:
-        return compact
+        return ''
+    compact = ''.join(raw.replace('_', ' ').split())
+    compact = compact.replace('NIFTY50', 'NIFTY').replace('NIFTYBANK', 'BANKNIFTY')
+    if ':' in compact:
+        exchange, tradingsymbol = compact.split(':', 1)
+        if not exchange:
+            exchange = 'NFO' if tradingsymbol.endswith(('CE', 'PE', 'FUT')) else 'NSE'
+        return f'{exchange}:{tradingsymbol}'
     if compact.isdigit():
         return compact
-    if compact.startswith("NIFTY") or compact.startswith("BANKNIFTY"):
-        return f"NSE:{compact}"
-    if compact.endswith("CE") or compact.endswith("PE"):
-        return f"NFO:{compact}"
-    return f"NSE:{compact}"
+    exchange = 'NFO' if compact.endswith(('CE', 'PE', 'FUT')) else 'NSE'
+    return f'{exchange}:{compact}'
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Args: symbol; Returns: normalized exchange-qualified symbol; Raises: none."""
+    return canonical(symbol)
 
 
 def unique_normalized_symbols(symbols: Iterable[str]) -> list[str]:

@@ -152,8 +152,9 @@ from nifty_scalper_bot.utils.errors import ConfigurationError
 from nifty_scalper_bot.utils.logging import get_logger, setup_logging
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
-from nifty_scalper_bot.utils.symbols import unique_normalized_symbols
-from nifty_scalper_bot.utils.reasons import SOFT, canonical
+from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
+from nifty_scalper_bot.utils.symbols import canonical, unique_normalized_symbols
+from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
@@ -927,7 +928,7 @@ class TradingSessionGuard:
                         or risk_snapshot.breaker_reason
                         or ""
                     )
-                    risk_fail_reason = canonical(str(source))
+                    risk_fail_reason = canonical_reason(str(source))
                     if risk_fail_reason == "OK":
                         risk_fail_reason = "RISK_CHECK_FAILED"
             if risk_fail_reason is None:
@@ -969,7 +970,7 @@ class TradingSessionGuard:
             elif status.fail_reason:
                 fail_reason = status.fail_reason
             else:
-                fail_reason = canonical(",".join(status.reasons))
+                fail_reason = canonical_reason(",".join(status.reasons))
                 if fail_reason == "OK":
                     fail_reason = "unknown"
         payload["session_fail_reason"] = fail_reason
@@ -1678,6 +1679,10 @@ class RuntimeSelfChecker:
             if hub is None:
                 return True, "no_data_hub", {}
 
+            market_state = get_market_state()
+            if market_state != MarketState.OPEN:
+                return True, "market_closed", {"market_state": market_state.value}
+
             # [FIX] Use actually tracked symbols from DataHub to prevent false negatives
             # Accessing protected member _quotes is necessary here for introspection
             symbols = list(getattr(hub, "_quotes", {}).keys())
@@ -1718,7 +1723,7 @@ class RuntimeSelfChecker:
                 else:
                     detail = cast(str, meta.get("reason") or "ok")
                     payload = cast(dict[str, object], dict(meta or {}))
-                    payload["symbol_checked"] = symbol
+                    payload["symbol_checked"] = canonical(symbol)
                     payload["adaptive_ms"] = adaptive_ms
                     self._logger.info(
                         "Condition met: runtime_self_check_data_freshness",
@@ -1761,7 +1766,7 @@ class RuntimeSelfChecker:
             )
 
             payload = cast(dict[str, object], dict(meta or {}))
-            payload["symbol_checked"] = symbol
+            payload["symbol_checked"] = canonical(symbol)
             payload["adaptive_ms"] = adaptive_ms
 
             self._logger.info(

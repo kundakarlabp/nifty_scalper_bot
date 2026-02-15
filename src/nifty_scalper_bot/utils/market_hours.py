@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, time as dtime
+from enum import Enum
 from functools import lru_cache
 from typing import Tuple
 from zoneinfo import ZoneInfo
@@ -30,6 +31,36 @@ MARKET_OPEN = dtime(9, 15)      # NSE opens
 SAFE_START = dtime(9, 20)       # Avoid opening volatility (was 9:30, now 9:20)
 SAFE_END = dtime(15, 15)        # Stop new entries 15 mins before close
 MARKET_CLOSE = dtime(15, 30)    # NSE closes
+
+
+class MarketState(Enum):
+    """Market session state classification."""
+
+    CLOSED = 'closed'
+    PREOPEN = 'preopen'
+    OPEN = 'open'
+    POSTMARKET = 'postmarket'
+
+
+def get_market_state() -> MarketState:
+    """Args: none; Returns: current market state; Raises: none."""
+    override = os.getenv('SESSION_ALLOW_OUT_OF_HOURS', '').lower()
+    if override == 'true':
+        return MarketState.OPEN
+
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return MarketState.CLOSED
+
+    current = now.time()
+    preopen_start = dtime(9, 0)
+    if preopen_start <= current < MARKET_OPEN:
+        return MarketState.PREOPEN
+    if MARKET_OPEN <= current <= MARKET_CLOSE:
+        return MarketState.OPEN
+    if MARKET_CLOSE < current <= dtime(16, 0):
+        return MarketState.POSTMARKET
+    return MarketState.CLOSED
 
 
 def is_market_hours(allow_override: bool = True) -> bool:
@@ -57,8 +88,7 @@ def is_market_open() -> bool:
     Check if market is open (broader check - 9:15 to 15:30).
     Useful for data collection even when not trading.
     """
-    now = datetime.now(IST).time()
-    return MARKET_OPEN <= now <= MARKET_CLOSE
+    return get_market_state() == MarketState.OPEN
 
 
 def get_time_status() -> Tuple[bool, str]:
@@ -124,6 +154,8 @@ __all__ = [
     "get_time_status",
     "get_current_ist_time",
     "format_time_for_log",
+    "MarketState",
+    "get_market_state",
     "IST",
     "MARKET_OPEN",
     "SAFE_START", 

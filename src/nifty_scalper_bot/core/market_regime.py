@@ -446,6 +446,24 @@ class MarketRegimeDetector:
             )
             raise
 
+    def get_snapshot(self, symbol: str) -> RegimeSnapshot | None:
+        """Return cached regime snapshot for *symbol*. Args: symbol. Returns: snapshot. Raises: None."""
+        self._logger.debug(
+            "Entered MarketRegimeDetector.get_snapshot",
+            extra={"event": "regime_get_snapshot", "symbol": symbol},
+        )
+        try:
+            with self._lock:
+                return self._state.get(symbol)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            self._logger.error(
+                "Failure in MarketRegimeDetector.get_snapshot: %s",
+                exc,
+                extra={"event": "regime_get_snapshot_error", "symbol": symbol},
+                exc_info=exc,
+            )
+            return None
+
     def ingest_tick(self, tick: Mapping[str, object]) -> RegimeSnapshot | None:
         """Process *tick* payloads and emit regime snapshots when available.
 

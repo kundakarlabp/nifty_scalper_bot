@@ -49,9 +49,15 @@ from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.logging import get_logger
-from nifty_scalper_bot.utils.market_hours import get_time_status, is_market_hours_cached
+from nifty_scalper_bot.utils.market_hours import (
+    MarketState,
+    get_market_state,
+    get_time_status,
+    is_market_hours_cached,
+)
 from nifty_scalper_bot.utils.metrics import Counter
-from nifty_scalper_bot.utils.reasons import canonical
+from nifty_scalper_bot.utils.reasons import canonical as canonical_reason
+from nifty_scalper_bot.utils.symbols import canonical
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.data_hub import DataHub
@@ -1005,16 +1011,17 @@ class StrategyRunner:
             )
 
             # 3. Ingest
-            self._ingest_bar(data["symbol"], bar, is_backfill=True)
+            symbol = canonical(str(data["symbol"]))
+            self._ingest_bar(symbol, bar, is_backfill=True)
 
             # 4. Force Registration
             with self._lock:
-                self._active_symbols.add(data["symbol"])
-                if data["symbol"] not in self._symbol_state:
-                    self._symbol_state[data["symbol"]] = SymbolRuntimeState(
-                        symbol=data["symbol"], history_limit=2000
+                self._active_symbols.add(symbol)
+                if symbol not in self._symbol_state:
+                    self._symbol_state[symbol] = SymbolRuntimeState(
+                        symbol=symbol, history_limit=2000
                     )
-                self._symbol_states.setdefault(data["symbol"], SymbolState.DISCOVERED)
+                self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
 
         except Exception as exc:
             self._logger.error(
@@ -1028,24 +1035,25 @@ class StrategyRunner:
         """
         with self._lock:
             for sym in symbols:
+                normalized = canonical(sym)
                 # 1. Register Active (Critical for main loop)
-                self._active_symbols.add(sym)
+                self._active_symbols.add(normalized)
 
                 # 2. Ensure SymbolState exists (Critical for Strategy Context)
-                if sym not in self._symbol_state:
-                    self._symbol_state[sym] = SymbolRuntimeState(
-                        symbol=sym, history_limit=2000
+                if normalized not in self._symbol_state:
+                    self._symbol_state[normalized] = SymbolRuntimeState(
+                        symbol=normalized, history_limit=2000
                     )
-                self._symbol_states.setdefault(sym, SymbolState.DISCOVERED)
-                self._set_symbol_hydration_state(sym, SymbolState.READY)
+                self._symbol_states.setdefault(normalized, SymbolState.DISCOVERED)
+                self._set_symbol_hydration_state(normalized, SymbolState.READY)
 
                 # 3. Initialize BarBuilder (Prevent KeyErrors in internal checks)
-                if sym not in self._bar_builders:
-                    self._bar_builders[sym] = OneMinuteBarBuilder()
+                if normalized not in self._bar_builders:
+                    self._bar_builders[normalized] = OneMinuteBarBuilder()
 
                 # 4. Set High-Water Mark (Prevent dropping first live tick)
-                if sym not in self._last_bar_ts:
-                    self._last_bar_ts[sym] = datetime.now(timezone.utc)
+                if normalized not in self._last_bar_ts:
+                    self._last_bar_ts[normalized] = datetime.now(timezone.utc)
 
         # 5. THE KILL SWITCH: Prevents fallback backfill logic from running
         self._startup_hydrated = True
@@ -2174,43 +2182,13 @@ class StrategyRunner:
             LOGGER.error(f"Error in async tick processing: {exc}", exc_info=True)
 
     def _is_market_open(self, now: datetime) -> bool:
-        """
-        Check if market is currently open (09:15 - 15:30 IST).
-        Handles timezone conversion robustly.
-        """
+        """Return True only when market state is OPEN."""
         try:
-            # 1. Allow Override for Testing/Session Extension
-            # Checks environment variable to bypass time restrictions
-            if os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "false").lower() == "true":
-                return True
-
-            # 2. Define IST Timezone (UTC+5:30)
-            ist_offset = timedelta(hours=5, minutes=30)
-            ist_tz = timezone(ist_offset)
-
-            # 3. Ensure 'now' is Timezone Aware
-            if now.tzinfo is None:
-                now = now.replace(tzinfo=timezone.utc)
-
-            # 4. Convert to IST
-            now_ist = now.astimezone(ist_tz)
-
-            # 5. Check Weekend (Saturday=5, Sunday=6)
-            if now_ist.weekday() >= 5:
-                return False
-
-            # 6. Check Time Boundaries (09:15 to 15:30)
-            t = now_ist.time()
-            start = time(9, 15)
-            end = time(15, 30)
-
-            return start <= t <= end
-
+            _ = now
+            return get_market_state() == MarketState.OPEN
         except Exception as e:
-            # Fail safe: If check crashes, defaulting to True prevents locking the bot
-            # (Risk is managed elsewhere)
-            self._logger.warning(f"Market time check failed: {e}. Defaulting to OPEN.")
-            return True
+            self._logger.warning(f"Market time check failed: {e}. Defaulting to CLOSED.")
+            return False
 
     def _on_tick_safe(self, tick: Mapping[str, Any]) -> None:
         """Safe wrapper for _on_tick to handle exceptions."""
@@ -5144,15 +5122,11 @@ class StrategyRunner:
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
-        """Normalize symbol to uppercase trimmed string."""
-        normalized = symbol.strip().upper()
+        """Normalize symbol to canonical exchange-qualified form."""
+        normalized = canonical(symbol)
         if not normalized:
             msg = "symbol must not be empty"
             raise ValueError(msg)
-
-        if ":" in normalized:
-            normalized = normalized.split(":", 1)[1]
-
         return normalized
 
     def _update_last_signal_selection(
