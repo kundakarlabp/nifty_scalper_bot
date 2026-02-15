@@ -12,6 +12,8 @@ from typing import Any, Callable, Iterable, Sequence
 
 # [FIX] Use centralized logging utilities
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
+from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
+from nifty_scalper_bot.utils.symbols import canonical
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
 
 LOGGER = get_logger(__name__)
@@ -45,6 +47,7 @@ class PollingStreamer:
         self._require_depth = bool(require_depth)
         self._warn_on_rate_limit = bool(warn_on_rate_limit)
         self._kite_streamer = None  # Optional KiteTicker reference for health checks
+        self._websocket_mode_enabled = False
 
         # Metrics
         self._m_poll_ok = Counter("polling_success_total", "Successful poll cycles")
@@ -91,6 +94,10 @@ class PollingStreamer:
     def set_kite_streamer(self, kite_streamer) -> None:
         """Set optional KiteTicker streamer reference for health monitoring."""
         self._kite_streamer = kite_streamer
+
+    def set_websocket_mode(self, enabled: bool) -> None:
+        """Args: enabled; Returns: none; Raises: none."""
+        self._websocket_mode_enabled = bool(enabled)
 
     def subscribe(self, tokens: Sequence[int]) -> None:
         """Add tokens to the polling list and seed DataHub immediately.
@@ -210,7 +217,12 @@ class PollingStreamer:
                 seen_nfo_this_cycle = False
                 seen_any_tick_this_cycle = False
 
-                if tokens:
+                should_poll_quotes = (
+                    bool(tokens)
+                    and not self._websocket_mode_enabled
+                    and get_market_state() == MarketState.OPEN
+                )
+                if should_poll_quotes:
                     # Yield chunks to avoid massive requests
                     for batch in self._chunks(tokens, self._batch_size):
                         # Safe Fetch (Uses the corrected _fetch_ticks)
@@ -252,6 +264,8 @@ class PollingStreamer:
                             symbol = tick.get("symbol")
                             if not symbol:
                                 continue
+                            symbol = canonical(str(symbol))
+                            tick["symbol"] = symbol
 
                             # 4. Seed DataHub (Synchronous)
                             if self._data_hub:
@@ -786,7 +800,7 @@ class PollingStreamer:
     def _resolve_instrument(self, token: int) -> str | None:
         """Resolve instrument token to exchange:tradingsymbol format.
 
-        Returns format like 'NSE:NIFTY 50' or 'NFO:NIFTY2612025700CE'.
+        Returns format like 'NSE:NIFTY' or 'NFO:NIFTY2612025700CE'.
         """
         if token is None:
             return None
@@ -796,7 +810,7 @@ class PollingStreamer:
             if isinstance(token, str):
                 if not token.strip().isdigit():
                     # It's already a symbol like "NSE:NIFTY 50", return it directly
-                    return token if ":" in token else None
+                    return canonical(token) if ":" in token else None
                 token_int = int(token.strip())
             else:
                 token_int = int(token)
@@ -805,7 +819,7 @@ class PollingStreamer:
             if hasattr(self._resolver, "format_token_as_symbol"):
                 result = self._resolver.format_token_as_symbol(token_int)
                 if result and result != str(token_int):
-                    return result
+                    return canonical(result)
 
             # 2. Try lookup method
             if hasattr(self._resolver, "lookup"):
@@ -816,10 +830,10 @@ class PollingStreamer:
                     if symbol:
                         # Handle special case: NIFTY 50 / NIFTY BANK
                         if symbol in ("NIFTY", "NIFTY 50"):
-                            return "NSE:NIFTY 50"
-                        elif symbol in ("BANKNIFTY", "NIFTY BANK"):
-                            return "NSE:NIFTY BANK"
-                        return f"{exchange}:{symbol}"
+                            return "NSE:NIFTY"
+                        if symbol in ("BANKNIFTY", "NIFTY BANK"):
+                            return "NSE:BANKNIFTY"
+                        return canonical(f"{exchange}:{symbol}")
 
             # 3. Try direct cache access with exchange lookup
             if hasattr(self._resolver, "_symbol_by_token"):
@@ -834,16 +848,16 @@ class PollingStreamer:
 
                     # Handle NIFTY special case
                     if symbol in ("NIFTY", "NIFTY 50"):
-                        return "NSE:NIFTY 50"
-                    elif symbol in ("BANKNIFTY", "NIFTY BANK"):
-                        return "NSE:NIFTY BANK"
+                        return "NSE:NIFTY"
+                    if symbol in ("BANKNIFTY", "NIFTY BANK"):
+                        return "NSE:BANKNIFTY"
 
-                    return f"{exchange}:{symbol}"
+                    return canonical(f"{exchange}:{symbol}")
 
             # 4. Well-known token fallback
             WELL_KNOWN_TOKENS = {
-                256265: "NSE:NIFTY 50",
-                260105: "NSE:NIFTY BANK",
+                256265: "NSE:NIFTY",
+                260105: "NSE:BANKNIFTY",
             }
             if token_int in WELL_KNOWN_TOKENS:
                 return WELL_KNOWN_TOKENS[token_int]

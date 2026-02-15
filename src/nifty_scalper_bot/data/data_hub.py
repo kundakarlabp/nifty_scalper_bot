@@ -14,7 +14,8 @@ from typing import Any, Callable, Iterable, Mapping, TypedDict, cast
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.logging import get_logger
-from nifty_scalper_bot.utils.symbols import normalize_symbol
+from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
+from nifty_scalper_bot.utils.symbols import canonical, normalize_symbol
 from nifty_scalper_bot.utils.options_math import (
     black_scholes_greeks,
     implied_volatility,
@@ -177,21 +178,15 @@ class DataHub:
 
         if not symbol:
             return
-        normalized_symbol = normalize_symbol(str(symbol)) or str(symbol)
+        normalized_symbol = canonical(str(symbol)) or str(symbol)
 
         with self._lock:
             # 1. Update Cache
             self._quotes[normalized_symbol] = tick
-            self._quotes[str(symbol)] = tick
-
-            # Cross-reference token/symbol (Fix for Self-Checker)
-            if str(token) == "256265":
-                self._quotes["NSE:NIFTY 50"] = tick
-                self._quotes["NIFTY 50"] = tick
 
             # 2. Update Metrics (Throttled)
             try:
-                self._capture_option_metrics(symbol, tick)
+                self._capture_option_metrics(normalized_symbol, tick)
             except Exception:
                 pass  # Don't let math errors kill the tick
 
@@ -211,8 +206,8 @@ class DataHub:
                     LOGGER.debug(f"MessageBus publish failed: {exc}")
 
             # 4. Notify Legacy Subscribers (Backward Compatibility)
-            if symbol in self._tick_subscribers:
-                for callback in list(self._tick_subscribers[symbol]):
+            if normalized_symbol in self._tick_subscribers:
+                for callback in list(self._tick_subscribers[normalized_symbol]):
                     try:
                         callback(tick)
                     except Exception as exc:
@@ -278,8 +273,9 @@ class DataHub:
             symbol: Trading symbol.
             allow_pull: If True and cache is empty, try fetching from broker via MDM.
         """
+        lookup_symbol = canonical(symbol)
         with self._lock:
-            tick = self._quotes.get(symbol)
+            tick = self._quotes.get(lookup_symbol)
 
         if tick is not None:
             return tick
@@ -336,12 +332,16 @@ class DataHub:
         symbol: str,
         threshold_ms: float = 5000.0,
     ) -> tuple[bool, dict[str, Any]]:
-        """
-        Check if the quote for a symbol is fresh (WS-aware, REST-safe).
+        """Check freshness with market-state and source-aware TTL handling."""
+        market_state = get_market_state()
+        if market_state != MarketState.OPEN:
+            return True, {
+                "ok": True,
+                "reason": "market_closed",
+                "market_state": market_state.value,
+                "threshold_ms": threshold_ms,
+            }
 
-        Handles the "Railway Problem" where REST polling is naturally slower
-        than WebSocket ticks, preventing false-positive 'STALE' blocks.
-        """
         quote = self.get_quote(symbol)
         if not quote:
             return False, {
@@ -358,15 +358,11 @@ class DataHub:
                 "threshold_ms": threshold_ms,
             }
 
-        # 1. Calculate Age
-        # Use centralized clock if available, else system time
         now = (self._clock() if hasattr(self, "_clock") else time.time()) * 1000.0
         ts = quote.get("timestamp")
-
         if isinstance(ts, datetime):
             ts_ms = ts.timestamp() * 1000.0
         elif isinstance(ts, (int, float)):
-            # Auto-detect seconds vs ms
             ts_ms = float(ts) * (1000.0 if ts < 1e11 else 1.0)
         else:
             return False, {
@@ -376,18 +372,14 @@ class DataHub:
             }
 
         age = max(0.0, now - ts_ms)
-
-        # 2. Source-Aware Threshold (The Magic Logic)
-        # We trust the 'source' tag set by store_quote. Default to 'ws' (strict).
-        source = quote.get("source", "ws")
-
-        if source == "rest":
-            # REST polling: Relax threshold to 90s (covers 60s poll interval + buffers)
-            effective_threshold = max(threshold_ms, 90_000.0)
+        source = str(quote.get("source", "ws")).lower()
+        if source == "ws":
+            ttl_ms = 5_000.0
+        elif source == "rest":
+            ttl_ms = 90_000.0
         else:
-            # WS (or unknown): Keep strict safety threshold (default 5s)
-            effective_threshold = threshold_ms
-
+            ttl_ms = threshold_ms
+        effective_threshold = max(threshold_ms, ttl_ms)
         is_fresh = age <= effective_threshold
 
         return is_fresh, {
@@ -404,20 +396,22 @@ class DataHub:
 
     def subscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Register a callback for tick updates on a symbol."""
+        normalized = canonical(symbol)
         with self._lock:
-            if symbol not in self._tick_subscribers:
-                self._tick_subscribers[symbol] = set()
+            if normalized not in self._tick_subscribers:
+                self._tick_subscribers[normalized] = set()
                 if self._mdm:
-                    self._mdm.subscribe(symbol, self.ingest_tick_sync)
-            self._tick_subscribers[symbol].add(callback)
+                    self._mdm.subscribe(normalized, self.ingest_tick_sync)
+            self._tick_subscribers[normalized].add(callback)
 
     def unsubscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Unregister a tick callback."""
+        normalized = canonical(symbol)
         with self._lock:
-            if symbol in self._tick_subscribers:
-                self._tick_subscribers[symbol].discard(callback)
-                if not self._tick_subscribers[symbol]:
-                    del self._tick_subscribers[symbol]
+            if normalized in self._tick_subscribers:
+                self._tick_subscribers[normalized].discard(callback)
+                if not self._tick_subscribers[normalized]:
+                    del self._tick_subscribers[normalized]
 
     def subscribe_orders(self, callback: OrderListener) -> None:
         """Register a callback for all order updates."""
@@ -486,9 +480,9 @@ class DataHub:
             pass
 
     def _get_underlying_price(self, base: str) -> float | None:
-        candidates = [base, "NIFTY 50", "NIFTY BANK"]
+        candidates = [canonical(base)]
         if base == "BANKNIFTY":
-            candidates = ["NIFTY BANK", "BANKNIFTY"]
+            candidates = [canonical("BANKNIFTY")]
 
         with self._lock:
             for cand in candidates:

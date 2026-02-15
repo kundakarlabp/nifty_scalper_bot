@@ -14,6 +14,7 @@ from typing import Any, Callable, Iterable
 from nifty_scalper_bot.utils.errors import WebSocketError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
+from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
 
 
 class ConnectionState(Enum):
@@ -919,20 +920,8 @@ class WebSocketManager:
 
     @staticmethod
     def _is_trading_window() -> bool:
-        """Check if current time is within NSE trading window.
-
-        Returns True Mon-Fri 09:00-15:45 IST (15 min buffer each side).
-        """
-        from datetime import datetime, time as dt_time
-        from zoneinfo import ZoneInfo
-
-        ist = ZoneInfo("Asia/Kolkata")
-        now_ist = datetime.now(ist)
-        # Weekend check (Saturday=5, Sunday=6)
-        if now_ist.weekday() >= 5:
-            return False
-        t = now_ist.time()
-        return dt_time(9, 0) <= t <= dt_time(15, 45)
+        """Return True only when market state is OPEN."""
+        return get_market_state() == MarketState.OPEN
 
     def _schedule_reconnect_at_market_open(self, reason: str) -> None:
         """Schedule reconnect timer for next market open. Args: reason; Returns: None; Raises: None."""

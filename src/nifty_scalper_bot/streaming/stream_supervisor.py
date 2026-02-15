@@ -74,6 +74,7 @@ class StreamSupervisor:
         self._start_count = 0
         self._last_error: str | None = None
         self._risk_halt_restart_logged = False
+        self._started = False
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
@@ -96,6 +97,9 @@ class StreamSupervisor:
     def start(self) -> bool:
         """Start the underlying streamer if not already running."""
 
+        with self._lock:
+            if self._started:
+                return True
         if self.is_running():
             LOG.debug(
                 "stream_supervisor_start_skipped",
@@ -114,6 +118,7 @@ class StreamSupervisor:
             )
             return False
         with self._lock:
+            self._started = True
             self._started_at_mono = time.monotonic()
             self._consecutive_failures = 0
             self._last_error = None
@@ -140,6 +145,7 @@ class StreamSupervisor:
                 extra={"event": "stream_supervisor_stop_failed", "error": str(exc)},
             )
         with self._lock:
+            self._started = False
             self._started_at_mono = None
 
     def is_running(self) -> bool:
