@@ -318,6 +318,8 @@ class WebSocketManager:
         self._last_error = None
         self._handshake_failures = 0
         self._connecting_since = 0.0
+        # ✅ FIX A: Reset backoff only when connection is CONFIRMED
+        self._backoff_reset()
         self._transition_state(ConnectionState.CONNECTED)
         if not self._subscriptions:
             return
@@ -466,6 +468,8 @@ class WebSocketManager:
             return
 
         self._handshake_failures += 1
+        # ✅ FIX C: Increment reconnect_failures so circuit breaker can trip
+        self._reconnect_failures += 1
         self._last_error = HandshakeTimeoutError(elapsed, hb_delta)
         self._logger.warning(
             "WS handshake stuck; forcing reconnect",
@@ -474,6 +478,7 @@ class WebSocketManager:
                 "elapsed_s": round(elapsed, 3),
                 "hb_delta_s": round(hb_delta, 3),
                 "failures": self._handshake_failures,
+                "reconnect_failures": self._reconnect_failures,
             },
         )
         try:
@@ -481,10 +486,10 @@ class WebSocketManager:
         except Exception:  # pragma: no cover - optional metrics
             pass
         self._increase_backoff()
-        self.refresh_session()
         self._transition_state(ConnectionState.ERROR)
         self._connecting_since = 0.0
-        self._force_reconnect(reason="handshake_timeout")
+        # ✅ FIX C: Use _schedule_reconnect to avoid racing with error callback
+        self._schedule_reconnect()
 
     def reconnect(self) -> None:
         """Force manual reconnection (e.g. from Telegram /ws command)."""
@@ -786,6 +791,15 @@ class WebSocketManager:
         if self._stop_event.is_set():
             return
 
+        # ✅ FIX B: Skip reconnection outside market hours / on weekends
+        if not self._is_trading_window():
+            self._logger.info(
+                "WS reconnect suppressed: outside trading window",
+                extra={"event": "ws_reconnect_market_closed"},
+            )
+            self._schedule_reconnect_delayed(60.0)
+            return
+
         now = time.monotonic()
         if now < self._breaker_open_until:
             remaining = self._breaker_open_until - now
@@ -829,7 +843,9 @@ class WebSocketManager:
                 self._last_heartbeat = time.monotonic()
                 self._transition_state(ConnectionState.CONNECTING)
                 self._connect_client()
-                self._backoff_reset()
+                # ✅ FIX A: Do NOT reset backoff here — _connect_client() is
+                # non-blocking (handshake hasn't completed). Reset only in
+                # _on_connect() when the connection is actually confirmed.
                 try:
                     self._m_reconnects.inc()
                 except Exception:  # pragma: no cover - optional metrics
@@ -858,6 +874,38 @@ class WebSocketManager:
         self._logger.error(
             "Circuit breaker OPEN",
             extra={"open_seconds": round(self._breaker_open_sec, 3)},
+        )
+
+    @staticmethod
+    def _is_trading_window() -> bool:
+        """Check if current time is within NSE trading window.
+
+        Returns True Mon-Fri 09:00-15:45 IST (15 min buffer each side).
+        """
+        from datetime import datetime, time as dt_time
+        from zoneinfo import ZoneInfo
+
+        ist = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        # Weekend check (Saturday=5, Sunday=6)
+        if now_ist.weekday() >= 5:
+            return False
+        t = now_ist.time()
+        return dt_time(9, 0) <= t <= dt_time(15, 45)
+
+    def _schedule_reconnect_delayed(self, delay_s: float) -> None:
+        """Schedule a reconnect after a long delay (used for off-hours)."""
+        self._cancel_reconnect_timer()
+        timer = threading.Timer(
+            delay_s, self._force_reconnect, kwargs={"reason": "market_recheck"}
+        )
+        timer.daemon = True
+        self._reconnect_timer = timer
+        timer.start()
+        self._logger.info(
+            "WS reconnect scheduled (market recheck in %.0fs)",
+            delay_s,
+            extra={"event": "ws_market_recheck", "delay_s": delay_s},
         )
 
     def _backoff_reset(self) -> None:
