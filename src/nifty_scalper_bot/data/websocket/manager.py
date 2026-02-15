@@ -300,6 +300,17 @@ class WebSocketManager:
         self._handshake_failures = 0
         self._breaker_open_until = 0.0
         self._backoff_s = self._backoff_base
+
+        # ✅ FIX: Skip initial connect outside trading window (weekends, off-hours)
+        if not self._is_trading_window():
+            self._transition_state(ConnectionState.DISCONNECTED)
+            self._logger.info(
+                "WS start deferred: outside trading window",
+                extra={"event": "ws_start_deferred_market_closed"},
+            )
+            self._schedule_reconnect_delayed(60.0)
+            return
+
         self._transition_state(ConnectionState.CONNECTING)
         self._logger.info("Starting WebSocket connection")
         self._last_heartbeat = time.monotonic()
@@ -759,6 +770,17 @@ class WebSocketManager:
     def _force_reconnect(self, *, reason: str | None = None) -> None:
         if self._stop_event.is_set():
             return
+
+        # ✅ FIX: Short-circuit outside trading window to avoid noisy logs
+        if not self._is_trading_window():
+            self._cancel_reconnect_timer()
+            self._logger.debug(
+                "WS reconnect suppressed: outside trading window",
+                extra={"event": "ws_reconnect_market_closed", "reason": reason},
+            )
+            self._schedule_reconnect_delayed(60.0)
+            return
+
         self._cancel_reconnect_timer()
         if reason:
             self._logger.info(
