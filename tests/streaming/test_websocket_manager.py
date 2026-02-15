@@ -82,18 +82,15 @@ async def test_ticks_dispatch_to_callback(monkeypatch: pytest.MonkeyPatch) -> No
 async def test_reconnect_scheduled_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
 
-    manager = ws_module.WebSocketManager(
-        "k",
-        "t",
-        base_backoff_seconds=0.01,
-        max_backoff_seconds=0.02,
-    )
+    manager = ws_module.WebSocketManager("k", "t")
+    manager._calculate_backoff = lambda _attempt: 0.01
     await manager.connect()
 
     fake_ticker = manager.ticker
     assert isinstance(fake_ticker, FakeKiteTicker)
     fake_ticker.on_error(fake_ticker, 1006, "drop")
-    await asyncio.sleep(0.06)
+    fake_ticker.on_close(fake_ticker, 1006, "drop")
+    await asyncio.sleep(0.08)
 
     assert fake_ticker.connect_calls >= 2
 
