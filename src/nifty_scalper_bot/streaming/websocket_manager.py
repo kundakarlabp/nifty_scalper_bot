@@ -57,8 +57,14 @@ class WebSocketManager:
         self._shutdown = False
         self._manual_disconnect = False
         self._reconnect = _ReconnectState()
+        self._connect_lock = asyncio.Lock()
 
         self._ticker = KiteTicker(api_key=api_key, access_token=access_token)
+        self._configure_handlers()
+
+    def _configure_handlers(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
         self._ticker.on_connect = self._on_connect
         self._ticker.on_ticks = self._on_ticks
         self._ticker.on_error = self._on_error
@@ -77,6 +83,7 @@ class WebSocketManager:
             self._logger.debug("Entered connect")
             self._shutdown = False
             self._manual_disconnect = False
+            self._configure_handlers()
             await self._run_ticker_connect()
         except Exception as e:
             self._logger.error("Failure in connect: %s", e)
@@ -125,7 +132,10 @@ class WebSocketManager:
         """Args: none; Returns: None; Raises: Exception."""
 
         try:
-            await asyncio.to_thread(self._ticker.connect, True)
+            async with self._connect_lock:
+                if self._shutdown:
+                    return
+                await asyncio.to_thread(self._ticker.connect, True)
         except Exception as e:
             self._logger.error("Failure in _run_ticker_connect: %s", e)
             raise
@@ -141,7 +151,7 @@ class WebSocketManager:
                     if self._reconnect.task and not self._reconnect.task.done():
                         return
                     self._reconnect.task = asyncio.create_task(
-                        self._reconnect_after_backoff(reason)
+                        self._reconnect_loop(reason)
                     )
             except Exception as e:
                 self._logger.error("Failure in _schedule_reconnect._inner: %s", e)
@@ -149,34 +159,48 @@ class WebSocketManager:
         loop = self._resolve_loop()
         loop.call_soon_threadsafe(lambda: asyncio.create_task(_inner()))
 
-    async def _reconnect_after_backoff(self, reason: str) -> None:
+    async def _reconnect_loop(self, reason: str) -> None:
         """Args: reason; Returns: None; Raises: Exception."""
 
         try:
-            self._reconnect.attempts += 1
-            delay = self._calculate_backoff(self._reconnect.attempts)
-            self._logger.info(
-                "Condition met: reconnect_scheduled reason=%s delay=%.2fs attempt=%d",
-                reason,
-                delay,
-                self._reconnect.attempts,
-            )
-            await asyncio.sleep(delay)
-            if self._shutdown or self._manual_disconnect:
-                return
-            await self._run_ticker_connect()
+            attempt = 0
+            while not self._shutdown and not self._manual_disconnect:
+                if self._connected.is_set():
+                    return
+                delay = self._calculate_backoff(attempt)
+                self._logger.info(
+                    "Condition met: reconnect_scheduled "
+                    "reason=%s delay=%.2fs attempt=%d",
+                    reason,
+                    delay,
+                    attempt,
+                )
+                await asyncio.sleep(delay)
+                if self._shutdown or self._manual_disconnect:
+                    return
+                try:
+                    await self._run_ticker_connect()
+                except Exception as connect_error:
+                    self._logger.error(
+                        "Failure in _reconnect_loop.connect_attempt: %s",
+                        connect_error,
+                    )
+                await asyncio.sleep(0)
+                attempt += 1
         except Exception as e:
-            self._logger.error("Failure in _reconnect_after_backoff: %s", e)
+            self._logger.error("Failure in _reconnect_loop: %s", e)
             raise
+        finally:
+            async with self._reconnect.lock:
+                if self._reconnect.task is asyncio.current_task():
+                    self._reconnect.task = None
 
     def _calculate_backoff(self, attempts: int) -> float:
         """Args: attempts; Returns: delay; Raises: none."""
 
-        base_delay = min(
-            self._max_backoff_seconds,
-            self._base_backoff_seconds * (2 ** max(0, attempts - 1)),
-        )
-        jitter = random.uniform(0.0, base_delay * 0.2)
+        exponential = 5.0 * (2 ** max(0, attempts))
+        base_delay = min(exponential, self._max_backoff_seconds)
+        jitter = random.uniform(0.0, 1.0)
         return base_delay + jitter
 
     def _resolve_loop(self) -> asyncio.AbstractEventLoop:
@@ -216,7 +240,14 @@ class WebSocketManager:
             for tick in ticks:
                 maybe = self._on_tick_callback(tick)
                 if asyncio.iscoroutine(maybe):
-                    loop.call_soon_threadsafe(lambda c=maybe: asyncio.create_task(c))
+                    try:
+                        running_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        running_loop = None
+                    if running_loop is loop:
+                        loop.create_task(maybe)
+                    else:
+                        loop.call_soon_threadsafe(lambda c=maybe: loop.create_task(c))
         except Exception as e:
             self._logger.error("Failure in _on_ticks: %s", e)
             raise
