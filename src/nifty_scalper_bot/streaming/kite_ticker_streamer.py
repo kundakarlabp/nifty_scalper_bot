@@ -230,5 +230,16 @@ class KiteTickerStreamer:
         LOGGER.info("🛑 KiteTicker stopped")
 
     def is_running(self) -> bool:
-        """Check if the ticker is running."""
-        return self._thread is not None and self._thread.is_alive()
+        """Check if KiteTicker WebSocket is active."""
+        if not self._ticker:
+            return False
+
+        # Zerodha internally creates _ws once connected
+        ws = getattr(self._ticker, "_ws", None)
+
+        if ws is None:
+            return False
+
+        # Check if underlying socket is open
+        return getattr(ws, "sock", None) is not None
+
