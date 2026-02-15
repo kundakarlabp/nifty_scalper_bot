@@ -383,6 +383,19 @@ class StreamSupervisor:
 
     # ------------------------------------------------------------------
     # Internal helpers
+    @staticmethod
+    def _is_trading_window() -> bool:
+        """Check if current time is within NSE trading window (Mon-Fri 09:00-15:45 IST)."""
+        from datetime import datetime, time as dt_time
+        from zoneinfo import ZoneInfo
+
+        ist = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        if now_ist.weekday() >= 5:
+            return False
+        t = now_ist.time()
+        return dt_time(9, 0) <= t <= dt_time(15, 45)
+
     def _ensure_monitor_thread(self) -> None:
         thread = self._monitor_thread
         if thread is not None and thread.is_alive():
@@ -399,6 +412,9 @@ class StreamSupervisor:
     def _monitor_loop(self) -> None:
         while not self._monitor_stop.wait(self._monitor_interval):
             if not self._autostart:
+                continue
+            # ✅ FIX: Skip restart attempts outside trading hours
+            if not self._is_trading_window():
                 continue
             with self._lock:
                 active_tokens = bool(self._tokens)
