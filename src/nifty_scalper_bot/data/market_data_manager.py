@@ -28,6 +28,7 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger
 from nifty_scalper_bot.utils.metrics import Counter
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 # NOTE: resolver is attached at runtime by app.py (ctx.market_data_manager._resolver).
 # Avoid importing resolver modules here to prevent circular imports or path issues.
@@ -221,6 +222,7 @@ class MarketDataManager:
         self._last_margin_refresh: float = 0.0
         self.last_tick_time = 0.0
         self._tick_warn_last: dict[str, float] = {}  # ✅ FIX: rate-limit cache-miss warnings
+        self._seed_attempt_last: dict[str, float] = {}
         self._margin_cache_ttl = self._parse_float_env(
             "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
         )
@@ -894,6 +896,7 @@ class MarketDataManager:
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
+        symbol = normalize_symbol(symbol) or symbol
         with self._lock:
             subscribers = self._subscribers[symbol]
             subscribers.add(callback)
@@ -947,6 +950,7 @@ class MarketDataManager:
     def unsubscribe(self, symbol: str, callback: TickCallback) -> None:
         """Remove *callback* from subscribers of *symbol*."""
 
+        symbol = normalize_symbol(symbol) or symbol
         should_unsubscribe = False
         with self._lock:
             callbacks = self._subscribers.get(symbol)
@@ -961,16 +965,17 @@ class MarketDataManager:
             self._release_subscription(symbol)
 
     def get_latest_tick(self, symbol: str) -> dict[str, Any] | None:
+        normalized = normalize_symbol(symbol) or symbol
         with self._lock:
-            tick = self._latest_ticks.get(symbol)
+            tick = self._latest_ticks.get(normalized) or self._latest_ticks.get(symbol)
             if tick is None:
                 # ✅ FIX: Rate-limit warning to once per 60s per symbol
                 import time as _time
                 _now = _time.monotonic()
-                _last = self._tick_warn_last.get(symbol, 0.0)
+                _last = self._tick_warn_last.get(normalized, 0.0)
                 if _now - _last >= 60.0:
-                    self._tick_warn_last[symbol] = _now
-                    self._logger.warning("MDM: get_latest_tick - No tick in cache for %s", symbol)
+                    self._tick_warn_last[normalized] = _now
+                    self._logger.warning("MDM: get_latest_tick - No tick in cache for %s", normalized)
                 return None
             return dict(tick)
 
@@ -2500,7 +2505,7 @@ class MarketDataManager:
             "Entered ensure_tracking",
             extra={"event": "mdm_ensure_tracking_enter", "symbol": symbol},
         )
-        sym = str(symbol or "").strip().upper()
+        sym = normalize_symbol(str(symbol or ""))
         if not sym:
             self._logger.info(
                 "Condition met: mdm_ensure_tracking_blank",
@@ -2548,7 +2553,7 @@ class MarketDataManager:
             "Entered untrack",
             extra={"event": "mdm_untrack_enter", "symbol": symbol},
         )
-        sym = str(symbol or "").strip().upper()
+        sym = normalize_symbol(str(symbol or ""))
         if not sym:
             self._logger.info(
                 "Condition met: mdm_untrack_blank",
@@ -2642,7 +2647,7 @@ class MarketDataManager:
             extra={"event": "mdm_is_tracked_enter", "symbol": symbol},
         )
         try:
-            sym = str(symbol or "").strip().upper()
+            sym = normalize_symbol(str(symbol or ""))
             if not sym:
                 return False
             with self._lock:
@@ -2705,6 +2710,15 @@ class MarketDataManager:
             broker = getattr(self, "_broker", None)
             if broker is None or not hasattr(broker, "get_quote"):
                 return False
+            now = time.monotonic()
+            last_attempt = self._seed_attempt_last.get(symbol, 0.0)
+            if now - last_attempt < 2.0:
+                self._logger.debug(
+                    "Condition met: mdm_seed_backoff_skip",
+                    extra={"event": "mdm_seed_backoff_skip", "symbol": symbol},
+                )
+                return False
+            self._seed_attempt_last[symbol] = now
 
             # ------------------------------------------------------------------
             # STRATEGY 1: Full Quote (Depth) - Preferred

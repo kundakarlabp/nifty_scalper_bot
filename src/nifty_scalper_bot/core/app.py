@@ -152,6 +152,7 @@ from nifty_scalper_bot.utils.errors import ConfigurationError
 from nifty_scalper_bot.utils.logging import get_logger, setup_logging
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
+from nifty_scalper_bot.utils.symbols import unique_normalized_symbols
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 
 if TYPE_CHECKING:
@@ -2766,7 +2767,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # Normalize symbols (quotes tolerated) and default fallback
     raw_syms = get_csv("POLLING__SYMBOLS")
     if raw_syms:
-        poll_symbols = [s.strip().upper() for s in raw_syms if s.strip()]
+        poll_symbols = unique_normalized_symbols(raw_syms)
     else:
         poll_symbols = ["NSE:NIFTY 50", "256265"]
 
@@ -2801,7 +2802,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     def _ws_token_issued_at() -> float | None:
         return None
 
+    ws_mode_requested = streaming_mode in {"websocket", "ws"}
     use_polling = (not websocket_enabled) or streaming_mode in {"polling", "poll"}
+    if websocket_enabled and ws_mode_requested:
+        use_polling = False
+        poll_enabled = False
     # [FIX] Container for direct wiring
     strategy_runner_ref: dict[str, Any] = {}
 
@@ -3236,18 +3241,26 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             )
             return False
 
-    stream_supervisor = StreamSupervisor(
-        streamer=streamer,
-        resolver=instrument_resolver,
-        default_symbols=list(poll_symbols or ["NSE:NIFTY 50"]),
-        autostart=True,
-        monitor_interval_s=300.0,
-        # Keep stream supervisor passive during breaker halts to avoid restart churn.
-        risk_halt_getter=_risk_halt_active,
-    )
-    stream_supervisor.bootstrap()
-    stream_supervisor.ensure_started()
-    stream_supervisor_started = True
+    if use_polling:
+        stream_supervisor = StreamSupervisor(
+            streamer=streamer,
+            resolver=instrument_resolver,
+            default_symbols=list(poll_symbols or ["NSE:NIFTY 50"]),
+            autostart=True,
+            monitor_interval_s=300.0,
+            # Keep stream supervisor passive during breaker halts to avoid restart churn.
+            risk_halt_getter=_risk_halt_active,
+        )
+        stream_supervisor.bootstrap()
+        stream_supervisor.ensure_started()
+        stream_supervisor_started = True
+    else:
+        stream_supervisor = None
+        stream_supervisor_started = False
+        LOGGER.info(
+            "polling_supervisor_disabled",
+            extra={"event": "polling_supervisor_disabled", "mode": "websocket"},
+        )
 
     # Initialize Indicators & Regime
     indicator_engine = IndicatorEngine()

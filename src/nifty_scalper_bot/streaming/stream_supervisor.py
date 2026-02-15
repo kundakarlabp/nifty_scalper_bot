@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
 
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.symbols import unique_normalized_symbols
 
 LOG = get_logger(__name__)
 
@@ -56,11 +57,7 @@ class StreamSupervisor:
     ) -> None:
         self.streamer = streamer
         self.resolver = resolver
-        self._default_symbols = [
-            str(symbol).strip().upper()
-            for symbol in (default_symbols or [])
-            if str(symbol).strip()
-        ]
+        self._default_symbols = unique_normalized_symbols(default_symbols or [])
         self._autostart = bool(autostart)
         self._monitor_interval = max(float(monitor_interval_s), 0.2)
         self._risk_halt_getter = risk_halt_getter
@@ -100,6 +97,10 @@ class StreamSupervisor:
         """Start the underlying streamer if not already running."""
 
         if self.is_running():
+            LOG.debug(
+                "stream_supervisor_start_skipped",
+                extra={"event": "stream_supervisor_start_skipped", "reason": "already_running"},
+            )
             return True
         try:
             self.streamer.start()
@@ -166,11 +167,7 @@ class StreamSupervisor:
         upper-cased symbols to resolved instrument tokens.
         """
 
-        cleaned = [
-            str(symbol).strip().upper()
-            for symbol in symbols or []
-            if str(symbol).strip()
-        ]
+        cleaned = unique_normalized_symbols(symbols or [])
         if not cleaned:
             return ([], [], {})
 
