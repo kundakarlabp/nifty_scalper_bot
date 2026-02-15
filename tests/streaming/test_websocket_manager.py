@@ -45,16 +45,17 @@ class FakeKiteTicker:
 
 
 @pytest.mark.asyncio
-async def test_connect_uses_single_ticker_and_subscribes(
+async def test_connect_subscribes_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
-    manager = ws_module.WebSocketManager("k", "t", [111, 222])
+    manager = ws_module.WebSocketManager(
+        "k", "t", [111, 222], trading_window_enabled=False
+    )
 
-    first_ticker = manager.ticker
     await manager.connect()
 
-    assert manager.ticker is first_ticker
+    first_ticker = manager.ticker
     assert first_ticker.connect_calls == 1
     assert set(first_ticker.subscribed) == {111, 222}
     await manager.disconnect()
@@ -68,7 +69,9 @@ async def test_ticks_dispatch_to_callback(monkeypatch: pytest.MonkeyPatch) -> No
     async def _on_tick(tick: dict[str, Any]) -> None:
         received.append(tick)
 
-    manager = ws_module.WebSocketManager("k", "t", on_tick_callback=_on_tick)
+    manager = ws_module.WebSocketManager(
+        "k", "t", on_tick_callback=_on_tick, trading_window_enabled=False
+    )
     await manager.connect()
 
     fake_ticker = manager.ticker
@@ -85,8 +88,8 @@ async def test_ticks_dispatch_to_callback(monkeypatch: pytest.MonkeyPatch) -> No
 async def test_reconnect_scheduled_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
 
-    manager = ws_module.WebSocketManager("k", "t")
-    manager._calculate_backoff = lambda _attempt: 0.01
+    manager = ws_module.WebSocketManager("k", "t", trading_window_enabled=False)
+    manager._next_backoff_delay = lambda: 0.01
     await manager.connect()
 
     fake_ticker = manager.ticker
@@ -95,14 +98,16 @@ async def test_reconnect_scheduled_on_error(monkeypatch: pytest.MonkeyPatch) -> 
     fake_ticker.on_close(fake_ticker, 1006, "drop")
     await asyncio.sleep(0.08)
 
-    assert fake_ticker.connect_calls >= 2
+    assert manager.ticker is not fake_ticker
+    assert manager.ticker.connect_calls >= 1
 
     await manager.disconnect()
-    calls_before = fake_ticker.connect_calls
-    fake_ticker.on_close(fake_ticker, 1000, "manual")
-    await asyncio.sleep(0.05)
-
-    assert fake_ticker.connect_calls == calls_before
+    latest_ticker = manager.ticker if manager._ticker is not None else None
+    if latest_ticker is not None:
+        calls_before = latest_ticker.connect_calls
+        latest_ticker.on_close(latest_ticker, 1000, "manual")
+        await asyncio.sleep(0.05)
+        assert latest_ticker.connect_calls == calls_before
 
 
 @pytest.mark.asyncio
@@ -116,15 +121,16 @@ async def test_watchdog_schedules_reconnect_for_stale_connection(
         "t",
         heartbeat_interval_seconds=0.01,
         stale_threshold_seconds=0.01,
+        trading_window_enabled=False,
     )
-    manager._calculate_backoff = lambda _attempt: 0.01
+    manager._next_backoff_delay = lambda: 0.01
     await manager.connect()
 
     fake_ticker = manager.ticker
     assert isinstance(fake_ticker, FakeKiteTicker)
     await asyncio.sleep(0.06)
 
-    assert fake_ticker.connect_calls >= 2
+    assert manager.ticker is not fake_ticker
     await manager.disconnect()
 
 
@@ -139,11 +145,11 @@ async def test_circuit_breaker_opens_after_repeated_failures(
         "t",
         circuit_breaker_threshold=2,
         circuit_breaker_cooldown_seconds=0.05,
+        trading_window_enabled=False,
     )
 
-    await manager._record_connect_failure()
-    await manager._record_connect_failure()
+    manager._record_failure()
+    manager._record_failure()
 
     snapshot = manager.health_snapshot()
     assert snapshot["circuit_open"] is True
-

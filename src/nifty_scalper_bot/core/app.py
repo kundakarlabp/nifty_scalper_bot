@@ -82,8 +82,6 @@ from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.data.market_regime import MarketRegimeDetector
 from nifty_scalper_bot.data.persistent_state import PersistentStateManager
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
-from nifty_scalper_bot.data.rest.zerodha_ws_adapter import build_kite_ticker
-from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 from nifty_scalper_bot.execution.bracket_manager import (
     BracketManager,
     SupportsCancelOrder,
@@ -138,6 +136,7 @@ from nifty_scalper_bot.streaming import (
     ResilientStreamer,
     StreamSupervisor,
 )
+from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 from nifty_scalper_bot.utils.config_validation import validate_execution_config
 from nifty_scalper_bot.utils.env import (
     coalesce_bool,
@@ -3119,44 +3118,59 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         }
 
         def _resolve_ws_token() -> str:  # type: ignore[redefined-outer-name]
-            candidates = [
-                os.getenv("ZERODHA_ACCESS_TOKEN"),
-                cast(str | None, getattr(config.broker, "access_token", None)),
-                _ws_token_state.get("token", ""),
-            ]
-            for candidate in candidates:
-                sanitized = _sanitize_ws_token(candidate)
-                if sanitized:
-                    previous = _ws_token_state.get("token")
-                    _ws_token_state["token"] = sanitized
-                    if (
-                        sanitized != previous
-                        or float(_ws_token_timestamp.get("ts", 0.0)) <= 0.0
-                    ):
-                        _ws_token_timestamp["ts"] = time_module.time()
-                    return sanitized
-            return _ws_token_state.get("token", "")
+            """Resolve websocket token from Railway and legacy env aliases safely."""
 
-        def _refresh_ws_session() -> None:  # type: ignore[redefined-outer-name]
-            _resolve_ws_token()
+            try:
+                candidates = [
+                    os.getenv("KITE_ACCESS_TOKEN"),
+                    os.getenv("ZERODHA_ACCESS_TOKEN"),
+                    os.getenv("BROKER_ACCESS_TOKEN"),
+                    cast(str | None, getattr(config.broker, "access_token", None)),
+                    _ws_token_state.get("token", ""),
+                ]
+                for candidate in candidates:
+                    sanitized = _sanitize_ws_token(candidate)
+                    if sanitized:
+                        previous = _ws_token_state.get("token")
+                        _ws_token_state["token"] = sanitized
+                        if (
+                            sanitized != previous
+                            or float(_ws_token_timestamp.get("ts", 0.0)) <= 0.0
+                        ):
+                            _ws_token_timestamp["ts"] = time_module.time()
+                        return sanitized
+                return _ws_token_state.get("token", "")
+            except Exception as e:
+                LOGGER.error("Failure in _resolve_ws_token: %s", e)
+                return _ws_token_state.get("token", "")
 
-        def _build_ws():
-            token = _resolve_ws_token()
-            return build_kite_ticker(
-                config.broker.api_key,
-                token,
-                session_refresher=_refresh_ws_session,
-            )
+        def _resolve_ws_api_key() -> str:
+            """Resolve websocket API key from Railway and legacy env aliases safely."""
 
-        websocket_client = _build_ws()
+            try:
+                candidates = [
+                    os.getenv("KITE_API_KEY"),
+                    os.getenv("ZERODHA_API_KEY"),
+                    os.getenv("BROKER_API_KEY"),
+                    cast(str | None, getattr(config.broker, "api_key", None)),
+                ]
+                for candidate in candidates:
+                    value = (candidate or "").strip()
+                    if value:
+                        return value
+                return ""
+            except Exception as e:
+                LOGGER.error("Failure in _resolve_ws_api_key: %s", e)
+                return ""
+
         websocket_manager = WebSocketManager(
-            websocket_client,
+            _resolve_ws_api_key(),
+            _resolve_ws_token(),
             on_tick=lambda tick: None,
             on_error=lambda err: LOGGER.error("WebSocket manager error: %s", err),
             backoff_min_sec=1.0,
             backoff_max_sec=30.0,
         )
-        websocket_manager.set_client_factory(_build_ws)
 
         # WebSocketManager is the primary streamer in WS mode.
         streamer = websocket_manager

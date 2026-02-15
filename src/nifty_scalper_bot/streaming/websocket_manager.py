@@ -1,37 +1,27 @@
-"""Async WebSocket manager for Zerodha KiteTicker streaming."""
+"""Hardened WebSocket manager for Zerodha KiteTicker streaming."""
 
 from __future__ import annotations
 
 import asyncio
 import random
-import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
+from datetime import time as dtime
 from enum import Enum
-from typing import Any, cast
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from kiteconnect import KiteTicker
 
 from nifty_scalper_bot.utils.logging import get_logger
 
-
-class HandshakeTimeoutError(RuntimeError):
-    """Args: elapsed/hb_delta; Returns: error; Raises: none."""
-
-    def __init__(self, elapsed: float, hb_delta: float) -> None:
-        super().__init__(
-            f"Handshake timeout after {elapsed:.1f}s (hbΔ={hb_delta:.1f}s)."
-        )
-        self.code = 1006
-        self.reason = "handshake_timeout"
-
-
 TickCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
 class ConnectionState(Enum):
-    """Args: none; Returns: enum; Raises: none."""
+    """Args: none; Returns: enum state; Raises: none."""
 
     DISCONNECTED = 0
     CONNECTING = 1
@@ -40,32 +30,20 @@ class ConnectionState(Enum):
 
 
 @dataclass(slots=True)
-class _ReconnectState:
-    """Args: none; Returns: state; Raises: none."""
+class _CircuitState:
+    """Args: none; Returns: breaker state; Raises: none."""
 
-    attempts: int = 0
-    task: asyncio.Task[None] | None = None
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-
-@dataclass(slots=True)
-class _HealthState:
-    """Args: none; Returns: health state; Raises: none."""
-
-    last_tick_monotonic: float = 0.0
-    last_heartbeat_monotonic: float = 0.0
-    last_connect_monotonic: float = 0.0
-    consecutive_failures: int = 0
-    circuit_open_until_monotonic: float = 0.0
+    failures: int = 0
+    open_until_mono: float = 0.0
 
 
 class WebSocketManager:
-    """Manage a single KiteTicker connection with async reconnect and tick dispatch."""
+    """Manage one resilient KiteTicker session with guarded reconnect logic."""
 
     def __init__(
         self,
-        api_key: str | Any,
-        access_token: str | None = None,
+        api_key: str,
+        access_token: str,
         tokens: Sequence[int] | None = None,
         *,
         on_tick: TickCallback | None = None,
@@ -76,69 +54,90 @@ class WebSocketManager:
         base_backoff_seconds: float = 1.0,
         heartbeat_interval_seconds: float = 2.0,
         stale_threshold_seconds: float = 5.0,
-        handshake_timeout_seconds: float = 15.0,
+        handshake_timeout_seconds: float = 20.0,
         circuit_breaker_threshold: int = 5,
-        circuit_breaker_cooldown_seconds: float = 20.0,
-        **_: Any,
+        circuit_breaker_cooldown_seconds: float = 60.0,
+        reconnect_min_seconds: float | None = None,
+        reconnect_max_seconds: float | None = None,
+        trading_window_enabled: bool = True,
+        trading_window_tz: str = "Asia/Kolkata",
+        trading_start: dtime = dtime(hour=9, minute=15),
+        trading_end: dtime = dtime(hour=15, minute=30),
+        **kwargs: Any,
     ) -> None:
-        """Args: init fields; Returns: None; Raises: ValueError."""
+        """Args: constructor fields; Returns: none; Raises: ValueError."""
 
+        backoff_min_alias = kwargs.get("backoff_min_sec")
+        backoff_max_alias = kwargs.get("backoff_max_sec")
+        if isinstance(backoff_min_alias, (int, float)):
+            base_backoff_seconds = float(backoff_min_alias)
+        if isinstance(backoff_max_alias, (int, float)):
+            max_backoff_seconds = float(backoff_max_alias)
+        if reconnect_min_seconds is not None:
+            base_backoff_seconds = reconnect_min_seconds
+        if reconnect_max_seconds is not None:
+            max_backoff_seconds = reconnect_max_seconds
+
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise ValueError("api_key is required")
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise ValueError("access_token is required")
         if base_backoff_seconds <= 0:
             raise ValueError("base_backoff_seconds must be > 0")
         if max_backoff_seconds < base_backoff_seconds:
             raise ValueError("max_backoff_seconds must be >= base_backoff_seconds")
         if heartbeat_interval_seconds <= 0:
-            raise ValueError('heartbeat_interval_seconds must be > 0')
+            raise ValueError("heartbeat_interval_seconds must be > 0")
         if stale_threshold_seconds <= 0:
-            raise ValueError('stale_threshold_seconds must be > 0')
-        if handshake_timeout_seconds <= 0:
-            raise ValueError('handshake_timeout_seconds must be > 0')
+            raise ValueError("stale_threshold_seconds must be > 0")
+        if handshake_timeout_seconds < 15.0 or handshake_timeout_seconds > 25.0:
+            raise ValueError("handshake_timeout_seconds must be within 15-25 seconds")
         if circuit_breaker_threshold <= 0:
-            raise ValueError('circuit_breaker_threshold must be > 0')
+            raise ValueError("circuit_breaker_threshold must be > 0")
         if circuit_breaker_cooldown_seconds <= 0:
-            raise ValueError('circuit_breaker_cooldown_seconds must be > 0')
+            raise ValueError("circuit_breaker_cooldown_seconds must be > 0")
 
         self._logger = get_logger(__name__)
-        if isinstance(api_key, str):
-            resolved_api_key = api_key
-            resolved_access_token = access_token or ""
-        else:
-            resolved_api_key = str(getattr(api_key, "api_key", "") or "")
-            resolved_access_token = str(
-                access_token or getattr(api_key, "access_token", "") or ""
-            )
-        if not resolved_api_key or not resolved_access_token:
-            raise ValueError("api_key and access_token are required")
-
-        self._loop = loop
-        self._api_key = resolved_api_key
-        self._access_token = resolved_access_token
+        self._api_key = api_key.strip()
+        self._access_token = access_token.strip()
         self._tokens: set[int] = {int(token) for token in (tokens or [])}
         self._on_tick_callback = on_tick_callback or on_tick
         self._on_error_callback = on_error
-        self._max_backoff_seconds = max_backoff_seconds
-        self._base_backoff_seconds = base_backoff_seconds
-        self._heartbeat_interval_seconds = heartbeat_interval_seconds
-        self._stale_threshold_seconds = stale_threshold_seconds
-        self._handshake_timeout_seconds = handshake_timeout_seconds
-        self._circuit_breaker_threshold = circuit_breaker_threshold
-        self._circuit_breaker_cooldown_seconds = circuit_breaker_cooldown_seconds
+        self._loop = loop
+
+        self._base_backoff = float(base_backoff_seconds)
+        self._max_backoff = float(max_backoff_seconds)
+        self._heartbeat_interval = float(heartbeat_interval_seconds)
+        self._stale_threshold = float(stale_threshold_seconds)
+        self._handshake_timeout = float(handshake_timeout_seconds)
+        self._circuit_breaker_threshold = int(circuit_breaker_threshold)
+        self._circuit_breaker_cooldown = float(circuit_breaker_cooldown_seconds)
+
+        self._trading_window_enabled = bool(trading_window_enabled)
+        self._trading_tz = ZoneInfo(trading_window_tz)
+        self._trading_start = trading_start
+        self._trading_end = trading_end
+
+        self._state = ConnectionState.DISCONNECTED
         self._connected = asyncio.Event()
+        self._connect_lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
         self._shutdown = False
         self._manual_disconnect = False
-        self._state = ConnectionState.DISCONNECTED
-        self._reconnect = _ReconnectState()
-        self._connect_lock = asyncio.Lock()
-        self._health = _HealthState()
-        self._health_lock = asyncio.Lock()
+        self._running = False
+        self._connect_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
-        self._thread_loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+
+        self._ticker: KiteTicker | None = None
+        self._ticker_factory: Callable[[], KiteTicker] | None = None
         self._on_connect_callback: Callable[[], None] | None = None
         self._on_disconnect_callback: Callable[[], None] | None = None
-
-        self._ticker = KiteTicker(self._api_key, self._access_token, reconnect=False)
-        self._configure_handlers()
+        self._connect_started_mono = 0.0
+        self._last_tick_mono = 0.0
+        self._last_heartbeat_mono = 0.0
+        self._last_backoff_delay = self._base_backoff
+        self._circuit = _CircuitState()
 
     @property
     def on_tick(self) -> TickCallback | None:
@@ -152,463 +151,106 @@ class WebSocketManager:
 
         self._on_tick_callback = callback
 
-    def _configure_handlers(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        self._ticker.on_connect = self._on_connect
-        self._ticker.on_ticks = self._on_ticks
-        self._ticker.on_error = self._on_error
-        self._ticker.on_close = self._on_close
-
     @property
     def ticker(self) -> KiteTicker:
-        """Args: none; Returns: KiteTicker; Raises: none."""
+        """Args: none; Returns: active ticker; Raises: RuntimeError."""
 
+        if self._ticker is None:
+            raise RuntimeError("ticker is not initialized")
         return self._ticker
 
     async def connect(self) -> None:
-        """Args: none; Returns: None; Raises: Exception."""
+        """Args: none; Returns: none; Raises: Exception."""
 
         try:
             self._logger.debug("Entered connect")
-            self._shutdown = False
-            self._manual_disconnect = False
-            self._state = ConnectionState.CONNECTING
             if self._loop is None:
                 self._loop = asyncio.get_running_loop()
-            self._configure_handlers()
-            await self._start_watchdog()
-            await self._run_ticker_connect()
+            self._shutdown = False
+            self._manual_disconnect = False
+            self._running = True
+            await self._ensure_watchdog()
+            await self._connect_once(reason="initial")
         except Exception as e:
-            await self._stop_watchdog()
             self._logger.error("Failure in connect: %s", e)
             raise
 
     async def disconnect(self) -> None:
-        """Args: none; Returns: None; Raises: Exception."""
+        """Args: none; Returns: none; Raises: Exception."""
 
         try:
             self._logger.debug("Entered disconnect")
             self._manual_disconnect = True
             self._shutdown = True
+            self._running = False
             self._state = ConnectionState.DISCONNECTED
-            async with self._reconnect.lock:
-                if self._reconnect.task is not None:
-                    self._reconnect.task.cancel()
-                    self._reconnect.task = None
-            await self._stop_watchdog()
             self._connected.clear()
-            await asyncio.to_thread(self._ticker.close)
+            await self._cancel_task(self._connect_task)
+            await self._cancel_task(self._reconnect_task)
+            await self._cancel_task(self._watchdog_task)
+            self._connect_task = None
+            self._reconnect_task = None
+            self._watchdog_task = None
+            ticker = self._ticker
+            self._ticker = None
+            if ticker is not None:
+                await asyncio.to_thread(ticker.close)
         except Exception as e:
             self._logger.error("Failure in disconnect: %s", e)
             raise
 
     async def subscribe(self, tokens: Sequence[int]) -> None:
-        """Args: tokens; Returns: None; Raises: Exception."""
+        """Args: tokens; Returns: none; Raises: Exception."""
 
         try:
             self._logger.debug("Entered subscribe")
-            new_tokens = [
-                int(token) for token in tokens if int(token) not in self._tokens
-            ]
-            if not new_tokens:
-                return
-            self._tokens.update(new_tokens)
-            if self._connected.is_set():
-                await asyncio.to_thread(self._ticker.subscribe, new_tokens)
-                await asyncio.to_thread(
-                    self._ticker.set_mode,
-                    self._ticker.MODE_FULL,
-                    new_tokens,
-                )
+            self._merge_tokens(tokens)
+            await self._resubscribe_if_connected()
         except Exception as e:
             self._logger.error("Failure in subscribe: %s", e)
             raise
 
-    async def _run_ticker_connect(self) -> None:
-        """Args: none; Returns: None; Raises: Exception."""
-
-        try:
-            async with self._connect_lock:
-                if self._shutdown:
-                    return
-                self._state = ConnectionState.CONNECTING
-                await self._mark_connect_attempt()
-                await asyncio.to_thread(self._ticker.connect, True)
-                await self._await_handshake()
-        except Exception as e:
-            self._logger.error("Failure in _run_ticker_connect: %s", e)
-            raise
-
-    async def _await_handshake(self) -> None:
-        """Args: none; Returns: None; Raises: HandshakeTimeoutError."""
-
-        if self._connected.is_set():
-            return
-        started = time.monotonic()
-        try:
-            await asyncio.wait_for(
-                self._connected.wait(), timeout=self._handshake_timeout_seconds
-            )
-        except TimeoutError as exc:
-            hb_delta = await self._heartbeat_age_seconds()
-            elapsed = time.monotonic() - started
-            raise HandshakeTimeoutError(elapsed=elapsed, hb_delta=hb_delta) from exc
-
-    async def _mark_connect_attempt(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        async with self._health_lock:
-            self._health.last_connect_monotonic = time.monotonic()
-
-    async def _record_heartbeat(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        now = time.monotonic()
-        async with self._health_lock:
-            self._health.last_heartbeat_monotonic = now
-
-    async def _record_tick(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        now = time.monotonic()
-        async with self._health_lock:
-            self._health.last_tick_monotonic = now
-            self._health.last_heartbeat_monotonic = now
-
-    async def _heartbeat_age_seconds(self) -> float:
-        """Args: none; Returns: float; Raises: none."""
-
-        async with self._health_lock:
-            last = self._health.last_heartbeat_monotonic
-        if last <= 0.0:
-            return self._stale_threshold_seconds + 1.0
-        return max(0.0, time.monotonic() - last)
-
-    def _schedule_reconnect(self, reason: str) -> None:
-        """Args: reason; Returns: None; Raises: none."""
-
-        async def _inner() -> None:
-            try:
-                async with self._reconnect.lock:
-                    if self._shutdown or self._manual_disconnect:
-                        return
-                    self._state = ConnectionState.RECONNECTING
-                    if self._reconnect.task and not self._reconnect.task.done():
-                        return
-                    self._reconnect.task = asyncio.create_task(
-                        self._reconnect_loop(reason)
-                    )
-            except Exception as e:
-                self._logger.error("Failure in _schedule_reconnect._inner: %s", e)
-
-        loop = self._resolve_loop()
-        loop.call_soon_threadsafe(lambda: asyncio.create_task(_inner()))
-
-    async def _reconnect_loop(self, reason: str) -> None:
-        """Args: reason; Returns: None; Raises: Exception."""
-
-        try:
-            attempt = 0
-            while not self._shutdown and not self._manual_disconnect:
-                if self._connected.is_set():
-                    return
-                if await self._is_circuit_open():
-                    continue
-                delay = self._calculate_backoff(attempt)
-                self._logger.info(
-                    "Condition met: reconnect_scheduled "
-                    "reason=%s delay=%.2fs attempt=%d",
-                    reason,
-                    delay,
-                    attempt,
-                )
-                await asyncio.sleep(delay)
-                if self._shutdown or self._manual_disconnect:
-                    return
-                try:
-                    await self._run_ticker_connect()
-                    await self._record_connect_success()
-                except Exception as connect_error:
-                    await self._record_connect_failure()
-                    self._logger.error(
-                        "Failure in _reconnect_loop.connect_attempt: %s",
-                        connect_error,
-                    )
-                await asyncio.sleep(0)
-                attempt += 1
-        except Exception as e:
-            self._logger.error("Failure in _reconnect_loop: %s", e)
-            raise
-        finally:
-            async with self._reconnect.lock:
-                if self._reconnect.task is asyncio.current_task():
-                    self._reconnect.task = None
-
-    def _calculate_backoff(self, attempts: int) -> float:
-        """Args: attempts; Returns: delay; Raises: none."""
-
-        exponential = 5.0 * (2 ** max(0, attempts))
-        base_delay = min(exponential, self._max_backoff_seconds)
-        jitter = random.uniform(0.0, 1.0)
-        return base_delay + jitter
-
-    async def _record_connect_success(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        async with self._health_lock:
-            self._health.consecutive_failures = 0
-            self._health.circuit_open_until_monotonic = 0.0
-
-    async def _record_connect_failure(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        async with self._health_lock:
-            self._health.consecutive_failures += 1
-            failures = self._health.consecutive_failures
-            if failures >= self._circuit_breaker_threshold:
-                cooldown_until = (
-                    time.monotonic() + self._circuit_breaker_cooldown_seconds
-                )
-                self._health.circuit_open_until_monotonic = cooldown_until
-                self._logger.warning(
-                    'Condition met: websocket_circuit_open failures=%d cooldown=%.2fs',
-                    failures,
-                    self._circuit_breaker_cooldown_seconds,
-                )
-
-    async def _is_circuit_open(self) -> bool:
-        """Args: none; Returns: bool; Raises: none."""
-
-        async with self._health_lock:
-            open_until = self._health.circuit_open_until_monotonic
-        if open_until <= 0.0:
-            return False
-        remaining = open_until - time.monotonic()
-        if remaining <= 0.0:
-            async with self._health_lock:
-                self._health.circuit_open_until_monotonic = 0.0
-            return False
-        await asyncio.sleep(min(remaining, self._heartbeat_interval_seconds))
-        return True
-
-    async def _start_watchdog(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        if self._watchdog_task is not None and not self._watchdog_task.done():
-            return
-        await self._record_heartbeat()
-        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
-
-    async def _stop_watchdog(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        if self._watchdog_task is None:
-            return
-        self._watchdog_task.cancel()
-        try:
-            await self._watchdog_task
-        except asyncio.CancelledError:
-            pass
-        self._watchdog_task = None
-
-    async def _watchdog_loop(self) -> None:
-        """Args: none; Returns: None; Raises: none."""
-
-        try:
-            while not self._shutdown:
-                await asyncio.sleep(self._heartbeat_interval_seconds)
-                if self._shutdown:
-                    return
-                if not self._connected.is_set():
-                    continue
-                heartbeat_age = await self._heartbeat_age_seconds()
-                if heartbeat_age > self._stale_threshold_seconds:
-                    self._logger.warning(
-                        'Condition met: websocket_stale_detected '
-                        'age=%.2fs threshold=%.2fs',
-                        heartbeat_age,
-                        self._stale_threshold_seconds,
-                    )
-                    self._connected.clear()
-                    self._schedule_reconnect('watchdog_stale')
-        except asyncio.CancelledError:
-            return
-        except Exception as e:
-            self._logger.error('Failure in _watchdog_loop: %s', e)
-
-    def _resolve_loop(self) -> asyncio.AbstractEventLoop:
-        """Args: none; Returns: loop; Raises: RuntimeError."""
-
-        if self._loop is not None:
-            return self._loop
-        try:
-            self._loop = asyncio.get_running_loop()
-            return self._loop
-        except RuntimeError:
-            if self._loop is None:
-                raise
-            return self._loop
-
-    def _on_connect(self, ws: KiteTicker, response: dict[str, Any]) -> None:
-        """Args: ws,response; Returns: None; Raises: none."""
-
-        try:
-            self._logger.info("Condition met: websocket_connected")
-            self._connected.set()
-            self._state = ConnectionState.CONNECTED
-            loop = self._resolve_loop()
-            loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self._record_connect_success())
-            )
-            loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self._record_heartbeat())
-            )
-            if self._on_connect_callback is not None:
-                self._on_connect_callback()
-            self._reconnect.attempts = 0
-            if self._tokens:
-                ws.subscribe(list(self._tokens))
-                ws.set_mode(ws.MODE_FULL, list(self._tokens))
-        except Exception as e:
-            self._logger.error("Failure in _on_connect: %s", e)
-            raise
-
-    def _on_ticks(self, _ws: KiteTicker, ticks: list[dict[str, Any]]) -> None:
-        """Args: ws,ticks; Returns: None; Raises: none."""
-
-        try:
-            if not self._on_tick_callback:
-                return
-            loop = self._resolve_loop()
-            for tick in ticks:
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(self._record_tick())
-                )
-                maybe = self._on_tick_callback(tick)
-                if asyncio.iscoroutine(maybe):
-                    try:
-                        running_loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        running_loop = None
-                    if running_loop is loop:
-                        loop.create_task(maybe)
-                    else:
-                        self._schedule_coroutine(
-                            loop, cast(Coroutine[Any, Any, Any], maybe)
-                        )
-        except Exception as e:
-            self._logger.error("Failure in _on_ticks: %s", e)
-            raise
-
-
-    def _schedule_coroutine(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        coroutine: Coroutine[Any, Any, Any],
-    ) -> None:
-        """Args: loop/coroutine; Returns: none; Raises: none."""
-
-        def _create_task() -> None:
-            loop.create_task(coroutine)
-
-        loop.call_soon_threadsafe(_create_task)
-
-    def _on_error(self, _ws: KiteTicker, code: int, reason: str) -> None:
-        """Args: ws,code,reason; Returns: None; Raises: none."""
-
-        try:
-            self._logger.error("Failure in websocket: code=%s reason=%s", code, reason)
-            self._connected.clear()
-            if self._on_error_callback is not None:
-                self._on_error_callback(RuntimeError(f"code={code} reason={reason}"))
-            if not self._manual_disconnect:
-                self._schedule_reconnect(f"error:{code}")
-        except Exception as e:
-            self._logger.error("Failure in _on_error: %s", e)
-            raise
-
-    def _on_close(self, _ws: KiteTicker, code: int, reason: str) -> None:
-        """Args: ws,code,reason; Returns: None; Raises: none."""
-
-        try:
-            self._logger.info(
-                "Condition met: websocket_closed code=%s reason=%s", code, reason
-            )
-            self._connected.clear()
-            if self._on_disconnect_callback is not None:
-                self._on_disconnect_callback()
-            if not self._manual_disconnect:
-                self._schedule_reconnect(f"close:{code}")
-        except Exception as e:
-            self._logger.error("Failure in _on_close: %s", e)
-            raise
-
     def start(self) -> None:
-        """Args: none; Returns: none; Raises: none."""
+        """Args: none; Returns: none; Raises: RuntimeError."""
 
         try:
-            if self._thread_loop is not None and self._thread is not None:
+            if self._loop is None:
+                self._loop = asyncio.get_running_loop()
+            if self._connect_task is not None and not self._connect_task.done():
                 return
-            loop = asyncio.new_event_loop()
-            self._thread_loop = loop
-
-            def _run() -> None:
-                asyncio.set_event_loop(loop)
-                loop.run_forever()
-
-            self._thread = threading.Thread(target=_run, daemon=True, name='ws-loop')
-            self._thread.start()
-            asyncio.run_coroutine_threadsafe(self.connect(), loop)
+            self._connect_task = self._loop.create_task(self.connect())
         except Exception as e:
-            self._logger.error('Failure in start: %s', e)
+            self._logger.error("Failure in start: %s", e)
             raise
 
     def stop(self) -> None:
-        """Args: none; Returns: none; Raises: none."""
+        """Args: none; Returns: none; Raises: RuntimeError."""
 
         try:
-            if self._thread_loop is None:
+            if self._loop is None:
                 return
-            future = asyncio.run_coroutine_threadsafe(
-                self.disconnect(),
-                self._thread_loop,
-            )
-            future.result(timeout=5)
-            self._thread_loop.call_soon_threadsafe(self._thread_loop.stop)
-            if self._thread is not None:
-                self._thread.join(timeout=2)
-            self._thread = None
-            self._thread_loop = None
+            self._loop.create_task(self.disconnect())
         except Exception as e:
-            self._logger.error('Failure in stop: %s', e)
+            self._logger.error("Failure in stop: %s", e)
             raise
 
     def subscribe_tokens(self, tokens: Sequence[int], mode: str = "ltp") -> None:
         """Args: tokens/mode; Returns: none; Raises: none."""
 
-        try:
-            del mode
-            new_tokens = [
-                int(token) for token in tokens if int(token) not in self._tokens
-            ]
-            if not new_tokens:
-                return
-            self._tokens.update(new_tokens)
-            if self._connected.is_set():
-                self._ticker.subscribe(new_tokens)
-                self._ticker.set_mode(self._ticker.MODE_FULL, new_tokens)
-        except Exception as e:
-            self._logger.error("Failure in subscribe_tokens: %s", e)
+        del mode
+        self._merge_tokens(tokens)
+        self._schedule_async(self._resubscribe_if_connected())
 
     def unsubscribe_tokens(self, tokens: Sequence[int]) -> None:
         """Args: tokens; Returns: none; Raises: none."""
 
         try:
-            token_set = {int(token) for token in tokens}
-            self._tokens = {token for token in self._tokens if token not in token_set}
-            if self._connected.is_set() and token_set:
-                self._ticker.unsubscribe(list(token_set))
+            remove_set = {int(token) for token in tokens}
+            self._tokens -= remove_set
+            ticker = self._ticker
+            if ticker is not None and self._connected.is_set() and remove_set:
+                payload = sorted(remove_set)
+                self._schedule_blocking(lambda: ticker.unsubscribe(payload))
         except Exception as e:
             self._logger.error("Failure in unsubscribe_tokens: %s", e)
 
@@ -623,41 +265,390 @@ class WebSocketManager:
         self._on_connect_callback = on_connect
         self._on_disconnect_callback = on_disconnect
 
+    def set_client_factory(self, fn: Callable[[], Any]) -> None:
+        """Args: factory callable; Returns: none; Raises: none."""
+
+        try:
+
+            def _factory() -> KiteTicker:
+                built = fn()
+                if not isinstance(built, KiteTicker):
+                    raise TypeError("client factory must return KiteTicker")
+                return built
+
+            self._ticker_factory = _factory
+        except Exception as e:
+            self._logger.error("Failure in set_client_factory: %s", e)
+
     def force_reconnect(self) -> None:
         """Args: none; Returns: none; Raises: none."""
 
-        self._schedule_reconnect('manual')
+        self._schedule_reconnect("manual")
 
     def is_connected(self) -> bool:
         """Args: none; Returns: bool; Raises: none."""
 
         return self._connected.is_set()
 
+    def is_running(self) -> bool:
+        """Args: none; Returns: bool; Raises: none."""
+
+        return self._running and not self._shutdown
+
     def connection_state(self) -> ConnectionState:
         """Args: none; Returns: state; Raises: none."""
 
         return self._state
 
-    def set_client_factory(self, _fn: Callable[[], Any]) -> None:
-        """Args: factory; Returns: none; Raises: none."""
-
-        return
-
     def health_snapshot(self) -> dict[str, float | int | bool]:
         """Args: none; Returns: health map; Raises: none."""
 
-        last_tick_age = 0.0
-        last_heartbeat_age = 0.0
         now = time.monotonic()
-        if self._health.last_tick_monotonic > 0.0:
-            last_tick_age = now - self._health.last_tick_monotonic
-        if self._health.last_heartbeat_monotonic > 0.0:
-            last_heartbeat_age = now - self._health.last_heartbeat_monotonic
+        last_tick_age = now - self._last_tick_mono if self._last_tick_mono > 0 else 0.0
+        hb_age = (
+            now - self._last_heartbeat_mono if self._last_heartbeat_mono > 0 else 0.0
+        )
         return {
-            'connected': self._connected.is_set(),
-            'state': int(self._state.value),
-            'consecutive_failures': self._health.consecutive_failures,
-            'last_tick_age_seconds': max(0.0, last_tick_age),
-            'last_heartbeat_age_seconds': max(0.0, last_heartbeat_age),
-            'circuit_open': self._health.circuit_open_until_monotonic > now,
+            "connected": self._connected.is_set(),
+            "state": int(self._state.value),
+            "consecutive_failures": self._circuit.failures,
+            "last_tick_age_seconds": max(0.0, last_tick_age),
+            "last_heartbeat_age_seconds": max(0.0, hb_age),
+            "circuit_open": self._circuit.open_until_mono > now,
         }
+
+    async def _connect_once(self, reason: str) -> None:
+        """Args: reason; Returns: none; Raises: Exception."""
+
+        try:
+            async with self._connect_lock:
+                if self._shutdown or self._manual_disconnect:
+                    return
+                if not self._is_within_trading_window():
+                    self._logger.info(
+                        "Condition met: reconnect_suppressed_outside_trading_window"
+                    )
+                    return
+                self._state = ConnectionState.CONNECTING
+                self._connected.clear()
+                self._connect_started_mono = time.monotonic()
+
+                # --- PRODUCTION SAFETY BLOCK: Always rebuild ticker on reconnect. ---
+                await self._replace_ticker()
+                await asyncio.to_thread(self.ticker.connect, True)
+                await asyncio.wait_for(
+                    self._connected.wait(), timeout=self._handshake_timeout
+                )
+                self._state = ConnectionState.CONNECTED
+                self._circuit.failures = 0
+                self._circuit.open_until_mono = 0.0
+                self._last_backoff_delay = self._base_backoff
+                self._logger.info(
+                    "Condition met: websocket_connected reason=%s",
+                    reason,
+                )
+                await self._resubscribe_if_connected()
+        except Exception as e:
+            self._record_failure()
+            self._logger.error("Failure in _connect_once: %s", e)
+            self._schedule_reconnect("connect_failure")
+
+    def _schedule_reconnect(self, reason: str) -> None:
+        """Args: reason; Returns: none; Raises: none."""
+
+        async def _ensure_task() -> None:
+            async with self._reconnect_lock:
+                if self._shutdown or self._manual_disconnect:
+                    return
+                if self._reconnect_task is not None and not self._reconnect_task.done():
+                    return
+                self._state = ConnectionState.RECONNECTING
+                self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason))
+
+        self._schedule_async(_ensure_task())
+
+    async def _reconnect_loop(self, reason: str) -> None:
+        """Args: reason; Returns: none; Raises: none."""
+
+        try:
+            while not self._shutdown and not self._manual_disconnect:
+                if self._connected.is_set():
+                    return
+                if self._circuit_is_open():
+                    await asyncio.sleep(min(self._heartbeat_interval, 1.0))
+                    continue
+                if not self._is_within_trading_window():
+                    await asyncio.sleep(30.0)
+                    continue
+
+                delay = self._next_backoff_delay()
+                self._logger.info(
+                    "Condition met: reconnect_scheduled reason=%s delay=%.2fs",
+                    reason,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                if (
+                    self._shutdown
+                    or self._manual_disconnect
+                    or self._connected.is_set()
+                ):
+                    return
+                await self._connect_once(reason="reconnect")
+                if self._connected.is_set():
+                    return
+        except Exception as e:
+            self._logger.error("Failure in _reconnect_loop: %s", e)
+        finally:
+            async with self._reconnect_lock:
+                if self._reconnect_task is asyncio.current_task():
+                    self._reconnect_task = None
+
+    async def _watchdog_loop(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+
+        try:
+            while not self._shutdown:
+                await asyncio.sleep(self._heartbeat_interval)
+                if self._shutdown:
+                    return
+                now = time.monotonic()
+
+                # --- PRODUCTION SAFETY BLOCK: Handshake timeout detection. ---
+                if (
+                    self._state == ConnectionState.CONNECTING
+                    and self._connect_started_mono > 0.0
+                    and (now - self._connect_started_mono) > self._handshake_timeout
+                ):
+                    self._logger.warning("Condition met: websocket_handshake_timeout")
+                    self._connected.clear()
+                    self._schedule_reconnect("watchdog_handshake_timeout")
+                    continue
+
+                # --- PRODUCTION SAFETY BLOCK: Stale tick detection. ---
+                if self._connected.is_set() and self._last_tick_mono > 0.0:
+                    age = now - self._last_tick_mono
+                    if age > self._stale_threshold:
+                        self._logger.warning(
+                            "Condition met: websocket_stale_tick "
+                            "age=%.2fs threshold=%.2fs",
+                            age,
+                            self._stale_threshold,
+                        )
+                        self._connected.clear()
+                        self._schedule_reconnect("watchdog_stale_tick")
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            self._logger.error("Failure in _watchdog_loop: %s", e)
+
+    async def _ensure_watchdog(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    async def _replace_ticker(self) -> None:
+        """Args: none; Returns: none; Raises: Exception."""
+
+        old = self._ticker
+        self._ticker = self._build_ticker()
+        self._bind_handlers(self._ticker)
+        if old is not None:
+            try:
+                await asyncio.to_thread(old.close)
+            except Exception as e:
+                self._logger.error("Failure in _replace_ticker.close_old: %s", e)
+
+    def _build_ticker(self) -> KiteTicker:
+        """Args: none; Returns: KiteTicker; Raises: Exception."""
+
+        if self._ticker_factory is not None:
+            return self._ticker_factory()
+        return KiteTicker(self._api_key, self._access_token, reconnect=False)
+
+    def _bind_handlers(self, ticker: KiteTicker) -> None:
+        """Args: ticker; Returns: none; Raises: none."""
+
+        ticker.on_connect = self._on_connect
+        ticker.on_ticks = self._on_ticks
+        ticker.on_error = self._on_error
+        ticker.on_close = self._on_close
+
+    def _on_connect(self, ws: KiteTicker, response: dict[str, Any]) -> None:
+        """Args: ws/response; Returns: none; Raises: none."""
+
+        try:
+            del ws, response
+            self._last_heartbeat_mono = time.monotonic()
+            self._last_tick_mono = time.monotonic()
+            self._connected.set()
+            self._state = ConnectionState.CONNECTED
+            if self._on_connect_callback is not None:
+                self._on_connect_callback()
+            self._schedule_async(self._resubscribe_if_connected())
+        except Exception as e:
+            self._logger.error("Failure in _on_connect: %s", e)
+
+    def _on_ticks(self, _ws: KiteTicker, ticks: list[dict[str, Any]]) -> None:
+        """Args: ws/ticks; Returns: none; Raises: none."""
+
+        try:
+            now = time.monotonic()
+            self._last_tick_mono = now
+            self._last_heartbeat_mono = now
+            callback = self._on_tick_callback
+            if callback is None:
+                return
+            loop = self._resolve_loop()
+            for tick in ticks:
+                result = callback(tick)
+                if asyncio.iscoroutine(result):
+                    self._schedule_coroutine(loop, result)
+        except Exception as e:
+            self._logger.error("Failure in _on_ticks: %s", e)
+
+    def _on_error(self, _ws: KiteTicker, code: int, reason: str) -> None:
+        """Args: ws/code/reason; Returns: none; Raises: none."""
+
+        try:
+            self._logger.error("Failure in websocket: code=%s reason=%s", code, reason)
+            self._connected.clear()
+            if self._on_error_callback is not None:
+                self._on_error_callback(RuntimeError(f"code={code} reason={reason}"))
+            if not self._manual_disconnect:
+                self._schedule_reconnect(f"error:{code}")
+        except Exception as e:
+            self._logger.error("Failure in _on_error: %s", e)
+
+    def _on_close(self, _ws: KiteTicker, code: int, reason: str) -> None:
+        """Args: ws/code/reason; Returns: none; Raises: none."""
+
+        try:
+            self._logger.info(
+                "Condition met: websocket_closed code=%s reason=%s", code, reason
+            )
+            self._connected.clear()
+            self._state = ConnectionState.DISCONNECTED
+            if self._on_disconnect_callback is not None:
+                self._on_disconnect_callback()
+            if not self._manual_disconnect:
+                self._schedule_reconnect(f"close:{code}")
+        except Exception as e:
+            self._logger.error("Failure in _on_close: %s", e)
+
+    async def _resubscribe_if_connected(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+
+        ticker = self._ticker
+        if ticker is None or not self._connected.is_set() or not self._tokens:
+            return
+        payload = sorted(self._tokens)
+        for idx in range(0, len(payload), 200):
+            batch = payload[idx : idx + 200]
+            await asyncio.to_thread(ticker.subscribe, batch)
+            await asyncio.to_thread(ticker.set_mode, ticker.MODE_FULL, batch)
+
+    def _merge_tokens(self, tokens: Sequence[int]) -> None:
+        """Args: tokens; Returns: none; Raises: none."""
+
+        for token in tokens:
+            self._tokens.add(int(token))
+
+    def _resolve_loop(self) -> asyncio.AbstractEventLoop:
+        """Args: none; Returns: event loop; Raises: RuntimeError."""
+
+        if self._loop is not None:
+            return self._loop
+        self._loop = asyncio.get_running_loop()
+        return self._loop
+
+    def _schedule_coroutine(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        coroutine: Coroutine[Any, Any, Any],
+    ) -> None:
+        """Args: loop/coroutine; Returns: none; Raises: none."""
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            loop.create_task(coroutine)
+            return
+        loop.call_soon_threadsafe(lambda: loop.create_task(coroutine))
+
+    def _schedule_async(self, coroutine: Coroutine[Any, Any, Any]) -> None:
+        """Args: coroutine; Returns: none; Raises: none."""
+
+        try:
+            loop = self._resolve_loop()
+            self._schedule_coroutine(loop, coroutine)
+        except Exception as e:
+            self._logger.error("Failure in _schedule_async: %s", e)
+
+    def _schedule_blocking(self, fn: Callable[[], Any]) -> None:
+        """Args: fn; Returns: none; Raises: none."""
+
+        async def _run() -> None:
+            await asyncio.to_thread(fn)
+
+        self._schedule_async(_run())
+
+    def _next_backoff_delay(self) -> float:
+        """Args: none; Returns: delay; Raises: none."""
+
+        low = self._base_backoff
+        high = max(low, self._last_backoff_delay * 3.0)
+        delay = random.uniform(low, high)
+        delay = min(self._max_backoff, delay)
+        self._last_backoff_delay = delay
+        return delay
+
+    def _record_failure(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+
+        self._circuit.failures += 1
+        if self._circuit.failures >= self._circuit_breaker_threshold:
+            self._circuit.open_until_mono = (
+                time.monotonic() + self._circuit_breaker_cooldown
+            )
+            self._logger.warning(
+                "Condition met: websocket_circuit_open failures=%d cooldown=%.2fs",
+                self._circuit.failures,
+                self._circuit_breaker_cooldown,
+            )
+
+    def _circuit_is_open(self) -> bool:
+        """Args: none; Returns: bool; Raises: none."""
+
+        if self._circuit.open_until_mono <= 0.0:
+            return False
+        now = time.monotonic()
+        if now >= self._circuit.open_until_mono:
+            self._circuit.open_until_mono = 0.0
+            return False
+        return True
+
+    def _is_within_trading_window(self) -> bool:
+        """Args: none; Returns: bool; Raises: none."""
+
+        if not self._trading_window_enabled:
+            return True
+        now = datetime.now(self._trading_tz)
+        if now.weekday() >= 5:
+            return False
+        now_time = now.time().replace(tzinfo=None)
+        return self._trading_start <= now_time <= self._trading_end
+
+    async def _cancel_task(self, task: asyncio.Task[None] | None) -> None:
+        """Args: task; Returns: none; Raises: none."""
+
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            return
