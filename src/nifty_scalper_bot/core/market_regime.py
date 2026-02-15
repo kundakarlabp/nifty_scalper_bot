@@ -261,8 +261,6 @@ class MarketRegimeDetector:
             )
             raise
 
-
-
     def evaluate(
         self,
         symbol: str,
@@ -461,6 +459,19 @@ class MarketRegimeDetector:
                 exc,
                 extra={"event": "regime_get_snapshot_error", "symbol": symbol},
                 exc_info=exc,
+            )
+            return None
+
+    def get_latest_snapshot(self) -> RegimeSnapshot | None:
+        """Args: none; Returns: latest regime snapshot; Raises: none."""
+        try:
+            with self._lock:
+                if not self._history:
+                    return None
+                return self._history[-1]
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in MarketRegimeDetector.get_latest_snapshot: %s", exc
             )
             return None
 

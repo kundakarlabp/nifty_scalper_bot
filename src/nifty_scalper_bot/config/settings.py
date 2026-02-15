@@ -914,6 +914,7 @@ class Settings:
     feature_order_without_token: bool = True
     feature_resolver_learn_from_quotes: bool = True
     universe_dynamic_mode: bool = True
+    backtest_mode: bool = False
 
 
 def _build_elite_settings() -> EliteStrategiesSettings:
@@ -1444,6 +1445,7 @@ def get_settings() -> Settings:
             "FEATURE_RESOLVER_LEARN_FROM_QUOTES", default=True
         ),
         universe_dynamic_mode=_env_bool("UNIVERSE_DYNAMIC_MODE", default=True),
+        backtest_mode=_env_bool("BACKTEST_MODE", default=False),
     )
 
     try:

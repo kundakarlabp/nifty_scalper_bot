@@ -146,6 +146,7 @@ class DataHub:
 
         # Subscribers
         self._tick_subscribers: dict[str, set[TickListener]] = {}
+        self._subscribed_symbols: set[str] = set()
         self._order_subscribers: list[OrderListener] = []
         self._history_cache_lock = RLock()
         self._history_cache: dict[_HistoryCacheKey, _HistoryCacheEntry] = {}
@@ -377,6 +378,8 @@ class DataHub:
             ttl_ms = 5_000.0
         elif source == "rest":
             ttl_ms = 90_000.0
+        elif source == "historical":
+            ttl_ms = float("inf")
         else:
             ttl_ms = threshold_ms
         effective_threshold = max(threshold_ms, ttl_ms)
@@ -397,12 +400,27 @@ class DataHub:
     def subscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Register a callback for tick updates on a symbol."""
         normalized = canonical(symbol)
+        if ":" not in normalized:
+            LOGGER.warning(
+                "data_hub_subscribe_rejected_malformed_symbol",
+                extra={
+                    "event": "data_hub_subscribe_rejected_malformed_symbol",
+                    "symbol": symbol,
+                },
+            )
+            return
         with self._lock:
             if normalized not in self._tick_subscribers:
                 self._tick_subscribers[normalized] = set()
-                if self._mdm:
-                    self._mdm.subscribe(normalized, self.ingest_tick_sync)
             self._tick_subscribers[normalized].add(callback)
+            if normalized in self._subscribed_symbols:
+                return
+            self._subscribed_symbols.add(normalized)
+        if self._mdm:
+            try:
+                self._mdm.subscribe(normalized, self.ingest_tick_sync)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error("Failure in DataHub.subscribe_ticks: %s", exc)
 
     def unsubscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Unregister a tick callback."""
@@ -412,6 +430,7 @@ class DataHub:
                 self._tick_subscribers[normalized].discard(callback)
                 if not self._tick_subscribers[normalized]:
                     del self._tick_subscribers[normalized]
+                    self._subscribed_symbols.discard(normalized)
 
     def subscribe_orders(self, callback: OrderListener) -> None:
         """Register a callback for all order updates."""
