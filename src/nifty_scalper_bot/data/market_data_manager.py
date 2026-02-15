@@ -220,6 +220,7 @@ class MarketDataManager:
         self._margin_snapshot: dict[str, Any] | None = None
         self._last_margin_refresh: float = 0.0
         self.last_tick_time = 0.0
+        self._tick_warn_last: dict[str, float] = {}  # ✅ FIX: rate-limit cache-miss warnings
         self._margin_cache_ttl = self._parse_float_env(
             "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
         )
@@ -963,7 +964,13 @@ class MarketDataManager:
         with self._lock:
             tick = self._latest_ticks.get(symbol)
             if tick is None:
-                self._logger.warning("MDM: get_latest_tick - No tick in cache for %s", symbol)
+                # ✅ FIX: Rate-limit warning to once per 60s per symbol
+                import time as _time
+                _now = _time.monotonic()
+                _last = self._tick_warn_last.get(symbol, 0.0)
+                if _now - _last >= 60.0:
+                    self._tick_warn_last[symbol] = _now
+                    self._logger.warning("MDM: get_latest_tick - No tick in cache for %s", symbol)
                 return None
             return dict(tick)
 
@@ -1114,16 +1121,6 @@ class MarketDataManager:
         Raises:
             None.
         """
-
-        if not self._rest_poll_enabled:
-            self._logger.info(
-                "Condition met: mdm_pull_quote_skipped_ws_primary",
-                extra={
-                    "event": "mdm_pull_quote_skipped_ws_primary",
-                    "symbol": symbol,
-                },
-            )
-            return {"symbol": symbol}
 
         candidates: list[str | int] = self._candidate_quote_keys(symbol)
         if not candidates:
@@ -2517,7 +2514,7 @@ class MarketDataManager:
                 "Condition met: mdm_tracking_added",
                 extra={"event": "mdm_tracking_added", "symbol": sym},
             )
-            if seed and self._rest_poll_enabled:
+            if seed:
                 seeded = self._seed_quote_from_broker(sym)
                 if seeded:
                     self._logger.info(
