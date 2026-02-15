@@ -14,6 +14,7 @@ from typing import Any, Callable, Iterable, Mapping, TypedDict, cast
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 from nifty_scalper_bot.utils.options_math import (
     black_scholes_greeks,
     implied_volatility,
@@ -176,10 +177,12 @@ class DataHub:
 
         if not symbol:
             return
+        normalized_symbol = normalize_symbol(str(symbol)) or str(symbol)
 
         with self._lock:
             # 1. Update Cache
-            self._quotes[symbol] = tick
+            self._quotes[normalized_symbol] = tick
+            self._quotes[str(symbol)] = tick
 
             # Cross-reference token/symbol (Fix for Self-Checker)
             if str(token) == "256265":
@@ -539,8 +542,8 @@ class DataHub:
 
     @staticmethod
     def normalize(symbol: str) -> str:
-        """Normalize symbol. Args: symbol. Returns: upper symbol. Raises: None."""
-        return symbol.strip().upper()
+        """Normalize symbol. Args: symbol. Returns: canonical symbol. Raises: None."""
+        return normalize_symbol(symbol)
 
     # ----------------------------------------------------------------
     # CRITICAL FIX: Option Chain Proxy for Strike Selector

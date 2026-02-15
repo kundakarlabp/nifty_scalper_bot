@@ -19,13 +19,17 @@ from nifty_scalper_bot.utils.metrics import Counter, Gauge
 class ConnectionState(Enum):
     """Enumeration describing the websocket connection lifecycle."""
 
-    # Keep enum values stable for metrics/health endpoints
-    DISCONNECTED = 0
-    CONNECTING = 1
+    STOPPED = 0
+    STARTING = 1
     CONNECTED = 2
-    ERROR = 3
-    CLOSING = 4
-    IDLE = DISCONNECTED  # Backwards compatibility alias
+    RECONNECTING = 3
+    DISABLED = 4
+    # Backwards compatibility aliases for existing call sites.
+    DISCONNECTED = STOPPED
+    CONNECTING = STARTING
+    ERROR = RECONNECTING
+    CLOSING = STOPPED
+    IDLE = STOPPED
 
 
 class HandshakeTimeoutError(WebSocketError):
@@ -78,6 +82,7 @@ class WebSocketManager:
         self._subscription_tokens: set[Any] = set()
         self._subscriptions: dict[Any, str] = {}
         self._reconnect_lock = threading.Lock()
+        self._connect_lock = threading.Lock()
         self._build_client_fn: Callable[[], Any] = lambda: broker_ws_client
         self._configure_callbacks()
         # Reconnect & breaker state
@@ -97,7 +102,6 @@ class WebSocketManager:
         self._max_backoff_s = max(
             self._backoff_base, self._backoff_max if self._backoff_max > 0 else 60.0
         )
-        self._refresh_hook = getattr(broker_ws_client, "refresh_session", None)
         self._last_error: Exception | None = None
         self._reconnect_timer: threading.Timer | None = None
         self._handshake_timeout = 15.0
@@ -252,11 +256,26 @@ class WebSocketManager:
         if getattr(self._client, "on_reconnect", None) is not None:
 
             def _adapter_on_reconnect(*_: Any, **__: Any) -> None:
-                self._transition_state(ConnectionState.CONNECTING)
+                self._transition_state(ConnectionState.STARTING)
 
             try:
                 self._client.on_reconnect = _adapter_on_reconnect
             except Exception:  # pragma: no cover - some clients block assignment
+                pass
+
+        if getattr(self._client, "on_ping", None) is not None:
+            try:
+                self._client.on_ping = lambda *_args, **_kwargs: self._logger.debug(
+                    "WS ping received", extra={"event": "ws_ping"}
+                )
+            except Exception:  # pragma: no cover - optional callback
+                pass
+        if getattr(self._client, "on_pong", None) is not None:
+            try:
+                self._client.on_pong = lambda *_args, **_kwargs: self._logger.debug(
+                    "WS pong received", extra={"event": "ws_pong"}
+                )
+            except Exception:  # pragma: no cover - optional callback
                 pass
 
         if getattr(self._client, "on_open", None) is not None:
@@ -303,20 +322,19 @@ class WebSocketManager:
 
         # ✅ FIX: Skip initial connect outside trading window (weekends, off-hours)
         if not self._is_trading_window():
-            self._transition_state(ConnectionState.DISCONNECTED)
+            self._transition_state(ConnectionState.DISABLED)
             self._logger.info(
                 "WS start deferred: outside trading window",
                 extra={"event": "ws_start_deferred_market_closed"},
             )
-            self._schedule_reconnect_delayed(60.0)
+            self._schedule_reconnect_at_market_open("start")
             return
 
-        self._transition_state(ConnectionState.CONNECTING)
+        self._transition_state(ConnectionState.STARTING)
         self._logger.info("Starting WebSocket connection")
         self._last_heartbeat = time.monotonic()
         self._connecting_since = self._last_heartbeat
         self._last_connect_attempt = self._last_heartbeat
-        self.refresh_session()
         try:
             self._connect_client()
         except Exception as exc:  # noqa: BLE001
@@ -349,7 +367,7 @@ class WebSocketManager:
         self._cancel_reconnect_timer()
         if self._watchdog_thread is not None:
             self._watchdog_thread.join(timeout=self._heartbeat_sec)
-        self._transition_state(ConnectionState.CLOSING)
+        self._transition_state(ConnectionState.STOPPED)
         with self._lock:
             try:
                 closer = getattr(self._client, "close", None)
@@ -363,7 +381,7 @@ class WebSocketManager:
                 self._logger.error("Error while disconnecting WebSocket: %s", exc)
                 raise WebSocketError("Failed to disconnect WebSocket") from exc
             finally:
-                self._transition_state(ConnectionState.DISCONNECTED)
+                self._transition_state(ConnectionState.STOPPED)
                 self._connecting_since = 0.0
                 self._last_heartbeat = 0.0
 
@@ -437,7 +455,7 @@ class WebSocketManager:
             self._reconnect_failures = max(self._reconnect_failures, 2)
 
         self._connecting_since = 0.0
-        self._transition_state(ConnectionState.ERROR)
+        self._transition_state(ConnectionState.RECONNECTING)
         self._increase_backoff()
 
         if self._user_on_error is not None:
@@ -497,7 +515,7 @@ class WebSocketManager:
         except Exception:  # pragma: no cover - optional metrics
             pass
         self._increase_backoff()
-        self._transition_state(ConnectionState.ERROR)
+        self._transition_state(ConnectionState.RECONNECTING)
         self._connecting_since = 0.0
         # ✅ FIX C: Use _schedule_reconnect to avoid racing with error callback
         self._schedule_reconnect()
@@ -509,17 +527,11 @@ class WebSocketManager:
         self._force_reconnect(reason="manual")
 
     def refresh_session(self) -> None:
-        """Refresh the underlying broker session before reconnecting."""
-
-        if callable(self._refresh_hook):
-            try:
-                self._logger.info(
-                    "Refreshing WS/broker session",
-                    extra={"event": "ws_handshake_retry"},
-                )
-                self._refresh_hook()
-            except Exception as exc:  # noqa: BLE001 - defensive logging
-                self._logger.warning("WebSocket session refresh failed: %s", exc)
+        """Refresh hook intentionally disabled for WS error/close reconnect path."""
+        self._logger.debug(
+            "WS refresh_session skipped",
+            extra={"event": "ws_refresh_skipped"},
+        )
 
     def is_connected(self) -> bool:
         """Return True if the WebSocket heartbeat is within the stale window."""
@@ -745,6 +757,12 @@ class WebSocketManager:
         )
 
     def _connect_client(self) -> None:
+        if not self._connect_lock.acquire(blocking=False):
+            self._logger.debug(
+                "WS connect suppressed: active connect in progress",
+                extra={"event": "ws_connect_suppressed"},
+            )
+            return
         try:
             now = time.monotonic()
             self._last_connect_attempt = now
@@ -760,6 +778,8 @@ class WebSocketManager:
         except Exception as exc:  # noqa: BLE001
             self._last_error = exc
             raise
+        finally:
+            self._connect_lock.release()
 
     def force_reconnect(self) -> None:
         """Force a websocket reconnect attempt regardless of breaker state."""
@@ -774,11 +794,12 @@ class WebSocketManager:
         # ✅ FIX: Short-circuit outside trading window to avoid noisy logs
         if not self._is_trading_window():
             self._cancel_reconnect_timer()
-            self._logger.debug(
+            self._logger.info(
                 "WS reconnect suppressed: outside trading window",
                 extra={"event": "ws_reconnect_market_closed", "reason": reason},
             )
-            self._schedule_reconnect_delayed(60.0)
+            self._transition_state(ConnectionState.DISABLED)
+            self._schedule_reconnect_at_market_open(reason or "reconnect")
             return
 
         self._cancel_reconnect_timer()
@@ -802,7 +823,7 @@ class WebSocketManager:
                         disconnector()
             except Exception:  # pragma: no cover - best effort cleanup
                 pass
-        self._transition_state(ConnectionState.ERROR)
+        self._transition_state(ConnectionState.RECONNECTING)
         try:
             self._reconnect()
         except WebSocketError:
@@ -819,7 +840,8 @@ class WebSocketManager:
                 "WS reconnect suppressed: outside trading window",
                 extra={"event": "ws_reconnect_market_closed"},
             )
-            self._schedule_reconnect_delayed(60.0)
+            self._transition_state(ConnectionState.DISABLED)
+            self._schedule_reconnect_at_market_open("reconnect")
             return
 
         now = time.monotonic()
@@ -847,9 +869,6 @@ class WebSocketManager:
                 if self._stop_event.wait(delay):
                     return
 
-            if callable(self._refresh_hook):
-                self.refresh_session()
-
             try:
                 new_client = self._build_client_fn()
             except Exception as exc:  # noqa: BLE001
@@ -863,7 +882,7 @@ class WebSocketManager:
 
             try:
                 self._last_heartbeat = time.monotonic()
-                self._transition_state(ConnectionState.CONNECTING)
+                self._transition_state(ConnectionState.STARTING)
                 self._connect_client()
                 # ✅ FIX A: Do NOT reset backoff here — _connect_client() is
                 # non-blocking (handshake hasn't completed). Reset only in
@@ -915,19 +934,36 @@ class WebSocketManager:
         t = now_ist.time()
         return dt_time(9, 0) <= t <= dt_time(15, 45)
 
-    def _schedule_reconnect_delayed(self, delay_s: float) -> None:
-        """Schedule a reconnect after a long delay (used for off-hours)."""
+    def _schedule_reconnect_at_market_open(self, reason: str) -> None:
+        """Schedule reconnect timer for next market open. Args: reason; Returns: None; Raises: None."""
+        from datetime import datetime, time as dt_time, timedelta
+        from zoneinfo import ZoneInfo
+
         self._cancel_reconnect_timer()
+        ist = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(ist)
+        next_open = datetime.combine(now.date(), dt_time(9, 15), tzinfo=ist)
+        if now >= next_open:
+            next_open = next_open + timedelta(days=1)
+        while next_open.weekday() >= 5:
+            next_open = next_open + timedelta(days=1)
+        delay_s = max((next_open - now).total_seconds(), 2.0)
         timer = threading.Timer(
-            delay_s, self._force_reconnect, kwargs={"reason": "market_recheck"}
+            delay_s,
+            self._force_reconnect,
+            kwargs={"reason": "market_open"},
         )
         timer.daemon = True
         self._reconnect_timer = timer
         timer.start()
         self._logger.info(
-            "WS reconnect scheduled (market recheck in %.0fs)",
-            delay_s,
-            extra={"event": "ws_market_recheck", "delay_s": delay_s},
+            "WS reconnect deferred until market open",
+            extra={
+                "event": "ws_market_open_deferred",
+                "reason": reason,
+                "delay_s": round(delay_s, 3),
+                "next_open": next_open.isoformat(),
+            },
         )
 
     def _backoff_reset(self) -> None:
