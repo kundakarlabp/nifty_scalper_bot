@@ -280,7 +280,7 @@ class MarketDataManager:
             "TICK_STALE_MS", default=2_000, minimum=0
         )
         if self._rest_poll_enabled:
-            self._tracked_symbols.add("NIFTY")
+            self._tracked_symbols.add("NSE:NIFTY 50")
 
         # Load optional settings overrides
         if settings is not None:
