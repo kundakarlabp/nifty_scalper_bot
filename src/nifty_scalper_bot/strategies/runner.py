@@ -2187,7 +2187,9 @@ class StrategyRunner:
             _ = now
             return get_market_state() == MarketState.OPEN
         except Exception as e:
-            self._logger.warning(f"Market time check failed: {e}. Defaulting to CLOSED.")
+            self._logger.warning(
+                f"Market time check failed: {e}. Defaulting to CLOSED."
+            )
             return False
 
     def _on_tick_safe(self, tick: Mapping[str, Any]) -> None:
@@ -3293,7 +3295,11 @@ class StrategyRunner:
                 return
 
             backoff_until = float(getattr(self, "_data_freshness_backoff_until", 0.0))
-            if backoff_until and time_module.time() < backoff_until:
+            if (
+                self._should_enforce_freshness_backoff()
+                and backoff_until
+                and time_module.time() < backoff_until
+            ):
                 remaining = max(0.0, backoff_until - time_module.time())
                 self._logger.debug(
                     "strategy_eval_skipped_stale_data",
@@ -3554,6 +3560,26 @@ class StrategyRunner:
             self._logger.error("Failure in _on_tick: %s", e, exc_info=True)
             return
 
+    def _should_enforce_freshness_backoff(self) -> bool:
+        """Args: none; Returns: whether freshness backoff should pause strategy; Raises: none."""
+        try:
+            if get_market_state() != MarketState.OPEN:
+                return False
+            transport = getattr(self._market_data, "transport_status", None)
+            if callable(transport):
+                status = transport() or {}
+                if bool(status.get("polling")):
+                    return False
+                ws_state = str(status.get("ws_state") or "").lower()
+                if ws_state in {"reconnecting", "connecting", "backoff"}:
+                    return False
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in StrategyRunner._should_enforce_freshness_backoff: %s", exc
+            )
+            return True
+
     def set_data_freshness_backoff(
         self,
         backoff_seconds: float,
@@ -3563,6 +3589,8 @@ class StrategyRunner:
     ) -> None:
         """Args: backoff_seconds, detail_code, symbol. Returns: None. Raises: Exception."""
         try:
+            if not self._should_enforce_freshness_backoff():
+                return
             seconds = max(float(backoff_seconds), 0.0)
             now_ts = time_module.time()
             until = now_ts + seconds

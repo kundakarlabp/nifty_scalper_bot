@@ -41,6 +41,8 @@ class PollingStreamer:
         self._interval_s = max(0.2, float(poll_interval_ms) / 1000.0)
         self._batch_size = max(1, int(batch_size))
         self._tokens: set[int] = set()
+        self._seeded_tokens: set[int] = set()
+        self._symbol_lookup_failed_once: set[int] = set()
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -100,7 +102,7 @@ class PollingStreamer:
         self._websocket_mode_enabled = bool(enabled)
 
     def subscribe(self, tokens: Sequence[int]) -> None:
-        """Add tokens to the polling list and seed DataHub immediately.
+        """Add tokens to the polling list and seed DataHub once before WS session.
 
         Args:
             tokens: Sequence of integer instrument tokens.
@@ -163,11 +165,12 @@ class PollingStreamer:
                 extra={"event": "polling_subscribe", "count": new_count},
             )
 
-        # Seed DataHub immediately
-        if self._data_hub:
+        # Seed DataHub only during initial hydration and only once per token.
+        if self._data_hub and not self._websocket_mode_enabled:
             import time
 
-            for token in valid_tokens:
+            tokens_to_seed = sorted(valid_tokens - self._seeded_tokens)
+            for token in tokens_to_seed:
                 symbol = self._resolve_instrument(token)
                 if symbol:
                     self._data_hub.store_quote(
@@ -181,6 +184,7 @@ class PollingStreamer:
                         source="rest",
                         seed=True,
                     )
+                    self._seeded_tokens.add(token)
                 else:
                     LOGGER.error(
                         "PollingStreamer.subscribe: symbol resolution failed",
@@ -425,6 +429,8 @@ class PollingStreamer:
                     base_symbol = symbol.split(":", 1)[-1] if ":" in symbol else symbol
                     symbol_to_token_map[base_symbol] = token
                 else:
+                    if token not in self._symbol_lookup_failed_once:
+                        self._symbol_lookup_failed_once.add(token)
                     log_throttled(
                         LOGGER,
                         f"resolve_fail_{token}",
@@ -468,12 +474,12 @@ class PollingStreamer:
 
             log_throttled(
                 LOGGER,
-                'quote_quality_check',
+                "quote_quality_check",
                 (
-                    '📊 QUOTE QUALITY: VWAP='
+                    "📊 QUOTE QUALITY: VWAP="
                     f"{'✅' if has_vwap else '❌'} | Volume="
                     f"{'✅' if has_volume else '❌'} | Keys="
-                    f'{list(sample_quote.keys())[:8]}'
+                    f"{list(sample_quote.keys())[:8]}"
                 ),
                 interval_sec=60.0,
                 level=logging.DEBUG,
@@ -503,10 +509,10 @@ class PollingStreamer:
                     token_int = int(token)
 
                     # ✅ CRITICAL: Extract VWAP (average_price) and Volume
-                    avg_price = quote.get('average_price') or quote.get('vwap')
-                    volume = quote.get('volume')
-                    oi = quote.get('oi')
-                    ohlc = quote.get('ohlc') or {}
+                    avg_price = quote.get("average_price") or quote.get("vwap")
+                    volume = quote.get("volume")
+                    oi = quote.get("oi")
+                    ohlc = quote.get("ohlc") or {}
 
                     # Convert to proper types with safe defaults
                     avg_price_float = float(avg_price) if avg_price is not None else 0.0
@@ -515,24 +521,24 @@ class PollingStreamer:
 
                     used_vwap_fallback = False
                     if avg_price_float <= 0:
-                        ohlc_close = ohlc.get('close')
+                        ohlc_close = ohlc.get("close")
                         if ohlc_close is not None:
                             try:
                                 avg_price_float = float(ohlc_close)
                                 used_vwap_fallback = avg_price_float > 0
                             except (TypeError, ValueError) as exc:
                                 LOGGER.debug(
-                                    '[POLL] VWAP fallback conversion failed: %s',
+                                    "[POLL] VWAP fallback conversion failed: %s",
                                     exc,
                                 )
 
                     if used_vwap_fallback:
                         log_throttled(
                             LOGGER,
-                            f'vwap_fallback_{key}',
+                            f"vwap_fallback_{key}",
                             (
-                                'Condition met: vwap_fallback_ohlc '
-                                f'for {key} (close={avg_price_float:.2f})'
+                                "Condition met: vwap_fallback_ohlc "
+                                f"for {key} (close={avg_price_float:.2f})"
                             ),
                             interval_sec=300.0,
                         )
@@ -540,16 +546,16 @@ class PollingStreamer:
                         # ✅ DIAGNOSTIC: Log if VWAP is missing (but don't spam)
                         log_throttled(
                             LOGGER,
-                            f'vwap_zero_{key}',
+                            f"vwap_zero_{key}",
                             (
-                                f'⚠️ VWAP=0 for {key} | This prevents VWAP '
-                                'strategy from triggering'
+                                f"⚠️ VWAP=0 for {key} | This prevents VWAP "
+                                "strategy from triggering"
                             ),
                             interval_sec=300.0,  # Only log every 5 minutes
                         )
 
                     # Handle timestamp
-                    q_ts = quote.get('timestamp')
+                    q_ts = quote.get("timestamp")
                     if q_ts and hasattr(q_ts, "timestamp"):
                         ts = int(q_ts.timestamp() * 1000)
                     elif q_ts and isinstance(q_ts, (int, float)):
@@ -559,29 +565,29 @@ class PollingStreamer:
 
                     # Build tick with ALL available data
                     tick = {
-                        'instrument_token': token_int,
-                        'last_price': lp,
-                        'timestamp': ts,
-                        'volume': volume_int,
-                        'average_price': avg_price_float,  # ✅ VWAP
-                        'oi': oi_int,
-                        'depth': quote.get('depth'),
-                        'symbol': (
+                        "instrument_token": token_int,
+                        "last_price": lp,
+                        "timestamp": ts,
+                        "volume": volume_int,
+                        "average_price": avg_price_float,  # ✅ VWAP
+                        "oi": oi_int,
+                        "depth": quote.get("depth"),
+                        "symbol": (
                             key
                             if ":" in str(key)
                             else self._resolve_instrument(token_int)
                         ),
-                        'source': 'rest',
+                        "source": "rest",
                     }
 
                     # ✅ LOG SUCCESS when we have VWAP (throttled)
                     if avg_price_float > 0:
                         log_throttled(
                             LOGGER,
-                            f'full_quote_{key}',
+                            f"full_quote_{key}",
                             (
-                                f'✅ FULL QUOTE: {key} | LTP={lp:.2f} | '
-                                f'VWAP={avg_price_float:.2f} | Vol={volume_int}'
+                                f"✅ FULL QUOTE: {key} | LTP={lp:.2f} | "
+                                f"VWAP={avg_price_float:.2f} | Vol={volume_int}"
                             ),
                             interval_sec=120.0,
                             level=logging.DEBUG,
@@ -598,8 +604,8 @@ class PollingStreamer:
                 vwap_count = sum(1 for t in ticks if t.get("average_price", 0) > 0)
                 log_throttled(
                     LOGGER,
-                    'fetch_summary',
-                    f'📈 FETCH COMPLETE: {len(ticks)} ticks | {vwap_count} with VWAP',
+                    "fetch_summary",
+                    f"📈 FETCH COMPLETE: {len(ticks)} ticks | {vwap_count} with VWAP",
                     interval_sec=60.0,
                     level=logging.DEBUG,
                 )

@@ -3,6 +3,7 @@ flexible SDK adapters."""
 
 from __future__ import annotations
 
+import queue
 import random
 import threading
 import time
@@ -49,6 +50,9 @@ class HandshakeTimeoutError(WebSocketError):
 class WebSocketManager:
     """Manage broker WebSocket callbacks with stale detection and fan-out."""
 
+    _MASTER_CLIENTS: dict[str, Any] = {}
+    _MASTER_LOCK = threading.RLock()
+
     def __init__(
         self,
         broker_ws_client: Any,
@@ -64,7 +68,7 @@ class WebSocketManager:
         breaker_threshold: int = 5,
         breaker_open_sec: float = 180.0,
     ) -> None:
-        self._client = broker_ws_client
+        self._client = self._resolve_master_client(broker_ws_client)
         self._on_tick = on_tick
         self._user_on_error = on_error
         self._heartbeat_sec = heartbeat_sec
@@ -78,6 +82,8 @@ class WebSocketManager:
         self._state_lock = threading.Lock()
         self._started = False
         self._watchdog_thread: threading.Thread | None = None
+        self._tick_worker_thread: threading.Thread | None = None
+        self._tick_queue: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
         self._state = ConnectionState.DISCONNECTED
         self._downtime_started = time.monotonic()
         self._subscription_tokens: set[Any] = set()
@@ -107,6 +113,7 @@ class WebSocketManager:
         self._reconnect_timer: threading.Timer | None = None
         self._handshake_timeout = 15.0
         self._handshake_hb_timeout = 10.0
+        self._tick_stale_sec = 5.0
 
         # Metrics
         self._m_reconnects = Counter(
@@ -131,6 +138,25 @@ class WebSocketManager:
         )
         self._user_on_connect: Callable[[], None] | None = None
         self._user_on_disconnect: Callable[[], None] | None = None
+
+    @classmethod
+    def _resolve_master_client(cls, broker_ws_client: Any) -> Any:
+        """Args: broker_ws_client; Returns: singleton ws client per API key; Raises: none."""
+        try:
+            api_key = str(getattr(broker_ws_client, "api_key", "") or "").strip()
+            if not api_key:
+                return broker_ws_client
+            with cls._MASTER_LOCK:
+                existing = cls._MASTER_CLIENTS.get(api_key)
+                if existing is not None:
+                    return existing
+                cls._MASTER_CLIENTS[api_key] = broker_ws_client
+            return broker_ws_client
+        except Exception as exc:  # noqa: BLE001
+            get_logger(__name__).error(
+                "Failure in WebSocketManager._resolve_master_client: %s", exc
+            )
+            return broker_ws_client
 
     def set_client_factory(self, fn: Callable[[], Any]) -> None:
         """Inject a callable that returns a fresh websocket client."""
@@ -316,6 +342,13 @@ class WebSocketManager:
                 name="ws-watchdog",
             )
             self._watchdog_thread.start()
+        if self._tick_worker_thread is None or not self._tick_worker_thread.is_alive():
+            self._tick_worker_thread = threading.Thread(
+                target=self._tick_worker_loop,
+                daemon=True,
+                name="ws-tick-worker",
+            )
+            self._tick_worker_thread.start()
         self._reconnect_failures = 0
         self._handshake_failures = 0
         self._breaker_open_until = 0.0
@@ -368,6 +401,8 @@ class WebSocketManager:
         self._cancel_reconnect_timer()
         if self._watchdog_thread is not None:
             self._watchdog_thread.join(timeout=self._heartbeat_sec)
+        if self._tick_worker_thread is not None:
+            self._tick_worker_thread.join(timeout=self._heartbeat_sec)
         self._transition_state(ConnectionState.STOPPED)
         with self._lock:
             try:
@@ -398,9 +433,21 @@ class WebSocketManager:
         self._last_heartbeat = time.monotonic()
         self._transition_state(ConnectionState.CONNECTED)
         try:
-            self._on_tick(data)
+            self._tick_queue.put(data)
         except Exception as exc:  # noqa: BLE001
-            self._logger.exception("Tick handler raised an error: %s", exc)
+            self._logger.exception("Tick enqueue raised an error: %s", exc)
+
+    def _tick_worker_loop(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+        while not self._stop_event.is_set():
+            try:
+                tick = self._tick_queue.get(timeout=self._heartbeat_sec)
+            except queue.Empty:
+                continue
+            try:
+                self._on_tick(tick)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.exception("Tick handler raised an error: %s", exc)
 
     def _handle_error(
         self,
@@ -481,7 +528,8 @@ class WebSocketManager:
             if (
                 self._state == ConnectionState.CONNECTED
                 and self._last_heartbeat > 0.0
-                and (now - self._last_heartbeat) > self._stale_sec
+                and (now - self._last_heartbeat)
+                > min(self._stale_sec, self._tick_stale_sec)
             ):
                 self._logger.warning(
                     "WS heartbeat stale for %.1fs -> forcing reconnect",
@@ -878,7 +926,7 @@ class WebSocketManager:
                 raise WebSocketError("Unable to rebuild WebSocket client") from exc
 
             with self._lock:
-                self._client = new_client
+                self._client = self._resolve_master_client(new_client)
                 self._configure_callbacks()
 
             try:
