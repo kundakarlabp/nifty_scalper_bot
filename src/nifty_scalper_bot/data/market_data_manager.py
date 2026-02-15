@@ -974,7 +974,7 @@ class MarketDataManager:
             self._release_subscription(symbol)
 
     def get_latest_tick(self, symbol: str) -> dict[str, Any] | None:
-        normalized = normalize_symbol(symbol) or symbol
+        normalized = enforce_canonical(normalize_symbol(symbol)) or symbol
         with self._lock:
             tick = self._latest_ticks.get(normalized) or self._latest_ticks.get(symbol)
             if tick is None:
@@ -2223,6 +2223,8 @@ class MarketDataManager:
 
         if not symbol:
             return
+        # 🔥 PRODUCTION FIX — enforce canonical key
+        symbol = enforce_canonical(normalize_symbol(symbol))
 
         # 2. Normalize
         with self._lock:
@@ -2267,6 +2269,10 @@ class MarketDataManager:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
 
         wallclock = tick.get("timestamp", time.time())
+        
+        # 🔥 PRODUCTION FIX — enforce canonical key
+        symbol = enforce_canonical(normalize_symbol(symbol))
+        
         cached_tick = dict(tick)
         with self._lock:
             self._latest_ticks[symbol] = cached_tick
