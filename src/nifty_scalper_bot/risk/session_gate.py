@@ -28,6 +28,11 @@ def _normalize_time(value: time) -> time:
 
 def _is_market_open(now: datetime, *, start: time, end: time) -> bool:
     ist_now = now.astimezone(IST)
+
+    # ✅ FIX D: Check weekend (Saturday=5, Sunday=6)
+    if ist_now.weekday() >= 5:
+        return False
+
     start_time = _normalize_time(start)
     end_time = _normalize_time(end)
     window_start = ist_now.replace(
