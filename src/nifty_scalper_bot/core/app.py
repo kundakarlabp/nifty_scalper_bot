@@ -54,6 +54,7 @@ def _run_sync_locked(operation: Callable[[], Any]) -> Any:
     with SYNC_LOCK:
         return operation()
 
+
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -150,11 +151,11 @@ from nifty_scalper_bot.utils.env import (
 )
 from nifty_scalper_bot.utils.errors import ConfigurationError
 from nifty_scalper_bot.utils.logging import get_logger, setup_logging
+from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
-from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
-from nifty_scalper_bot.utils.symbols import canonical, unique_normalized_symbols
 from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
+from nifty_scalper_bot.utils.symbols import canonical, unique_normalized_symbols
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
@@ -1830,13 +1831,14 @@ class RuntimeSelfChecker:
 
         ist = ZoneInfo("Asia/Kolkata")
         now_ist = datetime.now(ist)
-        is_trading_window = (
-            now_ist.weekday() < 5
-            and dt_time(9, 0) <= now_ist.time() <= dt_time(15, 45)
-        )
+        is_trading_window = now_ist.weekday() < 5 and dt_time(
+            9, 0
+        ) <= now_ist.time() <= dt_time(15, 45)
         if not is_trading_window:
-            return True, "market_closed", cast(
-                dict[str, object], {"connected": False, "market_closed": True}
+            return (
+                True,
+                "market_closed",
+                cast(dict[str, object], {"connected": False, "market_closed": True}),
             )
 
         streamer = self._context.streamer
@@ -2079,28 +2081,28 @@ def _get_symbols(
     option_universe: OptionUniverseManager | None = None,
 ) -> list[str]:
     """Return validated option symbols for trading."""
-    LOGGER.info('=' * 60)
-    LOGGER.info('🔍 _get_symbols() STARTING - Symbol Resolution')
+    LOGGER.info("=" * 60)
+    LOGGER.info("🔍 _get_symbols() STARTING - Symbol Resolution")
 
-    symbols = getattr(config, 'symbols', None)
+    symbols = getattr(config, "symbols", None)
     if symbols:
         if isinstance(symbols, Iterable) and not isinstance(symbols, (str, bytes)):
             result = [str(s).strip() for s in symbols if str(s).strip()]
-            LOGGER.info('✅ Using configured SYMBOLS env: %s', result)
-            LOGGER.info('=' * 60)
+            LOGGER.info("✅ Using configured SYMBOLS env: %s", result)
+            LOGGER.info("=" * 60)
             return result
         result = [str(symbols)]
-        LOGGER.info('✅ Using configured SYMBOLS env: %s', result)
-        LOGGER.info('=' * 60)
+        LOGGER.info("✅ Using configured SYMBOLS env: %s", result)
+        LOGGER.info("=" * 60)
         return result
 
     ltp: float = 0.0
     if broker:
         try:
             token_candidates = [256265]
-            spot_symbol = 'NSE:NIFTY 50'
-            str_candidates = [spot_symbol, 'NIFTY 50', 'NIFTY 50 INDEX']
-            inner = getattr(broker, 'client', getattr(broker, '_broker', broker))
+            spot_symbol = "NSE:NIFTY 50"
+            str_candidates = [spot_symbol, "NIFTY 50", "NIFTY 50 INDEX"]
+            inner = getattr(broker, "client", getattr(broker, "_broker", broker))
 
             def parse_price(data: Any) -> float:
                 if not data:
@@ -2108,7 +2110,7 @@ def _get_symbols(
                 if isinstance(data, (int, float)):
                     return float(data)
                 if isinstance(data, dict):
-                    for key in ('last_price', 'ltp', 'close'):
+                    for key in ("last_price", "ltp", "close"):
                         val = data.get(key)
                         if val:
                             try:
@@ -2117,7 +2119,7 @@ def _get_symbols(
                                 continue
                 return 0.0
 
-            if ltp == 0 and hasattr(inner, 'get_ltp_bulk'):
+            if ltp == 0 and hasattr(inner, "get_ltp_bulk"):
                 response = inner.get_ltp_bulk(token_candidates)
                 if response:
                     for t in token_candidates:
@@ -2127,7 +2129,7 @@ def _get_symbols(
                             ltp = price
                             break
 
-            if ltp == 0 and hasattr(inner, 'get_ltp'):
+            if ltp == 0 and hasattr(inner, "get_ltp"):
                 for candidate in str_candidates:
                     try:
                         price = parse_price(inner.get_ltp(candidate))
@@ -2137,11 +2139,11 @@ def _get_symbols(
                     except Exception:
                         continue
 
-            if ltp == 0 and hasattr(inner, 'ltp'):
+            if ltp == 0 and hasattr(inner, "ltp"):
                 try:
                     q = inner.ltp(str_candidates)
                     if spot_symbol not in q:
-                        LOGGER.error('Live NIFTY spot unavailable — aborting cycle')
+                        LOGGER.error("Live NIFTY spot unavailable — aborting cycle")
                         return []
                     for candidate in str_candidates:
                         if candidate in q:
@@ -2152,28 +2154,28 @@ def _get_symbols(
                 except Exception:
                     pass
         except Exception as exc:
-            LOGGER.error('Error fetching live price: %s', exc, exc_info=True)
+            LOGGER.error("Error fetching live price: %s", exc, exc_info=True)
 
     if ltp <= 0:
-        LOGGER.error('Live NIFTY spot unavailable — aborting cycle')
+        LOGGER.error("Live NIFTY spot unavailable — aborting cycle")
         return []
 
     global _LATEST_CTX
     universe = option_universe
     if universe is None:
-        settings = getattr(_LATEST_CTX, 'settings', None)
-        universe_config = getattr(settings, 'option_universe', {})
+        settings = getattr(_LATEST_CTX, "settings", None)
+        universe_config = getattr(settings, "option_universe", {})
         universe = OptionUniverseManager(universe_config)
 
     universe.update_underlying(float(ltp))
     final_symbols = universe.get_filtered_universe(float(ltp))
-    LOGGER.debug('OptionUniv: Universe refreshed -> %s', final_symbols)
+    LOGGER.debug("OptionUniv: Universe refreshed -> %s", final_symbols)
 
     if _LATEST_CTX:
-        _LATEST_CTX.update_spot_price('NIFTY', float(ltp))
+        _LATEST_CTX.update_spot_price("NIFTY", float(ltp))
 
-    LOGGER.info('🎯 FINAL SYMBOLS TO TRADE: %s', final_symbols)
-    LOGGER.info('=' * 60)
+    LOGGER.info("🎯 FINAL SYMBOLS TO TRADE: %s", final_symbols)
+    LOGGER.info("=" * 60)
     return final_symbols
 
 
@@ -2230,10 +2232,16 @@ def _bind_ws_mdm(ctx: BotContext) -> None:
             runner = getattr(ctx, "strategy_runner", None)
             bracket_manager = getattr(runner, "_bracket_manager", None)
             position_manager = getattr(runner, "_position_manager", None)
-            if bracket_manager and position_manager and hasattr(position_manager, "get_all_positions"):
+            if (
+                bracket_manager
+                and position_manager
+                and hasattr(position_manager, "get_all_positions")
+            ):
                 for pos in position_manager.get_all_positions():
                     symbol = getattr(pos, "symbol", "")
-                    bracket = getattr(bracket_manager, "active_brackets", {}).get(symbol)
+                    bracket = getattr(bracket_manager, "active_brackets", {}).get(
+                        symbol
+                    )
                     if bracket and hasattr(bracket, "rehydrate_state_from_position"):
                         bracket.rehydrate_state_from_position(pos)
         except Exception as exc:
@@ -2962,7 +2970,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # 🔍 ADDED: 'avg_p' to see the RAW value from Zerodha
         log_throttled(
             LOGGER,
-            'poll_tick_callback_entry',
+            "poll_tick_callback_entry",
             f'🔔 _on_poll_tick | keys={len(t.keys())} | avg_p={t.get("average_price")}',
             interval_sec=30.0,
             level=logging.DEBUG,
@@ -3021,7 +3029,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if sym:
             log_throttled(
                 LOGGER,
-                f'tick_received_{sym}',
+                f"tick_received_{sym}",
                 f'📡 TICK: {sym} | LTP: {t.get("ltp")} | VWAP: {t.get("vwap")}',
                 interval_sec=30.0,
                 level=logging.DEBUG,
@@ -5545,7 +5553,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             # This commits the hydration so Runner doesn't trigger fallback backfill.
             runner = ctx.strategy_runner
             ready_symbols: list[str] = []
-            min_required_bars = int(getattr(runner, "_required_candles", 20) if runner else 20)
+            min_required_bars = int(
+                getattr(runner, "_required_candles", 20) if runner else 20
+            )
             for sym in targets:
                 if hydrated_counts.get(sym, 0) >= min_required_bars:
                     ready_symbols.append(sym)
@@ -5562,7 +5572,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             if runner and hasattr(runner, "mark_ready") and ready_symbols:
                 runner.mark_ready(ready_symbols)
             elif runner:
-                LOGGER.error("Startup hydration incomplete for all symbols — runner remains unready")
+                LOGGER.error(
+                    "Startup hydration incomplete for all symbols — runner remains unready"
+                )
             # =========================================================
 
             await ctx.market_regime_manager.refresh_from_indicators()
@@ -5573,7 +5585,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             if ready_symbols:
                 LOGGER.info("🧠 Indicators fully hydrated and READY at startup")
             else:
-                LOGGER.error("Indicators remain unready because no symbols passed hydration barrier")
+                LOGGER.error(
+                    "Indicators remain unready because no symbols passed hydration barrier"
+                )
 
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
@@ -5586,7 +5600,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             for sym in targets:
                 if mdm:
-                    mdm.ensure_tracking(sym)
+                    mdm.ensure_tracking(sym, seed=not websocket_enabled)
 
                 tok = None
                 if ctx.instrument_resolver:
@@ -5623,7 +5637,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.info("📡 MDM polling disabled (PollingStreamer is active)")
 
             dynamic_option_symbols = {
-                sym for sym in targets if sym.startswith('NFO:NIFTY') and (sym.endswith('CE') or sym.endswith('PE'))
+                sym
+                for sym in targets
+                if sym.startswith("NFO:NIFTY")
+                and (sym.endswith("CE") or sym.endswith("PE"))
             }
             option_universe_controller = UniverseController()
             option_universe_controller.update(dynamic_option_symbols)
@@ -5637,36 +5654,64 @@ async def startup_sequence(ctx: BotContext) -> None:
                             await asyncio.sleep(30)
                             continue
 
-                        spot = ctx.market_data_manager.get_latest_price('NSE:NIFTY 50') if ctx.market_data_manager else None
+                        spot = (
+                            ctx.market_data_manager.get_latest_price("NSE:NIFTY 50")
+                            if ctx.market_data_manager
+                            else None
+                        )
                         if spot and spot > 0:
                             latest_symbols = set(
                                 ctx.option_universe.get_filtered_universe(float(spot))
                             )
                         else:
-                            latest_symbols = set(ctx.option_universe.get_current_universe())
-                        added, removed = option_universe_controller.update(latest_symbols)
+                            latest_symbols = set(
+                                ctx.option_universe.get_current_universe()
+                            )
+                        added, removed = option_universe_controller.update(
+                            latest_symbols
+                        )
                         add_symbols = sorted(added)
                         drop_symbols = sorted(removed)
 
                         for sym in add_symbols:
                             if ctx.market_data_manager:
                                 ctx.market_data_manager.ensure_tracking(sym)
-                            tok = ctx.instrument_resolver.resolve(sym) if ctx.instrument_resolver else None
-                            if tok and ctx.streamer and hasattr(ctx.streamer, 'subscribe'):
+                            tok = (
+                                ctx.instrument_resolver.resolve(sym)
+                                if ctx.instrument_resolver
+                                else None
+                            )
+                            if (
+                                tok
+                                and ctx.streamer
+                                and hasattr(ctx.streamer, "subscribe")
+                            ):
                                 ctx.streamer.subscribe([tok])
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.add_symbol(sym)
 
                         for sym in drop_symbols:
-                            tok = ctx.instrument_resolver.resolve(sym) if ctx.instrument_resolver else None
-                            if tok and ctx.streamer and hasattr(ctx.streamer, 'unsubscribe'):
+                            tok = (
+                                ctx.instrument_resolver.resolve(sym)
+                                if ctx.instrument_resolver
+                                else None
+                            )
+                            if (
+                                tok
+                                and ctx.streamer
+                                and hasattr(ctx.streamer, "unsubscribe")
+                            ):
                                 ctx.streamer.unsubscribe([tok])
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.remove_symbol(sym)
 
                         dynamic_option_symbols = latest_symbols
                     except Exception as exc:
-                        LOGGER.error('Failure in option universe sync loop: %s', exc, exc_info=exc)
+                        LOGGER.error(
+                            "Failure in option universe sync loop: %s",
+                            exc,
+                            exc_info=exc,
+                        )
                     await asyncio.sleep(30)
 
             asyncio.create_task(_option_universe_sync_loop())
@@ -5689,14 +5734,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                     ctx.order_manager.start_monitoring()
                 if ctx.strategy_runner:
                     ctx.strategy_runner.start()
-                if ctx.stream_supervisor and not ctx.stream_supervisor_started:
-                    ctx.stream_supervisor.start()
-                    ctx.stream_supervisor_started = True
-                elif hasattr(ctx.streamer, "start") and not ctx.stream_supervisor_started:
-                    res = ctx.streamer.start()
-                    if inspect.isawaitable(res):
-                        await res
-                    ctx.stream_supervisor_started = True
+                if not ctx.websocket_enabled and ctx.market_data_manager is not None:
+                    ctx.market_data_manager._seed_completed = True
+                if ctx.websocket_enabled:
+                    if ctx.stream_supervisor and not ctx.stream_supervisor_started:
+                        ctx.stream_supervisor.start()
+                        ctx.stream_supervisor_started = True
+                    elif (
+                        hasattr(ctx.streamer, "start")
+                        and not ctx.stream_supervisor_started
+                    ):
+                        res = ctx.streamer.start()
+                        if inspect.isawaitable(res):
+                            await res
+                        ctx.stream_supervisor_started = True
 
                 if ctx.telegram_bot:
                     LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
@@ -5712,7 +5763,9 @@ async def startup_sequence(ctx: BotContext) -> None:
     # ---------------------------------------------------------
     if broker_ready:
         try:
-            orders = await asyncio.to_thread(_run_sync_locked, ctx.broker_client.get_orders)
+            orders = await asyncio.to_thread(
+                _run_sync_locked, ctx.broker_client.get_orders
+            )
             for o in orders:
                 if o.get("status") == "OPEN":
                     await asyncio.to_thread(
@@ -5934,16 +5987,21 @@ async def _reconcile_state(ctx: BotContext) -> None:
     Syncs local state with Broker (Orders & Positions).
     Features: Non-Blocking Execution, Position Sync, and Auto-Guarding of Orphans.
     """
+
     def safe_sync_fetch() -> list[Mapping[str, Any]]:
         """Synchronize broker orders/positions under the global sync lock."""
+
         def _sync_operation() -> list[Mapping[str, Any]]:
             if ctx.order_manager:
                 ctx.order_manager.reconcile_open_orders_with_broker()
             # ✅ FIX E: ctx.broker_client is RobustDataProvider whose get_positions()
             # without await returns a coroutine object, not positions.
             # Access the underlying sync ZerodhaKiteClient directly.
-            _sync_broker = getattr(ctx.broker_client, 'client',
-                                   getattr(ctx.broker_client, '_broker', ctx.broker_client))
+            _sync_broker = getattr(
+                ctx.broker_client,
+                "client",
+                getattr(ctx.broker_client, "_broker", ctx.broker_client),
+            )
             try:
                 raw = _sync_broker.get_positions()
             except Exception as _pos_err:
@@ -5953,7 +6011,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
             if isinstance(raw, list):
                 broker_positions = [p for p in raw if isinstance(p, Mapping)]
             elif isinstance(raw, Mapping):
-                src = raw.get('net', raw)
+                src = raw.get("net", raw)
                 if isinstance(src, list):
                     broker_positions = [p for p in src if isinstance(p, Mapping)]
                 elif isinstance(src, Mapping):
@@ -5963,7 +6021,7 @@ async def _reconcile_state(ctx: BotContext) -> None:
             return broker_positions
 
         return cast(list[Mapping[str, Any]], _run_sync_locked(_sync_operation))
-        
+
     # 1/2. SYNC ORDERS + POSITIONS & AUTO-GUARD ORPHANS
     if ctx.position_manager:
         try:

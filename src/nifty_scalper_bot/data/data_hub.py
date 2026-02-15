@@ -3,22 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import re
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
+import re
 from threading import RLock
+import time
 from typing import Any, Callable, Iterable, Mapping, TypedDict, cast
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
-from nifty_scalper_bot.utils.symbols import canonical, normalize_symbol
 from nifty_scalper_bot.utils.options_math import (
     black_scholes_greeks,
     implied_volatility,
+)
+from nifty_scalper_bot.utils.symbols import (
+    canonical,
+    enforce_canonical,
+    normalize_symbol,
 )
 
 LOGGER = get_logger(__name__)
@@ -172,14 +176,9 @@ class DataHub:
     async def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
         symbol = tick.get("symbol")
-        # Handle token mapping (fix from previous step)
-        token = tick.get("instrument_token") or tick.get("token")
-        if not symbol and token:
-            symbol = str(token)
-
         if not symbol:
             return
-        normalized_symbol = canonical(str(symbol)) or str(symbol)
+        normalized_symbol = enforce_canonical(canonical(str(symbol)))
 
         with self._lock:
             # 1. Update Cache
@@ -238,8 +237,9 @@ class DataHub:
         payload["seed"] = bool(seed)
 
         # Ensure symbol presence
-        if "symbol" not in payload:
-            payload["symbol"] = symbol
+        canonical_symbol = enforce_canonical(canonical(symbol))
+        assert canonical_symbol.count(":") == 1
+        payload["symbol"] = canonical_symbol
 
         # Ensure timestamp (critical for freshness checks)
         if "timestamp" not in payload:
@@ -343,6 +343,18 @@ class DataHub:
                 "threshold_ms": threshold_ms,
             }
 
+        transport_status = getattr(self._mdm, "transport_status", None)
+        if callable(transport_status):
+            status = transport_status() or {}
+            ws_state = str(status.get("ws_state") or "").lower()
+            if ws_state != "connected":
+                return True, {
+                    "ok": True,
+                    "reason": "ws_not_connected",
+                    "market_state": market_state.value,
+                    "threshold_ms": threshold_ms,
+                }
+
         quote = self.get_quote(symbol)
         if not quote:
             return False, {
@@ -382,8 +394,8 @@ class DataHub:
             ttl_ms = float("inf")
         else:
             ttl_ms = threshold_ms
-        effective_threshold = max(threshold_ms, ttl_ms)
-        is_fresh = age <= effective_threshold
+        effective_threshold = ttl_ms
+        is_fresh = age < effective_threshold
 
         return is_fresh, {
             "ok": is_fresh,
@@ -399,32 +411,25 @@ class DataHub:
 
     def subscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Register a callback for tick updates on a symbol."""
-        normalized = canonical(symbol)
-        if ":" not in normalized:
-            LOGGER.warning(
-                "data_hub_subscribe_rejected_malformed_symbol",
-                extra={
-                    "event": "data_hub_subscribe_rejected_malformed_symbol",
-                    "symbol": symbol,
-                },
-            )
-            return
+        normalized = enforce_canonical(canonical(symbol))
+        assert normalized.count(":") == 1
         with self._lock:
             if normalized not in self._tick_subscribers:
                 self._tick_subscribers[normalized] = set()
             self._tick_subscribers[normalized].add(callback)
             if normalized in self._subscribed_symbols:
                 return
-            self._subscribed_symbols.add(normalized)
         if self._mdm:
             try:
                 self._mdm.subscribe(normalized, self.ingest_tick_sync)
+                with self._lock:
+                    self._subscribed_symbols.add(normalized)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error("Failure in DataHub.subscribe_ticks: %s", exc)
 
     def unsubscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Unregister a tick callback."""
-        normalized = canonical(symbol)
+        normalized = enforce_canonical(canonical(symbol))
         with self._lock:
             if normalized in self._tick_subscribers:
                 self._tick_subscribers[normalized].discard(callback)
@@ -515,7 +520,7 @@ class DataHub:
     def _parse_option_symbol(
         self, symbol: str
     ) -> tuple[str, float, float, bool] | None:
-        clean_sym = symbol.split(":")[-1]
+        clean_sym = symbol
         if self._resolver:
             try:
                 meta = self._resolver.lookup(symbol)
@@ -803,7 +808,7 @@ class DataHub:
     def _extract_history_group(symbol: str) -> tuple[str, str]:
         """Return ``(symbol_root, expiry)`` grouping keys for history caching."""
         normalized = (symbol or "").strip().upper()
-        clean = normalized.split(":")[-1]
+        clean = normalized
         match = re.match(
             r"^(?P<root>[A-Z]+)(?P<expiry>(?:\d{2}[A-Z]\d{2}|\d{2}[A-Z]{3}|\d{2}[A-Z]{3}\d{2}))\d+(?:CE|PE)$",
             clean,

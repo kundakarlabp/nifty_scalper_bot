@@ -1,16 +1,17 @@
 """Central market data manager responsible for tick fan-out and broker cache."""
+
 from __future__ import annotations
 
-import math
-import os
-import threading
-import time
 import asyncio
 from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
+import math
+import os
 from random import uniform
+import threading
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -28,7 +29,7 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger
 from nifty_scalper_bot.utils.metrics import Counter
-from nifty_scalper_bot.utils.symbols import normalize_symbol
+from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
 
 # NOTE: resolver is attached at runtime by app.py (ctx.market_data_manager._resolver).
 # Avoid importing resolver modules here to prevent circular imports or path issues.
@@ -159,14 +160,14 @@ class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
 
     def __init__(
-        self, 
-        broker: Any = None, 
-        websocket: Any = None, 
-        settings: dict | None = None, 
-        *, 
-        cache_len: int = 1000, 
-        resolver: Any = None, 
-        **kwargs
+        self,
+        broker: Any = None,
+        websocket: Any = None,
+        settings: dict | None = None,
+        *,
+        cache_len: int = 1000,
+        resolver: Any = None,
+        **kwargs,
     ) -> None:
         """
         MarketDataManager constructor.
@@ -174,16 +175,18 @@ class MarketDataManager:
         self._broker = broker
         self._websocket = websocket
         # FIX: Explicitly assign self._ws for internal use
-        self._ws = websocket  
+        self._ws = websocket
         self._settings = settings or {}
         self._resolver = resolver
         self._logger = get_logger(__name__)
 
         # FIX: Initialize cache_len before it is used
         self._cache_len = cache_len
-        
+
         # FIX: Initialize duplicate window (Missing in your file, causing the crash)
-        self._duplicate_window = self._parse_float_env("MDM_DUPLICATE_WINDOW_SEC", default=1.0, minimum=0.0)
+        self._duplicate_window = self._parse_float_env(
+            "MDM_DUPLICATE_WINDOW_SEC", default=1.0, minimum=0.0
+        )
 
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
         self._latest_ticks: dict[str, dict[str, Any]] = {}
@@ -221,8 +224,12 @@ class MarketDataManager:
         self._margin_snapshot: dict[str, Any] | None = None
         self._last_margin_refresh: float = 0.0
         self.last_tick_time = 0.0
-        self._tick_warn_last: dict[str, float] = {}  # ✅ FIX: rate-limit cache-miss warnings
+        self._tick_warn_last: dict[str, float] = (
+            {}
+        )  # ✅ FIX: rate-limit cache-miss warnings
         self._seed_attempt_last: dict[str, float] = {}
+        self._seed_completed = False
+        self._seeded_symbols: set[str] = set()
         self._margin_cache_ttl = self._parse_float_env(
             "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
         )
@@ -304,19 +311,21 @@ class MarketDataManager:
         """Commit REST quote payload for ``symbol`` into cache AND emit to subscribers."""
         if not symbol or not isinstance(quote, Mapping):
             return
-        
+
         try:
             normalized_symbol = symbol.strip().upper()
             if not normalized_symbol:
                 return
-            
+
             # Normalize fields
             ltp = _coerce_float(quote.get("ltp") or quote.get("last_price"))
             bid = _coerce_float(quote.get("bid"))
             ask = _coerce_float(quote.get("ask"))
-            timestamp = _coerce_float(quote.get("timestamp") or quote.get("server_ts_s"))
+            timestamp = _coerce_float(
+                quote.get("timestamp") or quote.get("server_ts_s")
+            )
             volume = _coerce_float(quote.get("volume") or quote.get("volume_traded"))
-            
+
             payload = {
                 "symbol": normalized_symbol,
                 "ltp": ltp,
@@ -325,25 +334,25 @@ class MarketDataManager:
                 "volume": volume,
                 "timestamp": timestamp or time.time(),
                 "_source": "rest",
-                "depth": quote.get("depth")
+                "depth": quote.get("depth"),
             }
-            
+
             with self._lock:
                 previous = self._latest_ticks.get(normalized_symbol)
                 self._latest_ticks[normalized_symbol] = payload
-            
+
             # [FIX] CRITICAL: Emit to Strategy Runner!
             # [FIX] CRITICAL: Emit to Strategy Runner!
             normalized_tick = self._normalize_tick(normalized_symbol, payload, previous)
-            
-            # Fallback: If normalization is too strict but we successfully extracted an LTP 
+
+            # Fallback: If normalization is too strict but we successfully extracted an LTP
             # in the payload above, use the payload directly.
             tick_to_emit = normalized_tick
             if tick_to_emit is None and payload.get("ltp") is not None:
                 tick_to_emit = payload
 
             if tick_to_emit:
-                 self._emit_tick(normalized_symbol, tick_to_emit, source="rest")
+                self._emit_tick(normalized_symbol, tick_to_emit, source="rest")
 
         except Exception as exc:
             self._logger.error(
@@ -409,7 +418,7 @@ class MarketDataManager:
     def _bar_symbol_key(symbol: str) -> str:
         """Return normalized bar key for *symbol*."""
 
-        return symbol.split(":")[-1].strip().upper()
+        return enforce_canonical(normalize_symbol(symbol))
 
     def _now_ms(self) -> float:
         """Return the current wall-clock timestamp in milliseconds.
@@ -971,11 +980,14 @@ class MarketDataManager:
             if tick is None:
                 # ✅ FIX: Rate-limit warning to once per 60s per symbol
                 import time as _time
+
                 _now = _time.monotonic()
                 _last = self._tick_warn_last.get(normalized, 0.0)
                 if _now - _last >= 60.0:
                     self._tick_warn_last[normalized] = _now
-                    self._logger.warning("MDM: get_latest_tick - No tick in cache for %s", normalized)
+                    self._logger.warning(
+                        "MDM: get_latest_tick - No tick in cache for %s", normalized
+                    )
                 return None
             return dict(tick)
 
@@ -1000,7 +1012,7 @@ class MarketDataManager:
                     pass
 
             return None
-            
+
     def _resolve_underlying_price(self, symbol: str) -> float | None:
         tick_price = self.get_latest_price(symbol)
         if tick_price is not None:
@@ -1274,7 +1286,9 @@ class MarketDataManager:
         age_seconds: float | None = None
         if isinstance(ts_value, (int, float)) and ts_value > 0:
             try:
-                age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - float(ts_value))
+                age_seconds = max(
+                    0.0, datetime.now(timezone.utc).timestamp() - float(ts_value)
+                )
             except Exception as age_exc:  # noqa: BLE001
                 self._logger.error(
                     "Failure in probe_quote cache age: %s",
@@ -1479,12 +1493,14 @@ class MarketDataManager:
             "ts": (
                 normalized.get("timestamp") if isinstance(normalized, Mapping) else None
             ),
-        # additional diagnostics
-        "has_depth": bool(
+            # additional diagnostics
+            "has_depth": bool(
                 (isinstance(normalized, Mapping) and normalized.get("depth"))
                 or (isinstance(latest, Mapping) and latest.get("depth"))
             ),
-            "source": normalized.get("_source") if isinstance(normalized, Mapping) else None,
+            "source": (
+                normalized.get("_source") if isinstance(normalized, Mapping) else None
+            ),
         }
 
         # earlier report["cache"] is already built — ensure it includes these:
@@ -2188,10 +2204,10 @@ class MarketDataManager:
 
     # ------------------------------------------------------------------
     # Internal plumbing
-    
+
     def _handle_tick(self, tick: dict[str, Any]) -> None:
         """Process an incoming raw tick from WebSocket or Polling."""
-        
+
         # 1. Resolve Symbol/Token
         raw_token = tick.get("instrument_token") or tick.get("token")
         try:
@@ -2204,7 +2220,7 @@ class MarketDataManager:
             symbol = self._extract_symbol(tick)
             if symbol and token:
                 self._seed_mapping(symbol, token)
-        
+
         if not symbol:
             return
 
@@ -2215,7 +2231,9 @@ class MarketDataManager:
         try:
             normalized = self._normalize_tick(symbol, tick, previous)
         except Exception as exc:
-            self._logger.error(f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True)
+            self._logger.error(
+                f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True
+            )
             return
 
         if not normalized:
@@ -2228,13 +2246,12 @@ class MarketDataManager:
         # 4. Update State
         if self._ws:
             self.set_ws_connected(True)
-        
+
         self.bump_heartbeat()
-        
+
         # 5. Emit
         self._emit_tick(symbol, normalized, source=tick.get("source", "ws"))
 
-    
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
             return
@@ -2246,7 +2263,6 @@ class MarketDataManager:
             self._token_by_symbol[symbol] = token_int
             self._symbol_by_token[token_int] = symbol
 
-    
     def _store_tick(self, symbol: str, tick: dict[str, Any]) -> None:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
 
@@ -2305,9 +2321,9 @@ class MarketDataManager:
                     callback(dict(tick))
             except Exception as exc:
                 self._logger.error(
-                    "Tick callback failed", 
-                    extra={"symbol": symbol, "error": str(exc)}
+                    "Tick callback failed", extra={"symbol": symbol, "error": str(exc)}
                 )
+
     def _start_rest_poll(self) -> None:
         if self._rest_poll_thread is not None and self._rest_poll_thread.is_alive():
             return
@@ -2329,7 +2345,7 @@ class MarketDataManager:
         target_interval = 1.5
         self._logger.info(
             f"🚀 Scout Polling Started. Target Interval: {target_interval}s",
-            extra={"event": "scout_poll_started"}
+            extra={"event": "scout_poll_started"},
         )
 
         # Move margin checks to a slower cadence (60s) to prevent blocking ticks
@@ -2353,15 +2369,17 @@ class MarketDataManager:
                 symbols = self._symbols_for_poll()
                 if not symbols:
                     # Idle wait if nothing to track
-                    if self._rest_poll_stop.wait(1.0): break
+                    if self._rest_poll_stop.wait(1.0):
+                        break
                     continue
 
                 # 3. Batch Fetch (Critical Optimization)
                 # Zerodha accepts up to 500 symbols per call. using 200 for safety.
                 batch_size = 200
                 for i in range(0, len(symbols), batch_size):
-                    if self._rest_poll_stop.is_set(): break
-                    
+                    if self._rest_poll_stop.is_set():
+                        break
+
                     batch = symbols[i : i + batch_size]
                     try:
                         # Fetch all quotes in ONE HTTP call
@@ -2371,60 +2389,69 @@ class MarketDataManager:
                         # Ingest immediately
                         for symbol, data in quotes.items():
                             # CRITICAL: Inject local timestamp for Stale Data logic
-                            data['_local_timestamp'] = arrival_time
+                            data["_local_timestamp"] = arrival_time
                             self.ingest_rest_quote(symbol, data)
-                        
+
                         # Success - Reset error counters
                         consecutive_errors = 0
-                            
+
                     except Exception as exc:
                         # [FIX] Handle Batch-Level Failures
                         self._logger.warning(
                             f"Batch poll failed for {len(batch)} symbols: {exc}",
-                            extra={"event": "scout_batch_fail"}
+                            extra={"event": "scout_batch_fail"},
                         )
-                        raise # Re-raise to trigger main loop error handling logic below
+                        raise  # Re-raise to trigger main loop error handling logic below
 
             except Exception as exc:
                 error_msg = str(exc).lower()
                 consecutive_errors += 1
-                
+
                 # [FIX 1] DETECT FATAL SESSION ERRORS (Cure for Zombie Mode)
                 # If broker says "Forbidden", "Unauthorized", or "Access Denied", our session is dead.
                 # We must kill the process so Docker/Railway restarts it with a fresh session.
-                if "403" in error_msg or "401" in error_msg or "unauthorized" in error_msg or "access denied" in error_msg:
+                if (
+                    "403" in error_msg
+                    or "401" in error_msg
+                    or "unauthorized" in error_msg
+                    or "access denied" in error_msg
+                ):
                     self._logger.critical(
                         "🚨 FATAL: Broker Session Expired. Killing process to force auto-restart.",
-                        extra={"event": "scout_session_expired", "error": str(exc)}
+                        extra={"event": "scout_session_expired", "error": str(exc)},
                     )
                     import os
-                    os._exit(1) # Hard exit to ensure restart
+
+                    os._exit(1)  # Hard exit to ensure restart
 
                 # [FIX 2] Handle Rate Limits Gracefully
                 elif "rate limit" in error_msg or "429" in error_msg:
                     self._logger.warning(
                         "⚠️ Rate Limit Hit! Cooling down Scout Poller...",
-                        extra={"event": "scout_rate_limit"}
+                        extra={"event": "scout_rate_limit"},
                     )
-                    time.sleep(5.0) # Hard wait
-                    target_interval = min(5.0, target_interval + 0.5) # Permanently slow down
-                
+                    time.sleep(5.0)  # Hard wait
+                    target_interval = min(
+                        5.0, target_interval + 0.5
+                    )  # Permanently slow down
+
                 # [FIX 3] Exponential Backoff for Network Blips
                 else:
-                    backoff = min(30.0, 0.5 * (2 ** consecutive_errors))
+                    backoff = min(30.0, 0.5 * (2**consecutive_errors))
                     self._logger.error(
-                        f"Scout Loop Error (Attempt {consecutive_errors}): {exc}", 
+                        f"Scout Loop Error (Attempt {consecutive_errors}): {exc}",
                         exc_info=True,
-                        extra={"event": "scout_critical_error", "backoff": backoff}
+                        extra={"event": "scout_critical_error", "backoff": backoff},
                     )
                     time.sleep(backoff)
 
             # 4. Smart Sleep (Maintain Rhythm)
             elapsed = time.time() - loop_start
             sleep_time = max(0.0, target_interval - elapsed)
-            
+
             if self._rest_poll_stop.wait(sleep_time):
                 break
+
     def _symbols_for_poll(self) -> list[str]:
         """Derive poll candidates across subscribers, cache, and tracking.
 
@@ -2486,7 +2513,7 @@ class MarketDataManager:
         except Exception:
             # don't let diagnostics break the loop
             pass
-    
+
     def ensure_tracking(self, symbol: str, *, seed: bool = True) -> bool:
         """Ensure *symbol* is tracked for REST polling and optional seeding.
 
@@ -2519,13 +2546,15 @@ class MarketDataManager:
                 "Condition met: mdm_tracking_added",
                 extra={"event": "mdm_tracking_added", "symbol": sym},
             )
-            if seed:
-                seeded = self._seed_quote_from_broker(sym)
-                if seeded:
-                    self._logger.info(
-                        "Condition met: mdm_seed_success",
-                        extra={"event": "mdm_seed_success", "symbol": sym},
-                    )
+            if seed and not self._seed_completed and not self._ws_connected:
+                if sym not in self._seeded_symbols:
+                    seeded = self._seed_quote_from_broker(sym)
+                    if seeded:
+                        self._seeded_symbols.add(sym)
+                        self._logger.info(
+                            "Condition met: mdm_seed_success",
+                            extra={"event": "mdm_seed_success", "symbol": sym},
+                        )
             return True
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
@@ -2690,16 +2719,7 @@ class MarketDataManager:
             return []
 
     def _seed_quote_from_broker(self, symbol: str) -> bool:
-        """
-        Fetch a single REST quote for *symbol* and seed the cache.
-        Includes robust fallback to LTP if full depth data is unavailable.
-
-        Args:
-            symbol: Trading symbol identifier to seed.
-
-        Returns:
-            ``True`` when a quote was seeded successfully, else ``False``.
-        """
+        """Fetch a single REST quote for *symbol* and seed the cache once."""
         self._logger.debug(
             "Entered _seed_quote_from_broker",
             extra={"event": "mdm_seed_quote_enter", "symbol": symbol},
@@ -2707,212 +2727,27 @@ class MarketDataManager:
         outcome = "failure"
 
         try:
+            symbol = enforce_canonical(normalize_symbol(symbol))
+            assert symbol.count(":") == 1
             broker = getattr(self, "_broker", None)
             if broker is None or not hasattr(broker, "get_quote"):
                 return False
-            now = time.monotonic()
-            last_attempt = self._seed_attempt_last.get(symbol, 0.0)
-            if now - last_attempt < 2.0:
-                self._logger.debug(
-                    "Condition met: mdm_seed_backoff_skip",
-                    extra={"event": "mdm_seed_backoff_skip", "symbol": symbol},
-                )
+            if self._ws_connected:
                 return False
-            self._seed_attempt_last[symbol] = now
-
-            # ------------------------------------------------------------------
-            # STRATEGY 1: Full Quote (Depth) - Preferred
-            # ------------------------------------------------------------------
-            candidates = self._candidate_quote_keys(symbol)
-            if not candidates:
-                candidates = [str(symbol or "").upper()]
-
-            quote: Mapping[str, Any] | None = None
-
-            for candidate in candidates:
-                try:
-                    self._logger.info(
-                        "Condition met: mdm_seed_candidate_attempt",
-                        extra={
-                            "event": "mdm_seed_candidate_attempt",
-                            "symbol": symbol,
-                            "candidate": candidate,
-                        },
-                    )
-                    # [FIX]: Use singular candidate (str) instead of list [candidate]
-                    # The Zerodha client expects a string for get_quote(), and passing a list 
-                    # causes it to format the list as string "['NFO:...']" which fails on the broker side.
-                    payload = broker.get_quote(str(candidate))
-                except Exception as broker_exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in _seed_quote_from_broker broker call: %s",
-                        broker_exc,
-                        extra={
-                            "event": "mdm_seed_broker_error",
-                            "symbol": symbol,
-                            "candidate": candidate,
-                        },
-                        exc_info=broker_exc,
-                    )
-                    continue
-
-                if not isinstance(payload, Mapping) or not payload:
-                    continue
-
-                # In singular get_quote(), payload IS the quote data for the requested symbol
-                quote = payload
-                self._logger.info(
-                    "Condition met: mdm_seed_candidate_success",
-                    extra={
-                        "event": "mdm_seed_candidate_success",
-                        "symbol": symbol,
-                        "candidate": candidate,
-                    },
-                )
-                break
-
-            # ------------------------------------------------------------------
-            # STRATEGY 2: LTP Fallback (If Depth Failed)
-            # ------------------------------------------------------------------
-            if not isinstance(quote, Mapping):
-                try:
-                    if hasattr(broker, "get_ltp"):
-                        self._logger.warning(
-                            "Condition met: mdm_seed_ltp_fallback_attempt",
-                            extra={
-                                "event": "mdm_seed_ltp_fallback_attempt",
-                                "symbol": symbol,
-                            },
-                        )
-                        ltp_payload = broker.get_ltp([symbol])
-                        
-                        if isinstance(ltp_payload, Mapping) and ltp_payload:
-                            raw = ltp_payload.get(symbol)
-                            if isinstance(raw, Mapping):
-                                ltp_value = _coerce_positive_float(
-                                    raw.get("last_price") or raw.get("ltp")
-                                )
-                                
-                                if ltp_value and ltp_value > 0:
-                                    # Extract token if available
-                                    token_value: int | None = None
-                                    for field in ("instrument_token", "token", "tradingsymbol_token"):
-                                        value = raw.get(field)
-                                        if value is None: continue
-                                        try:
-                                            token_value = int(value)
-                                            break
-                                        except (ValueError, TypeError): 
-                                            continue
-                                    
-                                    # Upsert to resolver if available
-                                    resolver_obj = getattr(self, "_resolver", None)
-                                    if token_value and resolver_obj is not None:
-                                        upsert_fn = getattr(resolver_obj, "upsert", None)
-                                        if callable(upsert_fn):
-                                            try:
-                                                upsert_fn(symbol, token_value)
-                                                self._logger.info(
-                                                    "Condition met: mdm_resolver_upsert_ltp",
-                                                    extra={
-                                                        "event": "mdm_resolver_upsert_ltp",
-                                                        "symbol": symbol,
-                                                        "token": int(token_value),
-                                                    },
-                                                )
-                                            except Exception as resolver_exc:
-                                                self._logger.error(
-                                                    "Failure in resolver upsert during LTP seed: %s",
-                                                    resolver_exc,
-                                                    extra={
-                                                        "event": "mdm_resolver_upsert_error_ltp",
-                                                        "symbol": symbol,
-                                                    },
-                                                    exc_info=resolver_exc,
-                                                )
-
-                                    # Create Synthetic Tick (Bid/Ask = LTP)
-                                    ts = float(time.time())
-                                    tick = {
-                                        "symbol": symbol,
-                                        "ltp": ltp_value,
-                                        "bid": ltp_value,  # Fallback
-                                        "ask": ltp_value,  # Fallback
-                                        "timestamp": ts,
-                                        "_source": "ltp_fallback"
-                                    }
-                                    
-                                    with self._lock:
-                                        self._latest_ticks[symbol] = tick
-                                        self._last_tick_source[symbol] = "rest_ltp"
-                                    
-                                    self._notify_unified_manager(symbol, tick)
-                                    
-                                    self._logger.info(
-                                        "Condition met: mdm_seed_ltp_success",
-                                        extra={
-                                            "event": "mdm_seed_ltp_success",
-                                            "symbol": symbol,
-                                        },
-                                    )
-                                    outcome = "success"
-                                    return True
-                except Exception as ltp_exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in LTP fallback: %s",
-                        ltp_exc,
-                        extra={"event": "mdm_seed_ltp_error", "symbol": symbol},
-                        exc_info=ltp_exc,
-                    )
+            if symbol in self._seeded_symbols:
                 return False
 
-            # ------------------------------------------------------------------
-            # PROCESSING FULL QUOTE (If Strategy 1 Succeeded)
-            # ------------------------------------------------------------------
+            payload = broker.get_quote(symbol)
+            if not isinstance(payload, Mapping) or not payload:
+                return False
+
             ltp = _coerce_positive_float(
-                quote.get("last_price")
-                or quote.get("ltp")
-                or quote.get("LastTradedPrice")
+                payload.get("last_price")
+                or payload.get("ltp")
+                or payload.get("LastTradedPrice")
             )
-            bid = _coerce_positive_float(quote.get("bid"))
-            ask = _coerce_positive_float(quote.get("ask"))
-
-            # Update Resolver if token present
-            token_value: int | None = None
-            for field in ("instrument_token", "token", "tradingsymbol_token"):
-                value = quote.get(field)
-                if value is None:
-                    continue
-                try:
-                    token_value = int(value)
-                    break
-                except (ValueError, TypeError):
-                    continue
-
-            resolver_obj = getattr(self, "_resolver", None)
-            if token_value and resolver_obj is not None:
-                upsert_fn = getattr(resolver_obj, "upsert", None)
-                if callable(upsert_fn):
-                    try:
-                        upsert_fn(symbol, token_value)
-                        self._logger.info(
-                            "Condition met: mdm_resolver_upsert",
-                            extra={
-                                "event": "mdm_resolver_upsert",
-                                "symbol": symbol,
-                                "token": int(token_value),
-                            },
-                        )
-                    except Exception as resolver_exc:  # noqa: BLE001
-                        self._logger.error(
-                            "Failure in resolver upsert during seed: %s",
-                            resolver_exc,
-                            extra={
-                                "event": "mdm_resolver_upsert_error",
-                                "symbol": symbol,
-                            },
-                            exc_info=resolver_exc,
-                        )
+            bid = _coerce_positive_float(payload.get("bid"))
+            ask = _coerce_positive_float(payload.get("ask"))
 
             ts = float(time.time())
             tick = {
@@ -2928,6 +2763,8 @@ class MarketDataManager:
                 self._last_tick_source[symbol] = "rest"
 
             self._notify_unified_manager(symbol, tick)
+            self._seeded_symbols.add(symbol)
+            self._seed_completed = True
             outcome = "success"
             return True
 
@@ -2940,7 +2777,6 @@ class MarketDataManager:
             )
             return False
         finally:
-            # Consistent Metrics Reporting
             try:
                 METRICS.record_mdm_rest_seed(symbol=symbol, outcome=outcome)
             except Exception as metric_exc:  # noqa: BLE001
@@ -3165,7 +3001,7 @@ class MarketDataManager:
                 continue
             seen.add(candidate)
             ordered.append(candidate)
-        
+
         if not ordered:
             # mapping failure — surface immediately rather than silently fallback
             self._logger.error(
@@ -3173,7 +3009,9 @@ class MarketDataManager:
                 extra={"initial": initial, "lookup_keys": lookup_keys},
                 exc_info=False,
             )
-            raise ValueError(f"Token-to-symbol mapping failed for input: {initial[:10]}")
+            raise ValueError(
+                f"Token-to-symbol mapping failed for input: {initial[:10]}"
+            )
         return ordered
 
     def _broker_quote_any(self, key: str | int) -> dict[str, Any] | None:
@@ -3287,7 +3125,7 @@ class MarketDataManager:
             )
             if not quote:
                 # log each failed candidate at debug level; keep failure reason
-                self._logger.debug( 
+                self._logger.debug(
                     "refresh candidate returned no quote",
                     extra={"symbol": symbol, "key": key, "trace_id": trace_id},
                 )
@@ -3313,7 +3151,7 @@ class MarketDataManager:
                 "candidates": candidates,
                 "trace_id": trace_id,
             },
-            exec_info=True
+            exec_info=True,
         )
         return None
 
@@ -3581,18 +3419,18 @@ class MarketDataManager:
     def _coerce_from_depth(self, depth: Mapping[str, Any], side: str) -> float | None:
         """Safely extract best price from depth list without crashing."""
         try:
-            if not depth: 
+            if not depth:
                 return None
-            
+
             levels = depth.get(side)
             # Must be a list/tuple/iterable, but NOT a string or dict
             if not levels or not isinstance(levels, (list, tuple)):
                 return None
-                
+
             for entry in levels:
                 if not isinstance(entry, Mapping):
                     continue
-                
+
                 # Check multiple common keys for price
                 price = entry.get("price") or entry.get("p")
                 if price:
@@ -3606,7 +3444,7 @@ class MarketDataManager:
             # Swallow deep extraction errors to prevent tick stream crash
             return None
         return None
-   
+
     @staticmethod
     def _extract_symbol(tick: dict[str, Any]) -> str | None:
         for key in ("symbol", "tradingsymbol", "instrument"):
@@ -3622,11 +3460,11 @@ class MarketDataManager:
         previous: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Normalize raw broker ticks into a standard internal format."""
-        
+
         # 1. Extract LTP (Last Traded Price)
         # Priority: ltp -> last_price -> close -> last
         ltp = self._coerce_float(tick, "ltp", "last_price", "close", "last")
-        
+
         # Deep search if top-level fails
         if (ltp is None or ltp <= 0) and isinstance(tick, Mapping):
             for value in tick.values():
@@ -3641,7 +3479,9 @@ class MarketDataManager:
 
         # 2. Extract Bid/Ask
         bid = self._coerce_float(tick, "best_bid", "bid", "buy_price", "best_bid_price")
-        ask = self._coerce_float(tick, "best_ask", "ask", "sell_price", "best_ask_price")
+        ask = self._coerce_float(
+            tick, "best_ask", "ask", "sell_price", "best_ask_price"
+        )
 
         # 3. Fallback to Depth
         depth = tick.get("depth")
@@ -3650,7 +3490,7 @@ class MarketDataManager:
 
         if bid is None:
             bid = self._coerce_from_depth(depth, "buy")
-        
+
         if ask is None:
             ask = self._coerce_from_depth(depth, "sell")
 
@@ -3659,7 +3499,9 @@ class MarketDataManager:
             buy_levels = depth.get("buy")
             if isinstance(buy_levels, list) and not buy_levels:
                 # Empty list = valid "no buyers" state
-                self._logger.debug("Depth present but buy side empty", extra={"symbol": symbol})
+                self._logger.debug(
+                    "Depth present but buy side empty", extra={"symbol": symbol}
+                )
             # Fallback: Previous > LTP
             bid = previous.get("bid") if previous else ltp
 
@@ -3667,13 +3509,17 @@ class MarketDataManager:
             sell_levels = depth.get("sell")
             if isinstance(sell_levels, list) and not sell_levels:
                 # Empty list = valid "no sellers" state
-                self._logger.debug("Depth present but sell side empty", extra={"symbol": symbol})
+                self._logger.debug(
+                    "Depth present but sell side empty", extra={"symbol": symbol}
+                )
             # Fallback: Previous > LTP
             ask = previous.get("ask") if previous else ltp
 
         # Final Safety
-        if bid is None: bid = ltp
-        if ask is None: ask = ltp
+        if bid is None:
+            bid = ltp
+        if ask is None:
+            ask = ltp
 
         timestamp = self._coerce_timestamp(tick)
 
@@ -3683,21 +3529,27 @@ class MarketDataManager:
             "bid": float(bid),
             "ask": float(ask),
             "timestamp": timestamp,
-            "depth": depth, 
+            "depth": depth,
         }
-        
+
         # 5. Volume Handling
-        volume = self._coerce_float(tick, "volume_traded_today", "volume", "volume_traded", "total_traded_volume")
+        volume = self._coerce_float(
+            tick,
+            "volume_traded_today",
+            "volume",
+            "volume_traded",
+            "total_traded_volume",
+        )
         if volume is None and previous:
             prev_vol = previous.get("volume")
             if isinstance(prev_vol, (int, float)):
                 volume = float(prev_vol)
-        
+
         if volume is not None:
             normalized["volume"] = float(volume)
 
         return normalized
-        
+
     @staticmethod
     def _coerce_float(payload: dict[str, Any], *keys: str) -> float | None:
         for key in keys:
@@ -3761,19 +3613,23 @@ class MarketDataManager:
     # -------------------------------------------------------------------------
     # ✅ "HUNTER-KILLER" FIX: Robust History Fetching
     # -------------------------------------------------------------------------
-    async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
+    async def fetch_history(
+        self, symbol: str, interval: str, days: int = 3
+    ) -> list[dict]:
         """
         Fetch historical data with Aggressive Fetcher Detection & Auto-Token Resolution.
         """
         # 1. Normalize Symbol
         symbol = symbol.strip().upper()
-        
+
         # 2. Resolve Token (Try Cache -> Resolver -> Broker)
         token = getattr(self, "_token_by_symbol", {}).get(symbol)
-        
+
         if not token:
-            self._logger.info(f"🔎 History: Cache miss for {symbol}. Attempting force resolution...")
-            
+            self._logger.info(
+                f"🔎 History: Cache miss for {symbol}. Attempting force resolution..."
+            )
+
             # Try Resolver
             resolver = getattr(self, "_resolver", None)
             if resolver:
@@ -3781,24 +3637,33 @@ class MarketDataManager:
                     # Try resolve() method
                     if hasattr(resolver, "resolve"):
                         t = resolver.resolve(symbol)
-                        if t: token = int(t)
+                        if t:
+                            token = int(t)
                     # Try get_token() method (Fallback)
                     if not token and hasattr(resolver, "get_token"):
                         t = resolver.get_token(symbol)
-                        if t: token = int(t)
+                        if t:
+                            token = int(t)
                 except Exception:
                     pass
-            
+
             # Try Broker Instrument Lookup (Final Fallback)
-            if not token and self._broker and hasattr(self._broker, "get_instrument_token"):
+            if (
+                not token
+                and self._broker
+                and hasattr(self._broker, "get_instrument_token")
+            ):
                 try:
                     t = self._broker.get_instrument_token(symbol)
-                    if t: token = int(t)
+                    if t:
+                        token = int(t)
                 except Exception:
                     pass
 
         if not token:
-            self._logger.warning(f"❌ History Aborted: Could not resolve token for {symbol}")
+            self._logger.warning(
+                f"❌ History Aborted: Could not resolve token for {symbol}"
+            )
             return []
 
         # 3. Calculate Dates
@@ -3812,20 +3677,27 @@ class MarketDataManager:
 
         try:
             fetcher = None
-            
+
             # List of method names to hunt for
-            candidates = ["historical_data", "get_historical_data", "history", "get_history"]
-            
+            candidates = [
+                "historical_data",
+                "get_historical_data",
+                "history",
+                "get_history",
+            ]
+
             # A. Check Broker Direct
             for method in candidates:
                 f = getattr(self._broker, method, None)
                 if callable(f):
                     fetcher = f
                     break
-            
+
             # B. Check Inner Client (kite/client)
             if not fetcher:
-                client = getattr(self._broker, "kite", getattr(self._broker, "client", None))
+                client = getattr(
+                    self._broker, "kite", getattr(self._broker, "client", None)
+                )
                 if client:
                     for method in candidates:
                         f = getattr(client, method, None)
@@ -3835,13 +3707,17 @@ class MarketDataManager:
 
             if callable(fetcher):
                 # Run blocking I/O in thread
-                data = await asyncio.to_thread(fetcher, token, from_date, to_date, interval)
+                data = await asyncio.to_thread(
+                    fetcher, token, from_date, to_date, interval
+                )
                 if data:
                     self._logger.info(f"✅ Received {len(data)} candles for {symbol}")
                 else:
-                    self._logger.warning(f"⚠️ History fetch returned 0 candles for {symbol} (Token: {token})")
+                    self._logger.warning(
+                        f"⚠️ History fetch returned 0 candles for {symbol} (Token: {token})"
+                    )
                 return data
-            
+
             # Debugging Dump if failure persists
             self._logger.error(
                 f"⚠️ Broker {type(self._broker).__name__} missing history capability. "
@@ -3850,9 +3726,11 @@ class MarketDataManager:
             return []
 
         except Exception as e:
-            self._logger.error(f"History fetch crashed for {symbol}: {e}", exc_info=True)
+            self._logger.error(
+                f"History fetch crashed for {symbol}: {e}", exc_info=True
+            )
             return []
-            
+
 
 def _compose_chain_entry(
     contract: Mapping[str, Any], quote: Mapping[str, Any]
@@ -4045,7 +3923,7 @@ def _coerce_int(value: Any) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
-        return None            
+        return None
 
 
 def _parse_expiry(value: Any) -> datetime | None:

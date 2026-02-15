@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
-import threading
-import time
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
+import threading
+import time
 from typing import Any, Callable, Iterable, Sequence
 
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import unique_normalized_symbols
 
 LOG = get_logger(__name__)
+
+
+class ConnectionLifecycleState(str, Enum):
+    """Connection lifecycle state for singleton connect behavior."""
+
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    BACKOFF = "backoff"
 
 
 @dataclass(slots=True)
@@ -75,6 +85,10 @@ class StreamSupervisor:
         self._last_error: str | None = None
         self._risk_halt_restart_logged = False
         self._started = False
+        self._connection_state = ConnectionLifecycleState.DISCONNECTED
+        self._connection_lock = threading.Lock()
+        self._backoff_seconds = 2.0
+        self._backoff_until_mono = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
@@ -97,32 +111,60 @@ class StreamSupervisor:
     def start(self) -> bool:
         """Start the underlying streamer if not already running."""
 
-        with self._lock:
-            if self._started:
+        with self._connection_lock:
+            now = time.monotonic()
+            if self._connection_state in {
+                ConnectionLifecycleState.CONNECTING,
+                ConnectionLifecycleState.BACKOFF,
+            }:
+                return False
+            if (
+                self._connection_state == ConnectionLifecycleState.CONNECTED
+                and self.is_running()
+            ):
                 return True
-        if self.is_running():
-            LOG.debug(
-                "stream_supervisor_start_skipped",
-                extra={"event": "stream_supervisor_start_skipped", "reason": "already_running"},
-            )
-            return True
-        try:
-            self.streamer.start()
-        except Exception as exc:  # noqa: BLE001 - defensive guard
+            if now < self._backoff_until_mono:
+                self._connection_state = ConnectionLifecycleState.BACKOFF
+                return False
+            self._connection_state = ConnectionLifecycleState.CONNECTING
             with self._lock:
-                self._consecutive_failures += 1
-                self._last_error = str(exc)
-            LOG.error(
-                "stream_supervisor_start_failed",
-                extra={"event": "stream_supervisor_start_failed", "error": str(exc)},
-            )
-            return False
-        with self._lock:
-            self._started = True
-            self._started_at_mono = time.monotonic()
-            self._consecutive_failures = 0
-            self._last_error = None
-            self._start_count += 1
+                if self._started:
+                    self._connection_state = ConnectionLifecycleState.CONNECTED
+                    return True
+            if self.is_running():
+                self._connection_state = ConnectionLifecycleState.CONNECTED
+                LOG.debug(
+                    "stream_supervisor_start_skipped",
+                    extra={
+                        "event": "stream_supervisor_start_skipped",
+                        "reason": "already_running",
+                    },
+                )
+                return True
+            try:
+                self.streamer.start()
+            except Exception as exc:  # noqa: BLE001 - defensive guard
+                with self._lock:
+                    self._consecutive_failures += 1
+                    self._last_error = str(exc)
+                self._backoff_until_mono = time.monotonic() + self._backoff_seconds
+                self._connection_state = ConnectionLifecycleState.BACKOFF
+                LOG.error(
+                    "stream_supervisor_start_failed",
+                    extra={
+                        "event": "stream_supervisor_start_failed",
+                        "error": str(exc),
+                    },
+                )
+                return False
+            with self._lock:
+                self._started = True
+                self._started_at_mono = time.monotonic()
+                self._consecutive_failures = 0
+                self._last_error = None
+                self._start_count += 1
+            self._backoff_until_mono = 0.0
+            self._connection_state = ConnectionLifecycleState.CONNECTED
         self._ensure_monitor_thread()
         LOG.info(
             "stream_supervisor_started", extra={"event": "stream_supervisor_started"}
@@ -147,6 +189,9 @@ class StreamSupervisor:
         with self._lock:
             self._started = False
             self._started_at_mono = None
+        with self._connection_lock:
+            self._connection_state = ConnectionLifecycleState.DISCONNECTED
+            self._backoff_until_mono = 0.0
 
     def is_running(self) -> bool:
         """Return ``True`` when the underlying streamer reports running."""
@@ -426,6 +471,9 @@ class StreamSupervisor:
             if self.is_running():
                 with self._lock:
                     self._consecutive_failures = 0
+                with self._connection_lock:
+                    self._connection_state = ConnectionLifecycleState.CONNECTED
+                    self._backoff_until_mono = 0.0
                 self._risk_halt_restart_logged = False
                 continue
             risk_halt_active = False
@@ -453,6 +501,9 @@ class StreamSupervisor:
             if not restarted:
                 with self._lock:
                     self._consecutive_failures += 1
+                with self._connection_lock:
+                    if self._connection_state != ConnectionLifecycleState.CONNECTED:
+                        self._connection_state = ConnectionLifecycleState.BACKOFF
 
 
 __all__ = ["StreamSupervisor", "StreamHealth"]
