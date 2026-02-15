@@ -433,7 +433,10 @@ class StreamSupervisor:
     # Internal helpers
     @staticmethod
     def _is_trading_window() -> bool:
-        """Check if current time is within NSE trading window (Mon-Fri 09:00-15:45 IST)."""
+        """Check if current time is within NSE trading window.
+
+        Args: none; Returns: trading-window bool; Raises: none.
+        """
         from datetime import datetime, time as dt_time
         from zoneinfo import ZoneInfo
 

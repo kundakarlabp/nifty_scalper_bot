@@ -817,96 +817,130 @@ class InstrumentResolver:
     def sync_nfo_from_broker(self, instruments: list) -> int:
         """
         Sync NFO instruments from broker API response into _option_contracts.
-        
-        This fixes the "📦 Got 0 contracts from option_contracts()" issue by 
-        populating the internal cache from broker.list_instruments("NFO").
-        
+
+        Populates the internal cache from broker.list_instruments("NFO").
+        Uses tradingsymbol-prefix heuristic (same as _ingest_instrument_row)
+        for reliable base detection regardless of CSV 'name' field quality.
+
         Args:
             instruments: List of instrument dicts from broker.list_instruments("NFO")
-            
+
         Returns:
             Count of option contracts synced
         """
         synced = 0
         skipped = 0
-        
+        seen_tokens: set = set()  # deduplicate (cache has multi-key→same row)
+
         with self._lock:
             for inst in instruments:
                 try:
-                    # Extract fields with multiple fallback names
-                    name = (inst.get("name") or inst.get("underlying") or 
-                            inst.get("tradingsymbol", "")[:5] or "")
-                    exchange = str(inst.get("exchange") or "").upper()
-                    segment = str(inst.get("segment") or "").upper()
-                    inst_type = inst.get("instrument_type") or ""
+                    ts = str(inst.get("tradingsymbol") or inst.get("symbol") or "").strip()
+                    if not ts:
+                        skipped += 1
+                        continue
 
-                    if exchange != "NFO" or segment != "NFO-OPT":
-                        skipped += 1
-                        continue
-                    
-                    # Determine base index
-                    base = name.upper().replace(" ", "").replace("INDEX", "")
-                    
-                    # Check if this is a NIFTY/BANKNIFTY option
-                    is_nifty_option = (
-                        base in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY") and
-                        inst_type in ("CE", "PE")
-                    )
-                    
-                    if not is_nifty_option:
-                        skipped += 1
-                        continue
-                    
-                    # Build contract dict
                     token = inst.get("instrument_token")
-                    ts = inst.get("tradingsymbol", "")
-                    
-                    if not token or not ts:
+                    if not token:
                         skipped += 1
                         continue
-                    
+
+                    # Deduplicate — _instrument_cache stores same row under multiple keys
+                    token_key = str(token)
+                    if token_key in seen_tokens:
+                        continue
+                    seen_tokens.add(token_key)
+
+                    ts_upper = ts.upper()
+
+                    # ✅ FIX: Use tradingsymbol suffix to detect CE/PE (reliable)
+                    is_ce_pe = ts_upper.endswith("CE") or ts_upper.endswith("PE")
+                    if not is_ce_pe:
+                        skipped += 1
+                        continue
+
+                    # ✅ FIX: Use tradingsymbol prefix to detect base (same as _ingest_instrument_row)
+                    base = self._base_index_from_tradingsymbol(ts_upper)
+                    if not base:
+                        # Fallback: try the name field
+                        name_raw = str(inst.get("name") or "").strip().upper()
+                        if name_raw in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+                            base = name_raw
+                        else:
+                            skipped += 1
+                            continue
+
+                    # Determine option type from suffix
+                    opt_type = "CE" if ts_upper.endswith("CE") else "PE"
+
+                    # Parse strike safely
+                    strike_val = None
+                    try:
+                        raw_strike = inst.get("strike")
+                        if raw_strike not in (None, "", "NULL"):
+                            strike_val = float(raw_strike)
+                    except (ValueError, TypeError):
+                        strike_val = None
+
+                    token_int = int(token)
+
                     contract = {
-                        "instrument_token": token,
+                        "instrument_token": token_int,
                         "tradingsymbol": ts,
                         "name": base,
+                        "option_type": opt_type,
                         "expiry": inst.get("expiry"),
-                        "strike": inst.get("strike", 0),
-                        "instrument_type": inst_type,
-                        "lot_size": inst.get("lot_size", 25),
+                        "strike": strike_val,
+                        "instrument_type": opt_type,
+                        "lot_size": inst.get("lot_size") or inst.get("lot") or 25,
+                        "tick_size": inst.get("tick_size"),
                         "exchange": "NFO",
                     }
-                    
+
                     # Add to option_contracts cache
                     self._option_contracts.setdefault(base, []).append(contract)
-                    
-                    # Also add to symbol resolution caches for fast lookup
+
+                    # Also add to symbol resolution caches
                     nfo_symbol = f"NFO:{ts}"
-                    self._by_symbol[nfo_symbol] = token
-                    self._by_symbol[ts] = token  # Also without prefix
-                    
-                    self._by_token[token] = {
-                        "tradingsymbol": ts,
-                        "exchange": "NFO",
-                        "segment": "NFO-OPT",
-                        **contract
-                    }
-                    
+                    self._by_symbol[nfo_symbol] = token_int
+                    self._by_symbol[ts_upper] = token_int
+                    self._symbol_by_token[token_int] = ts
+                    self._exchange_by_token[token_int] = "NFO"
+
                     synced += 1
-                    
-                except Exception:
+
+                except Exception as e:
                     skipped += 1
+                    if synced == 0 and skipped <= 3:
+                        LOGGER.warning(
+                            "sync_nfo_from_broker skip: %s (row=%s)",
+                            e,
+                            str(inst)[:200],
+                        )
                     continue
-        
+
         # Log summary
-        if synced > 0:
-            # Log contract counts per base
-            with self._lock:
-                for base, contracts in self._option_contracts.items():
-                    if contracts:
-                        LOGGER.debug(f"  {base}: {len(contracts)} contracts")
-        
+        with self._lock:
+            for base_key, contracts in self._option_contracts.items():
+                if contracts:
+                    LOGGER.info(
+                        "sync_nfo_from_broker: %s = %d contracts", base_key, len(contracts)
+                    )
+
+        if synced == 0 and len(instruments) > 0:
+            # Diagnostic: log first 3 instruments for debugging
+            for i, sample in enumerate(instruments[:3]):
+                LOGGER.warning(
+                    "sync_nfo_from_broker 0-synced diagnostic row[%d]: "
+                    "tradingsymbol=%s name=%s instrument_type=%s",
+                    i,
+                    sample.get("tradingsymbol"),
+                    sample.get("name"),
+                    sample.get("instrument_type"),
+                )
+
         return synced
-        
+
 
     def get_lot_size(self, symbol_or_base: str) -> Optional[int]:
         """
