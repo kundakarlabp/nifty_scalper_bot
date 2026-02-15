@@ -3,6 +3,7 @@
 from .polling_streamer import PollingStreamer
 from .resilient_streamer import ResilientStreamer, StreamMetrics
 from .stream_supervisor import StreamHealth, StreamSupervisor
+from .websocket_manager import WebSocketManager
 
 __all__ = [
     "PollingStreamer",
@@ -10,4 +11,5 @@ __all__ = [
     "StreamMetrics",
     "StreamSupervisor",
     "StreamHealth",
+    "WebSocketManager",
 ]
