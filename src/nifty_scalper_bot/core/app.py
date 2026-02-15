@@ -3118,27 +3118,54 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         }
 
         def _resolve_ws_token() -> str:  # type: ignore[redefined-outer-name]
-            candidates = [
-                os.getenv("ZERODHA_ACCESS_TOKEN"),
-                cast(str | None, getattr(config.broker, "access_token", None)),
-                _ws_token_state.get("token", ""),
-            ]
-            for candidate in candidates:
-                sanitized = _sanitize_ws_token(candidate)
-                if sanitized:
-                    previous = _ws_token_state.get("token")
-                    _ws_token_state["token"] = sanitized
-                    if (
-                        sanitized != previous
-                        or float(_ws_token_timestamp.get("ts", 0.0)) <= 0.0
-                    ):
-                        _ws_token_timestamp["ts"] = time_module.time()
-                    return sanitized
-            return _ws_token_state.get("token", "")
+            """Resolve websocket token from Railway and legacy env aliases safely."""
+
+            try:
+                candidates = [
+                    os.getenv("KITE_ACCESS_TOKEN"),
+                    os.getenv("ZERODHA_ACCESS_TOKEN"),
+                    os.getenv("BROKER_ACCESS_TOKEN"),
+                    cast(str | None, getattr(config.broker, "access_token", None)),
+                    _ws_token_state.get("token", ""),
+                ]
+                for candidate in candidates:
+                    sanitized = _sanitize_ws_token(candidate)
+                    if sanitized:
+                        previous = _ws_token_state.get("token")
+                        _ws_token_state["token"] = sanitized
+                        if (
+                            sanitized != previous
+                            or float(_ws_token_timestamp.get("ts", 0.0)) <= 0.0
+                        ):
+                            _ws_token_timestamp["ts"] = time_module.time()
+                        return sanitized
+                return _ws_token_state.get("token", "")
+            except Exception as e:
+                LOGGER.error("Failure in _resolve_ws_token: %s", e)
+                return _ws_token_state.get("token", "")
+
+        def _resolve_ws_api_key() -> str:
+            """Resolve websocket API key from Railway and legacy env aliases safely."""
+
+            try:
+                candidates = [
+                    os.getenv("KITE_API_KEY"),
+                    os.getenv("ZERODHA_API_KEY"),
+                    os.getenv("BROKER_API_KEY"),
+                    cast(str | None, getattr(config.broker, "api_key", None)),
+                ]
+                for candidate in candidates:
+                    value = (candidate or "").strip()
+                    if value:
+                        return value
+                return ""
+            except Exception as e:
+                LOGGER.error("Failure in _resolve_ws_api_key: %s", e)
+                return ""
 
         websocket_manager = WebSocketManager(
-            settings.ZERODHA_API_KEY,
-            _resolve_ws_token() or settings.ZERODHA_ACCESS_TOKEN,
+            _resolve_ws_api_key(),
+            _resolve_ws_token(),
             on_tick=lambda tick: None,
             on_error=lambda err: LOGGER.error("WebSocket manager error: %s", err),
             backoff_min_sec=1.0,
