@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import random
 import threading
-from collections.abc import Awaitable, Callable, Sequence
+import time
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from kiteconnect import KiteTicker
 
@@ -47,6 +48,17 @@ class _ReconnectState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+@dataclass(slots=True)
+class _HealthState:
+    """Args: none; Returns: health state; Raises: none."""
+
+    last_tick_monotonic: float = 0.0
+    last_heartbeat_monotonic: float = 0.0
+    last_connect_monotonic: float = 0.0
+    consecutive_failures: int = 0
+    circuit_open_until_monotonic: float = 0.0
+
+
 class WebSocketManager:
     """Manage a single KiteTicker connection with async reconnect and tick dispatch."""
 
@@ -62,6 +74,11 @@ class WebSocketManager:
         loop: asyncio.AbstractEventLoop | None = None,
         max_backoff_seconds: float = 60.0,
         base_backoff_seconds: float = 1.0,
+        heartbeat_interval_seconds: float = 2.0,
+        stale_threshold_seconds: float = 5.0,
+        handshake_timeout_seconds: float = 15.0,
+        circuit_breaker_threshold: int = 5,
+        circuit_breaker_cooldown_seconds: float = 20.0,
         **_: Any,
     ) -> None:
         """Args: init fields; Returns: None; Raises: ValueError."""
@@ -70,6 +87,16 @@ class WebSocketManager:
             raise ValueError("base_backoff_seconds must be > 0")
         if max_backoff_seconds < base_backoff_seconds:
             raise ValueError("max_backoff_seconds must be >= base_backoff_seconds")
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError('heartbeat_interval_seconds must be > 0')
+        if stale_threshold_seconds <= 0:
+            raise ValueError('stale_threshold_seconds must be > 0')
+        if handshake_timeout_seconds <= 0:
+            raise ValueError('handshake_timeout_seconds must be > 0')
+        if circuit_breaker_threshold <= 0:
+            raise ValueError('circuit_breaker_threshold must be > 0')
+        if circuit_breaker_cooldown_seconds <= 0:
+            raise ValueError('circuit_breaker_cooldown_seconds must be > 0')
 
         self._logger = get_logger(__name__)
         if isinstance(api_key, str):
@@ -91,12 +118,20 @@ class WebSocketManager:
         self._on_error_callback = on_error
         self._max_backoff_seconds = max_backoff_seconds
         self._base_backoff_seconds = base_backoff_seconds
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
+        self._stale_threshold_seconds = stale_threshold_seconds
+        self._handshake_timeout_seconds = handshake_timeout_seconds
+        self._circuit_breaker_threshold = circuit_breaker_threshold
+        self._circuit_breaker_cooldown_seconds = circuit_breaker_cooldown_seconds
         self._connected = asyncio.Event()
         self._shutdown = False
         self._manual_disconnect = False
         self._state = ConnectionState.DISCONNECTED
         self._reconnect = _ReconnectState()
         self._connect_lock = asyncio.Lock()
+        self._health = _HealthState()
+        self._health_lock = asyncio.Lock()
+        self._watchdog_task: asyncio.Task[None] | None = None
         self._thread_loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._on_connect_callback: Callable[[], None] | None = None
@@ -139,9 +174,13 @@ class WebSocketManager:
             self._shutdown = False
             self._manual_disconnect = False
             self._state = ConnectionState.CONNECTING
+            if self._loop is None:
+                self._loop = asyncio.get_running_loop()
             self._configure_handlers()
+            await self._start_watchdog()
             await self._run_ticker_connect()
         except Exception as e:
+            await self._stop_watchdog()
             self._logger.error("Failure in connect: %s", e)
             raise
 
@@ -157,6 +196,7 @@ class WebSocketManager:
                 if self._reconnect.task is not None:
                     self._reconnect.task.cancel()
                     self._reconnect.task = None
+            await self._stop_watchdog()
             self._connected.clear()
             await asyncio.to_thread(self._ticker.close)
         except Exception as e:
@@ -193,10 +233,57 @@ class WebSocketManager:
                 if self._shutdown:
                     return
                 self._state = ConnectionState.CONNECTING
+                await self._mark_connect_attempt()
                 await asyncio.to_thread(self._ticker.connect, True)
+                await self._await_handshake()
         except Exception as e:
             self._logger.error("Failure in _run_ticker_connect: %s", e)
             raise
+
+    async def _await_handshake(self) -> None:
+        """Args: none; Returns: None; Raises: HandshakeTimeoutError."""
+
+        if self._connected.is_set():
+            return
+        started = time.monotonic()
+        try:
+            await asyncio.wait_for(
+                self._connected.wait(), timeout=self._handshake_timeout_seconds
+            )
+        except TimeoutError as exc:
+            hb_delta = await self._heartbeat_age_seconds()
+            elapsed = time.monotonic() - started
+            raise HandshakeTimeoutError(elapsed=elapsed, hb_delta=hb_delta) from exc
+
+    async def _mark_connect_attempt(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
+        async with self._health_lock:
+            self._health.last_connect_monotonic = time.monotonic()
+
+    async def _record_heartbeat(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
+        now = time.monotonic()
+        async with self._health_lock:
+            self._health.last_heartbeat_monotonic = now
+
+    async def _record_tick(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
+        now = time.monotonic()
+        async with self._health_lock:
+            self._health.last_tick_monotonic = now
+            self._health.last_heartbeat_monotonic = now
+
+    async def _heartbeat_age_seconds(self) -> float:
+        """Args: none; Returns: float; Raises: none."""
+
+        async with self._health_lock:
+            last = self._health.last_heartbeat_monotonic
+        if last <= 0.0:
+            return self._stale_threshold_seconds + 1.0
+        return max(0.0, time.monotonic() - last)
 
     def _schedule_reconnect(self, reason: str) -> None:
         """Args: reason; Returns: None; Raises: none."""
@@ -226,6 +313,8 @@ class WebSocketManager:
             while not self._shutdown and not self._manual_disconnect:
                 if self._connected.is_set():
                     return
+                if await self._is_circuit_open():
+                    continue
                 delay = self._calculate_backoff(attempt)
                 self._logger.info(
                     "Condition met: reconnect_scheduled "
@@ -239,7 +328,9 @@ class WebSocketManager:
                     return
                 try:
                     await self._run_ticker_connect()
+                    await self._record_connect_success()
                 except Exception as connect_error:
+                    await self._record_connect_failure()
                     self._logger.error(
                         "Failure in _reconnect_loop.connect_attempt: %s",
                         connect_error,
@@ -262,6 +353,90 @@ class WebSocketManager:
         jitter = random.uniform(0.0, 1.0)
         return base_delay + jitter
 
+    async def _record_connect_success(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
+        async with self._health_lock:
+            self._health.consecutive_failures = 0
+            self._health.circuit_open_until_monotonic = 0.0
+
+    async def _record_connect_failure(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
+        async with self._health_lock:
+            self._health.consecutive_failures += 1
+            failures = self._health.consecutive_failures
+            if failures >= self._circuit_breaker_threshold:
+                cooldown_until = (
+                    time.monotonic() + self._circuit_breaker_cooldown_seconds
+                )
+                self._health.circuit_open_until_monotonic = cooldown_until
+                self._logger.warning(
+                    'Condition met: websocket_circuit_open failures=%d cooldown=%.2fs',
+                    failures,
+                    self._circuit_breaker_cooldown_seconds,
+                )
+
+    async def _is_circuit_open(self) -> bool:
+        """Args: none; Returns: bool; Raises: none."""
+
+        async with self._health_lock:
+            open_until = self._health.circuit_open_until_monotonic
+        if open_until <= 0.0:
+            return False
+        remaining = open_until - time.monotonic()
+        if remaining <= 0.0:
+            async with self._health_lock:
+                self._health.circuit_open_until_monotonic = 0.0
+            return False
+        await asyncio.sleep(min(remaining, self._heartbeat_interval_seconds))
+        return True
+
+    async def _start_watchdog(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        await self._record_heartbeat()
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    async def _stop_watchdog(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
+        if self._watchdog_task is None:
+            return
+        self._watchdog_task.cancel()
+        try:
+            await self._watchdog_task
+        except asyncio.CancelledError:
+            pass
+        self._watchdog_task = None
+
+    async def _watchdog_loop(self) -> None:
+        """Args: none; Returns: None; Raises: none."""
+
+        try:
+            while not self._shutdown:
+                await asyncio.sleep(self._heartbeat_interval_seconds)
+                if self._shutdown:
+                    return
+                if not self._connected.is_set():
+                    continue
+                heartbeat_age = await self._heartbeat_age_seconds()
+                if heartbeat_age > self._stale_threshold_seconds:
+                    self._logger.warning(
+                        'Condition met: websocket_stale_detected '
+                        'age=%.2fs threshold=%.2fs',
+                        heartbeat_age,
+                        self._stale_threshold_seconds,
+                    )
+                    self._connected.clear()
+                    self._schedule_reconnect('watchdog_stale')
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            self._logger.error('Failure in _watchdog_loop: %s', e)
+
     def _resolve_loop(self) -> asyncio.AbstractEventLoop:
         """Args: none; Returns: loop; Raises: RuntimeError."""
 
@@ -282,6 +457,13 @@ class WebSocketManager:
             self._logger.info("Condition met: websocket_connected")
             self._connected.set()
             self._state = ConnectionState.CONNECTED
+            loop = self._resolve_loop()
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._record_connect_success())
+            )
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._record_heartbeat())
+            )
             if self._on_connect_callback is not None:
                 self._on_connect_callback()
             self._reconnect.attempts = 0
@@ -300,6 +482,9 @@ class WebSocketManager:
                 return
             loop = self._resolve_loop()
             for tick in ticks:
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._record_tick())
+                )
                 maybe = self._on_tick_callback(tick)
                 if asyncio.iscoroutine(maybe):
                     try:
@@ -309,10 +494,25 @@ class WebSocketManager:
                     if running_loop is loop:
                         loop.create_task(maybe)
                     else:
-                        loop.call_soon_threadsafe(lambda c=maybe: loop.create_task(c))
+                        self._schedule_coroutine(
+                            loop, cast(Coroutine[Any, Any, Any], maybe)
+                        )
         except Exception as e:
             self._logger.error("Failure in _on_ticks: %s", e)
             raise
+
+
+    def _schedule_coroutine(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        coroutine: Coroutine[Any, Any, Any],
+    ) -> None:
+        """Args: loop/coroutine; Returns: none; Raises: none."""
+
+        def _create_task() -> None:
+            loop.create_task(coroutine)
+
+        loop.call_soon_threadsafe(_create_task)
 
     def _on_error(self, _ws: KiteTicker, code: int, reason: str) -> None:
         """Args: ws,code,reason; Returns: None; Raises: none."""
@@ -442,3 +642,22 @@ class WebSocketManager:
         """Args: factory; Returns: none; Raises: none."""
 
         return
+
+    def health_snapshot(self) -> dict[str, float | int | bool]:
+        """Args: none; Returns: health map; Raises: none."""
+
+        last_tick_age = 0.0
+        last_heartbeat_age = 0.0
+        now = time.monotonic()
+        if self._health.last_tick_monotonic > 0.0:
+            last_tick_age = now - self._health.last_tick_monotonic
+        if self._health.last_heartbeat_monotonic > 0.0:
+            last_heartbeat_age = now - self._health.last_heartbeat_monotonic
+        return {
+            'connected': self._connected.is_set(),
+            'state': int(self._state.value),
+            'consecutive_failures': self._health.consecutive_failures,
+            'last_tick_age_seconds': max(0.0, last_tick_age),
+            'last_heartbeat_age_seconds': max(0.0, last_heartbeat_age),
+            'circuit_open': self._health.circuit_open_until_monotonic > now,
+        }
