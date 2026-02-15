@@ -7,7 +7,7 @@ from typing import Any, Iterable
 import pytest
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-from nifty_scalper_bot.data.websocket.manager import ConnectionState
+from nifty_scalper_bot.streaming.websocket_manager import ConnectionState
 
 
 class DummyBroker:

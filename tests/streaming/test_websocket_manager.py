@@ -16,13 +16,14 @@ class FakeKiteTicker:
 
     MODE_FULL = "full"
 
-    def __init__(self, api_key: str, access_token: str) -> None:
+    def __init__(self, api_key: str, access_token: str, reconnect: bool = True) -> None:
         self.api_key = api_key
         self.access_token = access_token
         self.on_connect: Callable[..., None] | None = None
         self.on_ticks: Callable[..., None] | None = None
         self.on_error: Callable[..., None] | None = None
         self.on_close: Callable[..., None] | None = None
+        self.reconnect = reconnect
         self.connect_calls = 0
         self.subscribed: list[int] = []
         self.mode_set: list[int] = []

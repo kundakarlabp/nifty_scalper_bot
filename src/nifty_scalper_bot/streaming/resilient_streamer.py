@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable
 
 from nifty_scalper_bot.config.settings import Settings
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
-from nifty_scalper_bot.data.websocket.manager import WebSocketManager
+from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter, Gauge, Histogram
