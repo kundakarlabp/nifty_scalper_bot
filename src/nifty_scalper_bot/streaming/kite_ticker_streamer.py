@@ -31,8 +31,9 @@ class KiteTickerStreamer:
         self._last_tick_ts = time.monotonic()
 
     def start(self):
+        """Start the KiteTicker WebSocket connection (Correct Implementation)."""
         if self._ticker:
-            LOGGER.warning("WebSocket already initialized")
+            LOGGER.warning("KiteTicker already initialized — skipping duplicate start")
             return
 
         self._ticker = KiteTicker(
@@ -45,10 +46,10 @@ class KiteTickerStreamer:
         self._ticker.on_close = self._on_close
         self._ticker.on_error = self._on_error
 
-        # ✅ FIX: Let KiteTicker manage its own internal thread
-        self._ticker.connect(threaded=True)
+        LOGGER.info("🚀 Starting KiteTicker WebSocket...")
 
-        LOGGER.info("🚀 KiteTicker WebSocket started (threaded mode)")
+        # ✅ CORRECT: Let KiteTicker manage its own thread
+        self._ticker.connect(threaded=True)
 
     def _on_connect(self, ws, response):
         """Handle WebSocket connection."""
