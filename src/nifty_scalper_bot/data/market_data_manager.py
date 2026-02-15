@@ -562,18 +562,19 @@ class MarketDataManager:
     # Lifecycle helpers
     def start(self) -> None:
         if self._ws is not None:
-            self._ws.start()
+            try:
+                self._ws.start()
+            except Exception:
+                self._logger.exception("Failure in ws.start")
+
+        # 🔥 Force REST fallback if WS not connected
         if self._rest_poll_enabled:
-            self._start_rest_poll()
-        try:
-            self.refresh_margin_snapshot(force=True)
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarketDataManager.start margin refresh: %s",
-                exc,
-                extra={"event": "mdm_start_margin_refresh_error"},
-                exc_info=exc,
-            )
+            if not self._ws or not self._ws.is_connected():
+                self._logger.info(
+                    "mdm_rest_fallback_activated",
+                    extra={"event": "mdm_rest_fallback_activated"}
+                )
+                self._start_rest_poll()
 
     def stop(self) -> None:
         if self._ws is not None:
@@ -905,7 +906,7 @@ class MarketDataManager:
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
-        symbol = normalize_symbol(symbol) or symbol
+        symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
         with self._lock:
             subscribers = self._subscribers[symbol]
             subscribers.add(callback)
@@ -976,7 +977,7 @@ class MarketDataManager:
     def get_latest_tick(self, symbol: str) -> dict[str, Any] | None:
         normalized = enforce_canonical(normalize_symbol(symbol)) or symbol
         with self._lock:
-            tick = self._latest_ticks.get(normalized) or self._latest_ticks.get(symbol)
+            tick = self._latest_ticks.get(normalized)
             if tick is None:
                 # ✅ FIX: Rate-limit warning to once per 60s per symbol
                 import time as _time
