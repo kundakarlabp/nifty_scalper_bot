@@ -270,7 +270,10 @@ class IndicatorEngine:
             indicators["atr_trend"] = self.get_atr_trend(symbol)
             indicators["volatility_index"] = self.get_volatility_index(symbol)
             indicators["vwap"] = self.get_vwap(symbol)
-            self._augment_session_metrics(symbol, indicators)
+            try:
+                self._augment_session_metrics(symbol, indicators)
+            except Exception:
+                pass  # Session metrics are non-critical — don't crash pipeline
             # ✅ FIX S1: Expose latest-bar OHLC for strategies that need it
             history = self._histories.get(symbol)
             if history and len(history) > 0:
@@ -479,27 +482,38 @@ class IndicatorEngine:
         return value
 
     def get_vwap(self, symbol: str, period: int = 20) -> float | None:
-        """Calculate VWAP. Returns None if insufficient data."""
-        history = self._histories.get(symbol)
-        if history is None or len(history) == 0:
-            return None
-        effective_period = min(period, len(history))
-        if effective_period < 3:
-            return None
+        """Calculate VWAP. Returns None if insufficient data. NEVER raises."""
+        try:
+            history = self._histories.get(symbol)
+            if history is None or len(history) == 0:
+                return None
+            effective_period = min(period, len(history))
+            if effective_period < 3:
+                return None
 
-        last_timestamp = history.last_timestamp
-        if last_timestamp is None:
-            return None
-        cache_key = f"vwap_{effective_period}"
-        cached = self._get_cached(symbol, cache_key, last_timestamp)
-        if cached is not None:
-            return cached  # type: ignore[return-value]
-        prices = history.get_closes(effective_period)
-        volumes = history.get_volumes(effective_period)
-        value = self._calculate_vwap(prices, volumes)
-        self._last_valid_vwap[symbol] = float(value)
-        self._set_cache(symbol, cache_key, value, last_timestamp)
-        return value
+            last_timestamp = history.last_timestamp
+            if last_timestamp is None:
+                return None
+            cache_key = f"vwap_{effective_period}"
+            cached = self._get_cached(symbol, cache_key, last_timestamp)
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+            prices = history.get_closes(effective_period)
+            volumes = history.get_volumes(effective_period)
+
+            # Pre-check: skip calculation if all volumes are zero
+            if not volumes or all(v == 0 for v in volumes):
+                return self._last_valid_vwap.get(symbol)
+
+            value = self._calculate_vwap(prices, volumes)
+            if value is None:
+                # Return last known good VWAP to avoid signal dropout
+                return self._last_valid_vwap.get(symbol)
+            self._last_valid_vwap[symbol] = float(value)
+            self._set_cache(symbol, cache_key, value, last_timestamp)
+            return value
+        except Exception:
+            return self._last_valid_vwap.get(symbol)
 
     def get_atr_trend(self, symbol: str, period: int = 14) -> float | None:
         """Return ATR trend ratio for *symbol*.
@@ -1184,18 +1198,30 @@ class IndicatorEngine:
         atr_values = np.asarray(true_ranges[-period:], dtype=float)
         return float(atr_values.mean())
 
-    def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float:
-        """Internal VWAP calculation. Args: prices, volumes. Returns: VWAP. Raises: ValueError."""
-        pv = 0.0
-        vol = 0.0
-        for price, volume in zip(prices, volumes, strict=False):
-            if int(volume) <= 0:
-                raise ValueError("Invalid volume for VWAP")
-            pv += float(price) * float(volume)
-            vol += float(volume)
-        if vol <= 0:
-            raise ValueError("Zero cumulative volume")
-        return pv / vol
+    def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float | None:
+        """Internal VWAP calculation.
+
+        Returns None when data is invalid and never raises.
+        """
+        try:
+            if not prices or not volumes or len(prices) != len(volumes):
+                return None
+            pv = 0.0
+            vol = 0.0
+            for price, volume in zip(prices, volumes, strict=False):
+                v = float(volume)
+                if v <= 0:
+                    continue  # Skip zero/negative volume bars instead of crashing
+                pv += float(price) * v
+                vol += v
+            if vol <= 0:
+                return None  # All-zero volume window — return None, don't crash
+            result = pv / vol
+            if not (result > 0):  # catches NaN and negative
+                return None
+            return result
+        except Exception:
+            return None  # NEVER crash the indicator pipeline
 
     def _ema_series(self, values: Iterable[float], period: int) -> np.ndarray:
         """Return the EMA series for the supplied values.
