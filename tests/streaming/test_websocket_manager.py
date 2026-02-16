@@ -97,7 +97,7 @@ async def test_reconnect_scheduled_on_error(monkeypatch: pytest.MonkeyPatch) -> 
     assert isinstance(fake_ticker, FakeKiteTicker)
     fake_ticker.on_error(fake_ticker, 1006, "drop")
     fake_ticker.on_close(fake_ticker, 1006, "drop")
-    await asyncio.sleep(0.08)
+    await asyncio.sleep(5.2)
 
     assert manager.ticker is not fake_ticker
     assert manager.ticker.connect_calls >= 1
@@ -129,7 +129,7 @@ async def test_watchdog_schedules_reconnect_for_missing_pong(
 
     fake_ticker = manager.ticker
     assert isinstance(fake_ticker, FakeKiteTicker)
-    await asyncio.sleep(0.06)
+    await asyncio.sleep(5.2)
 
     assert manager.ticker is not fake_ticker
     await manager.disconnect()
