@@ -401,6 +401,11 @@ class StrategyRunner:
         except Exception as e:
             self._logger.error(f"❌ Failed to create 'data/' directory: {e}")
         self._data_hub = data_hub
+        if self._data_hub is not None and hasattr(self._data_hub, "tick_bus"):
+            try:
+                self._data_hub.tick_bus.subscribe(self._on_tick_from_bus)
+            except Exception as e:
+                self._logger.error("Failure in StrategyRunner.__init__: %s", e)
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
         self._symbol_source: MarketDataManager | None = None
@@ -480,6 +485,8 @@ class StrategyRunner:
         self._running = False
         self._trading_paused = False
         self._active_symbols: set[str] = set()
+        self._tracked_symbols: set[str] = set()
+        self._live_symbols: set[str] = set()
         self._symbol_state: Dict[str, SymbolRuntimeState] = {}
         self._callbacks: MutableMapping[str, Callable[[dict], None]] = {}
         self._bar_builders: Dict[str, OneMinuteBarBuilder] = {}
@@ -658,6 +665,7 @@ class StrategyRunner:
                 )
                 return
             self._active_symbols.add(normalized)
+            self._tracked_symbols.add(normalized)
             self._symbol_states.setdefault(normalized, SymbolState.DISCOVERED)
             self._set_symbol_hydration_state(normalized, SymbolState.HYDRATING)
             # Update tracked universe snapshot only when membership changes.
@@ -701,6 +709,8 @@ class StrategyRunner:
 
             state.active = False
             self._active_symbols.discard(normalized)
+            self._tracked_symbols.discard(normalized)
+            self._live_symbols.discard(normalized)
             self._frozen_universe.discard(normalized)
             self._symbol_states.pop(normalized, None)
             self._symbol_bar_count.pop(normalized, None)
@@ -1051,6 +1061,7 @@ class StrategyRunner:
                 normalized = canonical(sym)
                 # 1. Register Active (Critical for main loop)
                 self._active_symbols.add(normalized)
+                self._tracked_symbols.add(normalized)
 
                 # 2. Ensure SymbolState exists (Critical for Strategy Context)
                 if normalized not in self._symbol_state:
@@ -2248,6 +2259,30 @@ class StrategyRunner:
                 f"Market time check failed: {e}. Defaulting to CLOSED."
             )
             return False
+
+    def _on_tick_from_bus(self, tick: Mapping[str, Any]) -> None:
+        """Args: tick; Returns: none; Raises: none."""
+        try:
+            symbol_value = tick.get("symbol")
+            if not symbol_value:
+                return
+            symbol = self._normalize_symbol(str(symbol_value))
+            if symbol not in self._tracked_symbols:
+                return
+            self._live_symbols.add(symbol)
+            if set(self._tracked_symbols) and self._live_symbols != set(self._tracked_symbols):
+                return
+            price = tick.get("last_price") or tick.get("ltp")
+            if not isinstance(price, (int, float)):
+                self._logger.error("Strategy skipped — missing live tick")
+                return
+            mdm_last_tick = getattr(self._market_data, "_last_tick_time", {}).get(symbol)
+            if isinstance(mdm_last_tick, (int, float)) and time.time() - float(mdm_last_tick) > 3.0:
+                self._logger.warning("Stale tick — skipping execution")
+                return
+            self._on_tick_safe({**dict(tick), "symbol": symbol, "last_price": float(price)})
+        except Exception as e:
+            self._logger.error("Failure in StrategyRunner._on_tick_from_bus: %s", e)
 
     def _on_tick_safe(self, tick: Mapping[str, Any]) -> None:
         """Safe wrapper for _on_tick to handle exceptions."""
@@ -3579,6 +3614,10 @@ class StrategyRunner:
                             level=logging.DEBUG,
                         )
 
+                        mdm_last_tick = getattr(self._market_data, "_last_tick_time", {}).get(symbol)
+                        if isinstance(mdm_last_tick, (int, float)) and time.time() - float(mdm_last_tick) > 3.0:
+                            self._logger.warning("Stale tick — skipping execution")
+                            return
                         signal = self._strategy_manager.generate_signal(symbol, price)
                         cycle_stats = getattr(self, "_strategy_cycle_stats", None)
                         if cycle_stats is None:

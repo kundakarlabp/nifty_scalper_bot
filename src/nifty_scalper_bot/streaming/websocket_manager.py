@@ -144,6 +144,9 @@ class WebSocketManager:
         self._last_pong_mono = 0.0
         self._last_backoff_delay = self._base_backoff
         self._circuit = _CircuitState()
+        self._fallback_start_callback: Callable[[], None] | None = None
+        self._fallback_stop_callback: Callable[[], None] | None = None
+        self._fallback_active = False
 
     @property
     def on_tick(self) -> TickCallback | None:
@@ -156,6 +159,18 @@ class WebSocketManager:
         """Args: callback; Returns: none; Raises: none."""
 
         self._on_tick_callback = callback
+
+
+    def set_fallback_callbacks(
+        self,
+        *,
+        on_start: Callable[[], None] | None = None,
+        on_stop: Callable[[], None] | None = None,
+    ) -> None:
+        """Args: callbacks; Returns: none; Raises: none."""
+
+        self._fallback_start_callback = on_start
+        self._fallback_stop_callback = on_stop
 
     @property
     def ticker(self) -> KiteTicker:
@@ -471,6 +486,17 @@ class WebSocketManager:
                             last_tick_age,
                             self._stale_threshold,
                         )
+                        if (
+                            not self._fallback_active
+                            and self._fallback_start_callback is not None
+                        ):
+                            self._fallback_active = True
+                            try:
+                                self._fallback_start_callback()
+                            except Exception as e:
+                                self._logger.error(
+                                    "Failure in _watchdog_loop.fallback_start: %s", e
+                                )
                         self._schedule_reconnect("watchdog_tick_stale")
         except asyncio.CancelledError:
             return
@@ -548,6 +574,12 @@ class WebSocketManager:
             # to prevent false pong-timeout reconnects when pong frames
             # are delayed/lost through Railway cloud proxy.
             self._last_pong_mono = now
+            if self._fallback_active and self._fallback_stop_callback is not None:
+                self._fallback_active = False
+                try:
+                    self._fallback_stop_callback()
+                except Exception as e:
+                    self._logger.error("Failure in _on_ticks.fallback_stop: %s", e)
             callback = self._on_tick_callback
             if callback is None:
                 return

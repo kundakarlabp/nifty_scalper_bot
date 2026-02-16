@@ -205,6 +205,9 @@ class MarketDataManager:
         self._account_lock = threading.RLock()
         self._last_tick_source: dict[str, str] = {}
         self._last_tick_hash: dict[str, int] = {}
+        self._tick_cache: dict[str, dict[str, Any]] = {}
+        self._last_tick_time: dict[str, float] = {}
+        self._tick_bus: Any | None = None
         self._ws_connected = False
         self._hydration_status: dict[str, str] = {}
         self._last_hb_mono: float | None = None
@@ -302,6 +305,8 @@ class MarketDataManager:
 
         if self._ws is not None:
             self._ws.on_tick = self._handle_tick
+        if self._tick_bus is not None:
+            self._tick_bus.subscribe(self._on_tick)
             with suppress(Exception):
                 self._ws_connected = bool(self._ws.is_connected())
 
@@ -987,7 +992,7 @@ class MarketDataManager:
             resolved_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
 
         with self._lock:
-            tick = self._latest_ticks.get(resolved_symbol)
+            tick = self._tick_cache.get(resolved_symbol)
             if tick is None:
                 import time as _time
 
@@ -2249,6 +2254,43 @@ class MarketDataManager:
             return self._rest_poll_enabled and self._has_recent_rest_ticks()
         return True
 
+
+    def attach_tick_bus(self, tick_bus: Any) -> None:
+        """Args: tick_bus; Returns: none; Raises: none."""
+        try:
+            self._tick_bus = tick_bus
+            subscribe = getattr(tick_bus, "subscribe", None)
+            if callable(subscribe):
+                subscribe(self._on_tick)
+        except Exception as e:
+            self._logger.error("Failure in MarketDataManager.attach_tick_bus: %s", e)
+
+    def _on_tick(self, tick: dict[str, Any]) -> None:
+        """Args: tick; Returns: none; Raises: none."""
+        try:
+            symbol_value = tick.get("symbol")
+            if not symbol_value:
+                return
+            symbol = enforce_canonical(normalize_symbol(str(symbol_value)))
+            incoming = dict(tick)
+            incoming_ts = float(incoming.get("timestamp") or time.time())
+            previous = self._tick_cache.get(symbol)
+            if previous is not None:
+                previous_ts = float(previous.get("timestamp") or 0.0)
+                previous_source = str(previous.get("source", "")).lower()
+                incoming_source = str(incoming.get("source", "")).lower()
+                if (
+                    previous_source == "ws"
+                    and incoming_source in {"rest", "polling"}
+                    and incoming_ts <= previous_ts
+                ):
+                    return
+            self._tick_cache[symbol] = incoming
+            self._last_tick_time[symbol] = time.time()
+            self._handle_tick(incoming)
+        except Exception as e:
+            self._logger.error("Failure in MarketDataManager._on_tick: %s", e)
+
     # ------------------------------------------------------------------
     # Internal plumbing
 
@@ -2323,6 +2365,8 @@ class MarketDataManager:
         cached_tick = dict(tick)
         with self._lock:
             self._latest_ticks[symbol] = cached_tick
+            self._tick_cache[symbol] = cached_tick
+            self._last_tick_time[symbol] = time.time()
             self._history[symbol].append(cached_tick)
             self._last_tick_wallclock[symbol] = float(wallclock)
         self._notify_unified_manager(symbol, cached_tick)
