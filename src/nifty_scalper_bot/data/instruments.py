@@ -30,6 +30,7 @@ from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.utils.symbols import canonical
 
 import logging
@@ -1112,6 +1113,18 @@ def refresh_from_csv(conn: sqlite3.Connection, csv_path: str | Path) -> Dict[str
         return summary
 
     conn_rowcount = 0
+    settings = get_settings()
+    only_index_options = bool(
+        getattr(settings.instruments, "sync_only_index_options", True)
+    )
+    raw_filter = getattr(
+        settings.instruments,
+        "sync_instruments_filter",
+        "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY",
+    )
+    allowed = [
+        item.strip().upper() for item in str(raw_filter).split(",") if item.strip()
+    ]
     try:
         with open(csv_path, newline="", encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
@@ -1129,6 +1142,15 @@ def refresh_from_csv(conn: sqlite3.Connection, csv_path: str | Path) -> Dict[str
                     if token is None:
                         summary["skipped"] += 1
                         continue
+                    if only_index_options:
+                        segment = str(row.get("segment") or "").strip().upper()
+                        name = str(row.get("name") or "").strip().upper()
+                        if segment != "NFO-OPT":
+                            summary["skipped"] += 1
+                            continue
+                        if not any(name.startswith(prefix) for prefix in allowed):
+                            summary["skipped"] += 1
+                            continue
                     token_int = int(float(token))
                     tradingsymbol = (row.get("tradingsymbol") or row.get("symbol") or "").strip()
                     if not tradingsymbol:

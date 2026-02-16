@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import math
 import os
-from random import uniform
 import threading
 import time
 from typing import (
@@ -27,6 +26,7 @@ from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.streaming.websocket_manager import ConnectionState, WebSocketManager
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.env import get_str
+from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
@@ -280,6 +280,22 @@ class MarketDataManager:
             )
         self._rest_poll_stop = threading.Event()
         self._rest_poll_thread: threading.Thread | None = None
+        self._health_monitor_stop = threading.Event()
+        self._health_monitor_thread: threading.Thread | None = None
+        self._zombie_symbol = "NSE:NIFTY 50"
+        self._zombie_tick_threshold_sec = self._parse_float_env(
+            "ZOMBIE_TICK_THRESHOLD_SEC", default=20.0, minimum=1.0
+        )
+        self._zombie_restart_failures = 0
+        self._zombie_restart_window = self._parse_float_env(
+            "ZOMBIE_RESTART_WINDOW_SEC", default=120.0, minimum=1.0
+        )
+        self._zombie_restart_limit = self._parse_int_env(
+            "ZOMBIE_RESTART_LIMIT", default=3, minimum=1
+        )
+        self._zombie_breaker_open_until = 0.0
+        self._zombie_stale_logged = False
+        self._rest_refresh_inflight: set[str] = set()
         self._tick_stale_threshold_ms = self._parse_int_env(
             "TICK_STALE_MS", default=2_000, minimum=0
         )
@@ -581,6 +597,7 @@ class MarketDataManager:
                     extra={"event": "mdm_rest_fallback_activated"}
                 )
                 self._start_rest_poll()
+        self._start_health_monitor()
 
     def stop(self) -> None:
         if self._ws is not None:
@@ -590,6 +607,11 @@ class MarketDataManager:
             self._rest_poll_thread.join(timeout=2.0)
             self._rest_poll_thread = None
             self._rest_poll_stop.clear()
+        if self._health_monitor_thread is not None:
+            self._health_monitor_stop.set()
+            self._health_monitor_thread.join(timeout=2.0)
+            self._health_monitor_thread = None
+            self._health_monitor_stop.clear()
 
     def set_ws_connected(self, connected: bool) -> None:
         """Record WebSocket connectivity state for health reporting."""
@@ -981,7 +1003,7 @@ class MarketDataManager:
             self._release_subscription(symbol)
 
     def get_latest_tick(self, symbol: str | int) -> dict[str, Any] | None:
-        """Args: symbol; Returns: fresh tick snapshot; Raises: none."""
+        """Args: symbol; Returns: cached tick snapshot; Raises: none."""
         resolved_symbol: str | None
         if isinstance(symbol, int):
             with self._lock:
@@ -993,24 +1015,73 @@ class MarketDataManager:
 
         with self._lock:
             tick = self._tick_cache.get(resolved_symbol)
-            if tick is None:
-                import time as _time
+            return dict(tick) if tick is not None else None
 
-                _now = _time.monotonic()
-                _last = self._tick_warn_last.get(resolved_symbol, 0.0)
-                if _now - _last >= 60.0:
-                    self._tick_warn_last[resolved_symbol] = _now
-                    self._logger.warning(
-                        "MDM: get_latest_tick - No tick in cache for %s",
-                        resolved_symbol,
-                    )
-                return None
-            tick_ts = float(tick.get("timestamp") or 0.0)
-            if tick_ts <= 0:
-                return None
-            if time.time() - tick_ts > 2.0:
-                return None
-            return dict(tick)
+    async def ensure_fresh_tick(self, symbol: str) -> dict[str, Any] | None:
+        """Args: symbol; Returns: cached tick; Raises: none."""
+
+        normalized_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
+        tick = self.get_latest_tick(normalized_symbol)
+        stale_threshold = max(float(self._tick_stale_threshold_ms) / 1000.0, 0.0)
+        tick_age = self.time_since_last_tick(normalized_symbol)
+        tick_stale = tick is None or (
+            tick_age is not None and stale_threshold > 0.0 and tick_age > stale_threshold
+        )
+        ws_disconnected = not self._is_ws_connected()
+
+        if tick_stale and ws_disconnected:
+            self._schedule_rest_refresh(normalized_symbol)
+        return tick
+
+    def time_since_last_tick(self, symbol: str) -> float | None:
+        """Args: symbol; Returns: seconds since last tick; Raises: none."""
+
+        normalized_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
+        with self._lock:
+            wallclock = self._last_tick_time.get(normalized_symbol)
+            if wallclock is None:
+                tick = self._tick_cache.get(normalized_symbol)
+                if tick is None:
+                    return None
+                wallclock = float(tick.get("timestamp") or 0.0)
+        if not wallclock:
+            return None
+        return max(time.time() - float(wallclock), 0.0)
+
+    async def _rest_refresh(self, symbol: str) -> None:
+        """Args: symbol; Returns: none; Raises: none."""
+
+        normalized_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
+        with self._lock:
+            if normalized_symbol in self._rest_refresh_inflight:
+                return
+            self._rest_refresh_inflight.add(normalized_symbol)
+        try:
+            await asyncio.to_thread(self.pull_quote, normalized_symbol)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in _rest_refresh: %s",
+                exc,
+                extra={"event": "mdm_rest_refresh_error", "symbol": normalized_symbol},
+                exc_info=exc,
+            )
+        finally:
+            with self._lock:
+                self._rest_refresh_inflight.discard(normalized_symbol)
+
+    def _schedule_rest_refresh(self, symbol: str) -> None:
+        """Args: symbol; Returns: none; Raises: none."""
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._rest_refresh(symbol))
+        except RuntimeError:
+            thread = threading.Thread(
+                target=lambda: asyncio.run(self._rest_refresh(symbol)),
+                name=f"mdm-rest-refresh-{symbol}",
+                daemon=True,
+            )
+            thread.start()
 
     async def wait_for_live_tick(self, token: int, timeout: float = 5) -> dict[str, Any]:
         """Args: token, timeout; Returns: fresh tick; Raises: RuntimeError."""
@@ -2420,6 +2491,116 @@ class MarketDataManager:
                 self._logger.error(
                     "Tick callback failed", extra={"symbol": symbol, "error": str(exc)}
                 )
+
+    def _is_ws_connected(self) -> bool:
+        """Args: none; Returns: websocket connectivity; Raises: none."""
+
+        try:
+            if self._ws is None:
+                return bool(self._ws_connected)
+            return bool(self._ws.is_connected())
+        except Exception:  # noqa: BLE001
+            return bool(self._ws_connected)
+
+    def _start_health_monitor(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+
+        if self._health_monitor_thread is not None and self._health_monitor_thread.is_alive():
+            return
+        self._health_monitor_stop.clear()
+        self._health_monitor_thread = threading.Thread(
+            target=self._health_monitor_loop,
+            name="mdm-health-monitor",
+            daemon=True,
+        )
+        self._health_monitor_thread.start()
+
+    def _health_monitor_loop(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+
+        while not self._health_monitor_stop.wait(1.0):
+            try:
+                self._check_zombie_ticks()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "Failure in _health_monitor_loop: %s",
+                    exc,
+                    extra={"event": "mdm_health_monitor_error"},
+                    exc_info=exc,
+                )
+
+    def _check_zombie_ticks(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+
+        if not is_market_hours_cached():
+            self._zombie_stale_logged = False
+            return
+        if not self._is_ws_connected():
+            self._zombie_stale_logged = False
+            return
+
+        tick_age = self.time_since_last_tick(self._zombie_symbol)
+        if tick_age is None or tick_age <= self._zombie_tick_threshold_sec:
+            self._zombie_stale_logged = False
+            return
+
+        if not self._zombie_stale_logged:
+            self._logger.critical(
+                "CRITICAL zombie_tick_detected symbol=%s age=%.2fs threshold=%.2fs",
+                self._zombie_symbol,
+                tick_age,
+                self._zombie_tick_threshold_sec,
+                extra={
+                    "event": "mdm_zombie_tick_detected",
+                    "symbol": self._zombie_symbol,
+                    "age_seconds": tick_age,
+                },
+            )
+            self._zombie_stale_logged = True
+
+        self._trigger_zombie_ws_restart()
+
+    def _trigger_zombie_ws_restart(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+
+        now = time.monotonic()
+        if now < self._zombie_breaker_open_until:
+            return
+
+        self._zombie_restart_failures += 1
+        if self._zombie_restart_failures > self._zombie_restart_limit:
+            self._zombie_breaker_open_until = now + self._zombie_restart_window
+            self._zombie_restart_failures = 0
+            self._logger.error(
+                "Failure in _trigger_zombie_ws_restart: circuit breaker open",
+                extra={
+                    "event": "mdm_zombie_circuit_open",
+                    "open_seconds": self._zombie_restart_window,
+                },
+            )
+            return
+
+        ws = self._ws
+        if ws is None:
+            return
+        try:
+            reconnect = getattr(ws, "force_reconnect", None)
+            if callable(reconnect):
+                reconnect()
+                self._logger.warning(
+                    "Condition met: mdm_zombie_ws_restart",
+                    extra={
+                        "event": "mdm_zombie_ws_restart",
+                        "failure_count": self._zombie_restart_failures,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in _trigger_zombie_ws_restart: %s",
+                exc,
+                extra={"event": "mdm_zombie_ws_restart_error"},
+                exc_info=exc,
+            )
 
     def _start_rest_poll(self) -> None:
         if self._rest_poll_thread is not None and self._rest_poll_thread.is_alive():

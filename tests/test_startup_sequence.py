@@ -196,6 +196,7 @@ async def test_startup_continues_when_broker_denied() -> None:
         shadow=ShadowSettings(),
         notifications=NotificationSettings(enabled=False),
         session_allow_out_of_hours=False,
+        allow_offmarket_trading=False,
     )
 
     broker = FailingBroker()

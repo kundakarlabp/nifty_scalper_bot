@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
+
+import pytest
 
 from nifty_scalper_bot.strategies.orchestrator import StrategyOrchestrator
 from nifty_scalper_bot.strategies.signal_generator import Signal
@@ -38,6 +41,15 @@ class _RiskStub:
     def __init__(self, balance: float) -> None:
         self.current_balance = balance
 
+
+
+
+@pytest.fixture(autouse=True)
+def _allow_offmarket_trading(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.orchestrator.get_settings",
+        lambda: SimpleNamespace(allow_offmarket_trading=True),
+    )
 
 def _make_signal(strategy: str, action: str = "BUY") -> Signal:
     return Signal(

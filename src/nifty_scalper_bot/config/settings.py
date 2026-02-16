@@ -881,6 +881,8 @@ class InstrumentSettings(BaseSettings):
     csv_path: Path | None = Path("/app/instruments.csv")
     db_path: Path | None = Path("/app/cache.sqlite")
     refresh_cron_enabled: bool = False
+    sync_only_index_options: bool = True
+    sync_instruments_filter: str = "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY"
 
     model_config = SettingsConfigDict(env_prefix="INSTRUMENTS_", case_sensitive=False)
 
@@ -897,6 +899,7 @@ class Settings:
     shadow: ShadowSettings
     notifications: NotificationSettings
     session_allow_out_of_hours: bool
+    allow_offmarket_trading: bool
     execution: ExecutionSettings = field(default_factory=ExecutionSettings)
     websocket_enabled: bool = True
     telemetry_tags: Set[str] = field(default_factory=set)
@@ -1368,7 +1371,15 @@ def _build_instrument_settings() -> InstrumentSettings:
     """
 
     try:
-        return InstrumentSettings()
+        return InstrumentSettings(
+            sync_only_index_options=_env_bool(
+                "SYNC_ONLY_INDEX_OPTIONS", default=True
+            ),
+            sync_instruments_filter=(
+                resolve_env("SYNC_INSTRUMENTS_FILTER")
+                or "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY"
+            ),
+        )
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in _build_instrument_settings: %s",
@@ -1407,6 +1418,10 @@ def get_settings() -> Settings:
         shadow=_build_shadow_settings(),
         notifications=_build_notification_settings(app_config),
         session_allow_out_of_hours=session_allow_out_of_hours,
+        allow_offmarket_trading=_env_bool(
+            "ALLOW_OFFMARKET_TRADING",
+            default=False,
+        ),
         websocket_enabled=not _env_bool(
             "WEBSOCKET__DISABLED", "WEBSOCKET_DISABLED", default=False
         ),
