@@ -53,9 +53,9 @@ class WebSocketManager:
         max_backoff_seconds: float = 60.0,
         base_backoff_seconds: float = 1.0,
         heartbeat_interval_seconds: float = 10.0,
-        stale_threshold_seconds: float = 5.0,
+        stale_threshold_seconds: float = 30.0,
         heartbeat_timeout_seconds: float = 25.0,
-        handshake_timeout_seconds: float = 20.0,
+        handshake_timeout_seconds: float = 30.0,
         circuit_breaker_threshold: int = 5,
         circuit_breaker_cooldown_seconds: float = 60.0,
         reconnect_min_seconds: float | None = None,
@@ -95,8 +95,8 @@ class WebSocketManager:
             raise ValueError(
                 "heartbeat_timeout_seconds must be > heartbeat_interval_seconds"
             )
-        if handshake_timeout_seconds < 15.0 or handshake_timeout_seconds > 25.0:
-            raise ValueError("handshake_timeout_seconds must be within 15-25 seconds")
+        if handshake_timeout_seconds < 15.0 or handshake_timeout_seconds > 45.0:
+            raise ValueError("handshake_timeout_seconds must be within 15-45 seconds")
         if circuit_breaker_threshold <= 0:
             raise ValueError("circuit_breaker_threshold must be > 0")
         if circuit_breaker_cooldown_seconds <= 0:
@@ -355,6 +355,15 @@ class WebSocketManager:
         except Exception as e:
             self._record_failure()
             self._logger.error("Failure in _connect_once: %s", e)
+            # Close the ticker that failed to connect — prevents orphaned
+            # KiteTicker threads from producing late 1006 close events.
+            ticker = self._ticker
+            if ticker is not None:
+                try:
+                    await asyncio.to_thread(ticker.close)
+                except Exception:
+                    pass  # Best effort cleanup
+            self._ticker = None
             self._schedule_reconnect("connect_failure")
 
     def _schedule_reconnect(self, reason: str) -> None:
@@ -386,6 +395,9 @@ class WebSocketManager:
                     continue
 
                 delay = self._next_backoff_delay()
+                # Enforce minimum floor — sub-second reconnects overwhelm
+                # Zerodha and cause cascading 1006 errors.
+                delay = max(delay, 5.0)
                 self._logger.info(
                     "Condition met: reconnect_scheduled reason=%s delay=%.2fs",
                     reason,
@@ -430,12 +442,20 @@ class WebSocketManager:
                     continue
 
                 if self._connected.is_set() and self._last_pong_mono > 0.0:
-                    pong_age = now - self._last_pong_mono
-                    if pong_age > self._heartbeat_timeout:
+                    # Use max(pong, tick) as activity indicator.
+                    # KiteTicker pong callbacks are unreliable through
+                    # cloud proxies (Railway); flowing ticks prove the
+                    # connection is alive even when pong frames are delayed.
+                    last_activity = max(
+                        self._last_pong_mono,
+                        self._last_tick_mono if self._last_tick_mono > 0.0 else 0.0,
+                    )
+                    activity_age = now - last_activity
+                    if activity_age > self._heartbeat_timeout:
                         self._logger.warning(
                             "Condition met: websocket_pong_timeout "
                             "age=%.2fs threshold=%.2fs",
-                            pong_age,
+                            activity_age,
                             self._heartbeat_timeout,
                         )
                         self._connected.clear()
@@ -513,6 +533,10 @@ class WebSocketManager:
         try:
             now = time.monotonic()
             self._last_tick_mono = now
+            # Ticks prove the connection is alive — bump pong tracker
+            # to prevent false pong-timeout reconnects when pong frames
+            # are delayed/lost through Railway cloud proxy.
+            self._last_pong_mono = now
             callback = self._on_tick_callback
             if callback is None:
                 return
@@ -545,8 +569,16 @@ class WebSocketManager:
             self._record_failure()
             if self._on_error_callback is not None:
                 self._on_error_callback(RuntimeError(f"code={code} reason={reason}"))
+            # Don't schedule another reconnect if one is already running —
+            # this prevents the storm where error + close + watchdog each
+            # fire their own reconnect path simultaneously.
             if not self._manual_disconnect:
-                self._schedule_reconnect(f"error:{code}")
+                if self._reconnect_task is not None and not self._reconnect_task.done():
+                    self._logger.debug(
+                        "Suppressed error reconnect — reconnect already in progress"
+                    )
+                else:
+                    self._schedule_reconnect(f"error:{code}")
         except Exception as e:
             self._logger.error("Failure in _on_error: %s", e)
 
@@ -559,7 +591,16 @@ class WebSocketManager:
             )
             self._connected.clear()
             self._state = ConnectionState.DISCONNECTED
-            if code != 1000:
+            # 1006 = old connection handshake timeout during normal teardown.
+            # Don't count as failure and don't trigger redundant reconnect
+            # if one is already in progress — this breaks the 1006 cascade.
+            if code == 1006:
+                if self._reconnect_task is not None and not self._reconnect_task.done():
+                    self._logger.debug(
+                        "Suppressed 1006 reconnect — reconnect already in progress"
+                    )
+                    return
+            elif code != 1000:
                 self._record_failure()
             if self._on_disconnect_callback is not None:
                 self._on_disconnect_callback()
@@ -631,7 +672,7 @@ class WebSocketManager:
         """Args: none; Returns: delay; Raises: none."""
 
         low = self._base_backoff
-        high = max(low, self._last_backoff_delay * 3.0)
+        high = max(low, self._last_backoff_delay * 2.0)
         delay = random.uniform(low, high)
         delay = min(self._max_backoff, delay)
         self._last_backoff_delay = delay
