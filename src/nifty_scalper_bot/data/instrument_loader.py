@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, Iterable, Iterator
 
+from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -237,6 +238,13 @@ def _sanitize_opt_type(row: dict[str, Any], tradingsymbol: str) -> str | None:
     return None
 
 
+def _allowed_instrument_prefixes(raw_filter: str) -> tuple[str, ...]:
+    """Args: raw_filter; Returns: normalized prefixes; Raises: none."""
+
+    tokens = [part.strip().upper() for part in str(raw_filter or '').split(',')]
+    return tuple(token for token in tokens if token)
+
+
 def upsert_instruments(
     conn: sqlite3.Connection,
     rows: Iterable[dict[str, Any]],
@@ -251,6 +259,18 @@ def upsert_instruments(
     stored = 0
     skipped = 0
     timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    settings = get_settings()
+    instrument_settings = settings.instruments
+    only_index_options = bool(
+        getattr(instrument_settings, "sync_only_index_options", True)
+    )
+    allowed_prefixes = _allowed_instrument_prefixes(
+        getattr(
+            instrument_settings,
+            "sync_instruments_filter",
+            "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY",
+        )
+    )
     try:
         with conn:
             for raw_row in rows:
@@ -270,9 +290,15 @@ def upsert_instruments(
                 if exchange != "NFO":
                     skipped += 1
                     continue
-                if not tradingsymbol.startswith("NIFTY"):
-                    skipped += 1
-                    continue
+                segment = str(raw_row.get("segment") or "").strip().upper()
+                symbol_name = str(raw_row.get("name") or "").strip().upper()
+                if only_index_options:
+                    if segment != "NFO-OPT":
+                        skipped += 1
+                        continue
+                    if not any(symbol_name.startswith(prefix) for prefix in allowed_prefixes):
+                        skipped += 1
+                        continue
                 if tradingsymbol.endswith("FUT"):
                     skipped += 1
                     continue

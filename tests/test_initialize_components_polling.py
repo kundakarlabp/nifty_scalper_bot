@@ -205,6 +205,7 @@ def _initialize_polling_context(
         shadow=ShadowSettings(drift_threshold_pct=0.0),
         notifications=NotificationSettings(enabled=False),
         session_allow_out_of_hours=False,
+        allow_offmarket_trading=False,
     )
 
     ctx = initialize_components(settings)

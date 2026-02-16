@@ -714,12 +714,11 @@ class WebSocketManager:
     def _next_backoff_delay(self) -> float:
         """Args: none; Returns: delay; Raises: none."""
 
-        low = self._base_backoff
-        high = max(low, self._last_backoff_delay * 2.0)
-        delay = random.uniform(low, high)
-        delay = min(self._max_backoff, delay)
-        self._last_backoff_delay = delay
-        return delay
+        cap = self._max_backoff
+        base = self._base_backoff
+        sleep = random.uniform(0.0, min(cap, base * (2 ** self._circuit.failures)))
+        self._last_backoff_delay = sleep
+        return sleep
 
     def _record_failure(self) -> None:
         """Args: none; Returns: none; Raises: none."""

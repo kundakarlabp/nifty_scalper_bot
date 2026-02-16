@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Iterable, Mapping
 
+from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -132,19 +133,24 @@ class StrategyOrchestrator:
         # 🛡️ FIX 1: EARLY TIME GUARD
         # ═══════════════════════════════════════════════════════════
         try:
-            from nifty_scalper_bot.utils.market_hours import is_market_hours_cached, get_time_status
-            
-            if not is_market_hours_cached():
-                _, reason = get_time_status()
-                self._logger.info(
-                    f"⏰ MARKET CLOSED: {symbol} blocked | Reason: {reason}",
-                    extra={"event": "orchestrator_market_closed", "symbol": symbol}
+            from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
+
+            settings = get_settings()
+            if not settings.allow_offmarket_trading:
+                if not is_market_hours_cached():
+                    self._logger.warning(
+                        "⛔ BLOCKED: Market hours filter active",
+                        extra={"event": "orchestrator_market_hours_blocked", "symbol": symbol},
+                    )
+                    self._set_skip_reason("market_closed")
+                    return None
+            else:
+                self._logger.warning(
+                    "⚠️ OFF-MARKET TRADING ENABLED (ENV OVERRIDE)",
+                    extra={"event": "orchestrator_offmarket_override", "symbol": symbol},
                 )
-                self._set_skip_reason("market_closed")
-                self._logger.warning("⛔ FILTER REJECT: reason=market_hours_block")
-                return None
-        except ImportError:
-            pass
+        except Exception as e:
+            self._logger.error("Failure in filter_signal: %s", e)
         
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX 2: BLOCK FUTURES TRADING

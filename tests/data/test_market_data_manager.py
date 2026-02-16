@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -345,3 +346,21 @@ async def test_wait_for_live_tick_rejects_stale_tick(
 
     with pytest.raises(RuntimeError, match='Live tick unavailable'):
         await manager.wait_for_live_tick(123, timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_tick_schedules_background_rest_refresh(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker
+) -> None:
+    monkeypatch.setenv("TICK_STALE_MS", "5")
+    manager = MarketDataManager(broker, None)
+    scheduled: list[str] = []
+
+    async def _fake_refresh(symbol: str) -> None:
+        scheduled.append(symbol)
+
+    monkeypatch.setattr(manager, "_rest_refresh", _fake_refresh)
+    await manager.ensure_fresh_tick("NIFTY23")
+    await asyncio.sleep(0)
+
+    assert scheduled == ["NSE:NIFTY23"]
