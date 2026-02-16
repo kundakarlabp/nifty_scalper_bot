@@ -272,19 +272,13 @@ class PollingStreamer:
                             assert symbol.count(":") == 1
                             tick["symbol"] = symbol
 
-                            # 4. Seed DataHub (Synchronous)
-                            if self._data_hub:
-                                self._data_hub.store_quote(
-                                    symbol, tick, source="rest", seed=True
-                                )
-
-                            # 5. Update Metrics
+                            # 4. Update Metrics
                             try:
                                 self._m_last_tick.set(int(time.time() * 1000))
                             except Exception as metric_err:
                                 LOGGER.debug(f"Metric update error: {metric_err}")
 
-                            # 6. Async Handoff (Strategy Pipeline)
+                             # 5. TickBus handoff (authoritative pipeline)
                             try:
                                 self._on_tick(tick)
                                 self._m_ticks_ingested.inc()

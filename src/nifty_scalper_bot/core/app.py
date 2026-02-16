@@ -2172,7 +2172,7 @@ def _get_symbols(
                 try:
                     q = inner.ltp(str_candidates)
                     if spot_symbol not in q:
-                        LOGGER.warning("skipping_iteration_missing_data")
+                        LOGGER.error("Strategy skipped — missing live tick")
                         return []
                     for candidate in str_candidates:
                         if candidate in q:
@@ -2186,7 +2186,7 @@ def _get_symbols(
             LOGGER.error("Error fetching live price: %s", exc, exc_info=True)
 
     if ltp <= 0:
-        LOGGER.warning("skipping_iteration_missing_data")
+        LOGGER.error("Strategy skipped — missing live tick")
         return []
 
     global _LATEST_CTX
@@ -2832,6 +2832,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     websocket_client: Any | None = None
     websocket_manager: WebSocketManager | None = None
     streamer: Any
+    polling_fallback_streamer: PollingStreamer | None = None
     stream_supervisor: StreamSupervisor | None = None
     risk_manager_ref: dict[str, RiskManager | None] = {"instance": None}
     stream_supervisor_started = False
@@ -3085,65 +3086,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if "timestamp" not in t:
             t["timestamp"] = datetime.now(timezone.utc).timestamp()
 
-        # 6. Direct Strategy Feed
-        if strategy_runner_ref and sym:
-            runner = strategy_runner_ref.get("instance")
-            if runner:
-                try:
-                    if hasattr(runner, "_on_tick_safe") and callable(
-                        runner._on_tick_safe
-                    ):
-                        runner._on_tick_safe(t)
-                    elif hasattr(runner, "_on_tick") and callable(runner._on_tick):
-                        runner._on_tick(sym, t)
-                except Exception as e:
-                    log_throttled(
-                        LOGGER,
-                        f"strat_error_{sym}",
-                        f"❌ Strategy Error {sym}: {e}",
-                        5.0,
-                    )
-
-        # 7. DataHub Ingestion
-        if data_hub is not None:
+        # 6. Authoritative tick pipeline via DataHub TickBus.
+        if data_hub is not None and hasattr(data_hub, "tick_bus"):
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(data_hub.ingest_tick(t))
-            except (RuntimeError, Exception):
-                pass
+                data_hub.tick_bus.publish(t)
+            except Exception as exc:
+                LOGGER.error("Failure in _on_poll_tick: %s", exc, exc_info=exc)
 
-        # 8. Feed BracketManager
-        _safe_ctx = get_latest_bot_context()
-        _bm_ref = None
-        if _safe_ctx and _safe_ctx.order_manager:
-            _bm_ref = getattr(_safe_ctx.order_manager, "_bracket_manager", None)
-
-        if _bm_ref is not None and sym and t.get("ltp"):
-            try:
-                _bm_ref.on_tick(str(sym), float(t["ltp"]))
-            except Exception:
-                pass
-
-        # 9. Market Data Manager Processing
-        try:
-            if hasattr(market_data_manager, "last_tick_time"):
-                market_data_manager.last_tick_time = time_module.time()
-
-            market_data_manager._handle_tick(t)
-
-            if hasattr(streamer, "_consecutive_errors"):
-                streamer._consecutive_errors = 0
-
-        except Exception as exc:
-            if not hasattr(streamer, "_consecutive_errors"):
-                streamer._consecutive_errors = 0
-            streamer._consecutive_errors += 1
-            if streamer._consecutive_errors > 10:
-                log_throttled(LOGGER, "mdm_fail", f"MDM Tick Failed: {exc}", 10.0)
-
-        finally:
-            if stream_supervisor is not None:
-                stream_supervisor.on_tick(t)
+        if stream_supervisor is not None:
+            stream_supervisor.on_tick(t)
 
     # ------------------------------------------------------------------
     # Streamer Selection Logic (Polling vs WebSocket)
@@ -3218,6 +3169,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             on_error=lambda err: LOGGER.error("WebSocket manager error: %s", err),
             backoff_min_sec=1.0,
             backoff_max_sec=30.0,
+            stale_threshold_seconds=5.0,
         )
 
         # WebSocketManager is the primary streamer in WS mode.
@@ -3240,6 +3192,23 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         # Register callback to app tick handler so strategy + orchestration paths are fed.
         websocket_manager.on_tick = _on_poll_tick
+
+        polling_fallback_streamer = PollingStreamer(
+            broker_client=broker_client,
+            on_tick=_on_poll_tick,
+            instrument_resolver=instrument_resolver,
+            data_hub=data_hub,
+            poll_interval_ms=int(poll_interval_sec * 1000),
+            batch_size=poll_batch_size,
+            require_depth=poll_require_depth,
+            warn_on_rate_limit=poll_warn_rate_limit,
+        )
+        polling_fallback_streamer.set_websocket_mode(True)
+        websocket_manager.set_fallback_callbacks(
+            on_start=lambda: polling_fallback_streamer.set_websocket_mode(False),
+            on_stop=lambda: polling_fallback_streamer.set_websocket_mode(True),
+        )
+        polling_fallback_streamer.start()
 
     else:
         LOGGER.info("Initializing Polling Streamer...")
@@ -5708,6 +5677,8 @@ async def startup_sequence(ctx: BotContext) -> None:
             if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
                 streamer.subscribe(tokens_to_poll)
                 LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
+            if polling_fallback_streamer is not None and tokens_to_poll:
+                polling_fallback_streamer.subscribe(tokens_to_poll)
 
             # ✅ FIX: Disable MDM polling when PollingStreamer is active
             # MDM polling is redundant - PollingStreamer already feeds DataHub

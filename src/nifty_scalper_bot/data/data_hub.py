@@ -33,6 +33,30 @@ OrderListener = Callable[[dict[str, Any]], None]
 TickListener = Callable[[dict[str, Any]], None]
 
 
+class TickBus:
+    """In-process tick fan-out bus shared by websocket and polling publishers."""
+
+    def __init__(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+        self._subscribers: list[TickListener] = []
+        self._lock = RLock()
+
+    def subscribe(self, handler: TickListener) -> None:
+        """Args: handler; Returns: none; Raises: none."""
+        with self._lock:
+            self._subscribers.append(handler)
+
+    def publish(self, tick: dict[str, Any]) -> None:
+        """Args: tick; Returns: none; Raises: none."""
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for handler in subscribers:
+            try:
+                handler(tick)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error("Failure in TickBus.publish: %s", exc, exc_info=exc)
+
+
 class Freshness(TypedDict, total=False):
     """Container describing cached quote freshness metrics."""
 
@@ -132,6 +156,13 @@ class DataHub:
         self._options_only = options_only
         self._store = store
         self._lock = RLock()
+        self.tick_bus = TickBus()
+        attach_tick_bus = getattr(self._mdm, "attach_tick_bus", None)
+        if callable(attach_tick_bus):
+            try:
+                attach_tick_bus(self.tick_bus)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error("Failure in DataHub.__init__: %s", exc, exc_info=exc)
 
         # State Caches
         self._quotes: dict[str, Tick] = {}
