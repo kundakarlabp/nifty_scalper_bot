@@ -52,8 +52,9 @@ class WebSocketManager:
         loop: asyncio.AbstractEventLoop | None = None,
         max_backoff_seconds: float = 60.0,
         base_backoff_seconds: float = 1.0,
-        heartbeat_interval_seconds: float = 2.0,
+        heartbeat_interval_seconds: float = 10.0,
         stale_threshold_seconds: float = 5.0,
+        heartbeat_timeout_seconds: float = 25.0,
         handshake_timeout_seconds: float = 20.0,
         circuit_breaker_threshold: int = 5,
         circuit_breaker_cooldown_seconds: float = 60.0,
@@ -90,6 +91,10 @@ class WebSocketManager:
             raise ValueError("heartbeat_interval_seconds must be > 0")
         if stale_threshold_seconds <= 0:
             raise ValueError("stale_threshold_seconds must be > 0")
+        if heartbeat_timeout_seconds <= heartbeat_interval_seconds:
+            raise ValueError(
+                "heartbeat_timeout_seconds must be > heartbeat_interval_seconds"
+            )
         if handshake_timeout_seconds < 15.0 or handshake_timeout_seconds > 25.0:
             raise ValueError("handshake_timeout_seconds must be within 15-25 seconds")
         if circuit_breaker_threshold <= 0:
@@ -109,6 +114,7 @@ class WebSocketManager:
         self._max_backoff = float(max_backoff_seconds)
         self._heartbeat_interval = float(heartbeat_interval_seconds)
         self._stale_threshold = float(stale_threshold_seconds)
+        self._heartbeat_timeout = float(heartbeat_timeout_seconds)
         self._handshake_timeout = float(handshake_timeout_seconds)
         self._circuit_breaker_threshold = int(circuit_breaker_threshold)
         self._circuit_breaker_cooldown = float(circuit_breaker_cooldown_seconds)
@@ -135,7 +141,7 @@ class WebSocketManager:
         self._on_disconnect_callback: Callable[[], None] | None = None
         self._connect_started_mono = 0.0
         self._last_tick_mono = 0.0
-        self._last_heartbeat_mono = 0.0
+        self._last_pong_mono = 0.0
         self._last_backoff_delay = self._base_backoff
         self._circuit = _CircuitState()
 
@@ -305,9 +311,7 @@ class WebSocketManager:
 
         now = time.monotonic()
         last_tick_age = now - self._last_tick_mono if self._last_tick_mono > 0 else 0.0
-        hb_age = (
-            now - self._last_heartbeat_mono if self._last_heartbeat_mono > 0 else 0.0
-        )
+        hb_age = now - self._last_pong_mono if self._last_pong_mono > 0 else 0.0
         return {
             "connected": self._connected.is_set(),
             "state": int(self._state.value),
@@ -425,18 +429,17 @@ class WebSocketManager:
                     self._schedule_reconnect("watchdog_handshake_timeout")
                     continue
 
-                # --- PRODUCTION SAFETY BLOCK: Stale tick detection. ---
-                if self._connected.is_set() and self._last_tick_mono > 0.0:
-                    age = now - self._last_tick_mono
-                    if age > self._stale_threshold:
+                if self._connected.is_set() and self._last_pong_mono > 0.0:
+                    pong_age = now - self._last_pong_mono
+                    if pong_age > self._heartbeat_timeout:
                         self._logger.warning(
-                            "Condition met: websocket_stale_tick "
+                            "Condition met: websocket_pong_timeout "
                             "age=%.2fs threshold=%.2fs",
-                            age,
-                            self._stale_threshold,
+                            pong_age,
+                            self._heartbeat_timeout,
                         )
                         self._connected.clear()
-                        self._schedule_reconnect("watchdog_stale_tick")
+                        self._schedule_reconnect("watchdog_pong_timeout")
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -474,13 +477,15 @@ class WebSocketManager:
         ticker.on_ticks = self._on_ticks
         ticker.on_error = self._on_error
         ticker.on_close = self._on_close
+        if hasattr(ticker, "on_pong"):
+            ticker.on_pong = self._on_pong
 
     def _on_connect(self, ws: KiteTicker, response: dict[str, Any]) -> None:
         """Args: ws/response; Returns: none; Raises: none."""
 
         try:
             del ws, response
-            self._last_heartbeat_mono = time.monotonic()
+            self._last_pong_mono = time.monotonic()
             self._last_tick_mono = time.monotonic()
             self._connected.set()
             self._state = ConnectionState.CONNECTED
@@ -496,7 +501,6 @@ class WebSocketManager:
         try:
             now = time.monotonic()
             self._last_tick_mono = now
-            self._last_heartbeat_mono = now
             callback = self._on_tick_callback
             if callback is None:
                 return
@@ -508,12 +512,25 @@ class WebSocketManager:
         except Exception as e:
             self._logger.error("Failure in _on_ticks: %s", e)
 
+    def _on_pong(self, _ws: KiteTicker, _payload: Any | None = None) -> None:
+        """Args: ws/payload; Returns: none; Raises: none."""
+
+        try:
+            self._last_pong_mono = time.monotonic()
+            if not self._connected.is_set():
+                self._connected.set()
+                self._state = ConnectionState.CONNECTED
+        except Exception as e:
+            self._logger.error("Failure in _on_pong: %s", e)
+
     def _on_error(self, _ws: KiteTicker, code: int, reason: str) -> None:
         """Args: ws/code/reason; Returns: none; Raises: none."""
 
         try:
             self._logger.error("Failure in websocket: code=%s reason=%s", code, reason)
             self._connected.clear()
+            self._state = ConnectionState.DISCONNECTED
+            self._record_failure()
             if self._on_error_callback is not None:
                 self._on_error_callback(RuntimeError(f"code={code} reason={reason}"))
             if not self._manual_disconnect:
@@ -530,6 +547,8 @@ class WebSocketManager:
             )
             self._connected.clear()
             self._state = ConnectionState.DISCONNECTED
+            if code != 1000:
+                self._record_failure()
             if self._on_disconnect_callback is not None:
                 self._on_disconnect_callback()
             if not self._manual_disconnect:
