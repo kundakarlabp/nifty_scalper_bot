@@ -206,6 +206,7 @@ class MarketDataManager:
         self._last_tick_source: dict[str, str] = {}
         self._last_tick_hash: dict[str, int] = {}
         self._ws_connected = False
+        self._hydration_status: dict[str, str] = {}
         self._last_hb_mono: float | None = None
         self._heartbeat_callbacks: list[Callable[[float], None]] = []
         self._fallback_enabled = False
@@ -1985,6 +1986,27 @@ class MarketDataManager:
         if number < 0:
             return None
         return number
+
+
+    def update_hydration_status(self, symbol: str, bars: Sequence[Mapping[str, Any]]) -> None:
+        """Update hydration status from bars. Args: symbol, bars. Returns: None. Raises: None."""
+        try:
+            normalized = normalize_symbol(str(symbol or ''))
+            bar_count = len(list(bars))
+            if bar_count >= 20:
+                self._hydration_status[normalized] = 'READY'
+            else:
+                self._logger.error(
+                    'insufficient_bars_for_strategy',
+                    extra={'event': 'insufficient_bars_for_strategy', 'symbol': normalized, 'bars': bar_count},
+                )
+        except Exception as exc:
+            self._logger.error('Failure in update_hydration_status: %s', exc, exc_info=exc)
+
+    def get_hydration_status(self, symbol: str) -> str:
+        """Return hydration status. Args: symbol. Returns: status string. Raises: None."""
+        normalized = normalize_symbol(str(symbol or ''))
+        return self._hydration_status.get(normalized, 'HYDRATING')
 
     @property
     def ws_connected(self) -> bool:

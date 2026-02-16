@@ -2078,6 +2078,7 @@ def _get_symbols(
     resolver: InstrumentResolver | None = None,
     broker: Any | None = None,
     option_universe: OptionUniverseManager | None = None,
+    market_data_manager: MarketDataManager | None = None,
 ) -> list[str]:
     """Return validated option symbols for trading."""
     LOGGER.info("=" * 60)
@@ -2095,11 +2096,40 @@ def _get_symbols(
         LOGGER.info("=" * 60)
         return result
 
+    def _wait_for_first_tick(symbol: str, timeout: float = 15.0) -> dict[str, Any] | None:
+        """Wait for first live tick. Args: symbol, timeout. Returns: Tick payload or None. Raises: None."""
+        import time
+
+        if market_data_manager is None:
+            return None
+
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            tick = market_data_manager.get_latest_tick(symbol)
+            if tick:
+                return tick
+            time.sleep(0.25)
+        return None
+
     ltp: float = 0.0
+    spot_symbol = "NSE:NIFTY 50"
+
+    first_tick = _wait_for_first_tick(spot_symbol, timeout=15.0)
+    if first_tick:
+        ltp_raw = first_tick.get("ltp") or first_tick.get("last_price")
+        try:
+            ltp = float(ltp_raw) if ltp_raw is not None else 0.0
+        except (TypeError, ValueError):
+            ltp = 0.0
+    elif market_data_manager is not None:
+        LOGGER.warning(
+            "spot_unavailable_after_wait",
+            extra={"event": "spot_unavailable_after_wait", "symbol": spot_symbol},
+        )
+
     if broker:
         try:
             token_candidates = [256265]
-            spot_symbol = "NSE:NIFTY 50"
             str_candidates = [spot_symbol, "NIFTY 50", "NIFTY 50 INDEX"]
             inner = getattr(broker, "client", getattr(broker, "_broker", broker))
 
@@ -2142,7 +2172,7 @@ def _get_symbols(
                 try:
                     q = inner.ltp(str_candidates)
                     if spot_symbol not in q:
-                        LOGGER.error("Live NIFTY spot unavailable — aborting cycle")
+                        LOGGER.warning("skipping_iteration_missing_data")
                         return []
                     for candidate in str_candidates:
                         if candidate in q:
@@ -2156,7 +2186,7 @@ def _get_symbols(
             LOGGER.error("Error fetching live price: %s", exc, exc_info=True)
 
     if ltp <= 0:
-        LOGGER.error("Live NIFTY spot unavailable — aborting cycle")
+        LOGGER.warning("skipping_iteration_missing_data")
         return []
 
     global _LATEST_CTX
@@ -2176,6 +2206,17 @@ def _get_symbols(
     LOGGER.info("🎯 FINAL SYMBOLS TO TRADE: %s", final_symbols)
     LOGGER.info("=" * 60)
     return final_symbols
+
+
+def _data_ready(mdm: MarketDataManager | None) -> bool:
+    """Check live tick readiness. Args: mdm. Returns: bool. Raises: None."""
+    if mdm is None:
+        return False
+    required = ['NSE:NIFTY 50', 'NFO:NIFTY26FEBFUT']
+    for sym in required:
+        if not mdm.get_latest_tick(sym):
+            return False
+    return True
 
 
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
@@ -5437,6 +5478,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.instrument_resolver,
                 ctx.broker_client,
                 option_universe=ctx.option_universe,
+                market_data_manager=ctx.market_data_manager,
             )
 
             # ---------- Futures rollover logic (unchanged) ----------
@@ -5548,6 +5590,11 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                         LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
                         hydrated_counts[sym] = count
+                        if ctx.market_data_manager:
+                            bars_snapshot = ctx.market_data_manager.get_ohlc_bars(sym)
+                            ctx.market_data_manager.update_hydration_status(
+                                sym, bars_snapshot or records
+                            )
 
                     await asyncio.sleep(HYDRATION_DELAY_SEC)
 
@@ -5605,6 +5652,9 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
+            if not _data_ready(mdm):
+                LOGGER.info("waiting_for_live_ticks")
+
             streamer = ctx.streamer
             tokens_to_poll = []
 
@@ -5633,9 +5683,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                 f"📊 Resolution summary: {resolved_count}/{len(targets)} resolved"
             )
             if unresolved_symbols:
-                LOGGER.error(
-                    f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}"
-                )
+                if mdm and not mdm.ws_connected:
+                    LOGGER.info("tracking_validation_deferred_ws_not_ready")
+                else:
+                    LOGGER.warning(
+                        f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}"
+                    )
             LOGGER.info(f"✅ tokens_to_poll has {len(tokens_to_poll)} tokens")
 
             if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
@@ -5730,7 +5783,10 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             asyncio.create_task(_option_universe_sync_loop())
         except Exception as e:
-            LOGGER.error("Hydration/Tracking failed", exc_info=True)
+            if ctx.market_data_manager and not ctx.market_data_manager.ws_connected:
+                LOGGER.info("tracking_validation_deferred_ws_not_ready")
+            else:
+                LOGGER.error("Hydration/Tracking failed", exc_info=True)
 
     # ---------------------------------------------------------
     # 4. Start subsystems (guarded singleton startup)
@@ -5747,6 +5803,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.order_manager:
                     ctx.order_manager.start_monitoring()
                 if ctx.strategy_runner:
+                    if not _data_ready(ctx.market_data_manager):
+                        LOGGER.info("waiting_for_live_ticks")
                     ctx.strategy_runner.start()
                 if not ctx.websocket_enabled and ctx.market_data_manager is not None:
                     ctx.market_data_manager._seed_completed = True
