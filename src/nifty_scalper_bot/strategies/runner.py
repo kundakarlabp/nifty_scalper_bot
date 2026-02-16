@@ -57,7 +57,7 @@ from nifty_scalper_bot.utils.market_hours import (
 )
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.reasons import canonical as canonical_reason
-from nifty_scalper_bot.utils.symbols import canonical
+from nifty_scalper_bot.utils.symbols import canonical, is_strategy_instrument
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.data_hub import DataHub
@@ -221,6 +221,16 @@ class StrategyRunnerConfig:
             msg = "max_trade_history must be positive"
             raise ValueError(msg)
 
+
+
+
+class RunnerState(Enum):
+    """State machine for strategy runner lifecycle."""
+
+    BOOTING = 1
+    HISTORICAL_READY = 2
+    LIVE_READY = 3
+    EXECUTION_ENABLED = 4
 
 class SymbolState(Enum):
     """Hydration lifecycle state maintained per symbol."""
@@ -522,6 +532,8 @@ class StrategyRunner:
         self._history_cache_dir.mkdir(parents=True, exist_ok=True)
         self._hydrate_failures: dict[str, int] = {}
         self._session_gap_count: dict[str, int] = {}
+        self._runner_state: RunnerState = RunnerState.BOOTING
+        self._active_orphan_guards: set[str] = set()
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -536,6 +548,7 @@ class StrategyRunner:
             self._frozen_universe = set(symbols)
             self._universe_controller.update(symbols)
             self._history_gate_failed = False
+            self._runner_state = RunnerState.HISTORICAL_READY
             self._history_ready_by_symbol = {symbol: False for symbol in symbols}
             for symbol in symbols:
                 self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
@@ -1057,6 +1070,26 @@ class StrategyRunner:
 
         # 5. THE KILL SWITCH: Prevents fallback backfill logic from running
         self._startup_hydrated = True
+        self._runner_state = RunnerState.HISTORICAL_READY
+
+        try:
+            if self._market_data is not None and self._main_loop is not None:
+                for wait_symbol in ("NSE:NIFTY 50", "NFO:NIFTY FUT"):
+                    token = int(self._market_data.get_token(wait_symbol) or 0)
+                    if token <= 0:
+                        continue
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._market_data.wait_for_live_tick(token, timeout=10),
+                        self._main_loop,
+                    )
+                    fut.result(timeout=10.5)
+                self._runner_state = RunnerState.EXECUTION_ENABLED
+        except Exception as exc:
+            self._logger.error(
+                "Failure in StrategyRunner.mark_ready live tick gate: %s",
+                exc,
+                exc_info=True,
+            )
 
         self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
 
@@ -1898,6 +1931,30 @@ class StrategyRunner:
         latency_seconds = max(
             0.0, (datetime.now(timezone.utc) - timestamp).total_seconds()
         )
+
+        if self._runner_state != RunnerState.EXECUTION_ENABLED:
+            raise RuntimeError("Execution blocked until live ticks are ready")
+        if not is_strategy_instrument(symbol):
+            raise RuntimeError("Blocked non-NIFTY instrument")
+        tick = self._market_data.get_latest_tick(symbol) if self._market_data else None
+        if not tick:
+            raise RuntimeError("Execution blocked due to stale tick")
+        spot_tick = (
+            self._market_data.get_latest_tick("NSE:NIFTY 50")
+            if self._market_data
+            else None
+        )
+        fut_tick = None
+        if self._market_data is not None:
+            for fut_symbol in ("NFO:NIFTY FUT", "NFO:NIFTYFUT"):
+                fut_tick = self._market_data.get_latest_tick(fut_symbol)
+                if fut_tick:
+                    break
+        if spot_tick and fut_tick:
+            spot = float(spot_tick.get("ltp") or 0.0)
+            fut = float(fut_tick.get("ltp") or 0.0)
+            if spot > 0 and fut > 0 and abs(fut - spot) / spot > 0.02:
+                raise RuntimeError("Execution blocked due to spread sanity guard")
 
         try:
             order_id = self._order_manager.place_order(
@@ -3069,6 +3126,8 @@ class StrategyRunner:
                     level=logging.WARNING,
                 )
                 return
+            if self._runner_state != RunnerState.EXECUTION_ENABLED:
+                return
 
             if skip_strategy:
                 return
@@ -3130,14 +3189,35 @@ class StrategyRunner:
                     if self._market_data
                     else None
                 )
+                if spot_tick is None and self._market_data is not None:
+                    try:
+                        spot_token = int(
+                            self._market_data.get_token("NSE:NIFTY 50") or 0
+                        )
+                        if spot_token > 0:
+                            loop = self._main_loop
+                            if loop is not None:
+                                fut = asyncio.run_coroutine_threadsafe(
+                                    self._market_data.wait_for_live_tick(
+                                        spot_token,
+                                        timeout=2,
+                                    ),
+                                    loop,
+                                )
+                                spot_tick = fut.result(timeout=2.5)
+                    except Exception as exc:
+                        self._logger.error(
+                            "Failure in StrategyRunner._on_tick wait_for_live_spot: %s",
+                            exc,
+                            exc_info=True,
+                        )
+                        return
                 if not spot_tick:
-                    self._logger.warning("skipping_iteration_missing_data")
                     return
                 spot_ts = _extract_float(spot_tick, "timestamp", "ts", "ts_ms")
                 if spot_ts is not None and spot_ts > 1_000_000_000_000:
                     spot_ts = spot_ts / 1000.0
-                if spot_ts is not None and (time.time() - float(spot_ts)) > 10.0:
-                    self._logger.warning("skipping_iteration_missing_data")
+                if spot_ts is not None and (time.time() - float(spot_ts)) > 2.0:
                     return
 
                 # Heartbeat logging for derivatives (confirms data flow)
@@ -3761,6 +3841,11 @@ class StrategyRunner:
                 symbol = getattr(pos, "symbol", "")
                 if not symbol:
                     continue
+                if not is_strategy_instrument(symbol):
+                    continue
+                if symbol in self._active_orphan_guards:
+                    continue
+                self._active_orphan_guards.add(symbol)
 
                 # Check strategy tag
                 strategy = (
@@ -3833,8 +3918,11 @@ class StrategyRunner:
 
                 except Exception as e:
                     self._logger.error(f"❌ Failed to adopt orphan {symbol}: {e}")
+                finally:
+                    self._active_orphan_guards.discard(symbol)
 
             except Exception as e:
+                self._active_orphan_guards.discard(symbol)
                 self._logger.error(f"❌ Error processing position: {e}")
 
         if adopted_count > 0:
@@ -4774,6 +4862,13 @@ class StrategyRunner:
         Returns:
             ATR value (never None, always positive)
         """
+        if not is_strategy_instrument(symbol):
+            raise RuntimeError("ATR requested for non-strategy instrument")
+
+        bars = self._market_data.get_ohlc_bars(symbol) if self._market_data else []
+        if len(bars) < self._required_candles:
+            raise RuntimeError("ATR unavailable due to insufficient data")
+
         atr_val = 0.0
         source = "unknown"
 
@@ -4826,28 +4921,8 @@ class StrategyRunner:
                         except (TypeError, ValueError):
                             pass
 
-        # 5. Fallback: Calculate from price
-        # For NIFTY options, typical ATR is ~1-2% of premium
         if atr_val <= 0:
-            atr_val = current_price * 0.015  # 1.5% of price
-            source = "price_fallback"
-
-        # ✅ FIX 7: Enforce minimum ATR floor regardless of source.
-        # Option 1-min bars produce micro-ATR (e.g. 0.24 for 828₹ option).
-        # Floor at 1% of price ensures meaningful SL/TP distances.
-        _min_atr = max(current_price * 0.01, 1.0)
-        if atr_val < _min_atr:
-            self._logger.info(
-                f"📐 ATR FLOOR: {symbol} | raw={atr_val:.2f} < min={_min_atr:.2f} | source={source}",
-                extra={
-                    "event": "atr_floor_applied",
-                    "symbol": symbol,
-                    "raw_atr": atr_val,
-                    "min_atr": _min_atr,
-                },
-            )
-            atr_val = _min_atr
-            source = f"{source}→floored"
+            raise RuntimeError("ATR unavailable due to insufficient data")
 
         spread = 0.0
         try:

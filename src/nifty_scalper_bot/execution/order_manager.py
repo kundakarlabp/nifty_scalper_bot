@@ -64,6 +64,7 @@ from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.pricing import canonical_price_source
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import canonical
+from nifty_scalper_bot.utils.symbols import is_strategy_instrument
 
 SOFT_BLOCK_CODES: set[str] = {
     "STALE",
@@ -1601,6 +1602,8 @@ class OrderManager:
         from nifty_scalper_bot.data.trade_store import TradeIntent
 
         normalized_symbol = symbol.strip().upper()
+        if not is_strategy_instrument(normalized_symbol):
+            raise RuntimeError("Blocked non-NIFTY instrument")
         # ---------------------------------------------------------------------
         # 🛑 FIX 1: Smart Idempotency with Timeout
         # ---------------------------------------------------------------------

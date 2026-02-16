@@ -440,6 +440,18 @@ class WebSocketManager:
                         )
                         self._connected.clear()
                         self._schedule_reconnect("watchdog_pong_timeout")
+                        continue
+
+                if self._connected.is_set() and self._last_tick_mono > 0.0:
+                    last_tick_age = now - self._last_tick_mono
+                    if last_tick_age > self._stale_threshold:
+                        self._logger.warning(
+                            "Condition met: websocket_tick_stale "
+                            "age=%.2fs threshold=%.2fs",
+                            last_tick_age,
+                            self._stale_threshold,
+                        )
+                        self._schedule_reconnect("watchdog_tick_stale")
         except asyncio.CancelledError:
             return
         except Exception as e:
