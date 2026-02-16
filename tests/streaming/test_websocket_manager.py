@@ -23,6 +23,7 @@ class FakeKiteTicker:
         self.on_ticks: Callable[..., None] | None = None
         self.on_error: Callable[..., None] | None = None
         self.on_close: Callable[..., None] | None = None
+        self.on_pong: Callable[..., None] | None = None
         self.reconnect = reconnect
         self.connect_calls = 0
         self.subscribed: list[int] = []
@@ -111,7 +112,7 @@ async def test_reconnect_scheduled_on_error(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_watchdog_schedules_reconnect_for_stale_connection(
+async def test_watchdog_schedules_reconnect_for_missing_pong(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
@@ -120,7 +121,7 @@ async def test_watchdog_schedules_reconnect_for_stale_connection(
         "k",
         "t",
         heartbeat_interval_seconds=0.01,
-        stale_threshold_seconds=0.01,
+        heartbeat_timeout_seconds=0.03,
         trading_window_enabled=False,
     )
     manager._next_backoff_delay = lambda: 0.01
