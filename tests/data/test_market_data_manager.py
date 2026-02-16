@@ -327,3 +327,21 @@ def test_heartbeat_callback_invoked(broker: DummyBroker, ws: DummyWebSocket) -> 
     manager.bump_heartbeat(2.5)
     assert captured[-1] == 2.5
     assert len(captured) == 2
+
+@pytest.mark.asyncio
+async def test_wait_for_live_tick_rejects_stale_tick(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager.subscribe('NIFTY23', lambda _: None)
+    assert ws.on_tick is not None
+    ws.on_tick(
+        {
+            'instrument_token': 123,
+            'last_price': 100.0,
+            'timestamp': time.time() - 10,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match='Live tick unavailable'):
+        await manager.wait_for_live_tick(123, timeout=0.2)

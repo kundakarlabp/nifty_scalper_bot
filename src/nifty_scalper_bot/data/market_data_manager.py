@@ -975,23 +975,47 @@ class MarketDataManager:
         if should_unsubscribe:
             self._release_subscription(symbol)
 
-    def get_latest_tick(self, symbol: str) -> dict[str, Any] | None:
-        normalized = enforce_canonical(normalize_symbol(symbol)) or symbol
+    def get_latest_tick(self, symbol: str | int) -> dict[str, Any] | None:
+        """Args: symbol; Returns: fresh tick snapshot; Raises: none."""
+        resolved_symbol: str | None
+        if isinstance(symbol, int):
+            with self._lock:
+                resolved_symbol = self._symbol_by_token.get(symbol)
+            if not resolved_symbol:
+                return None
+        else:
+            resolved_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
+
         with self._lock:
-            tick = self._latest_ticks.get(normalized)
+            tick = self._latest_ticks.get(resolved_symbol)
             if tick is None:
-                # ✅ FIX: Rate-limit warning to once per 60s per symbol
                 import time as _time
 
                 _now = _time.monotonic()
-                _last = self._tick_warn_last.get(normalized, 0.0)
+                _last = self._tick_warn_last.get(resolved_symbol, 0.0)
                 if _now - _last >= 60.0:
-                    self._tick_warn_last[normalized] = _now
+                    self._tick_warn_last[resolved_symbol] = _now
                     self._logger.warning(
-                        "MDM: get_latest_tick - No tick in cache for %s", normalized
+                        "MDM: get_latest_tick - No tick in cache for %s",
+                        resolved_symbol,
                     )
                 return None
+            tick_ts = float(tick.get("timestamp") or 0.0)
+            if tick_ts <= 0:
+                return None
+            if time.time() - tick_ts > 2.0:
+                return None
             return dict(tick)
+
+    async def wait_for_live_tick(self, token: int, timeout: float = 5) -> dict[str, Any]:
+        """Args: token, timeout; Returns: fresh tick; Raises: RuntimeError."""
+        start = time.time()
+        while time.time() - start < timeout:
+            tick = self.get_latest_tick(token)
+            if tick:
+                return tick
+            await asyncio.sleep(0.1)
+        raise RuntimeError("Live tick unavailable")
 
     def get_latest_price(self, symbol: str) -> float | None:
         tick = self.get_latest_tick(symbol)

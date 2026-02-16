@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import time
+from uuid import uuid4
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from nifty_scalper_bot.utils.logging import get_logger
@@ -43,8 +44,12 @@ class BracketStore:
         Saves or Updates a SINGLE bracket. Efficient and Safe.
         """
         try:
-            order_id = bracket_data['order_id']
-            symbol = bracket_data['symbol']
+            order = bracket_data if isinstance(bracket_data, dict) else {}
+            order_id = order.get("order_id") if order else None
+            if not order_id:
+                order_id = f"VIRTUAL-{uuid4().hex}"
+                bracket_data["order_id"] = order_id
+            symbol = str(bracket_data.get("symbol") or "UNKNOWN")
             # We serialize the full data object to JSON to store in one flexible column
             json_dump = json.dumps(bracket_data)
             now = time.time()

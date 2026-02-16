@@ -482,11 +482,10 @@ class IndicatorEngine:
         """Calculate VWAP. Returns None if insufficient data."""
         history = self._histories.get(symbol)
         if history is None or len(history) == 0:
-            return self._last_valid_vwap.get(symbol)
-        # ✅ FIX S6: Use available bars if < period (graceful degradation)
+            return None
         effective_period = min(period, len(history))
         if effective_period < 3:
-            return self._last_valid_vwap.get(symbol)  # Preserve numeric fallback
+            return None
 
         last_timestamp = history.last_timestamp
         if last_timestamp is None:
@@ -498,14 +497,6 @@ class IndicatorEngine:
         prices = history.get_closes(effective_period)
         volumes = history.get_volumes(effective_period)
         value = self._calculate_vwap(prices, volumes)
-        if value is None or value <= 0:
-            fallback = self._last_valid_vwap.get(symbol)
-            if fallback is not None and fallback > 0:
-                return fallback
-            if prices:
-                value = float(prices[-1])
-            else:
-                return None
         self._last_valid_vwap[symbol] = float(value)
         self._set_cache(symbol, cache_key, value, last_timestamp)
         return value
@@ -1193,32 +1184,18 @@ class IndicatorEngine:
         atr_values = np.asarray(true_ranges[-period:], dtype=float)
         return float(atr_values.mean())
 
-    def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float | None:
-        """Internal VWAP calculation.
-
-        The Volume Weighted Average Price is::
-
-            VWAP = (\sum price_i * volume_i) / (\sum volume_i)
-
-        The result is ``None`` when the cumulative volume is zero.
-        """
-        volume_arr = np.asarray(volumes, dtype=float)
-        price_arr = np.asarray(prices, dtype=float)
-        total_volume = volume_arr.sum()
-        if np.isclose(total_volume, 0.0):
-            if price_arr.size == 0:
-                return None
-            log_throttled(
-                LOGGER,
-                "indicator_vwap_zero_volume",
-                "Condition met: indicator_vwap_zero_volume_fallback",
-                interval_sec=60.0,
-                level=logging.WARNING,
-                extra={"event": "indicator_vwap_zero_volume_fallback"},
-            )
-            return float(price_arr.mean())
-        vwap = float(np.dot(price_arr, volume_arr) / total_volume)
-        return vwap
+    def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float:
+        """Internal VWAP calculation. Args: prices, volumes. Returns: VWAP. Raises: ValueError."""
+        pv = 0.0
+        vol = 0.0
+        for price, volume in zip(prices, volumes, strict=False):
+            if int(volume) <= 0:
+                raise ValueError("Invalid volume for VWAP")
+            pv += float(price) * float(volume)
+            vol += float(volume)
+        if vol <= 0:
+            raise ValueError("Zero cumulative volume")
+        return pv / vol
 
     def _ema_series(self, values: Iterable[float], period: int) -> np.ndarray:
         """Return the EMA series for the supplied values.

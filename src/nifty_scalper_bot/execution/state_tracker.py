@@ -14,6 +14,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.symbols import is_strategy_instrument
 
 
 @dataclass(slots=True)
@@ -653,9 +654,13 @@ class StateTracker:
                 if not isinstance(entry, dict):
                     continue
                 symbol = str(entry.get("symbol", "")).strip()
-                if not symbol:
+                if not symbol or not is_strategy_instrument(symbol):
                     continue
-                broker_map[symbol] = entry
+                product = str(entry.get("product", "")).strip().upper()
+                quantity = int(float(entry.get("quantity") or 0))
+                if product != "MIS" or quantity == 0:
+                    continue
+                broker_map[symbol] = dict(entry)
             for symbol, local in current_positions.items():
                 broker_quantity = int(broker_map.get(symbol, {}).get("quantity", 0))
                 if symbol not in broker_map or broker_quantity == 0:

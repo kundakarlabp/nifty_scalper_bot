@@ -57,3 +57,9 @@ def is_canonical_symbol(symbol: str) -> bool:
         return False
     exchange, tradingsymbol = value.split(":", 1)
     return bool(exchange and tradingsymbol and " " not in exchange)
+
+
+def is_strategy_instrument(symbol: str) -> bool:
+    """Args: symbol; Returns: True for strategy instruments; Raises: none."""
+    normalized = canonical(symbol)
+    return normalized.startswith("NFO:NIFTY")

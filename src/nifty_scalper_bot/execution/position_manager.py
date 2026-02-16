@@ -27,6 +27,7 @@ from nifty_scalper_bot.options.strike_selector import SelectedContract
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.reasons import canonical
+from nifty_scalper_bot.utils.symbols import is_strategy_instrument
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.persistent_state import PersistentStateManager
@@ -1783,6 +1784,9 @@ class PositionManager:
 
         reconciled: Dict[str, Position] = {}
 
+        with self._lock:
+            existing_positions = dict(self._positions)
+
         # Helper to safely extract floats from multiple possible keys
         def _get_float(record: Mapping, keys: list[str], default: float = 0.0) -> float:
             for k in keys:
@@ -1797,7 +1801,6 @@ class PositionManager:
             if not isinstance(record, Mapping):
                 continue
 
-            # 1. Symbol Normalization
             raw_symbol = (
                 record.get("tradingsymbol")
                 or record.get("symbol")
@@ -1805,14 +1808,15 @@ class PositionManager:
                 or ""
             )
             symbol = str(raw_symbol).strip().upper()
-            if not symbol:
+            if not symbol or not is_strategy_instrument(symbol):
                 continue
 
-            # 2. Quantity Extraction (Fail-Safe)
+            product = str(record.get("product") or "").strip().upper()
+            if product != "MIS":
+                continue
+
             try:
-                # Handle various broker keys for quantity
-                qty_val = record.get("quantity") or record.get("net_quantity") or 0
-                quantity = int(float(qty_val))
+                quantity = PositionManager._safe_get_net_qty(record)
             except Exception as exc:
                 self._logger.error(
                     "Failure decoding broker quantity for %s: %s",
@@ -1843,7 +1847,7 @@ class PositionManager:
             # 4. Construct Position Object
             try:
                 # Check if we have an existing position to preserve metadata
-                existing = self._positions.get(symbol)
+                existing = existing_positions.get(symbol)
 
                 if existing is None:
                     # Import NEW position
