@@ -2743,6 +2743,11 @@ class StrategyRunner:
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
+        self._logger.critical(
+            "🔥 TICK RECEIVED: %s @ %s",
+            tick.get("instrument_token", "unknown"),
+            tick.get("last_price"),
+        )
         self._logger.debug(
             "Entered StrategyRunner._on_tick",
             extra={"event": "tick_enter", "symbol": symbol},

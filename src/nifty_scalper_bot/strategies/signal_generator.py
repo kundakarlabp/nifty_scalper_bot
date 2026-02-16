@@ -1195,6 +1195,9 @@ class StrategyManager:
         """
         MASTER EXECUTION LOOP.
         """
+        self._logger.critical(
+            f"📋 StrategyManager.generate_signal ENTERED | {symbol}"
+        )
         # ✅ DIAGNOSTIC: Log strategy count at entry
         self._logger.info(
             f"📋 StrategyManager.generate_signal | {symbol} | "
