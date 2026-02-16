@@ -3121,6 +3121,25 @@ class StrategyRunner:
                 if hydration_state != SymbolState.READY:
                     return
 
+                bars = self._market_data.get_ohlc_bars(symbol) if self._market_data else []
+                if len(bars) < 20:
+                    return
+
+                spot_tick = (
+                    self._market_data.get_latest_tick("NSE:NIFTY 50")
+                    if self._market_data
+                    else None
+                )
+                if not spot_tick:
+                    self._logger.warning("skipping_iteration_missing_data")
+                    return
+                spot_ts = _extract_float(spot_tick, "timestamp", "ts", "ts_ms")
+                if spot_ts is not None and spot_ts > 1_000_000_000_000:
+                    spot_ts = spot_ts / 1000.0
+                if spot_ts is not None and (time.time() - float(spot_ts)) > 10.0:
+                    self._logger.warning("skipping_iteration_missing_data")
+                    return
+
                 # Heartbeat logging for derivatives (confirms data flow)
                 if "NIFTY" in symbol and any(x in symbol for x in ["FUT", "CE", "PE"]):
                     log_throttled(

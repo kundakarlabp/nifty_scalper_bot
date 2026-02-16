@@ -37,7 +37,7 @@ class MessageBus:
     Components communicate ONLY via this bus - no direct calls.
     """
     
-    def __init__(self, max_queue_size: int = 1000):
+    def __init__(self, max_queue_size: int = 5000):
         # Separate queue per message type
         self.queues: dict[MessageType, asyncio.Queue] = {
             msg_type: asyncio.Queue(maxsize=max_queue_size)
