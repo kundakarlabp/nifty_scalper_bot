@@ -2974,6 +2974,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if not tick or not isinstance(tick, dict):
             return
 
+        LOGGER.critical(
+            "🔥 TICK RECEIVED: %s @ %s",
+            tick.get("instrument_token", "unknown"),
+            tick.get("last_price"),
+        )
+
         # 1. Normalize Tick
         t = dict(tick) if isinstance(tick, dict) else {"raw": tick}
         t.setdefault("source", "polling")
@@ -3208,6 +3214,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             _resolve_ws_api_key(),
             _resolve_ws_token(),
             on_tick=lambda tick: None,
+            on_tick_callback=_on_poll_tick,
             on_error=lambda err: LOGGER.error("WebSocket manager error: %s", err),
             backoff_min_sec=1.0,
             backoff_max_sec=30.0,
@@ -3231,8 +3238,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             message_bus=message_bus,
         )
 
-        # Register callback to MarketDataManager; DataHub receives updates via MDM.
-        websocket_manager.on_tick = market_data_manager._handle_tick
+        # Register callback to app tick handler so strategy + orchestration paths are fed.
+        websocket_manager.on_tick = _on_poll_tick
 
     else:
         LOGGER.info("Initializing Polling Streamer...")
@@ -5690,6 +5697,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                         f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}"
                     )
             LOGGER.info(f"✅ tokens_to_poll has {len(tokens_to_poll)} tokens")
+            subscribed_symbols = sorted({sym for sym in targets})
+            LOGGER.critical(
+                "📊 STRATEGY SUBSCRIBED SYMBOLS: %s",
+                subscribed_symbols,
+            )
+            if not subscribed_symbols:
+                LOGGER.critical("⛔ STRATEGY SUBSCRIPTION LIST IS EMPTY")
 
             if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
                 streamer.subscribe(tokens_to_poll)

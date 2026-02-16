@@ -489,6 +489,10 @@ class WebSocketManager:
         old = self._ticker
         self._ticker = self._build_ticker()
         self._bind_handlers(self._ticker)
+        self._logger.debug(
+            "Condition met: websocket_ticker_replaced callback_bound=%s",
+            bool(self._on_tick_callback),
+        )
         if old is not None:
             try:
                 await asyncio.to_thread(old.close)
@@ -511,6 +515,13 @@ class WebSocketManager:
         ticker.on_close = self._on_close
         if hasattr(ticker, "on_pong"):
             ticker.on_pong = self._on_pong
+        if self._on_tick_callback is None:
+            self._logger.warning("Condition met: websocket_tick_callback_unbound")
+        else:
+            self._logger.debug(
+                "Condition met: websocket_handlers_bound callback=%s",
+                getattr(self._on_tick_callback, "__name__", type(self._on_tick_callback).__name__),
+            )
 
     def _on_connect(self, ws: KiteTicker, response: dict[str, Any]) -> None:
         """Args: ws/response; Returns: none; Raises: none."""

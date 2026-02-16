@@ -141,6 +141,7 @@ class StrategyOrchestrator:
                     extra={"event": "orchestrator_market_closed", "symbol": symbol}
                 )
                 self._set_skip_reason("market_closed")
+                self._logger.warning("⛔ FILTER REJECT: reason=market_hours_block")
                 return None
         except ImportError:
             pass
@@ -210,6 +211,7 @@ class StrategyOrchestrator:
                         },
                     )
                     self._set_skip_reason("direction_conflict")
+                    self._logger.warning("⛔ FILTER REJECT: reason=direction_lock")
                     return None
 
             # Direction lock deferred to after ALL checks pass (was here before,
@@ -230,6 +232,7 @@ class StrategyOrchestrator:
                 extra={"event": "orchestrator_rate_limit", "symbol": symbol, "cooldown": signal_cooldown}
             )
             self._set_skip_reason("global_rate_limit")
+            self._logger.warning("⛔ FILTER REJECT: reason=global_cooldown")
             return None
         
         # ═══════════════════════════════════════════════════════════
@@ -249,6 +252,7 @@ class StrategyOrchestrator:
                 extra={"event": "orchestrator_underlying_limit", "symbol": symbol, "underlying": underlying}
             )
             self._set_skip_reason("underlying_rate_limit")
+            self._logger.warning("⛔ FILTER REJECT: reason=underlying_cooldown")
             return None
         
         # ═══════════════════════════════════════════════════════════
@@ -292,6 +296,7 @@ class StrategyOrchestrator:
                 },
             )
             self._set_skip_reason("orchestrator_capital")
+            self._logger.warning("⛔ FILTER REJECT: reason=capital_headroom")
             return None
             
         if self._is_correlated(underlying, position_manager):
@@ -304,6 +309,7 @@ class StrategyOrchestrator:
                 },
             )
             self._set_skip_reason("orchestrator_correlation")
+            self._logger.warning("⛔ FILTER REJECT: reason=correlation_block")
             return None
             
         if not self._futures_context_ready(indicators):
@@ -426,6 +432,9 @@ class StrategyOrchestrator:
             
             for pos in positions or []:
                 try:
+                    pos_symbol = str(getattr(pos, "symbol", "") or "")
+                    if not pos_symbol.startswith("NFO:NIFTY"):
+                        continue
                     qty = abs(float(getattr(pos, "quantity", 0) or 0))
                     price = float(
                         getattr(pos, "entry_price", 0) or 
@@ -504,7 +513,9 @@ class StrategyOrchestrator:
             positions = get_all()
             for pos in positions or []:
                 try:
-                    pos_symbol = getattr(pos, "symbol", "")
+                    pos_symbol = str(getattr(pos, "symbol", "") or "")
+                    if not pos_symbol.startswith("NFO:NIFTY"):
+                        continue
                     pos_underlying = self._normalize_underlying(pos_symbol)
                     
                     if pos_underlying != underlying:
