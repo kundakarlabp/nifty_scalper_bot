@@ -2096,7 +2096,9 @@ def _get_symbols(
         LOGGER.info("=" * 60)
         return result
 
-    def _wait_for_first_tick(symbol: str, timeout: float = 15.0) -> dict[str, Any] | None:
+    def _wait_for_first_tick(
+        symbol: str, timeout: float = 15.0
+    ) -> dict[str, Any] | None:
         """Wait for first live tick. Args: symbol, timeout. Returns: Tick payload or None. Raises: None."""
         import time
 
@@ -2212,7 +2214,7 @@ def _data_ready(mdm: MarketDataManager | None) -> bool:
     """Check live tick readiness. Args: mdm. Returns: bool. Raises: None."""
     if mdm is None:
         return False
-    required = ['NSE:NIFTY 50', 'NFO:NIFTY26FEBFUT']
+    required = ["NSE:NIFTY 50", "NFO:NIFTY26FEBFUT"]
     for sym in required:
         if not mdm.get_latest_tick(sym):
             return False
@@ -3077,7 +3079,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             log_throttled(
                 LOGGER,
                 f"tick_received_{sym}",
-                f'📡 TICK: {sym} | LTP: {t.get("ltp")} | VWAP: {t.get("vwap")}',
+                f"EVENT|tick_update|symbol={sym}|ltp={t.get('ltp')}|vwap={t.get('vwap')}",
                 interval_sec=30.0,
                 level=logging.DEBUG,
             )
