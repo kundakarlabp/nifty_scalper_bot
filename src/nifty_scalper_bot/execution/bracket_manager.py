@@ -1023,6 +1023,17 @@ class BracketManager:
                     if not is_partial:
                         bracket.active = True
 
+    def on_tick_event(self, tick: dict[str, Any]) -> None:
+        """Args: tick; Returns: none; Raises: none."""
+        try:
+            symbol = str(tick.get("symbol") or "")
+            ltp = tick.get("last_price") or tick.get("ltp")
+            if not symbol or not isinstance(ltp, (int, float)):
+                return
+            self.on_tick(symbol, float(ltp))
+        except Exception as e:
+            LOGGER.error("Failure in BracketManager.on_tick_event: %s", e)
+
     def _execute_exit_order(
         self, 
         bracket: BracketState, 
