@@ -794,6 +794,16 @@ class OrderManager:
             return
         self._maybe_init_execution_policy()
 
+    def on_tick_event(self, tick: dict[str, Any]) -> None:
+        """Args: tick; Returns: none; Raises: none."""
+        try:
+            symbol = str(tick.get("symbol") or "")
+            if not symbol:
+                return
+            self._logger.debug("EVENT|order_tick|%s", symbol)
+        except Exception as e:
+            self._logger.error("Failure in OrderManager.on_tick_event: %s", e)
+
     def set_broker_client(self, broker_client: Any) -> None:
         """Swap the underlying broker client used for routing orders."""
 

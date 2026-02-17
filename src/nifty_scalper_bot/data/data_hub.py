@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 import re
+from collections import defaultdict
 from threading import RLock
 import time
 from typing import Any, Callable, Iterable, Mapping, TypedDict, cast
@@ -33,28 +34,61 @@ OrderListener = Callable[[dict[str, Any]], None]
 TickListener = Callable[[dict[str, Any]], None]
 
 
-class TickBus:
-    """In-process tick fan-out bus shared by websocket and polling publishers."""
+class EventBus:
+    """Generic in-process event bus.
+
+    Args: none; Returns: none; Raises: none.
+    """
 
     def __init__(self) -> None:
         """Args: none; Returns: none; Raises: none."""
-        self._subscribers: list[TickListener] = []
+        self._handlers: dict[str, list[Callable[[dict[str, Any]], None]]] = defaultdict(
+            list
+        )
         self._lock = RLock()
+
+    def subscribe(self, event_name: str, handler: Callable[[dict[str, Any]], None]) -> None:
+        """Args: event_name, handler; Returns: none; Raises: none."""
+        with self._lock:
+            self._handlers[event_name].append(handler)
+
+    def publish(self, event_name: str, payload: dict[str, Any]) -> None:
+        """Args: event_name, payload; Returns: none; Raises: none."""
+        with self._lock:
+            handlers = list(self._handlers.get(event_name, ()))
+        for handler in handlers:
+            try:
+                handler(payload)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error("Failure in EventBus.publish: %s", exc, exc_info=exc)
+
+
+class TickBus:
+    """Backward-compatible tick bus wrapper around :class:`EventBus`."""
+
+    def __init__(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+        self._event_bus = EventBus()
 
     def subscribe(self, handler: TickListener) -> None:
         """Args: handler; Returns: none; Raises: none."""
-        with self._lock:
-            self._subscribers.append(handler)
+        self._event_bus.subscribe("tick", handler)
 
     def publish(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
-        with self._lock:
-            subscribers = list(self._subscribers)
-        for handler in subscribers:
-            try:
-                handler(tick)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error("Failure in TickBus.publish: %s", exc, exc_info=exc)
+        self._event_bus.publish("tick", tick)
+
+    def subscribe_event(
+        self,
+        event_name: str,
+        handler: Callable[[dict[str, Any]], None],
+    ) -> None:
+        """Args: event_name, handler; Returns: none; Raises: none."""
+        self._event_bus.subscribe(event_name, handler)
+
+    def publish_event(self, event_name: str, payload: dict[str, Any]) -> None:
+        """Args: event_name, payload; Returns: none; Raises: none."""
+        self._event_bus.publish(event_name, payload)
 
 
 class Freshness(TypedDict, total=False):

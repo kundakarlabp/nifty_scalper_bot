@@ -255,10 +255,9 @@ class WebSocketManager:
             self._logger.error("Failure in stop: %s", e)
             raise
 
-    def subscribe_tokens(self, tokens: Sequence[int], mode: str = "ltp") -> None:
+    def subscribe_tokens(self, tokens: Sequence[int], mode: str = "full") -> None:
         """Args: tokens/mode; Returns: none; Raises: none."""
 
-        del mode
         self._merge_tokens(tokens)
         self._schedule_async(self._resubscribe_if_connected())
 
@@ -714,11 +713,16 @@ class WebSocketManager:
     def _next_backoff_delay(self) -> float:
         """Args: none; Returns: delay; Raises: none."""
 
-        cap = self._max_backoff
-        base = self._base_backoff
-        sleep = random.uniform(0.0, min(cap, base * (2 ** self._circuit.failures)))
+        sleep = self._next_backoff(self._circuit.failures)
         self._last_backoff_delay = sleep
         return sleep
+
+    def _next_backoff(self, attempt: int) -> float:
+        """Args: attempt; Returns: full-jitter backoff; Raises: none."""
+
+        base = self._base_backoff
+        cap = self._max_backoff
+        return random.uniform(0.0, min(cap, base * 2**attempt))
 
     def _record_failure(self) -> None:
         """Args: none; Returns: none; Raises: none."""
