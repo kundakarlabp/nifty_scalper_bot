@@ -400,37 +400,31 @@ class StrategyRunner:
         except Exception as e:
             self._logger.error(f"❌ Failed to create 'data/' directory: {e}")
         self._data_hub = data_hub
+        self._strike_selector = strike_selector
+        self._bracket_manager = bracket_manager
         if self._data_hub is not None and hasattr(self._data_hub, "tick_bus"):
             try:
                 subscribe_event = getattr(
                     self._data_hub.tick_bus, "subscribe_event", None
                 )
                 if callable(subscribe_event):
-                    subscribe_event("tick_updated", self._on_tick_from_bus)
-                else:
-                    self._data_hub.tick_bus.subscribe(self._on_tick_from_bus)
+                    if self._bracket_manager is not None and hasattr(
+                        self._bracket_manager, "on_tick_event"
+                    ):
+                        subscribe_event("tick_updated", self._bracket_manager.on_tick_event)
+                    if self._order_manager is not None and hasattr(
+                        self._order_manager, "on_tick_event"
+                    ):
+                        subscribe_event("tick_updated", self._order_manager.on_tick_event)
             except Exception as e:
                 self._logger.error("Failure in StrategyRunner.__init__: %s", e)
-        self._strike_selector = strike_selector
-        self._bracket_manager = bracket_manager
-        if self._data_hub is not None and hasattr(self._data_hub, "tick_bus"):
-            subscribe_event = getattr(self._data_hub.tick_bus, "subscribe_event", None)
-            if callable(subscribe_event):
-                if self._bracket_manager is not None and hasattr(
-                    self._bracket_manager, "on_tick_event"
-                ):
-                    subscribe_event("tick_updated", self._bracket_manager.on_tick_event)
-                if self._order_manager is not None and hasattr(
-                    self._order_manager, "on_tick_event"
-                ):
-                    subscribe_event("tick_updated", self._order_manager.on_tick_event)
         self._symbol_source: MarketDataManager | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         # Time block logging throttle
         self._time_block_logged: Dict[str, float] = {}
 
-        # Subscribe to MessageBus if available
-        if self._message_bus is not None:
+        # Subscribe to MessageBus when DataHub is unavailable (avoids duplicate tick eval).
+        if self._message_bus is not None and self._data_hub is None:
             self._message_bus.subscribe(MessageType.TICK, self._handle_tick_message)
 
         hedge_env = os.getenv("NSB__ALLOW_HEDGE_ENTRIES", "false").strip().lower()

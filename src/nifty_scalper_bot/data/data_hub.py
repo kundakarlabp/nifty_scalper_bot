@@ -191,6 +191,7 @@ class DataHub:
         self._store = store
         self._lock = RLock()
         self.tick_bus = TickBus()
+        self.tick_bus.subscribe(self.ingest_tick_sync)
         attach_tick_bus = getattr(self._mdm, "attach_tick_bus", None)
         if callable(attach_tick_bus):
             try:
