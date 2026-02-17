@@ -206,6 +206,8 @@ class MarketDataManager:
         self._last_tick_source: dict[str, str] = {}
         self._last_tick_hash: dict[str, int] = {}
         self._tick_cache: dict[str, dict[str, Any]] = {}
+        self._tick_counter = 0
+        self._last_tick_log_time = time.monotonic()
         self._last_tick_time: dict[str, float] = {}
         self._tick_bus: Any | None = None
         self._ws_connected = False
@@ -2470,8 +2472,18 @@ class MarketDataManager:
         with self._lock:
             self._last_tick_source[symbol] = source
             callbacks = list(self._subscribers.get(symbol, ()))
+            self._tick_counter += 1
         if source != "ws":
             self.bump_heartbeat()
+        now_mono = time.monotonic()
+        if now_mono - self._last_tick_log_time >= 5.0:
+            self._logger.info(
+                "EVENT|tick_stats|cached=%d|ticks_last_5s=%d",
+                len(self._tick_cache),
+                self._tick_counter,
+            )
+            self._tick_counter = 0
+            self._last_tick_log_time = now_mono
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
@@ -3631,12 +3643,12 @@ class MarketDataManager:
                     "WS subscribe skipped (no token)", extra={"symbol": symbol}
                 )
                 return
-            # Zerodha is safest with 'ltp' or 'quote'. Prefer 'ltp' to minimize payload.
             self._logger.info(
-                "Subscribing symbol",
-                extra={"symbol": symbol, "token": token, "mode": "ltp"},
+                "EVENT|subscribe|%s|token=%s|mode=full",
+                symbol,
+                token,
             )
-            self._ws.subscribe_tokens([token], mode="ltp")
+            self._ws.subscribe_tokens([token], mode="full")
         except Exception as exc:  # noqa: BLE001
             # Log both message and details so it shows up even if the logger ignores
             # 'extra'.
@@ -3804,10 +3816,13 @@ class MarketDataManager:
         normalized = {
             "symbol": symbol,
             "ltp": float(ltp),
+            "last_price": float(ltp),
             "bid": float(bid),
             "ask": float(ask),
             "timestamp": timestamp,
             "depth": depth,
+            "ltq": tick.get("last_quantity"),
+            "oi": self._coerce_float(tick, "oi", "open_interest"),
         }
 
         # 5. Volume Handling
@@ -3825,6 +3840,10 @@ class MarketDataManager:
 
         if volume is not None:
             normalized["volume"] = float(volume)
+
+        instrument_token = tick.get("instrument_token") or tick.get("token")
+        if instrument_token is not None:
+            normalized["instrument_token"] = instrument_token
 
         return normalized
 

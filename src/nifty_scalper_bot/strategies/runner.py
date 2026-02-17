@@ -408,6 +408,17 @@ class StrategyRunner:
                 self._logger.error("Failure in StrategyRunner.__init__: %s", e)
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
+        if self._data_hub is not None and hasattr(self._data_hub, "tick_bus"):
+            subscribe_event = getattr(self._data_hub.tick_bus, "subscribe_event", None)
+            if callable(subscribe_event):
+                if self._bracket_manager is not None and hasattr(
+                    self._bracket_manager, "on_tick_event"
+                ):
+                    subscribe_event("tick", self._bracket_manager.on_tick_event)
+                if self._order_manager is not None and hasattr(
+                    self._order_manager, "on_tick_event"
+                ):
+                    subscribe_event("tick", self._order_manager.on_tick_event)
         self._symbol_source: MarketDataManager | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         # Time block logging throttle
@@ -2283,6 +2294,20 @@ class StrategyRunner:
             self._on_tick_safe({**dict(tick), "symbol": symbol, "last_price": float(price)})
         except Exception as e:
             self._logger.error("Failure in StrategyRunner._on_tick_from_bus: %s", e)
+
+    def on_tick_event(self, tick: dict[str, Any]) -> None:
+        """Args: tick; Returns: none; Raises: none."""
+        try:
+            symbol = str(tick.get("symbol") or "")
+            if not symbol:
+                return
+            price = tick.get("last_price") or tick.get("ltp")
+            if not isinstance(price, (int, float)):
+                return
+            self._logger.debug("EVENT|strategy_eval|%s|price=%.2f", symbol, float(price))
+            self._on_tick_safe({**tick, "symbol": symbol, "last_price": float(price)})
+        except Exception as e:
+            self._logger.error("Failure in StrategyRunner.on_tick_event: %s", e)
 
     def _on_tick_safe(self, tick: Mapping[str, Any]) -> None:
         """Safe wrapper for _on_tick to handle exceptions."""
