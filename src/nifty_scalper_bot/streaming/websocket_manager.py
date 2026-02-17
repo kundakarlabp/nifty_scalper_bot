@@ -158,6 +158,13 @@ class WebSocketManager:
     def on_tick(self, callback: TickCallback | None) -> None:
         """Args: callback; Returns: none; Raises: none."""
 
+        self.set_tick_callback(callback)
+
+    def set_tick_callback(self, callback: TickCallback | None) -> None:
+        """Args: callback; Returns: none; Raises: none."""
+
+        if self._on_tick_callback is not None:
+            self._logger.warning("WS|Replacing existing tick callback")
         self._on_tick_callback = callback
 
 
