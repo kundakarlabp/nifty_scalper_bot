@@ -88,3 +88,42 @@ def test_runner_falls_back_to_mdm_when_hub_missing() -> None:
 
     runner.stop()
     assert mdm.unsubscribed == ["NIFTY25SEP25000CE"]
+
+
+def test_runner_avoids_message_bus_tick_subscription_when_hub_present() -> None:
+    hub = _StubHub()
+    mdm = _StubMDM()
+    message_bus = MagicMock()
+    runner = StrategyRunner(
+        market_data_manager=mdm,
+        indicator_engine=MagicMock(),
+        strategy_manager=MagicMock(),
+        risk_manager=MagicMock(),
+        order_manager=MagicMock(),
+        position_manager=MagicMock(),
+        config=StrategyRunnerConfig(max_trade_history=10),
+        data_hub=hub,
+        message_bus=message_bus,
+    )
+
+    assert runner is not None
+    message_bus.subscribe.assert_not_called()
+
+
+def test_runner_subscribes_message_bus_tick_when_hub_missing() -> None:
+    mdm = _StubMDM()
+    message_bus = MagicMock()
+    runner = StrategyRunner(
+        market_data_manager=mdm,
+        indicator_engine=MagicMock(),
+        strategy_manager=MagicMock(),
+        risk_manager=MagicMock(),
+        order_manager=MagicMock(),
+        position_manager=MagicMock(),
+        config=StrategyRunnerConfig(max_trade_history=10),
+        data_hub=None,
+        message_bus=message_bus,
+    )
+
+    assert runner is not None
+    message_bus.subscribe.assert_called_once()

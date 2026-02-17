@@ -2863,10 +2863,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if websocket_enabled and ws_mode_requested:
         use_polling = False
         poll_enabled = False
-    # [FIX] Container for direct wiring
-    strategy_runner_ref: dict[str, Any] = {}
-
-    # [FIX 1/2] Container to hold strategy runner reference for direct tick injection
+    # Container to hold strategy runner reference for direct tick injection.
     strategy_runner_ref: dict[str, Any] = {}
 
     if not poll_enabled and not websocket_enabled:
