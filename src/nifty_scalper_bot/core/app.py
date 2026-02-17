@@ -2116,7 +2116,9 @@ def _get_symbols(
     ltp: float = 0.0
     spot_symbol = "NSE:NIFTY 50"
 
-    first_tick = _wait_for_first_tick(spot_symbol, timeout=15.0)
+    _allow_offhours = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
+    _wait_timeout = 0.5 if _allow_offhours else 15.0
+    first_tick = _wait_for_first_tick(spot_symbol, timeout=_wait_timeout)
     if first_tick:
         ltp_raw = first_tick.get("ltp") or first_tick.get("last_price")
         try:
@@ -2188,8 +2190,26 @@ def _get_symbols(
             LOGGER.error("Error fetching live price: %s", exc, exc_info=True)
 
     if ltp <= 0:
-        LOGGER.error("Strategy skipped — missing live tick")
-        return []
+        if _allow_offhours:
+            fallback = os.getenv("NIFTY_FALLBACK_LTP", "24000.0")
+            try:
+                ltp = float(fallback)
+                LOGGER.warning(
+                    "spot_ltp_unavailable_offhours",
+                    extra={
+                        "event": "spot_ltp_unavailable_offhours",
+                        "fallback_ltp": ltp,
+                    },
+                )
+            except (TypeError, ValueError):
+                LOGGER.error(
+                    "invalid_nifty_fallback_ltp",
+                    extra={"event": "invalid_nifty_fallback_ltp", "value": fallback},
+                )
+                return []
+        else:
+            LOGGER.error("Strategy skipped — missing live tick")
+            return []
 
     global _LATEST_CTX
     universe = option_universe
@@ -2974,10 +2994,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if not tick or not isinstance(tick, dict):
             return
 
-        LOGGER.critical(
-            "🔥 TICK RECEIVED: %s @ %s",
-            tick.get("instrument_token", "unknown"),
+        symbol = ctx.instrument_resolver.get_symbol(
+            tick.get("instrument_token"), default="unknown"
+        )
+        LOGGER.debug(
+            "tick_received token=%s symbol=%s ltp=%s src=%s",
+            tick.get("instrument_token", "?"),
+            symbol,
             tick.get("last_price"),
+            tick.get("source", "ws"),
         )
 
         # 1. Normalize Tick
@@ -3163,7 +3188,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         websocket_manager = WebSocketManager(
             _resolve_ws_api_key(),
             _resolve_ws_token(),
-            on_tick=lambda tick: None,
             on_tick_callback=_on_poll_tick,
             on_error=lambda err: LOGGER.error("WebSocket manager error: %s", err),
             backoff_min_sec=1.0,
@@ -3188,9 +3212,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             store=hub_store,
             message_bus=message_bus,
         )
-
-        # Register callback to app tick handler so strategy + orchestration paths are fed.
-        websocket_manager.on_tick = _on_poll_tick
 
         polling_fallback_streamer = PollingStreamer(
             broker_client=broker_client,
@@ -5316,10 +5337,25 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if row.get("exchange") == "NFO"
                         }
 
-                total_items = len(nfo_cache)
-                LOGGER.info(f"📊 NFO cache has {total_items} items to sync")
+                _nifty_prefixes = ("NIFTY",)
+                nfo_cache_filtered = {
+                    k: v
+                    for k, v in nfo_cache.items()
+                    if str(v.get("tradingsymbol") or v.get("symbol") or "")
+                    .upper()
+                    .startswith(_nifty_prefixes)
+                }
+                total_items = len(nfo_cache_filtered)
+                LOGGER.info(
+                    "nfo_cache_filtered",
+                    extra={
+                        "event": "nfo_cache_filtered",
+                        "filtered_contracts": total_items,
+                        "total_contracts": len(nfo_cache),
+                    },
+                )
 
-                for idx, (key, row) in enumerate(nfo_cache.items(), 1):
+                for idx, (key, row) in enumerate(nfo_cache_filtered.items(), 1):
                     try:
                         token = row.get("instrument_token")
                         ts = row.get("tradingsymbol") or row.get("symbol")
@@ -5348,9 +5384,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # ✅ FIX #3: Populate _option_contracts from broker NFO instruments
                 if hasattr(ctx.instrument_resolver, "sync_nfo_from_broker"):
                     nfo_payload = (
-                        list(nfo_cache.values())
-                        if isinstance(nfo_cache, dict)
-                        else list(nfo_cache)
+                        list(nfo_cache_filtered.values())
+                        if isinstance(nfo_cache_filtered, dict)
+                        else list(nfo_cache_filtered)
                     )
                     nfo_synced = ctx.instrument_resolver.sync_nfo_from_broker(
                         nfo_payload

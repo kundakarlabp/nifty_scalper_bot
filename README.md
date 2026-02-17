@@ -175,6 +175,8 @@ pytest
 | `RECONCILIATION_INTERVAL_SEC` | Post-fill reconciliation interval | `30` |
 | `RECONCILIATION_ALERT_ON_MISMATCH` | Emit alerts when drift is detected | `true` |
 | `RECONCILIATION_BROKER_IS_TRUTH` | Treat broker snapshot as the source of truth | `true` |
+| `SESSION_ALLOW_OUT_OF_HOURS` | Allow strategy startup and checks outside market hours for testing | `false` |
+| `NIFTY_FALLBACK_LTP` | Fallback NIFTY spot used when live ticks are unavailable off-hours | `24000` |
 
 ### Live trading toggles
 
@@ -182,7 +184,8 @@ For integration tests that exercise the live order routing code paths, export th
 
 ```bash
 export ENABLE_LIVE=1
-export SESSION_ALLOW_OUT_OF_HOURS=1  # optional: bypass market hours check during testing
+export SESSION_ALLOW_OUT_OF_HOURS=true  # optional: bypass market hours check during testing
+export NIFTY_FALLBACK_LTP=24000        # optional: fallback spot for off-hours symbol selection
 ```
 
 ## License
