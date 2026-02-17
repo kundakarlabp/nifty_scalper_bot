@@ -408,6 +408,7 @@ class StrategyRunner:
                     self._data_hub.tick_bus, "subscribe_event", None
                 )
                 if callable(subscribe_event):
+                    subscribe_event("tick_updated", self.on_tick_event)
                     if self._bracket_manager is not None and hasattr(
                         self._bracket_manager, "on_tick_event"
                     ):
@@ -1010,14 +1011,8 @@ class StrategyRunner:
             callback = _callback
             self._callbacks[symbol] = callback
 
-        if self._data_hub is not None:
-            self._logger.info(f"🔔 SUBSCRIBING via DataHub: {symbol}")
-            self._data_hub.subscribe_ticks(symbol, callback)
-            self._logger.info(f"✅ SUBSCRIBED via DataHub: {symbol}")
-        else:
-            self._logger.info(f"🔔 SUBSCRIBING via MarketData: {symbol}")
+        if self._data_hub is None:
             self._market_data.subscribe(symbol, callback)
-            self._logger.info(f"✅ SUBSCRIBED via MarketData: {symbol}")
 
     def ingest_historical_bar(self, data: dict) -> None:
         """
@@ -2282,23 +2277,8 @@ class StrategyRunner:
             symbol = self._normalize_symbol(str(symbol_value))
             if symbol not in self._tracked_symbols:
                 return
-            self._live_symbols.add(symbol)
-            if set(self._tracked_symbols) and self._live_symbols != set(
-                self._tracked_symbols
-            ):
-                return
             price = tick.get("last_price") or tick.get("ltp")
             if not isinstance(price, (int, float)):
-                self._logger.error("Strategy skipped — missing live tick")
-                return
-            mdm_last_tick = getattr(self._market_data, "_last_tick_time", {}).get(
-                symbol
-            )
-            if (
-                isinstance(mdm_last_tick, (int, float))
-                and time.time() - float(mdm_last_tick) > 3.0
-            ):
-                self._logger.warning("Stale tick — skipping execution")
                 return
             self._on_tick_safe(
                 {**dict(tick), "symbol": symbol, "last_price": float(price)}
@@ -2315,9 +2295,6 @@ class StrategyRunner:
             price = tick.get("last_price") or tick.get("ltp")
             if not isinstance(price, (int, float)):
                 return
-            self._logger.debug(
-                "EVENT|runner_eval|symbol=%s|price=%.2f", symbol, float(price)
-            )
             self._on_tick_safe({**tick, "symbol": symbol, "last_price": float(price)})
         except Exception as e:
             self._logger.error("Failure in StrategyRunner.on_tick_event: %s", e)
@@ -2816,11 +2793,6 @@ class StrategyRunner:
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
-        self._logger.critical(
-            "🔥 TICK RECEIVED: %s @ %s",
-            tick.get("instrument_token", "unknown"),
-            tick.get("last_price"),
-        )
         self._logger.debug(
             "Entered StrategyRunner._on_tick",
             extra={"event": "tick_enter", "symbol": symbol},
@@ -2868,10 +2840,6 @@ class StrategyRunner:
                         if isinstance(tick_err_map, dict):
                             tick_err_map[symbol] = True
 
-            if "FUT" in symbol.upper():
-                return
-            if get_market_state() != MarketState.OPEN:
-                return None
 
             # =================================================================
             # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
@@ -3422,9 +3390,6 @@ class StrategyRunner:
                             )
 
                 # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
-                raw_vwap = state.vwap
-                if generated_signal is None and (raw_vwap is None or raw_vwap <= 0):
-                    return
 
                 # Update last tick
                 state.last_tick = dict(tick)
@@ -3450,16 +3415,6 @@ class StrategyRunner:
                 and "PE" not in upper_symbol
                 and "FUT" not in upper_symbol
             )
-            if is_index_symbol:
-                self._logger.debug(
-                    "DEBUG skip_strategy_eval index_symbol=%s",
-                    symbol,
-                    extra={
-                        "event": "strategy_eval_skipped_index_symbol",
-                        "symbol": symbol,
-                    },
-                )
-                return
 
             symbol_rate_until = float(
                 self._rate_limit_backoff_until_by_symbol.get(symbol, 0.0)

@@ -325,7 +325,11 @@ class MarketDataManager:
                 self._rest_poll_max_symbols = min(self._rest_poll_max_symbols, ceiling)
 
         if self._ws is not None:
-            self._ws.on_tick = self._handle_tick
+            set_tick_callback = getattr(self._ws, "set_tick_callback", None)
+            if callable(set_tick_callback):
+                set_tick_callback(self._handle_tick)
+            else:
+                self._ws.on_tick = self._handle_tick
         if self._tick_bus is not None:
             self._tick_bus.subscribe(self._on_tick)
             with suppress(Exception):
@@ -2480,6 +2484,7 @@ class MarketDataManager:
             )
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
+        source = str(source or "unknown").lower()
         self._store_tick(symbol, tick)
         callbacks: list[TickCallback]
         tick_payload = dict(tick)
@@ -2498,22 +2503,8 @@ class MarketDataManager:
             )
             self._tick_counter = 0
             self._last_tick_log_time = now_mono
-        tick_bus = self._tick_bus
-        if tick_bus is not None:
-            publish_event = getattr(tick_bus, "publish_event", None)
-            if callable(publish_event):
-                try:
-                    publish_event("tick_updated", tick_payload)
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in MarketDataManager._emit_tick publish_event: %s",
-                        exc,
-                        extra={
-                            "event": "mdm_tick_publish_event_error",
-                            "symbol": symbol,
-                        },
-                        exc_info=exc,
-                    )
+        # MarketDataManager is the authoritative tick dispatcher.
+        # Do not republish to tick_bus here to avoid duplicate event callbacks.
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
