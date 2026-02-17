@@ -23,11 +23,14 @@ from typing import (
 )
 
 from nifty_scalper_bot.config.settings import get_settings
-from nifty_scalper_bot.streaming.websocket_manager import ConnectionState, WebSocketManager
 from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.streaming.websocket_manager import (
+    ConnectionState,
+    WebSocketManager,
+)
 from nifty_scalper_bot.utils.env import get_str
-from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger
+from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
 
@@ -596,7 +599,7 @@ class MarketDataManager:
             if not self._ws or not self._ws.is_connected():
                 self._logger.info(
                     "mdm_rest_fallback_activated",
-                    extra={"event": "mdm_rest_fallback_activated"}
+                    extra={"event": "mdm_rest_fallback_activated"},
                 )
                 self._start_rest_poll()
         self._start_health_monitor()
@@ -1027,7 +1030,9 @@ class MarketDataManager:
         stale_threshold = max(float(self._tick_stale_threshold_ms) / 1000.0, 0.0)
         tick_age = self.time_since_last_tick(normalized_symbol)
         tick_stale = tick is None or (
-            tick_age is not None and stale_threshold > 0.0 and tick_age > stale_threshold
+            tick_age is not None
+            and stale_threshold > 0.0
+            and tick_age > stale_threshold
         )
         ws_disconnected = not self._is_ws_connected()
 
@@ -1085,7 +1090,9 @@ class MarketDataManager:
             )
             thread.start()
 
-    async def wait_for_live_tick(self, token: int, timeout: float = 5) -> dict[str, Any]:
+    async def wait_for_live_tick(
+        self, token: int, timeout: float = 5
+    ) -> dict[str, Any]:
         """Args: token, timeout; Returns: fresh tick; Raises: RuntimeError."""
         start = time.time()
         while time.time() - start < timeout:
@@ -2089,26 +2096,33 @@ class MarketDataManager:
             return None
         return number
 
-
-    def update_hydration_status(self, symbol: str, bars: Sequence[Mapping[str, Any]]) -> None:
+    def update_hydration_status(
+        self, symbol: str, bars: Sequence[Mapping[str, Any]]
+    ) -> None:
         """Update hydration status from bars. Args: symbol, bars. Returns: None. Raises: None."""
         try:
-            normalized = normalize_symbol(str(symbol or ''))
+            normalized = normalize_symbol(str(symbol or ""))
             bar_count = len(list(bars))
             if bar_count >= 20:
-                self._hydration_status[normalized] = 'READY'
+                self._hydration_status[normalized] = "READY"
             else:
                 self._logger.error(
-                    'insufficient_bars_for_strategy',
-                    extra={'event': 'insufficient_bars_for_strategy', 'symbol': normalized, 'bars': bar_count},
+                    "insufficient_bars_for_strategy",
+                    extra={
+                        "event": "insufficient_bars_for_strategy",
+                        "symbol": normalized,
+                        "bars": bar_count,
+                    },
                 )
         except Exception as exc:
-            self._logger.error('Failure in update_hydration_status: %s', exc, exc_info=exc)
+            self._logger.error(
+                "Failure in update_hydration_status: %s", exc, exc_info=exc
+            )
 
     def get_hydration_status(self, symbol: str) -> str:
         """Return hydration status. Args: symbol. Returns: status string. Raises: None."""
-        normalized = normalize_symbol(str(symbol or ''))
-        return self._hydration_status.get(normalized, 'HYDRATING')
+        normalized = normalize_symbol(str(symbol or ""))
+        return self._hydration_status.get(normalized, "HYDRATING")
 
     @property
     def ws_connected(self) -> bool:
@@ -2327,7 +2341,6 @@ class MarketDataManager:
             return self._rest_poll_enabled and self._has_recent_rest_ticks()
         return True
 
-
     def attach_tick_bus(self, tick_bus: Any) -> None:
         """Args: tick_bus; Returns: none; Raises: none."""
         try:
@@ -2431,10 +2444,10 @@ class MarketDataManager:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
 
         wallclock = tick.get("timestamp", time.time())
-        
+
         # 🔥 PRODUCTION FIX — enforce canonical key
         symbol = enforce_canonical(normalize_symbol(symbol))
-        
+
         cached_tick = dict(tick)
         with self._lock:
             self._latest_ticks[symbol] = cached_tick
@@ -2469,6 +2482,7 @@ class MarketDataManager:
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         self._store_tick(symbol, tick)
         callbacks: list[TickCallback]
+        tick_payload = dict(tick)
         with self._lock:
             self._last_tick_source[symbol] = source
             callbacks = list(self._subscribers.get(symbol, ()))
@@ -2477,13 +2491,29 @@ class MarketDataManager:
             self.bump_heartbeat()
         now_mono = time.monotonic()
         if now_mono - self._last_tick_log_time >= 5.0:
-            self._logger.info(
+            self._logger.debug(
                 "EVENT|tick_stats|cached=%d|ticks_last_5s=%d",
                 len(self._tick_cache),
                 self._tick_counter,
             )
             self._tick_counter = 0
             self._last_tick_log_time = now_mono
+        tick_bus = self._tick_bus
+        if tick_bus is not None:
+            publish_event = getattr(tick_bus, "publish_event", None)
+            if callable(publish_event):
+                try:
+                    publish_event("tick_updated", tick_payload)
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        "Failure in MarketDataManager._emit_tick publish_event: %s",
+                        exc,
+                        extra={
+                            "event": "mdm_tick_publish_event_error",
+                            "symbol": symbol,
+                        },
+                        exc_info=exc,
+                    )
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
@@ -2494,11 +2524,11 @@ class MarketDataManager:
                 if asyncio.iscoroutinefunction(callback):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(callback(dict(tick)))
+                        loop.create_task(callback(dict(tick_payload)))
                     except RuntimeError:
-                        asyncio.run(callback(dict(tick)))
+                        asyncio.run(callback(dict(tick_payload)))
                 else:
-                    callback(dict(tick))
+                    callback(dict(tick_payload))
             except Exception as exc:
                 self._logger.error(
                     "Tick callback failed", extra={"symbol": symbol, "error": str(exc)}
@@ -2517,7 +2547,10 @@ class MarketDataManager:
     def _start_health_monitor(self) -> None:
         """Args: none; Returns: none; Raises: none."""
 
-        if self._health_monitor_thread is not None and self._health_monitor_thread.is_alive():
+        if (
+            self._health_monitor_thread is not None
+            and self._health_monitor_thread.is_alive()
+        ):
             return
         self._health_monitor_stop.clear()
         self._health_monitor_thread = threading.Thread(

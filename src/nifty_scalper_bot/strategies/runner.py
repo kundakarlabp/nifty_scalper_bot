@@ -222,8 +222,6 @@ class StrategyRunnerConfig:
             raise ValueError(msg)
 
 
-
-
 class RunnerState(Enum):
     """State machine for strategy runner lifecycle."""
 
@@ -231,6 +229,7 @@ class RunnerState(Enum):
     HISTORICAL_READY = 2
     LIVE_READY = 3
     EXECUTION_ENABLED = 4
+
 
 class SymbolState(Enum):
     """Hydration lifecycle state maintained per symbol."""
@@ -403,7 +402,13 @@ class StrategyRunner:
         self._data_hub = data_hub
         if self._data_hub is not None and hasattr(self._data_hub, "tick_bus"):
             try:
-                self._data_hub.tick_bus.subscribe(self._on_tick_from_bus)
+                subscribe_event = getattr(
+                    self._data_hub.tick_bus, "subscribe_event", None
+                )
+                if callable(subscribe_event):
+                    subscribe_event("tick_updated", self._on_tick_from_bus)
+                else:
+                    self._data_hub.tick_bus.subscribe(self._on_tick_from_bus)
             except Exception as e:
                 self._logger.error("Failure in StrategyRunner.__init__: %s", e)
         self._strike_selector = strike_selector
@@ -414,11 +419,11 @@ class StrategyRunner:
                 if self._bracket_manager is not None and hasattr(
                     self._bracket_manager, "on_tick_event"
                 ):
-                    subscribe_event("tick", self._bracket_manager.on_tick_event)
+                    subscribe_event("tick_updated", self._bracket_manager.on_tick_event)
                 if self._order_manager is not None and hasattr(
                     self._order_manager, "on_tick_event"
                 ):
-                    subscribe_event("tick", self._order_manager.on_tick_event)
+                    subscribe_event("tick_updated", self._order_manager.on_tick_event)
         self._symbol_source: MarketDataManager | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         # Time block logging throttle
@@ -2264,6 +2269,9 @@ class StrategyRunner:
         """Return True only when market state is OPEN."""
         try:
             _ = now
+            settings = get_settings()
+            if bool(getattr(settings, "allow_offmarket_trading", False)):
+                return True
             return get_market_state() == MarketState.OPEN
         except Exception as e:
             self._logger.warning(
@@ -2281,17 +2289,26 @@ class StrategyRunner:
             if symbol not in self._tracked_symbols:
                 return
             self._live_symbols.add(symbol)
-            if set(self._tracked_symbols) and self._live_symbols != set(self._tracked_symbols):
+            if set(self._tracked_symbols) and self._live_symbols != set(
+                self._tracked_symbols
+            ):
                 return
             price = tick.get("last_price") or tick.get("ltp")
             if not isinstance(price, (int, float)):
                 self._logger.error("Strategy skipped — missing live tick")
                 return
-            mdm_last_tick = getattr(self._market_data, "_last_tick_time", {}).get(symbol)
-            if isinstance(mdm_last_tick, (int, float)) and time.time() - float(mdm_last_tick) > 3.0:
+            mdm_last_tick = getattr(self._market_data, "_last_tick_time", {}).get(
+                symbol
+            )
+            if (
+                isinstance(mdm_last_tick, (int, float))
+                and time.time() - float(mdm_last_tick) > 3.0
+            ):
                 self._logger.warning("Stale tick — skipping execution")
                 return
-            self._on_tick_safe({**dict(tick), "symbol": symbol, "last_price": float(price)})
+            self._on_tick_safe(
+                {**dict(tick), "symbol": symbol, "last_price": float(price)}
+            )
         except Exception as e:
             self._logger.error("Failure in StrategyRunner._on_tick_from_bus: %s", e)
 
@@ -2304,7 +2321,9 @@ class StrategyRunner:
             price = tick.get("last_price") or tick.get("ltp")
             if not isinstance(price, (int, float)):
                 return
-            self._logger.debug("EVENT|strategy_eval|%s|price=%.2f", symbol, float(price))
+            self._logger.debug(
+                "EVENT|runner_eval|symbol=%s|price=%.2f", symbol, float(price)
+            )
             self._on_tick_safe({**tick, "symbol": symbol, "last_price": float(price)})
         except Exception as e:
             self._logger.error("Failure in StrategyRunner.on_tick_event: %s", e)
@@ -3204,6 +3223,7 @@ class StrategyRunner:
             if in_warmup:
                 return
             if not self._is_market_open(now):
+                self._logger.info("EVENT|blocked|market_hours")
                 return
             if not self._validate_symbol_for_cycle(symbol):
                 return
@@ -3245,7 +3265,9 @@ class StrategyRunner:
                 if hydration_state != SymbolState.READY:
                     return
 
-                bars = self._market_data.get_ohlc_bars(symbol) if self._market_data else []
+                bars = (
+                    self._market_data.get_ohlc_bars(symbol) if self._market_data else []
+                )
                 if len(bars) < 20:
                     return
 
@@ -3639,8 +3661,13 @@ class StrategyRunner:
                             level=logging.DEBUG,
                         )
 
-                        mdm_last_tick = getattr(self._market_data, "_last_tick_time", {}).get(symbol)
-                        if isinstance(mdm_last_tick, (int, float)) and time.time() - float(mdm_last_tick) > 3.0:
+                        mdm_last_tick = getattr(
+                            self._market_data, "_last_tick_time", {}
+                        ).get(symbol)
+                        if (
+                            isinstance(mdm_last_tick, (int, float))
+                            and time.time() - float(mdm_last_tick) > 3.0
+                        ):
                             self._logger.warning("Stale tick — skipping execution")
                             return
                         signal = self._strategy_manager.generate_signal(symbol, price)
