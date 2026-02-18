@@ -151,19 +151,19 @@ def _env_bool(*names: str, default: bool = False) -> bool:
                 continue
             normalized = token.lower()
             if normalized in {"1", "true", "yes", "on"}:
-                LOGGER.info(
+                LOGGER.debug(
                     "Condition met: settings_env_bool_true",
                     extra={"event": "settings_env_bool_true", "env_name": name},
                 )
                 return True
             if normalized in {"0", "false", "no", "off"}:
-                LOGGER.info(
+                LOGGER.debug(
                     "Condition met: settings_env_bool_false",
                     extra={"event": "settings_env_bool_false", "env_name": name},
                 )
                 return False
             raise ConfigurationError(f"Invalid boolean for {name!s}: {raw_value!r}")
-        LOGGER.info(
+        LOGGER.debug(
             "Condition met: settings_env_bool_default",
             extra={"event": "settings_env_bool_default", "default": bool(default)},
         )
@@ -231,7 +231,7 @@ def _env_float(*names: str, default: float, minimum: float | None = None) -> flo
             raise ConfigurationError(
                 f"Invalid float for {source_name!s}: {value!r} < minimum {minimum!r}"
             )
-        LOGGER.info(
+        LOGGER.debug(
             "Condition met: settings_env_float_resolved",
             extra={
                 "event": "settings_env_float_resolved",
@@ -303,7 +303,7 @@ def _env_int(*names: str, default: int, minimum: int | None = None) -> int:
             raise ConfigurationError(
                 f"Invalid integer for {source_name!s}: {value!r} < minimum {minimum!r}"
             )
-        LOGGER.info(
+        LOGGER.debug(
             "Condition met: settings_env_int_resolved",
             extra={
                 "event": "settings_env_int_resolved",
@@ -355,12 +355,12 @@ def _env_str(*names: str, default: str = "") -> str:
                 continue
             value = str(raw_value).strip()
             if value:
-                LOGGER.info(
+                LOGGER.debug(
                     "Condition met: settings_env_str_resolved",
                     extra={"event": "settings_env_str_resolved", "env_name": name},
                 )
                 return value
-        LOGGER.info(
+        LOGGER.debug(
             "Condition met: settings_env_str_default",
             extra={"event": "settings_env_str_default", "default": default},
         )
@@ -408,12 +408,12 @@ def _env_csv(*names: str) -> list[str]:
                 values = get_csv(sentinel)
             finally:
                 os.environ.pop(sentinel, None)
-            LOGGER.info(
+            LOGGER.debug(
                 "Condition met: settings_env_csv_resolved",
                 extra={"event": "settings_env_csv_resolved", "name": name},
             )
             return values
-        LOGGER.info(
+        LOGGER.debug(
             "Condition met: settings_env_csv_default",
             extra={"event": "settings_env_csv_default"},
         )
@@ -468,7 +468,7 @@ def _env_csv_ints(*names: str) -> Set[int]:
                     raise ConfigurationError(
                         f"Invalid integer in {name!s}: {item!r}"
                     ) from exc
-        LOGGER.info(
+        LOGGER.debug(
             "Condition met: settings_env_csv_ints_resolved",
             extra={
                 "event": "settings_env_csv_ints_resolved",
@@ -518,7 +518,7 @@ def _env_csv_strs(*names: str) -> Set[str]:
                 token = item.strip()
                 if token:
                     values.add(token)
-        LOGGER.info(
+        LOGGER.debug(
             "Condition met: settings_env_csv_strs_resolved",
             extra={
                 "event": "settings_env_csv_strs_resolved",
@@ -1504,7 +1504,7 @@ def get_settings() -> Settings:
         )
         raise
 
-    LOGGER.info(
+    LOGGER.debug(
         "Condition met: settings_validated",
         extra={"event": "settings_validated"},
     )

@@ -52,7 +52,7 @@ def resolve_env(canonical: str, default: Any | None = None) -> Any | None:
     try:
         value = os.getenv(canonical)
         if value is not None:
-            LOGGER.info(
+            LOGGER.debug(
                 'Condition met: resolve_env_canonical_hit',
                 extra={'event': 'env_alias_canonical_hit', 'canonical': canonical},
             )
@@ -61,7 +61,7 @@ def resolve_env(canonical: str, default: Any | None = None) -> Any | None:
         for alias in aliases:
             alias_value = os.getenv(alias)
             if alias_value is not None:
-                LOGGER.info(
+                LOGGER.debug(
                     'Condition met: resolve_env_alias_hit',
                     extra={
                         'event': 'env_alias_alias_hit',
@@ -111,7 +111,7 @@ def normalize_env_on_load() -> None:
                 if value is None:
                     continue
                 os.environ[canonical] = value
-                LOGGER.info(
+                LOGGER.debug(
                     'Condition met: env_alias_promoted',
                     extra={
                         'event': 'env_alias_promoted',
