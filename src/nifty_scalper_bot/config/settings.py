@@ -923,6 +923,8 @@ class Settings:
     notifications: NotificationSettings
     session_allow_out_of_hours: bool
     allow_offmarket_trading: bool
+    paper_mode: bool = False
+    ws_allow_offhours: bool = False
     execution: ExecutionSettings = field(default_factory=ExecutionSettings)
     websocket_enabled: bool = True
     telemetry_tags: Set[str] = field(default_factory=set)
@@ -1439,6 +1441,8 @@ def get_settings() -> Settings:
         shadow=_build_shadow_settings(),
         notifications=_build_notification_settings(app_config),
         session_allow_out_of_hours=session_allow_out_of_hours,
+        paper_mode=_env_bool("PAPER_MODE", default=False),
+        ws_allow_offhours=_env_bool("WS_ALLOW_OFFHOURS", default=False),
         allow_offmarket_trading=_env_bool(
             "ALLOW_OFFMARKET_TRADING",
             default=False,
