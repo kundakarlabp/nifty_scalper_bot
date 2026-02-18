@@ -19,6 +19,29 @@ def _build_client() -> ZerodhaKiteClient:
     return ZerodhaKiteClient(api_key="key", access_token="token")
 
 
+def test_get_orders_returns_cached_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use cached orders when REST fetch fails."""
+
+    client = _build_client()
+    now = 1_500.0
+    monkeypatch.setattr(client, "_log_time_fn", lambda: now)
+    client._rest_cache_ttl = 30.0
+    client._orders_cache = _RestCacheEntry(
+        payload=[{"order_id": "abc123"}],
+        updated_at=now - 5.0,
+    )
+
+    def _raise(*_: Any, **__: Any) -> None:
+        raise BrokerError("boom")
+
+    monkeypatch.setattr(client, "_execute_with_retry", _raise)
+    result = client.get_orders()
+
+    assert result == [{"order_id": "abc123"}]
+
+
 def test_get_positions_returns_cached_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

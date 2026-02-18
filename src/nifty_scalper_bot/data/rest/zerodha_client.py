@@ -220,6 +220,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             1.0, get_float("BROKER_REST_CACHE_TTL_SEC", default=15.0)
         )
         self._positions_cache: _RestCacheEntry | None = None
+        self._orders_cache: _RestCacheEntry | None = None
         self._margins_cache: dict[str, _RestCacheEntry] = {}
 
     def _load_rest_cache(
@@ -981,6 +982,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 )
             else:
                 LOGGER.debug("zerodha_orders_fetch_success count=0")
+            self._orders_cache = _RestCacheEntry(
+                payload=list(orders),
+                updated_at=self._log_time_fn(),
+            )
             return orders
 
         try:
@@ -997,6 +1002,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 exc,
                 extra={"event": "zerodha_get_orders_error"},
             )
+            cached = self._load_rest_cache(self._orders_cache, label=label)
+            if cached is not None:
+                return cast(list[dict], cached)
             raise
 
     def get_positions(self) -> list[dict[str, Any]]:
@@ -2518,17 +2526,24 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return
         remaining = max(0.0, open_until - time.monotonic())
         if remaining <= 0.0:
+            with self._resilience_lock:
+                self._breaker_open_until = 0.0
             return
         self._log_transient(
-            "zerodha_stream_circuit_sleep remaining=%0.1fs endpoint=%s"
+            "zerodha_stream_circuit_open_skip remaining=%0.1fs endpoint=%s"
             % (remaining, endpoint),
             level=logging.WARNING,
-            force=True,
+            force=False,
             endpoint=endpoint,
         )
-        self._sleep(remaining)
-        with self._resilience_lock:
-            self._breaker_open_until = 0.0
+        raise RetryableError(
+            f"Circuit open for {remaining:.1f}s, skipping {endpoint}",
+            context=RetryErrorContext(
+                status=None,
+                endpoint=endpoint,
+                delay_hint=remaining,
+            ),
+        )
 
     def _reset_transient_state(self) -> None:
         with self._resilience_lock:

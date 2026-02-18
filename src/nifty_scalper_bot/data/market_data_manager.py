@@ -299,6 +299,10 @@ class MarketDataManager:
             "ZOMBIE_RESTART_LIMIT", default=3, minimum=1
         )
         self._zombie_breaker_open_until = 0.0
+        self._zombie_last_restart_attempt_at: float = 0.0
+        self._zombie_restart_cooldown_sec = self._parse_float_env(
+            "ZOMBIE_RESTART_COOLDOWN_SEC", default=30.0, minimum=5.0
+        )
         self._zombie_stale_logged = False
         self._rest_refresh_inflight: set[str] = set()
         self._tick_stale_threshold_ms = self._parse_int_env(
@@ -2568,7 +2572,8 @@ class MarketDataManager:
     def _check_zombie_ticks(self) -> None:
         """Args: none; Returns: none; Raises: none."""
 
-        if not is_market_hours_cached():
+        from nifty_scalper_bot.utils.market_hours import is_market_open
+        if not is_market_open():
             self._zombie_stale_logged = False
             return
         if not self._is_ws_connected():
@@ -2603,7 +2608,38 @@ class MarketDataManager:
         if now < self._zombie_breaker_open_until:
             return
 
-        self._zombie_restart_failures += 1
+        since_last = now - self._zombie_last_restart_attempt_at
+        if since_last < self._zombie_restart_cooldown_sec:
+            return
+        self._zombie_last_restart_attempt_at = now
+
+        ws = self._ws
+        if ws is None:
+            return
+
+        reconnect = getattr(ws, "force_reconnect", None)
+        if not callable(reconnect):
+            self._zombie_restart_failures += 1
+        else:
+            try:
+                reconnect()
+                self._zombie_restart_failures = 0
+                self._logger.warning(
+                    "Condition met: mdm_zombie_ws_restart",
+                    extra={
+                        "event": "mdm_zombie_ws_restart",
+                        "failure_count": self._zombie_restart_failures,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._zombie_restart_failures += 1
+                self._logger.error(
+                    "Failure in _trigger_zombie_ws_restart: %s",
+                    exc,
+                    extra={"event": "mdm_zombie_ws_restart_error"},
+                    exc_info=exc,
+                )
+
         if self._zombie_restart_failures > self._zombie_restart_limit:
             self._zombie_breaker_open_until = now + self._zombie_restart_window
             self._zombie_restart_failures = 0
@@ -2613,29 +2649,6 @@ class MarketDataManager:
                     "event": "mdm_zombie_circuit_open",
                     "open_seconds": self._zombie_restart_window,
                 },
-            )
-            return
-
-        ws = self._ws
-        if ws is None:
-            return
-        try:
-            reconnect = getattr(ws, "force_reconnect", None)
-            if callable(reconnect):
-                reconnect()
-                self._logger.warning(
-                    "Condition met: mdm_zombie_ws_restart",
-                    extra={
-                        "event": "mdm_zombie_ws_restart",
-                        "failure_count": self._zombie_restart_failures,
-                    },
-                )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in _trigger_zombie_ws_restart: %s",
-                exc,
-                extra={"event": "mdm_zombie_ws_restart_error"},
-                exc_info=exc,
             )
 
     def _start_rest_poll(self) -> None:

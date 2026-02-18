@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime, timedelta, timezone
+import time
 from typing import Any, Iterable
 
 import pytest
@@ -329,22 +329,23 @@ def test_heartbeat_callback_invoked(broker: DummyBroker, ws: DummyWebSocket) -> 
     assert captured[-1] == 2.5
     assert len(captured) == 2
 
+
 @pytest.mark.asyncio
 async def test_wait_for_live_tick_rejects_stale_tick(
     broker: DummyBroker, ws: DummyWebSocket
 ) -> None:
     manager = MarketDataManager(broker, ws)
-    manager.subscribe('NIFTY23', lambda _: None)
+    manager.subscribe("NIFTY23", lambda _: None)
     assert ws.on_tick is not None
     ws.on_tick(
         {
-            'instrument_token': 123,
-            'last_price': 100.0,
-            'timestamp': time.time() - 10,
+            "instrument_token": 123,
+            "last_price": 100.0,
+            "timestamp": time.time() - 10,
         }
     )
 
-    with pytest.raises(RuntimeError, match='Live tick unavailable'):
+    with pytest.raises(RuntimeError, match="Live tick unavailable"):
         await manager.wait_for_live_tick(123, timeout=0.2)
 
 
@@ -364,3 +365,55 @@ async def test_ensure_fresh_tick_schedules_background_rest_refresh(
     await asyncio.sleep(0)
 
     assert scheduled == ["NSE:NIFTY23"]
+
+
+def test_zombie_restart_respects_cooldown(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    """Limit websocket zombie reconnect attempts using cooldown pacing."""
+
+    manager = MarketDataManager(broker, ws)
+    manager._zombie_restart_cooldown_sec = 5.0
+    reconnect_calls: list[float] = []
+
+    def _reconnect() -> None:
+        reconnect_calls.append(1.0)
+
+    ws.force_reconnect = _reconnect
+    monotonic_values = iter([10.0, 12.0, 16.1])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    manager._trigger_zombie_ws_restart()
+    manager._trigger_zombie_ws_restart()
+    manager._trigger_zombie_ws_restart()
+
+    assert len(reconnect_calls) == 2
+
+
+def test_zombie_restart_circuit_opens_after_failed_reconnects(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    """Open zombie reconnect circuit only after repeated reconnect failures."""
+
+    manager = MarketDataManager(broker, ws)
+    manager._zombie_restart_limit = 2
+    manager._zombie_restart_window = 120.0
+    manager._zombie_restart_cooldown_sec = 0.0
+
+    def _fail_reconnect() -> None:
+        raise RuntimeError("ws down")
+
+    ws.force_reconnect = _fail_reconnect
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.time.monotonic",
+        lambda: 42.0,
+    )
+
+    manager._trigger_zombie_ws_restart()
+    manager._trigger_zombie_ws_restart()
+    manager._trigger_zombie_ws_restart()
+
+    assert manager._zombie_breaker_open_until == 162.0
