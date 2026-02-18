@@ -262,6 +262,40 @@ class _EventSamplingFilter(logging.Filter):
             return (counter % self._every) == 0
 
 
+class DedupLogger:
+    """Suppress repeated identical INFO logs within a cooldown window."""
+
+    def __init__(self, logger: logging.Logger, cooldown_seconds: float = 60.0) -> None:
+        self._logger = logger
+        self._cooldown = cooldown_seconds
+        self._last_messages: dict[str, float] = {}
+
+    def info(self, msg: object, *args: object, **kwargs: object) -> None:
+        now = time.monotonic()
+        key = str(msg % args if args else msg)
+
+        last = self._last_messages.get(key)
+        if last is not None and (now - last) < self._cooldown:
+            return
+
+        self._last_messages[key] = now
+        self._logger.info(msg, *args, **kwargs)
+
+    def debug(self, msg: object, *args: object, **kwargs: object) -> None:
+        self._logger.debug(msg, *args, **kwargs)
+
+    def warning(self, msg: object, *args: object, **kwargs: object) -> None:
+        self._logger.warning(msg, *args, **kwargs)
+
+    def error(self, msg: object, *args: object, **kwargs: object) -> None:
+        self._logger.error(msg, *args, **kwargs)
+
+    def __getattr__(self, item: str) -> Any:
+        """Args: attribute name; Returns: delegated logger attr; Raises: AttributeError."""
+
+        return getattr(self._logger, item)
+
+
 # =============================================================================
 # 4. SETUP & CONFIGURATION LOGIC
 # =============================================================================
@@ -407,11 +441,11 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     target = name or _DEFAULT_LOGGER_NAME
     try:
         _install_filters_once()
-        logger = logging.getLogger(target)
+        base_logger = logging.getLogger(target)
         # Avoid duplicate filters if get_logger is called repeatedly
-        if not any(isinstance(flt, EventEnricher) for flt in logger.filters):
-            logger.addFilter(EventEnricher())
-        return logger
+        if not any(isinstance(flt, EventEnricher) for flt in base_logger.filters):
+            base_logger.addFilter(EventEnricher())
+        return DedupLogger(base_logger)  # type: ignore[return-value]
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in get_logger for %s: %s", target, exc,

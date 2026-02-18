@@ -5273,7 +5273,13 @@ def force_enable_trading_override() -> str:
 async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration and Option-Only Trading."""
 
-    LOGGER.info("Starting Nifty Scalper Bot...")
+    LOGGER.info(
+        "Startup | mode=%s | live=%s | data_dir=%s | port=%s",
+        ctx.settings.execution_mode,
+        ctx.settings.enable_live,
+        ctx.settings.data_dir,
+        os.getenv("PORT"),
+    )
 
     # =========================================================
     # Create Data Directory
@@ -5282,7 +5288,6 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     try:
         os.makedirs("data", exist_ok=True)
-        LOGGER.info("✅ Verified/Created 'data/' directory.")
     except Exception as e:
         LOGGER.critical(f"❌ Failed to create data directory: {e}")
 
