@@ -219,6 +219,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._rest_cache_ttl = max(
             1.0, get_float("BROKER_REST_CACHE_TTL_SEC", default=15.0)
         )
+        self._orders_cache: _RestCacheEntry | None = None
         self._positions_cache: _RestCacheEntry | None = None
         self._margins_cache: dict[str, _RestCacheEntry] = {}
 
@@ -981,6 +982,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 )
             else:
                 LOGGER.debug("zerodha_orders_fetch_success count=0")
+            self._orders_cache = _RestCacheEntry(
+                payload=list(orders),
+                updated_at=self._log_time_fn(),
+            )
             return orders
 
         try:
@@ -997,6 +1002,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 exc,
                 extra={"event": "zerodha_get_orders_error"},
             )
+            cached = self._load_rest_cache(self._orders_cache, label=label)
+            if cached is not None:
+                return cast(list[dict], cached)
             raise
 
     def get_positions(self) -> list[dict[str, Any]]:
