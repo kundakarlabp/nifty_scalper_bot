@@ -598,10 +598,11 @@ class WebSocketManager:
                 return
             loop = self._resolve_loop()
             # Pass full tick batch downstream (CRITICAL FIX)
-            result = callback(ticks)
+            for tick in ticks:
+                result = callback(tick)
 
-            if asyncio.iscoroutine(result):
-                self._schedule_coroutine(loop, result)
+                if asyncio.iscoroutine(result):
+                    self._schedule_coroutine(loop, result)
 
         except Exception as e:
             self._logger.error("Failure in _on_ticks: %s", e)
