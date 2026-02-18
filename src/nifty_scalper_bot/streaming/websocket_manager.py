@@ -378,6 +378,10 @@ class WebSocketManager:
                     "Condition met: websocket_connected reason=%s",
                     reason,
                 )
+                if not self._is_within_trading_window():
+                    self._logger.warning(
+                        "WebSocket connected outside trading hours (paper-mode only)"
+                    )
         except Exception as e:
             self._record_failure()
             self._logger.error("Failure in _connect_once: %s", e)
@@ -776,9 +780,25 @@ class WebSocketManager:
 
         if not self._trading_window_enabled:
             return True
+
+        from nifty_scalper_bot.config.settings import get_settings
+
+        settings = get_settings()
+
+        # Controlled paper-mode override
+        if (
+            getattr(settings, "paper_mode", False)
+            and getattr(settings, "ws_allow_offhours", False)
+        ):
+            self._logger.info(
+                "Condition met: ws_offhours_allowed_in_paper_mode"
+            )
+            return True
+
         now = datetime.now(self._trading_tz)
         if now.weekday() >= 5:
             return False
+
         now_time = now.time().replace(tzinfo=None)
         return self._trading_start <= now_time <= self._trading_end
 

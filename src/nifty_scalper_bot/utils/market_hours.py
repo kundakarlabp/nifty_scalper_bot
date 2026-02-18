@@ -84,11 +84,13 @@ def is_market_hours(allow_override: bool = True) -> bool:
 
 
 def is_market_open() -> bool:
-    """
-    Check if market is open (broader check - 9:15 to 15:30).
-    Useful for data collection even when not trading.
-    """
-    return get_market_state() == MarketState.OPEN
+    """Args: none; Returns: bool; Raises: none."""
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+
+    current = now.time()
+    return MARKET_OPEN <= current <= MARKET_CLOSE
 
 
 def get_time_status() -> Tuple[bool, str]:
