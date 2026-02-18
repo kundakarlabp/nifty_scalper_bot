@@ -428,7 +428,7 @@ def get_tracer_logger(name: Optional[str] = None) -> logging.Logger:
     )
     try:
         tracer = get_logger(name)
-        LOGGER.info(
+        LOGGER.debug(
             "Condition met: tracer_logger_ready",
             extra={"event": "logging_tracer_logger_ready", "logger_name": tracer.name},
         )
