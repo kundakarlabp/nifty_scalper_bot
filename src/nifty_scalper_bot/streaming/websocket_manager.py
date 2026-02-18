@@ -365,6 +365,7 @@ class WebSocketManager:
                     self._connected.wait(), timeout=self._handshake_timeout
                 )
                 self._state = ConnectionState.CONNECTED
+                await self._ensure_watchdog()
                 self._circuit.failures = 0
                 self._circuit.open_until_mono = 0.0
                 self._last_backoff_delay = self._base_backoff
@@ -372,7 +373,6 @@ class WebSocketManager:
                     "Condition met: websocket_connected reason=%s",
                     reason,
                 )
-                await self._resubscribe_if_connected()
         except Exception as e:
             self._record_failure()
             self._logger.error("Failure in _connect_once: %s", e)
@@ -431,6 +431,14 @@ class WebSocketManager:
                     or self._connected.is_set()
                 ):
                     return
+
+                # Ensure any old ticker is fully closed before reconnect
+                if self._ticker is not None:
+                    try:
+                        await asyncio.to_thread(self._ticker.close)
+                    except Exception:
+                        pass
+                    self._ticker = None
                 await self._connect_once(reason="reconnect")
                 if self._connected.is_set():
                     return
@@ -561,7 +569,6 @@ class WebSocketManager:
         try:
             del ws, response
             self._last_pong_mono = time.monotonic()
-            self._last_tick_mono = time.monotonic()
             self._connected.set()
             self._state = ConnectionState.CONNECTED
             if self._on_connect_callback is not None:
