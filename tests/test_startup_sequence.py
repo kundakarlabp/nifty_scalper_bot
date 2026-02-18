@@ -275,3 +275,45 @@ async def test_startup_continues_when_broker_denied() -> None:
     payload = client.get("/health").json()
     assert payload.get("guard") == "blocked"
     assert "Broker session not validated" in payload.get("reasons", [])
+
+
+def test_settings_execution_mode_and_data_dir_compat() -> None:
+    app_config = AppConfig(
+        broker=BrokerConfig(
+            api_key='demo',
+            api_secret='secret',
+            access_token='token',
+            base_url='https://example.com',
+            websocket_url='wss://example.com/ws',
+        ),
+        risk=RiskConfig(),
+        logging=LoggingConfig(level='INFO'),
+        ratelimit=RateLimitConfig(
+            orders=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            rest=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            hist=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+        ),
+        quote_stale_threshold_ms=1_000,
+    )
+
+    settings = Settings(
+        app=app_config,
+        enable_live=False,
+        orders=OrderSettings(),
+        risk=RiskSettings(),
+        streamer=StreamerSettings(),
+        shadow=ShadowSettings(),
+        notifications=NotificationSettings(enabled=False),
+        session_allow_out_of_hours=False,
+        allow_offmarket_trading=False,
+    )
+
+    assert settings.execution_mode == 'SHADOW'
+    assert settings.data_dir == settings.replay.data_dir
+
+    settings.paper_mode = True
+    assert settings.execution_mode == 'PAPER'
+
+    settings.paper_mode = False
+    settings.enable_live = True
+    assert settings.execution_mode == 'LIVE'

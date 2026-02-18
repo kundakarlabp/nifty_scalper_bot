@@ -944,6 +944,20 @@ class Settings:
     universe_dynamic_mode: bool = True
     backtest_mode: bool = False
 
+    @property
+    def execution_mode(self) -> str:
+        """Args: None; Returns: Runtime execution mode string; Raises: Never."""
+        if self.paper_mode:
+            return "PAPER"
+        if self.enable_live:
+            return "LIVE"
+        return "SHADOW"
+
+    @property
+    def data_dir(self) -> Path:
+        """Args: None; Returns: Replay data directory path; Raises: Never."""
+        return self.replay.data_dir
+
 
 def _build_elite_settings() -> EliteStrategiesSettings:
     """
