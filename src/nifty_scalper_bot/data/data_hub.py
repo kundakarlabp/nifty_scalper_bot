@@ -183,6 +183,7 @@ class DataHub:
         options_only: bool = True,
         store: HubStore | None = None,
         message_bus: MessageBus | None = None,
+        event_bus: MessageBus | None = None,
     ) -> None:
 
         self._mdm = market_data_manager
@@ -203,7 +204,8 @@ class DataHub:
         self._quotes: dict[str, Tick] = {}
         self._orders: dict[str, dict[str, Any]] = {}
         self._positions: dict[str, dict[str, Any]] = {}
-        self._message_bus = message_bus
+        self._message_bus = message_bus or event_bus
+        LOGGER.debug("DataHub using MessageBus id=%s", id(self._message_bus))
 
         # Derived Metrics Caches
         self._iv_cache: dict[str, float] = {}
@@ -246,6 +248,10 @@ class DataHub:
             return
         normalized_symbol = enforce_canonical(canonical(str(symbol)))
 
+        if self._message_bus is None:
+            LOGGER.error("DataHub has no event_bus — cannot emit tick")
+            return
+
         with self._lock:
             # 1. Update Cache
             self._quotes[normalized_symbol] = tick
@@ -259,7 +265,6 @@ class DataHub:
             # 3. Publish to MessageBus (The Critical Fix)
             if self._message_bus:
                 try:
-                    # FIX: Direct await for immediate data flow
                     await self._message_bus.publish(
                         Message(
                             type=MessageType.TICK,
@@ -269,7 +274,7 @@ class DataHub:
                         )
                     )
                 except Exception as exc:
-                    LOGGER.debug(f"MessageBus publish failed: {exc}")
+                    LOGGER.error("Failure in DataHub.ingest_tick: %s", exc, exc_info=exc)
 
             # 4. Notify Legacy Subscribers (Backward Compatibility)
             if normalized_symbol in self._tick_subscribers:

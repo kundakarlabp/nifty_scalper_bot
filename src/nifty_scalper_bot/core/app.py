@@ -2883,9 +2883,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if websocket_enabled and ws_mode_requested:
         use_polling = False
         poll_enabled = False
-    # Container to hold strategy runner reference for direct tick injection.
-    strategy_runner_ref: dict[str, Any] = {}
-
     if not poll_enabled and not websocket_enabled:
         raise ConfigurationError(
             "Polling disabled while websocket transport is disabled; "
@@ -2950,7 +2947,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             instrument_resolver,
             options_only=True,
             store=hub_store,
-            message_bus=message_bus,
+            event_bus=message_bus,
         )
         # Explicitly mark WS disconnected in polling mode so health reflects polling
         market_data_manager.set_ws_connected(False)
@@ -3210,7 +3207,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             instrument_resolver,
             options_only=True,
             store=hub_store,
-            message_bus=message_bus,
+            event_bus=message_bus,
         )
 
         polling_fallback_streamer = PollingStreamer(
@@ -3248,7 +3245,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             instrument_resolver,
             options_only=True,
             store=hub_store,
-            message_bus=message_bus,
+            event_bus=message_bus,
         )
         LOGGER.info(f"✅ DataHub created: {data_hub is not None}")
 
@@ -4042,10 +4039,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     strategy_runner.attach_persistent_state(persistent_state)
     strategy_runner.restore_trades(persistent_state.load_trades())
-    # [FIX 2/2] Populate the reference for Polling Mode to enable the hot-wire
-    strategy_runner_ref["instance"] = strategy_runner
-    LOGGER.info("✅ Polling Streamer -> StrategyRunner direct wiring established.")
-
     settings.enable_live = bool(live_toggle_env)
     mandatory_paper = not live_possible
     paper_state: dict[str, bool] = {"enabled": bool(paper_initial or mandatory_paper)}
