@@ -602,6 +602,9 @@ class WebSocketManager:
 
             if asyncio.iscoroutine(result):
                 self._schedule_coroutine(loop, result)
+
+        except Exception as e:
+            self._logger.error("Failure in _on_ticks: %s", e)
         
     def _on_pong(self, _ws: KiteTicker, _payload: Any | None = None) -> None:
         """Args: ws/payload; Returns: none; Raises: none."""
