@@ -100,3 +100,31 @@ def test_transient_errors_open_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.approx(client._breaker_cooldown_sec) == call for call in sleep_calls
     )
     client._client.close()
+
+
+def test_get_ltp_bulk_depth_maps_symbol_payload_to_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('POLL_REQUIRE_DEPTH', 'true')
+    client = ZerodhaKiteClient(api_key='key', access_token='token')
+
+    class _Resolver:
+        @staticmethod
+        def format_token_as_symbol(token: int) -> str:
+            return {256265: 'NSE:NIFTY 50'}.get(token, '')
+
+    client.attach_resolver(_Resolver())
+
+    monkeypatch.setattr(
+        client,
+        'get_quote_bulk',
+        lambda _tokens: {
+            'NSE:NIFTY 50': {'instrument_token': 256265, 'last_price': 25382.4}
+        },
+    )
+
+    out = client.get_ltp_bulk([256265])
+
+    assert out == {256265: 25382.4}
+
+    client._client.close()

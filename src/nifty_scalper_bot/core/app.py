@@ -2140,7 +2140,7 @@ def _get_symbols(
             ltp = float(ltp_raw) if ltp_raw is not None else 0.0
         except (TypeError, ValueError):
             ltp = 0.0
-    elif market_data_manager is not None:
+    elif market_data_manager is not None and broker is None:
         LOGGER.warning(
             "spot_unavailable_after_wait",
             extra={"event": "spot_unavailable_after_wait", "symbol": spot_symbol},
@@ -2180,7 +2180,15 @@ def _get_symbols(
             if ltp == 0 and hasattr(inner, "get_ltp"):
                 for candidate in str_candidates:
                     try:
-                        price = parse_price(inner.get_ltp(candidate))
+                        get_ltp_response = inner.get_ltp([candidate])
+                        response_payload: Any = get_ltp_response
+                        if isinstance(get_ltp_response, dict):
+                            response_payload = (
+                                get_ltp_response.get(candidate)
+                                or get_ltp_response.get(spot_symbol)
+                                or next(iter(get_ltp_response.values()), 0.0)
+                            )
+                        price = parse_price(response_payload)
                         if price > 0:
                             ltp = price
                             break
@@ -2190,12 +2198,16 @@ def _get_symbols(
             if ltp == 0 and hasattr(inner, "ltp"):
                 try:
                     q = inner.ltp(str_candidates)
-                    if spot_symbol not in q:
-                        LOGGER.error("Strategy skipped — missing live tick")
-                        return []
-                    for candidate in str_candidates:
-                        if candidate in q:
-                            price = parse_price(q[candidate])
+                    for candidate in (spot_symbol, *str_candidates):
+                        payload = q.get(candidate) if isinstance(q, dict) else None
+                        price = parse_price(payload)
+                        if price > 0:
+                            ltp = price
+                            break
+
+                    if ltp == 0 and isinstance(q, dict):
+                        for payload in q.values():
+                            price = parse_price(payload)
                             if price > 0:
                                 ltp = price
                                 break
@@ -2203,6 +2215,12 @@ def _get_symbols(
                     pass
         except Exception as exc:
             LOGGER.error("Error fetching live price: %s", exc, exc_info=True)
+
+    if ltp <= 0 and market_data_manager is not None:
+        LOGGER.warning(
+            "spot_unavailable_after_wait",
+            extra={"event": "spot_unavailable_after_wait", "symbol": spot_symbol},
+        )
 
     if ltp <= 0:
         if _allow_offhours:
