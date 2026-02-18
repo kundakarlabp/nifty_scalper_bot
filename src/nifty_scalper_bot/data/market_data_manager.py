@@ -331,7 +331,7 @@ class MarketDataManager:
         if self._ws is not None:
             set_tick_callback = getattr(self._ws, "set_tick_callback", None)
             if callable(set_tick_callback):
-                set_tick_callback(self._handle_tick)
+                set_tick_callback(self._handle_tick, suppress_warning=True)
             else:
                 self._ws.on_tick = self._handle_tick
         if self._tick_bus is not None:

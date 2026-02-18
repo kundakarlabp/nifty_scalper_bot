@@ -875,11 +875,33 @@ class OptionUniverseSettings:
         self.market_close_minute = min(max(0, int(self.market_close_minute)), 59)
 
 
+def _default_instruments_csv_path() -> Path:
+    """Resolve to DATA_DIR volume so CSV persists across Railway restarts."""
+    import os
+    data_dir = os.getenv("DATA_DIR", "").strip()
+    if data_dir:
+        return Path(data_dir) / "instruments.csv"
+    if Path("/app/data").exists():
+        return Path("/app/data") / "instruments.csv"
+    return Path("/app/instruments.csv")
+
+
+def _default_instruments_db_path() -> Path:
+    """Resolve to DATA_DIR volume so SQLite cache persists across Railway restarts."""
+    import os
+    data_dir = os.getenv("DATA_DIR", "").strip()
+    if data_dir:
+        return Path(data_dir) / "cache.sqlite"
+    if Path("/app/data").exists():
+        return Path("/app/data") / "cache.sqlite"
+    return Path("/app/cache.sqlite")
+
+
 class InstrumentSettings(BaseSettings):
     """Settings governing instrument cache warm-up and refresh."""
 
-    csv_path: Path | None = Path("/app/instruments.csv")
-    db_path: Path | None = Path("/app/cache.sqlite")
+    csv_path: Path | None = Field(default_factory=_default_instruments_csv_path)
+    db_path: Path | None = Field(default_factory=_default_instruments_db_path)
     refresh_cron_enabled: bool = False
     refresh_interval_hours: float = 24.0
     sync_only_index_options: bool = True
