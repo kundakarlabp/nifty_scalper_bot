@@ -881,6 +881,7 @@ class InstrumentSettings(BaseSettings):
     csv_path: Path | None = Path("/app/instruments.csv")
     db_path: Path | None = Path("/app/cache.sqlite")
     refresh_cron_enabled: bool = False
+    refresh_interval_hours: float = 24.0
     sync_only_index_options: bool = True
     sync_instruments_filter: str = "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY"
 
@@ -1372,9 +1373,7 @@ def _build_instrument_settings() -> InstrumentSettings:
 
     try:
         return InstrumentSettings(
-            sync_only_index_options=_env_bool(
-                "SYNC_ONLY_INDEX_OPTIONS", default=True
-            ),
+            sync_only_index_options=_env_bool("SYNC_ONLY_INDEX_OPTIONS", default=True),
             sync_instruments_filter=(
                 resolve_env("SYNC_INSTRUMENTS_FILTER")
                 or "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY"

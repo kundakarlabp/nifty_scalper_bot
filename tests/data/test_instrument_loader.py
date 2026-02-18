@@ -8,6 +8,8 @@ from nifty_scalper_bot.data import (
     ensure_sqlite,
     load_rows_for_resolver,
     refresh_from_csv,
+    sync_instrument_csv_from_broker,
+    write_instrument_rows_to_csv,
 )
 
 
@@ -38,3 +40,55 @@ def test_refresh_and_load_from_csv(tmp_path: Path) -> None:
         assert "lot_size" in first
     finally:
         conn.close()
+
+
+def test_write_instrument_rows_to_csv_creates_file(tmp_path: Path) -> None:
+    """Broker rows should be persisted into a CSV consumable by refresh logic."""
+
+    csv_path = tmp_path / "instruments.csv"
+    written = write_instrument_rows_to_csv(
+        [
+            {
+                "instrument_token": 1001,
+                "exchange": "NFO",
+                "tradingsymbol": "NIFTY25OCT26000CE",
+                "lot_size": 50,
+                "expiry": "2025-10-30",
+                "strike": 26000,
+                "instrument_type": "CE",
+                "segment": "NFO-OPT",
+                "name": "NIFTY",
+            }
+        ],
+        str(csv_path),
+    )
+    assert written == 1
+    assert csv_path.exists()
+    header = csv_path.read_text(encoding="utf-8").splitlines()[0]
+    assert "instrument_token" in header
+
+
+def test_sync_instrument_csv_from_broker_uses_loader(tmp_path: Path) -> None:
+    """Broker loader should bootstrap a missing warm-up CSV file."""
+
+    class _Broker:
+        def load_instruments(self, exchange: str) -> list[dict[str, object]]:
+            assert exchange == "NFO"
+            return [
+                {
+                    "instrument_token": 2001,
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTY25OCT26100PE",
+                    "lot_size": 50,
+                    "expiry": "2025-10-30",
+                    "strike": 26100,
+                    "instrument_type": "PE",
+                    "segment": "NFO-OPT",
+                    "name": "NIFTY",
+                }
+            ]
+
+    csv_path = tmp_path / "bootstrap.csv"
+    summary = sync_instrument_csv_from_broker(_Broker(), str(csv_path), exchange="NFO")
+    assert summary["written"] == 1
+    assert csv_path.exists()

@@ -241,7 +241,7 @@ def _sanitize_opt_type(row: dict[str, Any], tradingsymbol: str) -> str | None:
 def _allowed_instrument_prefixes(raw_filter: str) -> tuple[str, ...]:
     """Args: raw_filter; Returns: normalized prefixes; Raises: none."""
 
-    tokens = [part.strip().upper() for part in str(raw_filter or '').split(',')]
+    tokens = [part.strip().upper() for part in str(raw_filter or "").split(",")]
     return tuple(token for token in tokens if token)
 
 
@@ -296,7 +296,9 @@ def upsert_instruments(
                     if segment != "NFO-OPT":
                         skipped += 1
                         continue
-                    if not any(symbol_name.startswith(prefix) for prefix in allowed_prefixes):
+                    if not any(
+                        symbol_name.startswith(prefix) for prefix in allowed_prefixes
+                    ):
                         skipped += 1
                         continue
                 if tradingsymbol.endswith("FUT"):
@@ -411,8 +413,7 @@ def load_rows_for_resolver(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         extra={"event": "instrument_cache_load_enter"},
     )
     try:
-        cursor = conn.execute(
-            """
+        cursor = conn.execute("""
             SELECT
                 token,
                 tradingsymbol,
@@ -423,8 +424,7 @@ def load_rows_for_resolver(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 opt_type
             FROM instruments
             ORDER BY token ASC
-            """
-        )
+            """)
         rows: list[dict[str, Any]] = []
         for entry in cursor.fetchall():
             token_int = int(entry["token"])
@@ -495,6 +495,151 @@ def refresh_from_csv(
         raise
 
 
+def write_instrument_rows_to_csv(
+    rows: Iterable[dict[str, Any]],
+    csv_path: str,
+) -> int:
+    """Write broker rows to CSV.
+
+    Args: rows,csv_path.
+    Returns: Number of rows written.
+    Raises: Exception on I/O failure.
+    """
+
+    LOGGER.debug(
+        "Entered write_instrument_rows_to_csv",
+        extra={"event": "instrument_csv_write_enter", "path": csv_path},
+    )
+    serializable_rows = [dict(row) for row in rows if isinstance(row, dict)]
+    if not serializable_rows:
+        LOGGER.info(
+            "Condition met: instrument_csv_write_skipped",
+            extra={"event": "instrument_csv_write_skipped", "path": csv_path},
+        )
+        return 0
+    try:
+        field_names: list[str] = []
+        seen: set[str] = set()
+        for row in serializable_rows:
+            for key in row:
+                clean_key = str(key).strip()
+                if not clean_key or clean_key in seen:
+                    continue
+                seen.add(clean_key)
+                field_names.append(clean_key)
+        if "instrument_token" not in seen and "instrumenttoken" in seen:
+            field_names = [
+                "instrument_token" if name == "instrumenttoken" else name
+                for name in field_names
+            ]
+        if "instrument_token" not in field_names:
+            field_names.insert(0, "instrument_token")
+        target_path = Path(csv_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with target_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle, fieldnames=field_names, extrasaction="ignore"
+            )
+            writer.writeheader()
+            for raw_row in serializable_rows:
+                row = dict(raw_row)
+                if row.get("instrument_token") in {None, ""} and row.get(
+                    "instrumenttoken"
+                ) not in {None, ""}:
+                    row["instrument_token"] = row.get("instrumenttoken")
+                writer.writerow(row)
+        LOGGER.info(
+            "Condition met: instrument_csv_write_success",
+            extra={
+                "event": "instrument_csv_write_success",
+                "path": str(target_path),
+                "written": len(serializable_rows),
+            },
+        )
+        return len(serializable_rows)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in write_instrument_rows_to_csv: %s",
+            exc,
+            extra={"event": "instrument_csv_write_error", "path": csv_path},
+            exc_info=exc,
+        )
+        raise
+
+
+def sync_instrument_csv_from_broker(
+    broker_client: Any,
+    csv_path: str,
+    *,
+    exchange: str = "NFO",
+) -> dict[str, Any]:
+    """Sync broker instruments into CSV.
+
+    Args: broker_client,csv_path,exchange.
+    Returns: Sync metrics.
+    Raises: Exception when broker retrieval fails.
+    """
+
+    LOGGER.debug(
+        "Entered sync_instrument_csv_from_broker",
+        extra={
+            "event": "instrument_csv_sync_enter",
+            "path": csv_path,
+            "exchange": exchange,
+        },
+    )
+    normalized_exchange = str(exchange or "NFO").strip().upper()
+    try:
+        rows: list[dict[str, Any]] = []
+        load_fn = getattr(broker_client, "load_instruments", None)
+        if callable(load_fn):
+            payload = load_fn(normalized_exchange)
+            if isinstance(payload, list):
+                rows = [row for row in payload if isinstance(row, dict)]
+        if not rows:
+            list_fn = getattr(broker_client, "list_instruments", None)
+            if callable(list_fn):
+                payload = list_fn()
+                if isinstance(payload, list):
+                    rows = [
+                        row
+                        for row in payload
+                        if isinstance(row, dict)
+                        and str(row.get("exchange") or "").strip().upper()
+                        == normalized_exchange
+                    ]
+        written = write_instrument_rows_to_csv(rows, csv_path)
+        LOGGER.info(
+            "Condition met: instrument_csv_sync_success",
+            extra={
+                "event": "instrument_csv_sync_success",
+                "exchange": normalized_exchange,
+                "path": csv_path,
+                "fetched": len(rows),
+                "written": written,
+            },
+        )
+        return {
+            "exchange": normalized_exchange,
+            "fetched": len(rows),
+            "written": written,
+            "path": csv_path,
+            "source": "broker",
+        }
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error(
+            "Failure in sync_instrument_csv_from_broker: %s",
+            exc,
+            extra={
+                "event": "instrument_csv_sync_error",
+                "path": csv_path,
+                "exchange": normalized_exchange,
+            },
+            exc_info=exc,
+        )
+        raise
+
+
 __all__ = [
     "InstrumentUniverseStatus",
     "ensure_sqlite",
@@ -502,4 +647,6 @@ __all__ = [
     "upsert_instruments",
     "load_rows_for_resolver",
     "refresh_from_csv",
+    "sync_instrument_csv_from_broker",
+    "write_instrument_rows_to_csv",
 ]
