@@ -15,6 +15,7 @@ from nifty_scalper_bot.data import (
     ensure_sqlite,
     load_rows_for_resolver,
     refresh_from_csv,
+    sync_instrument_csv_from_broker,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.logging import get_logger
@@ -22,6 +23,39 @@ from nifty_scalper_bot.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
 _TARGET_TIME = time(hour=6, minute=30)
+
+
+def _csv_refresh_interval_seconds(settings: Any) -> float:
+    """Compute CSV refresh cadence.
+
+    Args: settings.
+    Returns: Refresh seconds.
+    Raises: None.
+    """
+
+    instrument_cfg = getattr(settings, "instruments", None)
+    raw_hours = getattr(instrument_cfg, "refresh_interval_hours", 24.0)
+    try:
+        hours = max(float(raw_hours), 0.25)
+    except (TypeError, ValueError):
+        hours = 24.0
+    return hours * 3600.0
+
+
+def _sync_csv_from_broker(
+    resolver: InstrumentResolver, csv_path: Path
+) -> dict[str, Any]:
+    """Sync instrument CSV from resolver broker.
+
+    Args: resolver,csv_path.
+    Returns: Sync summary.
+    Raises: Exception.
+    """
+
+    broker = getattr(resolver, "_broker", None)
+    if broker is None:
+        return {"written": 0, "path": str(csv_path), "source": "none"}
+    return sync_instrument_csv_from_broker(broker, str(csv_path), exchange="NFO")
 
 
 def _seconds_until_run(target_time: time, tz: ZoneInfo) -> float:
@@ -56,7 +90,7 @@ def schedule_instrument_refresh(
     *,
     state: InstrumentUniverseStatus | None = None,
 ) -> asyncio.Task[Any] | None:
-    """Schedule daily resolver refresh at 06:30 Asia/Kolkata.
+    """Schedule resolver refresh with initial 06:30 IST trigger and periodic updates.
 
     Args:
         settings: Settings object exposing ``instruments`` configuration.
@@ -96,16 +130,17 @@ def schedule_instrument_refresh(
         return None
 
     async def _refresh_loop() -> None:
-        """Execute the daily refresh loop until cancelled."""
+        """Execute the instrument refresh loop until cancelled."""
 
         LOGGER.debug(
             "Entered instrument refresh loop",
             extra={"event": "instrument_refresh_loop_enter"},
         )
+        delay = _seconds_until_run(_TARGET_TIME, _IST)
         while True:
             try:
-                delay = _seconds_until_run(_TARGET_TIME, _IST)
                 await asyncio.sleep(delay)
+                csv_sync_summary = _sync_csv_from_broker(resolver, csv_path)
                 conn = ensure_sqlite(str(instrument_cfg.db_path))
                 try:
                     summary = refresh_from_csv(conn, str(csv_path))
@@ -132,11 +167,13 @@ def schedule_instrument_refresh(
                             "tokens": tokens,
                             "options": options,
                             "path": str(csv_path),
+                            "csv_written": int(csv_sync_summary.get("written") or 0),
                         },
                     )
                 finally:
                     with suppress(Exception):
                         conn.close()
+                delay = _csv_refresh_interval_seconds(settings)
             except asyncio.CancelledError:
                 LOGGER.info(
                     "instrument_refresh_task_cancelled",

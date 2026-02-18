@@ -75,6 +75,7 @@ from nifty_scalper_bot.data import (
     ensure_sqlite,
     load_rows_for_resolver,
     refresh_from_csv,
+    sync_instrument_csv_from_broker,
 )
 from nifty_scalper_bot.data.assess_data import assess_datahub_fresh
 from nifty_scalper_bot.data.data_hub import DataHub
@@ -321,21 +322,35 @@ def _try_warm_instruments(
                     "Instrument CSV path not configured; skipping CSV warm-up.",
                     extra={"event": "instrument_warm_csv_missing"},
                 )
-            elif not Path(csv_path).exists():
-                logger.warning(
-                    "Instrument CSV not found at %s; skipping warm-up.",
-                    csv_path,
-                    extra={
-                        "event": "instrument_warm_csv_not_found",
-                        "csv_path": str(csv_path),
-                    },
-                )
             elif conn is None:
                 logger.warning(
                     "Instrument database path not configured; skipping cache refresh.",
                     extra={"event": "instrument_warm_db_missing"},
                 )
             else:
+                csv_file = Path(csv_path)
+                if not csv_file.exists():
+                    logger.warning(
+                        "Instrument CSV not found at %s; creating from broker.",
+                        csv_path,
+                        extra={
+                            "event": "instrument_warm_csv_not_found",
+                            "csv_path": str(csv_path),
+                        },
+                    )
+                    sync_summary = sync_instrument_csv_from_broker(
+                        resolver._broker,
+                        str(csv_path),
+                        exchange="NFO",
+                    )
+                    logger.info(
+                        "Condition met: instrument_csv_bootstrap_complete",
+                        extra={
+                            "event": "instrument_csv_bootstrap_complete",
+                            "csv_path": str(csv_path),
+                            "written": int(sync_summary.get("written") or 0),
+                        },
+                    )
                 summary = refresh_from_csv(conn, str(csv_path))
                 instrument_options = int(summary.get("stored") or instrument_options)
                 instrument_source = "csv"
@@ -5859,21 +5874,26 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             async def _sync_loop():
                 from nifty_scalper_bot.utils.market_hours import is_market_open
+
                 while True:
                     try:
                         if is_market_open():
                             await _reconcile_state(ctx)
                         else:
                             _inner = getattr(
-                                ctx.broker_client, "_broker",
-                                getattr(ctx.broker_client, "client", ctx.broker_client)
+                                ctx.broker_client,
+                                "_broker",
+                                getattr(ctx.broker_client, "client", ctx.broker_client),
                             )
                             reset_fn = getattr(_inner, "_reset_transient_state", None)
                             if callable(reset_fn):
                                 reset_fn()
                     except Exception:
                         pass
-                    from nifty_scalper_bot.utils.market_hours import is_market_open as _imo
+                    from nifty_scalper_bot.utils.market_hours import (
+                        is_market_open as _imo,
+                    )
+
                     await asyncio.sleep(15 if _imo() else 120)
 
             asyncio.create_task(_sync_loop())
