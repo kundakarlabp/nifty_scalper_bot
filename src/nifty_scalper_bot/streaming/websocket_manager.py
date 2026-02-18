@@ -590,13 +590,12 @@ class WebSocketManager:
             if callback is None:
                 return
             loop = self._resolve_loop()
-            for tick in ticks:
-                result = callback(tick)
-                if asyncio.iscoroutine(result):
-                    self._schedule_coroutine(loop, result)
-        except Exception as e:
-            self._logger.error("Failure in _on_ticks: %s", e)
+            # Pass full tick batch downstream (CRITICAL FIX)
+            result = callback(ticks)
 
+            if asyncio.iscoroutine(result):
+                self._schedule_coroutine(loop, result)
+        
     def _on_pong(self, _ws: KiteTicker, _payload: Any | None = None) -> None:
         """Args: ws/payload; Returns: none; Raises: none."""
 
