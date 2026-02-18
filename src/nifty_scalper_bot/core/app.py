@@ -3199,7 +3199,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         websocket_manager = WebSocketManager(
             _resolve_ws_api_key(),
             _resolve_ws_token(),
-            on_tick_callback=_on_poll_tick,
             on_error=lambda err: LOGGER.error("WebSocket manager error: %s", err),
             backoff_min_sec=1.0,
             backoff_max_sec=30.0,

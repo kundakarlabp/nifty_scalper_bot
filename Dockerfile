@@ -55,8 +55,6 @@ RUN mkdir -p /app/data /tmp/nifty_scalper_data \
 COPY entrypoint.sh /app/entrypoint.sh
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
-# Set DATA_DIR environment variable as fallback
-ENV DATA_DIR=/tmp/nifty_scalper_data
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
