@@ -667,19 +667,26 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 # get_quote_bulk already honors rate limiting and symbol resolution.
                 quote_map = self.get_quote_bulk(tokens)
                 out: dict[int, float] = {}
-                for token, payload in quote_map.items():
+                for symbol, payload in quote_map.items():
                     if not isinstance(payload, Mapping):
+                        continue
+                    try:
+                        token = int(
+                            payload.get("instrument_token")
+                            or payload.get("instrument_token_id")
+                            or 0
+                        )
+                    except (TypeError, ValueError):
+                        token = 0
+                    if token <= 0:
                         continue
                     try:
                         last_price = float(payload.get("last_price", 0.0) or 0.0)
                     except (TypeError, ValueError):
                         continue
-
-                    # [CORRECTED] Indentation fixed to be inside the for loop
                     if last_price > 0:
                         out[token] = last_price
 
-                # [CORRECTED] Logic for returning data if found (inside try)
                 if out:
                     now = time.time()
                     if now - self._last_log_ltp_bulk >= self._log_throttle_interval:
@@ -693,11 +700,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
                         self._last_log_ltp_bulk = now
                     return out
 
-                # depth fetch returned but no usable last_price values
-                LOGGER.warning(
-                    "zerodha_get_ltp_bulk_depth_no_ltp",
+                LOGGER.info(
+                    "zerodha_get_ltp_bulk_depth_empty_fallback",
                     extra={
-                        "event": "zerodha_get_ltp_bulk_depth_no_ltp",
+                        "event": "zerodha_get_ltp_bulk_depth_empty_fallback",
                         "tokens": tokens,
                     },
                 )

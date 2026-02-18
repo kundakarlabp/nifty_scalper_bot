@@ -24,14 +24,14 @@ class _BrokerWithSpot:
         return {'NSE:NIFTY 50': {'last_price': 25382.4}}
 
 
-def test_get_symbols_aborts_when_live_spot_symbol_missing() -> None:
+def test_get_symbols_accepts_alternate_spot_symbol_keys() -> None:
     cfg = SimpleNamespace(symbols=None)
     universe = _UniverseStub()
 
     symbols = app._get_symbols(cfg, broker=_BrokerNoSpot(), option_universe=universe)
 
-    assert symbols == []
-    assert universe.underlying is None
+    assert symbols == ['NFO:NIFTY26FEB25000CE']
+    assert universe.underlying == 25300.0
 
 
 def test_get_symbols_uses_nse_nifty_50_symbol() -> None:
