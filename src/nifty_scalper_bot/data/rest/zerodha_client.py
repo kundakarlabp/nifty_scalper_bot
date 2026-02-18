@@ -219,8 +219,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._rest_cache_ttl = max(
             1.0, get_float("BROKER_REST_CACHE_TTL_SEC", default=15.0)
         )
-        self._orders_cache: _RestCacheEntry | None = None
         self._positions_cache: _RestCacheEntry | None = None
+        self._orders_cache: _RestCacheEntry | None = None
         self._margins_cache: dict[str, _RestCacheEntry] = {}
 
     def _load_rest_cache(
@@ -2526,17 +2526,24 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return
         remaining = max(0.0, open_until - time.monotonic())
         if remaining <= 0.0:
+            with self._resilience_lock:
+                self._breaker_open_until = 0.0
             return
         self._log_transient(
-            "zerodha_stream_circuit_sleep remaining=%0.1fs endpoint=%s"
+            "zerodha_stream_circuit_open_skip remaining=%0.1fs endpoint=%s"
             % (remaining, endpoint),
             level=logging.WARNING,
-            force=True,
+            force=False,
             endpoint=endpoint,
         )
-        self._sleep(remaining)
-        with self._resilience_lock:
-            self._breaker_open_until = 0.0
+        raise RetryableError(
+            f"Circuit open for {remaining:.1f}s, skipping {endpoint}",
+            context=RetryErrorContext(
+                status=None,
+                endpoint=endpoint,
+                delay_hint=remaining,
+            ),
+        )
 
     def _reset_transient_state(self) -> None:
         with self._resilience_lock:

@@ -2995,9 +2995,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             tick.get("instrument_token"), default="unknown"
         )
         LOGGER.debug(
-            "tick_received token=%s symbol=%s ltp=%s src=%s",
+            "tick_received token=%s ltp=%s src=%s",
             tick.get("instrument_token", "?"),
-            symbol,
             tick.get("last_price"),
             tick.get("source", "ws"),
         )
@@ -5859,12 +5858,23 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info("✅ Zombie orders cleared.")
 
             async def _sync_loop():
+                from nifty_scalper_bot.utils.market_hours import is_market_open
                 while True:
                     try:
-                        await _reconcile_state(ctx)
+                        if is_market_open():
+                            await _reconcile_state(ctx)
+                        else:
+                            _inner = getattr(
+                                ctx.broker_client, "_broker",
+                                getattr(ctx.broker_client, "client", ctx.broker_client)
+                            )
+                            reset_fn = getattr(_inner, "_reset_transient_state", None)
+                            if callable(reset_fn):
+                                reset_fn()
                     except Exception:
                         pass
-                    await asyncio.sleep(15)
+                    from nifty_scalper_bot.utils.market_hours import is_market_open as _imo
+                    await asyncio.sleep(15 if _imo() else 120)
 
             asyncio.create_task(_sync_loop())
 

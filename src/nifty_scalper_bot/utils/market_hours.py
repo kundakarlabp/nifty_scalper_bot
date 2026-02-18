@@ -133,14 +133,14 @@ def format_time_for_log() -> str:
 # Cached version for high-frequency calls (1 second cache)
 @lru_cache(maxsize=128)
 def _cached_market_hours_check(minute_key: int, override_flag: str) -> bool:
-    """Internal cached check - cache key changes every minute and override state."""
+    """Internal cached check - cache key changes every minute + override state."""
     return is_market_hours(allow_override=True)
 
 
 def is_market_hours_cached() -> bool:
     """
     Cached version of is_market_hours for high-frequency tick processing.
-    Cache refreshes every minute.
+    Cache refreshes every minute and when SESSION_ALLOW_OUT_OF_HOURS changes.
     """
     now = datetime.now(IST)
     minute_key = now.hour * 60 + now.minute
