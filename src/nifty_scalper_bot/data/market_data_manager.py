@@ -860,7 +860,7 @@ class MarketDataManager:
                             resolved_balance = float(numeric_live)
                             # [FIX] Throttled INFO log
                             if time.time() - self._last_balance_log_time >= 60.0:
-                                self._logger.info(
+                                self._logger.debug(
                                     "mdm_available_balance_resolved",
                                     extra={
                                         "event": "mdm_available_balance_resolved",
@@ -887,7 +887,7 @@ class MarketDataManager:
                             value = _coerce_positive_float(flattened.get(key))
                             if value is not None:
                                 if time.time() - self._last_balance_log_time >= 60.0:
-                                    self._logger.info(
+                                    self._logger.debug(
                                         "mdm_available_balance_resolved",
                                         extra={
                                             "event": "mdm_available_balance_resolved",
@@ -925,7 +925,7 @@ class MarketDataManager:
             value = snapshot.get(key)
             numeric = _coerce_positive_float(value)
             if numeric is not None:
-                self._logger.info(
+                self._logger.debug(
                     "mdm_available_balance_resolved",
                     extra={
                         "event": "mdm_available_balance_resolved",

@@ -49,6 +49,7 @@ if _PROM_MODULE is not None:
 
 
 _METRIC_CACHE: Dict[tuple[Any, ...], Any] = {}
+_PROMETHEUS_WARNING_LOGGED = False
 
 
 def ensure_multiproc_dir(clear_stale: bool = False) -> Path | None:
@@ -207,10 +208,13 @@ def Gauge(name: str, doc: str, labels: Iterable[str] | None = None) -> Any:
             else:
                 metric = _PGauge(name, doc, list(label_key))
         except Exception as exc:  # pragma: no cover - defensive fallback
-            LOGGER.warning(
-                'Prometheus Gauge init failed; using no-op',
-                extra={'metric_name': name, 'error': str(exc)},
-            )
+            global _PROMETHEUS_WARNING_LOGGED
+            if not _PROMETHEUS_WARNING_LOGGED:
+                LOGGER.warning(
+                    'Prometheus disabled; using no-op metrics',
+                    extra={'metric_name': name, 'error': str(exc)},
+                )
+                _PROMETHEUS_WARNING_LOGGED = True
             metric = _Noop()
         _METRIC_CACHE[cache_key] = metric
     return metric

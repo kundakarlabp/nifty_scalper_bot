@@ -355,7 +355,7 @@ class WebSocketManager:
                 if self._shutdown or self._manual_disconnect:
                     return
                 if not self._is_within_trading_window():
-                    self._logger.info(
+                    self._logger.debug(
                         "Condition met: reconnect_suppressed_outside_trading_window"
                     )
                     return
