@@ -2362,6 +2362,11 @@ class MarketDataManager:
     def _on_tick(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
         try:
+            # WS-source ticks are already processed via the direct _handle_tick callback.
+            # Skipping here prevents a re-entry loop:
+            # _emit_tick → tick_bus.publish(ws tick) → _on_tick → _handle_tick → _emit_tick
+            if str(tick.get("source", "")).lower() == "ws":
+                return
             symbol_value = tick.get("symbol")
             if not symbol_value:
                 return
@@ -2507,8 +2512,16 @@ class MarketDataManager:
             )
             self._tick_counter = 0
             self._last_tick_log_time = now_mono
-        # MarketDataManager is the authoritative tick dispatcher.
-        # Do not republish to tick_bus here to avoid duplicate event callbacks.
+        # Forward WS ticks to tick_bus so DataHub → MessageBus → StrategyRunner receives them.
+        # Guard: only in WS mode (self._ws is not None) and only for ws-sourced ticks.
+        # MDM._on_tick skips WS-source ticks (added below) to break the re-entry loop.
+        if source == "ws" and self._ws is not None and self._tick_bus is not None:
+            try:
+                publish = getattr(self._tick_bus, "publish", None)
+                if callable(publish):
+                    publish(dict(tick_payload))
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("tick_bus forward failed: %s", exc)
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
