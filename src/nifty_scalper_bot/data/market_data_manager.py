@@ -329,9 +329,8 @@ class MarketDataManager:
                 self._rest_poll_max_symbols = min(self._rest_poll_max_symbols, ceiling)
 
         if self._ws is not None:
-            set_tick_callback = getattr(self._ws, "set_tick_callback", None)
-            if callable(set_tick_callback):
-                set_tick_callback(self._handle_tick, suppress_warning=True)
+            if hasattr(self._ws, "_on_tick_callback"):
+                self._ws._on_tick_callback = self._handle_tick
             else:
                 self._ws.on_tick = self._handle_tick
         if self._tick_bus is not None:
@@ -2386,73 +2385,73 @@ class MarketDataManager:
                     return
             self._tick_cache[symbol] = incoming
             self._last_tick_time[symbol] = time.time()
-            self._handle_tick([incoming])
+            self._handle_tick(incoming)
         except Exception as e:
             self._logger.error("Failure in MarketDataManager._on_tick: %s", e)
 
     # ------------------------------------------------------------------
     # Internal plumbing
 
-    def _handle_tick(self, ticks: list[dict]) -> None:
-        """Process an incoming raw tick batch from WebSocket or Polling."""
+    def _handle_tick(self, tick: dict[str, Any]) -> None:
+        """Process an incoming raw tick from WebSocket or Polling."""
 
-        if not ticks:
+        if not isinstance(tick, dict):
+            self._logger.error("Invalid tick format: %s", type(tick))
             return
 
-        self._logger.debug(
-            "MDM received tick batch | size=%d",
-            len(ticks),
-        )
+        instrument_token = tick.get("instrument_token")
+        last_price = tick.get("last_price")
+        if instrument_token is None or last_price is None:
+            return
 
-        for tick in ticks:
-            if not isinstance(tick, dict):
-                continue
+        self._last_tick_time["__global__"] = time.monotonic()
 
-            # 1. Resolve Symbol/Token
-            raw_token = tick.get("instrument_token") or tick.get("token")
-            try:
-                token = int(raw_token) if raw_token is not None else None
-            except (ValueError, TypeError):
-                token = None
+        token: int | None = None
+        try:
+            token = int(instrument_token)
+        except (ValueError, TypeError):
+            token = None
 
-            symbol = self._symbol_by_token.get(token) if token else None
+        symbol = None
+        if token is not None:
+            resolver = getattr(self, "_resolver", None)
+            resolve_token = getattr(resolver, "resolve_token", None)
+            if callable(resolve_token):
+                symbol = resolve_token(token)
             if not symbol:
-                symbol = self._extract_symbol(tick)
-                if symbol and token:
-                    self._seed_mapping(symbol, token)
+                symbol = self._symbol_by_token.get(token)
 
-            if not symbol:
-                continue
-            # 🔥 PRODUCTION FIX — enforce canonical key
-            symbol = enforce_canonical(normalize_symbol(symbol))
+        if not symbol:
+            self._logger.error(
+                "Token %s not mapped to symbol — dropping tick",
+                instrument_token,
+            )
+            return
 
-            # 2. Normalize
-            with self._lock:
-                previous = self._latest_ticks.get(symbol)
+        symbol = enforce_canonical(normalize_symbol(str(symbol)))
 
-            try:
-                normalized = self._normalize_tick(symbol, tick, previous)
-            except Exception as exc:
-                self._logger.error(
-                    f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True
-                )
-                continue
+        with self._lock:
+            previous = self._latest_ticks.get(symbol)
 
-            if not normalized:
-                continue
+        try:
+            normalized_tick = self._normalize_tick(symbol, tick, previous)
+        except Exception as exc:
+            self._logger.error(
+                f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True
+            )
+            return
 
-            # 3. Deduplicate
-            if self._is_duplicate(symbol, normalized):
-                continue
+        if not normalized_tick:
+            return
 
-            # 4. Update State
-            if self._ws:
-                self.set_ws_connected(True)
+        if self._is_duplicate(symbol, normalized_tick):
+            return
 
-            self.bump_heartbeat()
-
-            # 5. Emit
-            self._emit_tick(symbol, normalized, source=tick.get("source", "ws"))
+        if self._ws:
+            self.set_ws_connected(True)
+        self.bump_heartbeat()
+        self._logger.info("LIVE_TICK %s %s", symbol, last_price)
+        self._emit_tick(symbol, normalized_tick, source=tick.get("source", "ws"))
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
