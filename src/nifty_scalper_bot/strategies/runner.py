@@ -987,14 +987,21 @@ class StrategyRunner:
         """Subscribe to tick updates for a symbol."""
         callback = self._callbacks.get(symbol)
         if callback is None:
-
             def _callback(tick: Mapping[str, Any], sym: str = symbol) -> None:
                 self._on_tick(sym, tick)
-
             callback = _callback
             self._callbacks[symbol] = callback
 
-        if self._data_hub is None:
+        if self._data_hub is not None:
+            # Primary path: data_hub.subscribe_ticks wires DataHub → MDM._subscribers
+            # so WS ticks reach this callback via MDM._emit_tick directly.
+            try:
+                self._data_hub.subscribe_ticks(symbol, callback)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "Failure in StrategyRunner._subscribe_symbol: %s", exc
+                )
+        else:
             self._market_data.subscribe(symbol, callback)
 
     def ingest_historical_bar(self, data: dict) -> None:
