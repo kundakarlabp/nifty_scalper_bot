@@ -605,11 +605,8 @@ class WebSocketManager:
         """Args: ws, ticks; Returns: none; Raises: none."""
 
         del ws
+        assert isinstance(ticks, list), "Broker ticks must be list"
         if not ticks:
-            return
-
-        if not isinstance(ticks, list):
-            self._logger.error("Invalid ticks payload type: %s", type(ticks))
             return
 
         now = time.monotonic()
@@ -629,12 +626,26 @@ class WebSocketManager:
 
         for tick in ticks:
             try:
+                if isinstance(tick, dict):
+                    tick['_ws_received_mono'] = now
+                    tick['pipeline_stage'] = 'WS_TICK'
+                token = tick.get("instrument_token") if isinstance(tick, dict) else None
+                last_price = tick.get("last_price") if isinstance(tick, dict) else None
+                exchange_timestamp = (
+                    tick.get("exchange_timestamp") if isinstance(tick, dict) else None
+                )
+                if token is None or last_price is None or exchange_timestamp is None:
+                    raise RuntimeError(
+                        "Malformed broker tick payload: required fields "
+                        "instrument_token,last_price,exchange_timestamp"
+                    )
                 result = callback(tick)
                 if asyncio.iscoroutine(result):
                     loop = self._resolve_loop()
                     self._schedule_coroutine(loop, result)
             except Exception as exc:
-                self._logger.error("Failure dispatching tick: %s", exc, exc_info=True)
+                self._logger.exception("Tick pipeline failure")
+                raise
         
     def _on_pong(self, _ws: KiteTicker, _payload: Any | None = None) -> None:
         """Args: ws/payload; Returns: none; Raises: none."""

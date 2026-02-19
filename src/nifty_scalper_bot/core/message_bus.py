@@ -4,10 +4,9 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-import logging
 from typing import Any, Awaitable, Callable, TypeVar
 
-from nifty_scalper_bot.utils.logging import get_logger, log_throttled
+from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
@@ -38,9 +37,10 @@ class MessageBus:
     """
     
     def __init__(self, max_queue_size: int = 5000):
+        self.max_queue_size = int(max_queue_size)
         # Separate queue per message type
         self.queues: dict[MessageType, asyncio.Queue] = {
-            msg_type: asyncio.Queue(maxsize=max_queue_size)
+            msg_type: asyncio.Queue(maxsize=self.max_queue_size)
             for msg_type in MessageType
         }
         # Subscribers store (message_type -> list of handler functions)
@@ -52,91 +52,25 @@ class MessageBus:
         LOGGER.info("MessageBus initialized with max_queue_size=%s", max_queue_size)
 
     async def publish(self, message: Message) -> None:
-        """Publish a message, with pre-start buffering for TICK messages."""
-        if not self._running:
-            # Buffer tick messages for later dispatch
-            if message.type == MessageType.TICK:
-                try:
-                    # Use put_nowait to avoid blocking - queue will buffer
-                    self.queues[message.type].put_nowait(message)
-                    LOGGER.debug(
-                        f"⏳ Buffered pre-start tick for {message.data.get('symbol', 'unknown')}",
-                        extra={"event": "tick_buffered", "type": message.type.value}
-                    )
-                except asyncio.QueueFull:
-                    # Only log occasionally to avoid spam
-                    if not hasattr(self, '_buffer_warn_count'):
-                        self._buffer_warn_count = 0
-                    self._buffer_warn_count += 1
-                    if self._buffer_warn_count % 100 == 1:
-                        log_throttled(
-                            LOGGER,
-                            "message_bus_prestart_tick_buffer_full",
-                            (
-                                "⚠️ Pre-start tick buffer full (dropped "
-                                f"{self._buffer_warn_count} ticks)"
-                            ),
-                            level=logging.WARNING,
-                            interval_sec=60.0,
-                            extra={"event": "buffer_full"},
-                        )
-                return
-            else:
-                # Non-tick messages before start are logged but not dropped
-                log_throttled(
-                    LOGGER,
-                    f"message_bus_prestart_{message.type.value}",
-                    (
-                        "⚠️ MessageBus received "
-                        f"'{message.type.value}' before start() - queuing"
-                    ),
-                    level=logging.DEBUG,
-                    interval_sec=30.0,
-                    extra={"event": "pre_start_message", "type": message.type.value},
-                )
-                try:
-                    self.queues[message.type].put_nowait(message)
-                except asyncio.QueueFull:
-                    log_throttled(
-                        LOGGER,
-                        f"message_bus_prestart_full_{message.type.value}",
-                        f"Queue full for pre-start {message.type.value}",
-                        level=logging.ERROR,
-                        interval_sec=30.0,
-                        extra={
-                            "event": "pre_start_queue_full",
-                            "type": message.type.value,
-                        },
-                    )
-                return
-        
-        # Normal publish (bus is running)
-        try:
-            await self.queues[message.type].put(message)
-        except asyncio.QueueFull:
-            log_throttled(
-                LOGGER,
-                f"message_bus_queue_full_{message.type.value}",
-                f"Queue full for {message.type.value} - dropping message.",
-                level=logging.ERROR,
-                interval_sec=15.0,
-                extra={"event": "message_drop", "type": message.type.value},
-            )
-        except KeyError:
-            LOGGER.error(
-                "Attempted to publish unknown message type: %s",
-                message.type.value,
-            )
-        except Exception as exc:  # noqa: BLE001 - defensive logging
-            LOGGER.error(
-                "Failure in MessageBus.publish: %s",
-                exc,
+        """Publish a message into the bus queue with deterministic backpressure."""
+        queue = self.queues.get(message.type)
+        if queue is None:
+            raise KeyError(f'Unknown message type: {message.type}')
+        depth = queue.qsize()
+        if depth > int(self.max_queue_size * 0.8):
+            LOGGER.warning(
+                'MessageBus queue nearing capacity',
                 extra={
-                    "event": "message_bus_publish_error",
-                    "type": message.type.value,
+                    'event': 'message_bus_queue_high_watermark',
+                    'type': message.type.value,
+                    'depth': depth,
+                    'max_queue_size': self.max_queue_size,
                 },
-                exc_info=exc,
             )
+        if self._running:
+            active_dispatchers = [t for t in self._tasks if not t.done()]
+            assert active_dispatchers, 'MessageBus dispatcher task is not alive'
+        await queue.put(message)
 
     def subscribe(
         self,
@@ -159,12 +93,15 @@ class MessageBus:
                 # Wait for message
                 message = await queue.get()
                 queue.task_done()
-                
-                # Dispatch to all handlers concurrently
-                await asyncio.gather(
-                    *[handler(message) for handler in handlers],
-                    return_exceptions=True # Don't let one handler crash the whole loop
-                )
+                if message.type == MessageType.TICK:
+                    LOGGER.info('BUS_DELIVER %s', message.data.get('symbol'))
+
+                for handler in handlers:
+                    try:
+                        await handler(message)
+                    except Exception:
+                        LOGGER.exception('Tick pipeline failure')
+                        raise
                                             
             except asyncio.CancelledError:
                 LOGGER.debug("%s dispatch loop cancelled.", message_type.value)

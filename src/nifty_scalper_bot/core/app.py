@@ -2267,6 +2267,9 @@ def _data_ready(mdm: MarketDataManager | None) -> bool:
     """Check live tick readiness. Args: mdm. Returns: bool. Raises: None."""
     if mdm is None:
         return False
+    global_ts = float(getattr(mdm, '_last_tick_time', {}).get('__global__', 0.0) or 0.0)
+    if global_ts > 0.0:
+        return True
     required = ["NSE:NIFTY 50", "NFO:NIFTY26FEBFUT"]
     for sym in required:
         if not mdm.get_latest_tick(sym):
@@ -3298,6 +3301,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # ------------------------------------------------------------------
     if data_hub is None:
         raise ConfigurationError("Data hub initialisation failed")
+
+    try:
+        data_hub.bind_event_loop(asyncio.get_running_loop())
+    except Exception as exc:
+        LOGGER.error('Failure binding DataHub event loop: %s', exc, exc_info=exc)
+        raise
 
     LOGGER.info("DataHub initialized. Snapshot deferred to startup sequence.")
 
@@ -5711,6 +5720,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             unresolved_symbols = []
 
             for sym in targets:
+                if ctx.instrument_resolver:
+                    resolved_token = ctx.instrument_resolver.resolve(sym)
+                    assert resolved_token, f'Missing token mapping for trading symbol {sym}'
                 if mdm:
                     mdm.ensure_tracking(sym, seed=not websocket_enabled)
 
