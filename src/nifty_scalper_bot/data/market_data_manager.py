@@ -226,6 +226,9 @@ class MarketDataManager:
         self._last_tick_log_time = time.monotonic()
         self._last_tick_time: dict[str, float] = {}
         self._tick_bus: Any | None = None
+        # Asyncio event loop reference for thread-safe dispatch from WS thread.
+        # Set by set_event_loop() called from startup_sequence after loop starts.
+        self._main_loop: asyncio.AbstractEventLoop | None = None
         self._ws_connected = False
         self._hydration_status: dict[str, str] = {}
         self._last_hb_mono: float | None = None
@@ -2371,6 +2374,22 @@ class MarketDataManager:
         except Exception as e:
             self._logger.error("Failure in MarketDataManager.attach_tick_bus: %s", e)
 
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Wire the running asyncio event loop for thread-safe async callback dispatch.
+
+        Must be called from within the asyncio startup context after the loop is
+        running.  Used by ``_emit_tick`` to schedule async subscriber callbacks
+        (e.g. DataHub.ingest_tick) from the KiteConnect background OS thread without
+        ``asyncio.run()`` (which deadlocks) or ``get_running_loop()`` (which raises).
+
+        Args:
+            loop: The running asyncio event loop.
+        """
+        self._main_loop = loop
+        self._logger.info(
+            "MDM event loop wired: id=%s — thread-safe async dispatch active", id(loop)
+        )
+
     def _on_tick(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
         try:
@@ -2556,20 +2575,47 @@ class MarketDataManager:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
             pass
+        # ── Observable: stage marker already stamped as 'MDM_FORWARD' above.
+        # Dispatch to each subscriber in isolation: one bad callback must NEVER
+        # kill sibling callbacks (idempotency / partial-delivery contract).
+        _mdm_loop: asyncio.AbstractEventLoop | None = getattr(self, "_main_loop", None)
         for callback in callbacks:
+            cb_name = getattr(callback, "__name__", repr(callback))
             try:
-                # [FIX] Handle Async Callbacks (DataHub) vs Sync (Legacy)
                 if asyncio.iscoroutinefunction(callback):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(callback(dict(tick_payload)))
-                    except RuntimeError:
-                        asyncio.run(callback(dict(tick_payload)))
+                    # ── Non-blocking async dispatch from WS background thread ──
+                    # asyncio.get_running_loop() always raises here because this
+                    # code executes on the KiteConnect OS thread, NOT the event loop.
+                    # asyncio.run() creates a *new* nested loop → deadlock with uvloop.
+                    # Correct pattern: schedule on the captured main loop.
+                    if _mdm_loop is not None and _mdm_loop.is_running():
+                        _mdm_loop.call_soon_threadsafe(
+                            _mdm_loop.create_task, callback(dict(tick_payload))
+                        )
+                    else:
+                        # Startup race: no loop yet — log and skip, never block.
+                        self._logger.warning(
+                            "MDM._emit_tick: async callback %s skipped — loop not ready",
+                            cb_name,
+                            extra={"event": "mdm_emit_no_loop", "callback": cb_name},
+                        )
                 else:
                     callback(dict(tick_payload))
             except Exception as exc:
-                self._logger.exception("Tick pipeline failure")
-                raise
+                # Fail-fast: log with full context but DO NOT re-raise.
+                # Re-raising here would kill ALL subsequent callbacks in this
+                # batch — turning a single-subscriber bug into a full data outage.
+                self._logger.error(
+                    "MDM._emit_tick callback %s failed: %s",
+                    cb_name,
+                    exc,
+                    extra={
+                        "event": "mdm_emit_callback_error",
+                        "callback": cb_name,
+                        "symbol": symbol,
+                    },
+                    exc_info=exc,
+                )
 
     def _is_ws_connected(self) -> bool:
         """Args: none; Returns: websocket connectivity; Raises: none."""

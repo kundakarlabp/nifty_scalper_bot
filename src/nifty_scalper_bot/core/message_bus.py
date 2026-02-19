@@ -84,33 +84,66 @@ class MessageBus:
         LOGGER.info("Component subscribed to %s", message_type.value)
 
     async def _dispatch_loop(self, message_type: MessageType) -> None:
-        """Dispatch messages from a queue to its subscribers."""
+        """Dispatch messages from a queue to its subscribers.
+
+        Design invariants:
+        - Each handler is isolated: one failure NEVER kills sibling handlers.
+        - The loop NEVER exits on handler errors — only on CancelledError.
+        - Every handler failure is logged with full context (observable + fail-fast).
+        """
         queue = self.queues[message_type]
         handlers = self.subscribers[message_type]
-        
+
         while self._running:
             try:
-                # Wait for message
                 message = await queue.get()
                 queue.task_done()
+
+                # ── Observable: pipeline stage marker ──
                 if message.type == MessageType.TICK:
-                    LOGGER.info('BUS_DELIVER %s', message.data.get('symbol'))
+                    LOGGER.debug(
+                        "BUS_DELIVER symbol=%s stage=MessageBus",
+                        message.data.get("symbol"),
+                        extra={
+                            "event": "bus_deliver",
+                            "symbol": message.data.get("symbol"),
+                            "pipeline_stage": "BUS_DISPATCH",
+                        },
+                    )
 
                 for handler in handlers:
+                    h_name = getattr(handler, "__name__", repr(handler))
                     try:
                         await handler(message)
-                    except Exception:
-                        LOGGER.exception('Tick pipeline failure')
-                        raise
-                                            
+                    except Exception as exc:
+                        # Fail-fast: log every error with structured context.
+                        # Do NOT re-raise — sibling handlers must still execute.
+                        # A re-raise here turns a single bad handler into a
+                        # full message blackout for all subscribers.
+                        LOGGER.error(
+                            "MessageBus handler %s failed for %s: %s",
+                            h_name,
+                            message_type.value,
+                            exc,
+                            extra={
+                                "event": "bus_handler_error",
+                                "handler": h_name,
+                                "message_type": message_type.value,
+                                "pipeline_stage": "BUS_HANDLER_FAULT",
+                            },
+                            exc_info=exc,
+                        )
+
             except asyncio.CancelledError:
                 LOGGER.debug("%s dispatch loop cancelled.", message_type.value)
                 raise
-            except Exception as exc:  # noqa: BLE001 - defensive logging
+            except Exception as exc:
+                # Queue.get() itself failed — log and keep the loop alive.
                 LOGGER.error(
-                    "Critical dispatch error in %s loop: %s",
+                    "MessageBus dispatch error in %s loop: %s",
                     message_type.value,
                     exc,
+                    extra={"event": "bus_dispatch_error", "message_type": message_type.value},
                     exc_info=exc,
                 )
 
@@ -119,7 +152,12 @@ class MessageBus:
         if self._running:
             return
         self._running = True
-        
+        self._loop: asyncio.AbstractEventLoop | None = None
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
         for msg_type in MessageType:
             if self.subscribers[msg_type]:
                 task = asyncio.create_task(
@@ -127,8 +165,37 @@ class MessageBus:
                     name=f"dispatch-{msg_type.value}"
                 )
                 self._tasks.append(task)
-        
+
         LOGGER.info("Message bus started with %d active dispatchers.", len(self._tasks))
+
+    def publish_from_thread(self, message: "Message") -> None:
+        """Thread-safe publish: callable from any OS thread, not just asyncio tasks.
+
+        Uses ``loop.call_soon_threadsafe`` + ``queue.put_nowait`` — the only
+        documented-correct way to push items into an asyncio.Queue from a
+        non-async thread (e.g. KiteConnect WS thread, PollingStreamer thread).
+
+        Args:
+            message: Message to publish.
+        """
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running():
+            # Loop not yet available — buffer via put_nowait directly
+            # (safe only because we're single-producer here during startup)
+            try:
+                self.queues[message.type].put_nowait(message)
+            except Exception:
+                pass
+            return
+        try:
+            self.queues[message.type].put_nowait  # validate key exists
+            loop.call_soon_threadsafe(
+                self.queues[message.type].put_nowait, message
+            )
+        except KeyError:
+            LOGGER.error("publish_from_thread: unknown MessageType %s", message.type)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("publish_from_thread failed: %s", exc)
 
     async def stop(self) -> None:
         """Stop all dispatch loops."""

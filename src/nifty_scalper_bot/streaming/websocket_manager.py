@@ -635,18 +635,32 @@ class WebSocketManager:
                     tick.get("exchange_timestamp") if isinstance(tick, dict) else None
                 )
                 if token is None or last_price is None or exchange_timestamp is None:
-                    raise RuntimeError(
-                        "Malformed broker tick payload: required fields "
-                        "instrument_token,last_price,exchange_timestamp"
+                    # Fail-fast: log malformed tick — do NOT raise/re-raise.
+                    # Raising here would kill ALL remaining ticks in this WS batch
+                    # AND propagate into KiteConnect's thread, forcing a reconnect.
+                    self._logger.error(
+                        "Malformed broker tick — missing required fields "
+                        "(token=%s last_price=%s exchange_ts=%s)",
+                        token, last_price, exchange_timestamp,
+                        extra={"event": "ws_malformed_tick", "pipeline_stage": "WS_TICK"},
                     )
+                    continue  # skip this tick, process the rest of the batch
                 result = callback(tick)
                 if asyncio.iscoroutine(result):
                     loop = self._resolve_loop()
                     self._schedule_coroutine(loop, result)
             except Exception as exc:
-                self._logger.exception("Tick pipeline failure")
-                raise
-        
+                # Fail-fast per-tick: structured log, never re-raise into WS thread.
+                self._logger.error(
+                    "Tick pipeline failure token=%s: %s",
+                    tick.get("instrument_token") if isinstance(tick, dict) else "?",
+                    exc,
+                    extra={
+                        "event": "ws_tick_pipeline_failure",
+                        "pipeline_stage": "WS_TICK",
+                    },
+                    exc_info=exc,
+                )
     def _on_pong(self, _ws: KiteTicker, _payload: Any | None = None) -> None:
         """Args: ws/payload; Returns: none; Raises: none."""
 
