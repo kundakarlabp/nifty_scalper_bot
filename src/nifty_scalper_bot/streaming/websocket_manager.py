@@ -354,9 +354,16 @@ class WebSocketManager:
             async with self._connect_lock:
                 if self._shutdown or self._manual_disconnect:
                     return
-                if not self._is_within_trading_window():
-                    self._logger.debug(
-                        "Condition met: reconnect_suppressed_outside_trading_window"
+                within_window = self._is_within_trading_window()
+                if not within_window:
+                    from datetime import datetime
+                    from zoneinfo import ZoneInfo
+
+                    ist = ZoneInfo("Asia/Kolkata")
+                    self._logger.warning(
+                        "WS connect blocked | within_window=%s | now=%s",
+                        within_window,
+                        datetime.now(ist),
                     )
                     return
                 self._state = ConnectionState.CONNECTING
@@ -580,6 +587,10 @@ class WebSocketManager:
             self._last_pong_mono = time.monotonic()
             self._connected.set()
             self._state = ConnectionState.CONNECTED
+            self._logger.info(
+                "WebSocket CONNECTED successfully | tokens=%d",
+                len(self._tokens),
+            )
             if self._on_connect_callback is not None:
                 self._on_connect_callback()
             self._schedule_async(self._resubscribe_if_connected())
@@ -680,9 +691,23 @@ class WebSocketManager:
     async def _resubscribe_if_connected(self) -> None:
         """Args: none; Returns: none; Raises: none."""
 
-        ticker = self._ticker
-        if ticker is None or not self._connected.is_set() or not self._tokens:
+        if not self._tokens:
+            self._logger.error(
+                "WS connected but no tokens present — subscription skipped"
+            )
             return
+
+        ticker = self._ticker
+        if ticker is None:
+            return
+
+        if not self._connected.is_set():
+            return
+
+        if not self._tokens:
+            self._logger.error("WS connected but token set empty — no subscription")
+            return
+
         payload = sorted(self._tokens)
         for idx in range(0, len(payload), 200):
             batch = payload[idx : idx + 200]
@@ -776,31 +801,33 @@ class WebSocketManager:
         return True
 
     def _is_within_trading_window(self) -> bool:
-        """Args: none; Returns: bool; Raises: none."""
+        """Determine whether WebSocket is allowed to connect."""
 
         if not self._trading_window_enabled:
             return True
 
-        from nifty_scalper_bot.config.settings import get_settings
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
 
-        settings = get_settings()
+        ist = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(ist)
 
-        # Controlled paper-mode override
-        if (
-            getattr(settings, "paper_mode", False)
-            and getattr(settings, "ws_allow_offhours", False)
-        ):
-            self._logger.info(
-                "Condition met: ws_offhours_allowed_in_paper_mode"
-            )
-            return True
-
-        now = datetime.now(self._trading_tz)
+        # Weekends blocked
         if now.weekday() >= 5:
             return False
 
         now_time = now.time().replace(tzinfo=None)
-        return self._trading_start <= now_time <= self._trading_end
+        allowed = self._trading_start <= now_time <= self._trading_end
+
+        if not allowed:
+            self._logger.debug(
+                "WS window blocked | now=%s | start=%s | end=%s",
+                now_time,
+                self._trading_start,
+                self._trading_end,
+            )
+
+        return allowed
 
     async def _cancel_task(self, task: asyncio.Task[None] | None) -> None:
         """Args: task; Returns: none; Raises: none."""
