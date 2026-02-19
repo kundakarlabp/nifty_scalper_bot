@@ -2430,6 +2430,9 @@ class MarketDataManager:
 
         symbol = enforce_canonical(normalize_symbol(str(symbol)))
 
+        if symbol not in self._tracked_symbols:
+            self._tracked_symbols.add(symbol)
+
         with self._lock:
             previous = self._latest_ticks.get(symbol)
 

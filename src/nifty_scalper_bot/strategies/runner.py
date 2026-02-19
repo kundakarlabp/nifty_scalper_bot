@@ -518,6 +518,8 @@ class StrategyRunner:
         self._history_ready_by_symbol: dict[str, bool] = {}
         self._symbol_states: dict[str, SymbolState] = {}
         self._symbol_bar_count: dict[str, int] = {}
+        self._last_eval_ts: dict[str, float] = {}
+        self._last_global_eval_ts: float = time.monotonic()
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._hydration_ready_streak: dict[str, int] = {}
         self._frozen_universe: set[str] = set()
@@ -2296,7 +2298,19 @@ class StrategyRunner:
             return
 
         try:
-            self._on_tick(str(symbol), tick)
+            normalized_symbol = str(symbol)
+            now_mono = time.monotonic()
+            self._health_watchdog()
+            last_eval = self._last_eval_ts.get(normalized_symbol, 0.0)
+            if now_mono - last_eval < 0.05:
+                return
+            self._last_eval_ts[normalized_symbol] = now_mono
+            self._last_global_eval_ts = now_mono
+            self._logger.debug(
+                "STRATEGY_RECEIVED_TICK",
+                extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
+            )
+            self._on_tick(normalized_symbol, tick)
         except Exception as exc:
             LOGGER.error(
                 "Critical error in _on_tick for %s: %s",
@@ -2304,6 +2318,12 @@ class StrategyRunner:
                 exc,
                 exc_info=True,
             )
+
+    def _health_watchdog(self) -> None:
+        """Args: none; Returns: none; Raises: none."""
+        now = time.monotonic()
+        if now - self._last_global_eval_ts > 60.0:
+            self._logger.error("No strategy evaluation in 60s despite live ticks.")
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:

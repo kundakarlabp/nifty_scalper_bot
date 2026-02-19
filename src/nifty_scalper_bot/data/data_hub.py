@@ -248,10 +248,6 @@ class DataHub:
             return
         normalized_symbol = enforce_canonical(canonical(str(symbol)))
 
-        if self._message_bus is None:
-            LOGGER.error("DataHub has no event_bus — cannot emit tick")
-            return
-
         with self._lock:
             # 1. Update Cache
             self._quotes[normalized_symbol] = tick
@@ -275,6 +271,8 @@ class DataHub:
                     )
                 except Exception as exc:
                     LOGGER.error("Failure in DataHub.ingest_tick: %s", exc, exc_info=exc)
+            else:
+                LOGGER.debug("DataHub has no event_bus — tick cached without bus publish")
 
             # 4. Notify Legacy Subscribers (Backward Compatibility)
             if normalized_symbol in self._tick_subscribers:
