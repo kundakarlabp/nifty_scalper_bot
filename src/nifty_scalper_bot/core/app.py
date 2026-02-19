@@ -5668,12 +5668,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                             "required": min_required_bars,
                         },
                     )
-            if runner and hasattr(runner, "mark_ready") and ready_symbols:
-                runner.mark_ready(ready_symbols)
-            elif runner:
-                LOGGER.error(
-                    "Startup hydration incomplete for all symbols — runner remains unready"
-                )
+            if runner and hasattr(runner, "mark_ready"):
+                if ready_symbols:
+                    runner.mark_ready(ready_symbols)
+                else:
+                    fallback_symbols = [s for s in targets if s]
+                    if fallback_symbols:
+                        LOGGER.warning(
+                            "startup_hydration_incomplete_forcing_ready symbols=%s",
+                            fallback_symbols,
+                            extra={"event": "startup_hydration_incomplete_forcing_ready"},
+                        )
+                        runner.mark_ready(fallback_symbols)
+                    else:
+                        LOGGER.error(
+                            "Startup hydration incomplete for all symbols — runner remains unready"
+                        )
             # =========================================================
 
             await ctx.market_regime_manager.refresh_from_indicators()
