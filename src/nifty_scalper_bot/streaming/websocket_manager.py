@@ -545,6 +545,9 @@ class WebSocketManager:
         old = self._ticker
         self._ticker = self._build_ticker()
         self._ticker.on_ticks = self._on_ticks
+        self._ticker.on_connect = self._on_connect
+        self._ticker.on_close = self._on_close
+        self._ticker.on_error = self._on_error
         self._bind_handlers(self._ticker)
         self._logger.debug(
             "Condition met: websocket_ticker_replaced callback_bound=%s",
@@ -599,19 +602,15 @@ class WebSocketManager:
             self._logger.error("Failure in _on_connect: %s", e)
 
     def _on_ticks(self, ws, ticks):
-        """
-        Raw tick entrypoint from KiteTicker.
-        ticks: list[dict]
-        """
+        """Args: ws, ticks; Returns: none; Raises: none."""
 
         del ws
         if not ticks:
             return
 
-        self._logger.debug(
-            "WS ticks received | batch_size=%d",
-            len(ticks),
-        )
+        if not isinstance(ticks, list):
+            self._logger.error("Invalid ticks payload type: %s", type(ticks))
+            return
 
         now = time.monotonic()
         self._last_tick_mono = now
@@ -624,21 +623,18 @@ class WebSocketManager:
                 self._logger.error("Failure in _on_ticks.fallback_stop: %s", e)
 
         callback = self._on_tick_callback
-        if callback is None:
-            self._logger.error("WS tick received but no callback registered")
+        if not callable(callback):
+            self._logger.error("Tick callback not set — dropping ticks")
             return
 
-        try:
-            result = callback(ticks)
-            if asyncio.iscoroutine(result):
-                loop = self._resolve_loop()
-                self._schedule_coroutine(loop, result)
-        except Exception as exc:
-            self._logger.error(
-                "Failure in tick callback: %s",
-                exc,
-                exc_info=exc,
-            )
+        for tick in ticks:
+            try:
+                result = callback(tick)
+                if asyncio.iscoroutine(result):
+                    loop = self._resolve_loop()
+                    self._schedule_coroutine(loop, result)
+            except Exception as exc:
+                self._logger.error("Failure dispatching tick: %s", exc, exc_info=True)
         
     def _on_pong(self, _ws: KiteTicker, _payload: Any | None = None) -> None:
         """Args: ws/payload; Returns: none; Raises: none."""

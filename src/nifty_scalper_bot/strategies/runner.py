@@ -2787,6 +2787,7 @@ class StrategyRunner:
             "Entered StrategyRunner._on_tick",
             extra={"event": "tick_enter", "symbol": symbol},
         )
+        self._logger.info("STRATEGY_TICK %s", symbol)
         try:
             # =================================================================
             # PHASE -1: BRACKET MANAGER TICK FORWARDING (MUST be before ANY return)
