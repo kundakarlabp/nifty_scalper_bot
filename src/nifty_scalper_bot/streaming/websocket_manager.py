@@ -544,6 +544,7 @@ class WebSocketManager:
 
         old = self._ticker
         self._ticker = self._build_ticker()
+        self._ticker.on_ticks = self._on_ticks
         self._bind_handlers(self._ticker)
         self._logger.debug(
             "Condition met: websocket_ticker_replaced callback_bound=%s",
@@ -597,35 +598,47 @@ class WebSocketManager:
         except Exception as e:
             self._logger.error("Failure in _on_connect: %s", e)
 
-    def _on_ticks(self, _ws: KiteTicker, ticks: list[dict[str, Any]]) -> None:
-        """Args: ws/ticks; Returns: none; Raises: none."""
+    def _on_ticks(self, ws, ticks):
+        """
+        Raw tick entrypoint from KiteTicker.
+        ticks: list[dict]
+        """
+
+        del ws
+        if not ticks:
+            return
+
+        self._logger.debug(
+            "WS ticks received | batch_size=%d",
+            len(ticks),
+        )
+
+        now = time.monotonic()
+        self._last_tick_mono = now
+        self._last_pong_mono = now
+        if self._fallback_active and self._fallback_stop_callback is not None:
+            self._fallback_active = False
+            try:
+                self._fallback_stop_callback()
+            except Exception as e:
+                self._logger.error("Failure in _on_ticks.fallback_stop: %s", e)
+
+        callback = self._on_tick_callback
+        if callback is None:
+            self._logger.error("WS tick received but no callback registered")
+            return
 
         try:
-            now = time.monotonic()
-            self._last_tick_mono = now
-            # Ticks prove the connection is alive — bump pong tracker
-            # to prevent false pong-timeout reconnects when pong frames
-            # are delayed/lost through Railway cloud proxy.
-            self._last_pong_mono = now
-            if self._fallback_active and self._fallback_stop_callback is not None:
-                self._fallback_active = False
-                try:
-                    self._fallback_stop_callback()
-                except Exception as e:
-                    self._logger.error("Failure in _on_ticks.fallback_stop: %s", e)
-            callback = self._on_tick_callback
-            if callback is None:
-                return
-            loop = self._resolve_loop()
-            # Pass full tick batch downstream (CRITICAL FIX)
-            for tick in ticks:
-                result = callback(tick)
-
-                if asyncio.iscoroutine(result):
-                    self._schedule_coroutine(loop, result)
-
-        except Exception as e:
-            self._logger.error("Failure in _on_ticks: %s", e)
+            result = callback(ticks)
+            if asyncio.iscoroutine(result):
+                loop = self._resolve_loop()
+                self._schedule_coroutine(loop, result)
+        except Exception as exc:
+            self._logger.error(
+                "Failure in tick callback: %s",
+                exc,
+                exc_info=exc,
+            )
         
     def _on_pong(self, _ws: KiteTicker, _payload: Any | None = None) -> None:
         """Args: ws/payload; Returns: none; Raises: none."""

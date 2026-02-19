@@ -2386,61 +2386,73 @@ class MarketDataManager:
                     return
             self._tick_cache[symbol] = incoming
             self._last_tick_time[symbol] = time.time()
-            self._handle_tick(incoming)
+            self._handle_tick([incoming])
         except Exception as e:
             self._logger.error("Failure in MarketDataManager._on_tick: %s", e)
 
     # ------------------------------------------------------------------
     # Internal plumbing
 
-    def _handle_tick(self, tick: dict[str, Any]) -> None:
-        """Process an incoming raw tick from WebSocket or Polling."""
+    def _handle_tick(self, ticks: list[dict]) -> None:
+        """Process an incoming raw tick batch from WebSocket or Polling."""
 
-        # 1. Resolve Symbol/Token
-        raw_token = tick.get("instrument_token") or tick.get("token")
-        try:
-            token = int(raw_token) if raw_token is not None else None
-        except (ValueError, TypeError):
-            token = None
-
-        symbol = self._symbol_by_token.get(token) if token else None
-        if not symbol:
-            symbol = self._extract_symbol(tick)
-            if symbol and token:
-                self._seed_mapping(symbol, token)
-
-        if not symbol:
-            return
-        # 🔥 PRODUCTION FIX — enforce canonical key
-        symbol = enforce_canonical(normalize_symbol(symbol))
-
-        # 2. Normalize
-        with self._lock:
-            previous = self._latest_ticks.get(symbol)
-
-        try:
-            normalized = self._normalize_tick(symbol, tick, previous)
-        except Exception as exc:
-            self._logger.error(
-                f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True
-            )
+        if not ticks:
             return
 
-        if not normalized:
-            return
+        self._logger.debug(
+            "MDM received tick batch | size=%d",
+            len(ticks),
+        )
 
-        # 3. Deduplicate
-        if self._is_duplicate(symbol, normalized):
-            return
+        for tick in ticks:
+            if not isinstance(tick, dict):
+                continue
 
-        # 4. Update State
-        if self._ws:
-            self.set_ws_connected(True)
+            # 1. Resolve Symbol/Token
+            raw_token = tick.get("instrument_token") or tick.get("token")
+            try:
+                token = int(raw_token) if raw_token is not None else None
+            except (ValueError, TypeError):
+                token = None
 
-        self.bump_heartbeat()
+            symbol = self._symbol_by_token.get(token) if token else None
+            if not symbol:
+                symbol = self._extract_symbol(tick)
+                if symbol and token:
+                    self._seed_mapping(symbol, token)
 
-        # 5. Emit
-        self._emit_tick(symbol, normalized, source=tick.get("source", "ws"))
+            if not symbol:
+                continue
+            # 🔥 PRODUCTION FIX — enforce canonical key
+            symbol = enforce_canonical(normalize_symbol(symbol))
+
+            # 2. Normalize
+            with self._lock:
+                previous = self._latest_ticks.get(symbol)
+
+            try:
+                normalized = self._normalize_tick(symbol, tick, previous)
+            except Exception as exc:
+                self._logger.error(
+                    f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True
+                )
+                continue
+
+            if not normalized:
+                continue
+
+            # 3. Deduplicate
+            if self._is_duplicate(symbol, normalized):
+                continue
+
+            # 4. Update State
+            if self._ws:
+                self.set_ws_connected(True)
+
+            self.bump_heartbeat()
+
+            # 5. Emit
+            self._emit_tick(symbol, normalized, source=tick.get("source", "ws"))
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
