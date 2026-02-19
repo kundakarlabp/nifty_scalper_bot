@@ -5284,8 +5284,6 @@ async def startup_sequence(ctx: BotContext) -> None:
     # =========================================================
     # Create Data Directory
     # =========================================================
-    import os
-
     try:
         os.makedirs("data", exist_ok=True)
     except Exception as e:
