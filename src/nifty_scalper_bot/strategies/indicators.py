@@ -8,6 +8,7 @@ that calculates common technical indicators from the stored price history.
 from __future__ import annotations
 
 import logging
+import threading
 from collections import deque
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Sequence
@@ -177,6 +178,7 @@ class IndicatorEngine:
         self._histories: Dict[str, PriceHistory] = {}
         self._cache: Dict[str, Dict[str, tuple[Any, datetime]]] = {}
         self._last_valid_vwap: Dict[str, float] = {}
+        self._lock = threading.RLock()
 
     def update_price(
         self,
@@ -189,16 +191,17 @@ class IndicatorEngine:
         is_provisional: bool = False,
     ) -> None:
         """Update price for symbol and invalidate cache."""
-        history = self._histories.setdefault(symbol, PriceHistory())
-        timestamp = timestamp or datetime.now(timezone.utc)
-        history.add_tick(
-            price,
-            volume,
-            timestamp,
-            is_complete=is_complete,
-            is_provisional=is_provisional,
-        )
-        self._cache.pop(symbol, None)
+        with self._lock:
+            history = self._histories.setdefault(symbol, PriceHistory())
+            timestamp = timestamp or datetime.now(timezone.utc)
+            history.add_tick(
+                price,
+                volume,
+                timestamp,
+                is_complete=is_complete,
+                is_provisional=is_provisional,
+            )
+            self._cache.pop(symbol, None)
 
     def get_history(self, symbol: str, count: int | None = None) -> list[float]:
         """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
@@ -207,17 +210,18 @@ class IndicatorEngine:
             extra={"event": "indicator_engine_get_history_enter", "symbol": symbol},
         )
         try:
-            history = self._histories.get(symbol)
-            if history is None:
-                LOGGER.info(
-                    "Condition met: indicator_history_missing",
-                    extra={
-                        "event": "indicator_engine_history_missing",
-                        "symbol": symbol,
-                    },
-                )
-                return []
-            closes = history.get_closes(count)
+            with self._lock:
+                history = self._histories.get(symbol)
+                if history is None:
+                    LOGGER.info(
+                        "Condition met: indicator_history_missing",
+                        extra={
+                            "event": "indicator_engine_history_missing",
+                            "symbol": symbol,
+                        },
+                    )
+                    return []
+                closes = history.get_closes(count)
             LOGGER.debug(
                 "Condition met: indicator_history_resolved",
                 extra={
@@ -240,10 +244,11 @@ class IndicatorEngine:
             extra={"event": "indicator_engine_get_indicators_enter", "symbol": symbol},
         )
         try:
-            indicators: dict[str, float | tuple[float, float, float] | None] = {}
-            indicators["rsi"] = self.get_rsi(symbol)
-            indicators["ema"] = self.get_ema(symbol)
-            indicators["sma"] = self.get_sma(symbol)
+            with self._lock:
+                indicators: dict[str, float | tuple[float, float, float] | None] = {}
+                indicators["rsi"] = self.get_rsi(symbol)
+                indicators["ema"] = self.get_ema(symbol)
+                indicators["sma"] = self.get_sma(symbol)
             macd = self.get_macd(symbol)
             if macd is not None:
                 (
@@ -366,41 +371,44 @@ class IndicatorEngine:
 
     def get_rsi(self, symbol: str, period: int = 14) -> float | None:
         """Calculate RSI. Returns None if insufficient data."""
-        history = self._histories.get(symbol)
-        if history is None or len(history) < period + 1:
-            return None
-        last_timestamp = history.last_timestamp
-        if last_timestamp is None:
-            return None
-        cache_key = f"rsi_{period}"
-        cached = self._get_cached(symbol, cache_key, last_timestamp)
-        if cached is not None:
-            return cached  # type: ignore[return-value]
-        prices = history.get_closes(period + 1)
-        value = self._calculate_rsi(prices, period)
-        self._set_cache(symbol, cache_key, value, last_timestamp)
-        return value
+        with self._lock:
+            history = self._histories.get(symbol)
+            if history is None or len(history) < period + 1:
+                return None
+            last_timestamp = history.last_timestamp
+            if last_timestamp is None:
+                return None
+            cache_key = f"rsi_{period}"
+            cached = self._get_cached(symbol, cache_key, last_timestamp)
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+            prices = history.get_closes(period + 1)
+            value = self._calculate_rsi(prices, period)
+            self._set_cache(symbol, cache_key, value, last_timestamp)
+            return value
 
     def get_ema(self, symbol: str, period: int = 20) -> float | None:
         """Calculate EMA. Returns None if insufficient data."""
-        history = self._histories.get(symbol)
-        if history is None or len(history) < period:
-            return None
-        last_timestamp = history.last_timestamp
-        if last_timestamp is None:
-            return None
-        cache_key = f"ema_{period}"
-        cached = self._get_cached(symbol, cache_key, last_timestamp)
-        if cached is not None:
-            return cached  # type: ignore[return-value]
-        prices = history.get_closes()
-        value = self._calculate_ema(prices, period)
-        self._set_cache(symbol, cache_key, value, last_timestamp)
-        return value
+        with self._lock:
+            history = self._histories.get(symbol)
+            if history is None or len(history) < period:
+                return None
+            last_timestamp = history.last_timestamp
+            if last_timestamp is None:
+                return None
+            cache_key = f"ema_{period}"
+            cached = self._get_cached(symbol, cache_key, last_timestamp)
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+            prices = history.get_closes()
+            value = self._calculate_ema(prices, period)
+            self._set_cache(symbol, cache_key, value, last_timestamp)
+            return value
 
     def get_sma(self, symbol: str, period: int = 20) -> float | None:
         """Calculate SMA. Returns None if insufficient data."""
-        history = self._histories.get(symbol)
+        with self._lock:
+            history = self._histories.get(symbol)
         if history is None or len(history) < period:
             return None
         last_timestamp = history.last_timestamp
@@ -423,7 +431,8 @@ class IndicatorEngine:
         signal: int = 9,
     ) -> tuple[float, float, float] | None:
         """Calculate MACD. Returns (macd, signal, histogram) or None."""
-        history = self._histories.get(symbol)
+        with self._lock:
+            history = self._histories.get(symbol)
         if history is None or len(history) < slow + signal:
             return None
         last_timestamp = history.last_timestamp
@@ -447,7 +456,8 @@ class IndicatorEngine:
         std_dev: float = 2.0,
     ) -> tuple[float, float, float] | None:
         """Calculate Bollinger Bands. Returns (upper, middle, lower) or None."""
-        history = self._histories.get(symbol)
+        with self._lock:
+            history = self._histories.get(symbol)
         if history is None or len(history) < period:
             return None
         last_timestamp = history.last_timestamp
@@ -464,27 +474,29 @@ class IndicatorEngine:
 
     def get_atr(self, symbol: str, period: int = 14) -> float | None:
         """Calculate ATR. Returns None if insufficient data."""
-        history = self._histories.get(symbol)
-        if history is None or len(history) < period + 1:
-            return None
-        last_timestamp = history.last_timestamp
-        if last_timestamp is None:
-            return None
-        cache_key = f"atr_{period}"
-        cached = self._get_cached(symbol, cache_key, last_timestamp)
-        if cached is not None:
-            return cached  # type: ignore[return-value]
-        highs = history.get_highs(period + 1)
-        lows = history.get_lows(period + 1)
-        closes = history.get_closes(period + 1)
-        value = self._calculate_atr(highs, lows, closes, period)
-        self._set_cache(symbol, cache_key, value, last_timestamp)
-        return value
+        with self._lock:
+            history = self._histories.get(symbol)
+            if history is None or len(history) < period + 1:
+                return None
+            last_timestamp = history.last_timestamp
+            if last_timestamp is None:
+                return None
+            cache_key = f"atr_{period}"
+            cached = self._get_cached(symbol, cache_key, last_timestamp)
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+            highs = history.get_highs(period + 1)
+            lows = history.get_lows(period + 1)
+            closes = history.get_closes(period + 1)
+            value = self._calculate_atr(highs, lows, closes, period)
+            self._set_cache(symbol, cache_key, value, last_timestamp)
+            return value
 
     def get_vwap(self, symbol: str, period: int = 20) -> float | None:
         """Calculate VWAP. Returns None if insufficient data. NEVER raises."""
         try:
-            history = self._histories.get(symbol)
+            with self._lock:
+                history = self._histories.get(symbol)
             if history is None or len(history) == 0:
                 return None
             effective_period = min(period, len(history))
@@ -533,7 +545,8 @@ class IndicatorEngine:
             "Entered IndicatorEngine.get_atr_trend",
             extra={"event": "indicator_atr_trend", "symbol": symbol},
         )
-        history = self._histories.get(symbol)
+        with self._lock:
+            history = self._histories.get(symbol)
         if history is None:
             LOGGER.info(
                 "Condition met: atr_trend_missing_history",
@@ -628,7 +641,8 @@ class IndicatorEngine:
             "Entered IndicatorEngine.get_volatility_index",
             extra={"event": "indicator_vol_index", "symbol": symbol},
         )
-        history = self._histories.get(symbol)
+        with self._lock:
+            history = self._histories.get(symbol)
         if history is None:
             LOGGER.info(
                 "Condition met: volatility_index_missing_history",
@@ -1244,22 +1258,24 @@ class IndicatorEngine:
         return result
 
     def _get_cached(self, symbol: str, key: str, timestamp: datetime) -> Any | None:
-        symbol_cache = self._cache.get(symbol)
-        if symbol_cache is None:
+        with self._lock:
+            symbol_cache = self._cache.get(symbol)
+            if symbol_cache is None:
+                return None
+            cached = symbol_cache.get(key)
+            if cached is None:
+                return None
+            value, cached_timestamp = cached
+            if cached_timestamp == timestamp:
+                return value
             return None
-        cached = symbol_cache.get(key)
-        if cached is None:
-            return None
-        value, cached_timestamp = cached
-        if cached_timestamp == timestamp:
-            return value
-        return None
 
     def _set_cache(
         self, symbol: str, key: str, value: Any, timestamp: datetime
     ) -> None:
-        symbol_cache = self._cache.setdefault(symbol, {})
-        symbol_cache[key] = (value, timestamp)
+        with self._lock:
+            symbol_cache = self._cache.setdefault(symbol, {})
+            symbol_cache[key] = (value, timestamp)
 
     def compute_atr(self, symbol: str, period: int = 14) -> object | None:
         """

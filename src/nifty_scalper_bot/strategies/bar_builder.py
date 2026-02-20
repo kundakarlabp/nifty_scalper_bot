@@ -199,7 +199,8 @@ class OneMinuteBarBuilder:
             AssertionError: If called without an active bar (defensive).
         """
 
-        assert self._current is not None  # defensive: guarded by callers
+        if self._current is None:
+            raise RuntimeError("Cannot finalise bar without an active payload")
         payload = self._current
         bar = OneMinuteBar(
             open=float(payload["open"]),

@@ -269,7 +269,8 @@ class PollingStreamer:
                             if not symbol:
                                 continue
                             symbol = enforce_canonical(canonical(str(symbol)))
-                            assert symbol.count(":") == 1
+                            if symbol.count(":") != 1:
+                                raise RuntimeError(f"Malformed canonical symbol: {symbol}")
                             tick["symbol"] = symbol
 
                             # 4. Update Metrics
@@ -418,7 +419,8 @@ class PollingStreamer:
                             symbol = f"NSE:{symbol}"
 
                     symbol = enforce_canonical(canonical(symbol))
-                    assert symbol.count(":") == 1
+                    if symbol.count(":") != 1:
+                        raise RuntimeError(f"Malformed canonical symbol: {symbol}")
                     symbols_for_api.append(symbol)
                     token_to_symbol_map[token] = symbol
                     symbol_to_token_map[symbol] = token

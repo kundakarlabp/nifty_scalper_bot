@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+import logging
 import math
 import os
 import threading
@@ -29,7 +30,7 @@ from nifty_scalper_bot.streaming.websocket_manager import (
     WebSocketManager,
 )
 from nifty_scalper_bot.utils.env import get_str
-from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger
+from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
@@ -224,6 +225,8 @@ class MarketDataManager:
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
+        self._tick_stats: dict[str, int] = defaultdict(int)
+        self._last_tick_stats_log = time.monotonic()
         self._account_cache_ttl = self._parse_float_env(
             "MDM_ACCOUNT_CACHE_TTL", default=30.0, minimum=1.0
         )
@@ -946,7 +949,9 @@ class MarketDataManager:
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
-        symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
+        symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        if symbol.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {symbol}")
         with self._lock:
             subscribers = self._subscribers[symbol]
             subscribers.add(callback)
@@ -1000,7 +1005,9 @@ class MarketDataManager:
     def unsubscribe(self, symbol: str, callback: TickCallback) -> None:
         """Remove *callback* from subscribers of *symbol*."""
 
-        symbol = normalize_symbol(symbol) or symbol
+        symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        if symbol.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {symbol}")
         should_unsubscribe = False
         with self._lock:
             callbacks = self._subscribers.get(symbol)
@@ -2423,6 +2430,8 @@ class MarketDataManager:
             return
 
         symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        if symbol.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {symbol}")
 
         if symbol not in self._tracked_symbols:
             self._tracked_symbols.add(symbol)
@@ -2447,7 +2456,22 @@ class MarketDataManager:
         if self._ws:
             self.set_ws_connected(True)
         self.bump_heartbeat()
-        self._logger.info("LIVE_TICK %s %s", symbol, last_price)
+        log_throttled(
+            self._logger,
+            f"live_tick_{symbol}",
+            f"LIVE_TICK {symbol} {last_price}",
+            interval_sec=5.0,
+            level=logging.DEBUG,
+        )
+        self._tick_stats[symbol] += 1
+        now = time.monotonic()
+        if now - self._last_tick_stats_log >= 5.0:
+            summary = ", ".join(
+                f"{sym}:{cnt}" for sym, cnt in sorted(self._tick_stats.items())
+            )
+            self._logger.info(f"TICK_RATE_5S {summary}")
+            self._tick_stats.clear()
+            self._last_tick_stats_log = now
         self._emit_tick(symbol, normalized_tick, source="ws")
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
@@ -2881,13 +2905,15 @@ class MarketDataManager:
             "Entered ensure_tracking",
             extra={"event": "mdm_ensure_tracking_enter", "symbol": symbol},
         )
-        sym = normalize_symbol(str(symbol or ""))
+        sym = enforce_canonical(normalize_symbol(str(symbol or "")))
         if not sym:
             self._logger.info(
                 "Condition met: mdm_ensure_tracking_blank",
                 extra={"event": "mdm_ensure_tracking_blank"},
             )
             return False
+        if sym.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {sym}")
         try:
             with self._lock:
                 self._tracked_symbols.add(sym)
@@ -2931,13 +2957,15 @@ class MarketDataManager:
             "Entered untrack",
             extra={"event": "mdm_untrack_enter", "symbol": symbol},
         )
-        sym = normalize_symbol(str(symbol or ""))
+        sym = enforce_canonical(normalize_symbol(str(symbol or "")))
         if not sym:
             self._logger.info(
                 "Condition met: mdm_untrack_blank",
                 extra={"event": "mdm_untrack_blank"},
             )
             return False
+        if sym.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {sym}")
         try:
             with self._lock:
                 existed = sym in self._tracked_symbols
@@ -3025,7 +3053,7 @@ class MarketDataManager:
             extra={"event": "mdm_is_tracked_enter", "symbol": symbol},
         )
         try:
-            sym = normalize_symbol(str(symbol or ""))
+            sym = enforce_canonical(normalize_symbol(str(symbol or "")))
             if not sym:
                 return False
             with self._lock:
@@ -3076,8 +3104,9 @@ class MarketDataManager:
         outcome = "failure"
 
         try:
-            symbol = enforce_canonical(normalize_symbol(symbol))
-            assert symbol.count(":") == 1
+            symbol = enforce_canonical(normalize_symbol(str(symbol)))
+            if symbol.count(":") != 1:
+                raise RuntimeError(f"Malformed canonical symbol: {symbol}")
             broker = getattr(self, "_broker", None)
             if broker is None or not hasattr(broker, "get_quote"):
                 return False

@@ -419,9 +419,8 @@ class StrategyRunner:
         # Time block logging throttle
         self._time_block_logged: Dict[str, float] = {}
 
-        assert (
-            self._message_bus is not None
-        ), "MessageBus not injected into StrategyRunner"
+        if self._message_bus is None:
+            raise RuntimeError("MessageBus not injected into StrategyRunner")
         self._message_bus.subscribe(MessageType.TICK, self._handle_tick_message)
 
         hedge_env = os.getenv("NSB__ALLOW_HEDGE_ENTRIES", "false").strip().lower()
@@ -491,6 +490,7 @@ class StrategyRunner:
         self._lock = threading.RLock()
         self._running = False
         self._trading_paused = False
+        self.ready = False
         self._active_symbols: set[str] = set()
         self._tracked_symbols: set[str] = set()
         self._live_symbols: set[str] = set()
@@ -561,8 +561,10 @@ class StrategyRunner:
                 return
             self._running = True
             self._trading_paused = False
-            assert isinstance(self._active_symbols, set)
-            assert len(self._active_symbols) > 0
+            if not isinstance(self._active_symbols, set):
+                raise RuntimeError("Invalid active symbols container type")
+            if len(self._active_symbols) == 0:
+                raise RuntimeError("StrategyRunner start requires at least one active symbol")
             symbols = list(self._active_symbols)
             self._frozen_universe = set(symbols)
             self._universe_controller.update(symbols)
@@ -1100,7 +1102,8 @@ class StrategyRunner:
         # 5. THE KILL SWITCH: Prevents fallback backfill logic from running
         self._startup_hydrated = True
         self._runner_state = RunnerState.EXECUTION_ENABLED
-        self._logger.info("🚀 StrategyRunner execution enabled.")
+        self.ready = True
+        self._logger.info("🚀 StrategyRunner execution enabled")
 
         try:
             if self._market_data is not None and self._main_loop is not None:
@@ -2261,6 +2264,21 @@ class StrategyRunner:
             self._main_loop = asyncio.get_running_loop()
 
         tick: dict = message.data
+        symbol_value = tick.get("symbol")
+        symbol = (
+            enforce_canonical(normalize_symbol(str(symbol_value)))
+            if symbol_value
+            else "UNKNOWN"
+        )
+        if not self.ready:
+            log_throttled(
+                self._logger,
+                "runner_not_ready",
+                f"Dropping tick during warmup for {symbol}",
+                interval_sec=5.0,
+                level=logging.DEBUG,
+            )
+            return
         try:
             # Offload heavy synchronous processing (and blocking broker calls) to a thread
             await asyncio.to_thread(self._on_tick_safe, tick)
@@ -2320,8 +2338,12 @@ class StrategyRunner:
 
         try:
             normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+            if normalized_symbol.count(":") != 1:
+                raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
+            if now_mono - self._last_global_eval_ts > 5.0:
+                self._logger.error("No strategy evaluation in 5s despite ticks flowing")
             self._health_watchdog()
             self._logger.debug(
                 "PIPELINE_OK",
@@ -3207,9 +3229,12 @@ class StrategyRunner:
                 self._logger.warning("RISK_BLOCK", extra={"symbol": symbol})
                 return
             if self._runner_state != RunnerState.EXECUTION_ENABLED:
-                self._logger.debug(
-                    "EXECUTION_BLOCKED",
-                    extra={"state": str(self._runner_state)},
+                log_throttled(
+                    self._logger,
+                    "execution_blocked",
+                    f"Execution blocked: state={self._runner_state}",
+                    interval_sec=10.0,
+                    level=logging.DEBUG,
                 )
                 return
 

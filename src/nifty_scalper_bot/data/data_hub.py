@@ -251,7 +251,10 @@ class DataHub:
         normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
         canonical_tick = dict(tick)
         canonical_tick["symbol"] = normalized_symbol
-        assert ":" in canonical_tick["symbol"]
+        if canonical_tick["symbol"].count(":") != 1:
+            raise RuntimeError(
+                f"Malformed canonical symbol in ingest_tick: {canonical_tick['symbol']}"
+            )
 
         with self._lock:
             # 1. Update Cache
@@ -315,8 +318,9 @@ class DataHub:
         payload["seed"] = bool(seed)
 
         # Ensure symbol presence
-        canonical_symbol = enforce_canonical(canonical(symbol))
-        assert canonical_symbol.count(":") == 1
+        canonical_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        if canonical_symbol.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {canonical_symbol}")
         payload["symbol"] = canonical_symbol
 
         # Ensure timestamp (critical for freshness checks)
@@ -489,8 +493,9 @@ class DataHub:
 
     def subscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Register a callback for tick updates on a symbol."""
-        normalized = enforce_canonical(canonical(symbol))
-        assert normalized.count(":") == 1
+        normalized = enforce_canonical(normalize_symbol(str(symbol)))
+        if normalized.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {normalized}")
         with self._lock:
             if normalized not in self._tick_subscribers:
                 self._tick_subscribers[normalized] = set()
