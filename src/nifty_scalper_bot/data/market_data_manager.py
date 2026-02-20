@@ -3143,7 +3143,8 @@ class MarketDataManager:
 
         try:
             symbol = enforce_canonical(normalize_symbol(symbol))
-            assert symbol.count(":") == 1
+            if symbol.count(":") != 1:
+                raise RuntimeError(f"Malformed symbol after normalization: {symbol!r}")
             broker = getattr(self, "_broker", None)
             if broker is None or not hasattr(broker, "get_quote"):
                 return False

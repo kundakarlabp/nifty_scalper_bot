@@ -605,7 +605,15 @@ class WebSocketManager:
         """Args: ws, ticks; Returns: none; Raises: none."""
 
         del ws
-        assert isinstance(ticks, list), "Broker ticks must be list"
+        # Fail-fast: validate broker payload type without assert (disabled by -O flag,
+        # and AssertionError can propagate unexpectedly into KiteConnect's dispatcher).
+        if not isinstance(ticks, list):
+            self._logger.error(
+                "WSM._on_ticks: expected list from broker, got %s — dropping batch",
+                type(ticks).__name__,
+                extra={"event": "ws_ticks_not_list", "pipeline_stage": "WS_TICK"},
+            )
+            return
         if not ticks:
             return
 

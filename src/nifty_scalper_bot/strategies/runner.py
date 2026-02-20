@@ -2243,7 +2243,16 @@ class StrategyRunner:
         latency_ms = None
         if isinstance(ws_received_mono, (int, float)):
             latency_ms = max((time.monotonic() - float(ws_received_mono)) * 1000.0, 0.0)
-        assert self.ready, 'Runner received tick before ready'
+        # Guard: runner not ready yet (startup race) — drop tick gracefully.
+        # assert self.ready would raise AssertionError into the MessageBus dispatch loop,
+        # permanently killing the TICK dispatcher task and blackholing all future ticks.
+        if not self.ready:
+            self._logger.debug(
+                "Runner not ready — dropping tick for %s (startup warmup)",
+                symbol,
+                extra={"event": "runner_tick_dropped_not_ready", "symbol": symbol},
+            )
+            return
         self._logger.info('RUNNER_RECEIVED_TICK %s %s', symbol, ltp)
         if latency_ms is not None and latency_ms > 50.0:
             self._logger.warning('tick_pipeline_latency_breach symbol=%s latency_ms=%.2f', symbol, latency_ms)

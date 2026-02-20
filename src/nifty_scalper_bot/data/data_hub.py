@@ -389,7 +389,11 @@ class DataHub:
 
         # Ensure symbol presence
         canonical_symbol = enforce_canonical(canonical(symbol))
-        assert canonical_symbol.count(":") == 1
+        if canonical_symbol.count(":") != 1:
+            raise RuntimeError(
+                f"DataHub.store_quote: malformed symbol {canonical_symbol!r} "
+                "(expected exactly one ':' separator e.g. 'NSE:NIFTY 50')"
+            )
         payload["symbol"] = canonical_symbol
 
         # Ensure timestamp (critical for freshness checks)
@@ -563,7 +567,11 @@ class DataHub:
     def subscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Register a callback for tick updates on a symbol."""
         normalized = enforce_canonical(canonical(symbol))
-        assert normalized.count(":") == 1
+        if normalized.count(":") != 1:
+            raise RuntimeError(
+                f"DataHub.subscribe_ticks: malformed symbol {normalized!r} "
+                "(expected exactly one ':' separator)"
+            )
         with self._lock:
             if normalized not in self._tick_subscribers:
                 self._tick_subscribers[normalized] = set()
