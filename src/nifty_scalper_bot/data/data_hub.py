@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 import re
-from collections import defaultdict
 from threading import RLock
 import time
 from typing import Any, Callable, Iterable, Mapping, TypedDict, cast
@@ -47,7 +47,9 @@ class EventBus:
         )
         self._lock = RLock()
 
-    def subscribe(self, event_name: str, handler: Callable[[dict[str, Any]], None]) -> None:
+    def subscribe(
+        self, event_name: str, handler: Callable[[dict[str, Any]], None]
+    ) -> None:
         """Args: event_name, handler; Returns: none; Raises: none."""
         with self._lock:
             self._handlers[event_name].append(handler)
@@ -246,11 +248,14 @@ class DataHub:
         symbol = tick.get("symbol")
         if not symbol:
             return
-        normalized_symbol = enforce_canonical(canonical(str(symbol)))
+        normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        canonical_tick = dict(tick)
+        canonical_tick["symbol"] = normalized_symbol
+        assert ":" in canonical_tick["symbol"]
 
         with self._lock:
             # 1. Update Cache
-            self._quotes[normalized_symbol] = tick
+            self._quotes[normalized_symbol] = canonical_tick
 
             # 2. Update Metrics (Throttled)
             try:
@@ -265,20 +270,24 @@ class DataHub:
                         Message(
                             type=MessageType.TICK,
                             timestamp=datetime.now(timezone.utc),
-                            data=tick,
+                            data=dict(canonical_tick),
                             source="data_hub",
                         )
                     )
                 except Exception as exc:
-                    LOGGER.error("Failure in DataHub.ingest_tick: %s", exc, exc_info=exc)
+                    LOGGER.error(
+                        "Failure in DataHub.ingest_tick: %s", exc, exc_info=exc
+                    )
             else:
-                LOGGER.debug("DataHub has no event_bus — tick cached without bus publish")
+                LOGGER.debug(
+                    "DataHub has no event_bus — tick cached without bus publish"
+                )
 
             # 4. Notify Legacy Subscribers (Backward Compatibility)
             if normalized_symbol in self._tick_subscribers:
                 for callback in list(self._tick_subscribers[normalized_symbol]):
                     try:
-                        callback(tick)
+                        callback(dict(canonical_tick))
                     except Exception as exc:
                         # This is likely where the "Tick callback failed" log comes from
                         LOGGER.error(

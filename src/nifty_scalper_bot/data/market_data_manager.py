@@ -2351,21 +2351,15 @@ class MarketDataManager:
     def attach_tick_bus(self, tick_bus: Any) -> None:
         """Args: tick_bus; Returns: none; Raises: none."""
         try:
+            # TickBus is used as outbound fan-out only (MDM -> DataHub).
+            # Do not subscribe MDM back onto TickBus to keep a single tick path.
             self._tick_bus = tick_bus
-            subscribe = getattr(tick_bus, "subscribe", None)
-            if callable(subscribe):
-                subscribe(self._on_tick)
         except Exception as e:
             self._logger.error("Failure in MarketDataManager.attach_tick_bus: %s", e)
 
     def _on_tick(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
         try:
-            # WS-source ticks are already processed via the direct _handle_tick callback.
-            # Skipping here prevents a re-entry loop:
-            # _emit_tick → tick_bus.publish(ws tick) → _on_tick → _handle_tick → _emit_tick
-            if str(tick.get("source", "")).lower() == "ws":
-                return
             symbol_value = tick.get("symbol")
             if not symbol_value:
                 return
@@ -2454,7 +2448,7 @@ class MarketDataManager:
             self.set_ws_connected(True)
         self.bump_heartbeat()
         self._logger.info("LIVE_TICK %s %s", symbol, last_price)
-        self._emit_tick(symbol, normalized_tick, source=tick.get("source", "ws"))
+        self._emit_tick(symbol, normalized_tick, source="ws")
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
@@ -2600,6 +2594,7 @@ class MarketDataManager:
         """Args: none; Returns: none; Raises: none."""
 
         from nifty_scalper_bot.utils.market_hours import is_market_open
+
         if not is_market_open():
             self._zombie_stale_logged = False
             return
