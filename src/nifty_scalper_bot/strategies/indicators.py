@@ -8,7 +8,6 @@ that calculates common technical indicators from the stored price history.
 from __future__ import annotations
 
 import logging
-import threading
 from collections import deque
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Sequence
@@ -178,11 +177,6 @@ class IndicatorEngine:
         self._histories: Dict[str, PriceHistory] = {}
         self._cache: Dict[str, Dict[str, tuple[Any, datetime]]] = {}
         self._last_valid_vwap: Dict[str, float] = {}
-        # RLock because update_price and get_indicators can both be called from
-        # asyncio.to_thread (thread pool) for multiple symbols concurrently.
-        # RLock (re-entrant) allows the same thread to acquire it twice without
-        # deadlocking when compute methods call each other internally.
-        self._lock = threading.RLock()
 
     def update_price(
         self,
@@ -195,18 +189,16 @@ class IndicatorEngine:
         is_provisional: bool = False,
     ) -> None:
         """Update price for symbol and invalidate cache."""
-        with self._lock:
-            history = self._histories.setdefault(symbol, PriceHistory())
-            timestamp = timestamp or datetime.now(timezone.utc)
-            history.add_tick(
-                price,
-                volume,
-                timestamp,
-                is_complete=is_complete,
-                is_provisional=is_provisional,
-            )
-            # Invalidate under the same lock so get_indicators never reads stale cache
-            self._cache.pop(symbol, None)
+        history = self._histories.setdefault(symbol, PriceHistory())
+        timestamp = timestamp or datetime.now(timezone.utc)
+        history.add_tick(
+            price,
+            volume,
+            timestamp,
+            is_complete=is_complete,
+            is_provisional=is_provisional,
+        )
+        self._cache.pop(symbol, None)
 
     def get_history(self, symbol: str, count: int | None = None) -> list[float]:
         """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
@@ -247,131 +239,130 @@ class IndicatorEngine:
             "Entered IndicatorEngine.get_indicators",
             extra={"event": "indicator_engine_get_indicators_enter", "symbol": symbol},
         )
-        with self._lock:
+        try:
+            indicators: dict[str, float | tuple[float, float, float] | None] = {}
+            indicators["rsi"] = self.get_rsi(symbol)
+            indicators["ema"] = self.get_ema(symbol)
+            indicators["sma"] = self.get_sma(symbol)
+            macd = self.get_macd(symbol)
+            if macd is not None:
+                (
+                    indicators["macd"],
+                    indicators["macd_signal"],
+                    indicators["macd_histogram"],
+                ) = macd
+            else:
+                indicators["macd"] = indicators["macd_signal"] = indicators[
+                    "macd_histogram"
+                ] = None
+            bands = self.get_bollinger_bands(symbol)
+            if bands is not None:
+                (
+                    indicators["bollinger_upper"],
+                    indicators["bollinger_middle"],
+                    indicators["bollinger_lower"],
+                ) = bands
+            else:
+                indicators["bollinger_upper"] = indicators["bollinger_middle"] = (
+                    indicators["bollinger_lower"]
+                ) = None
+            indicators["atr"] = self.get_atr(symbol)
+            indicators["atr_trend"] = self.get_atr_trend(symbol)
+            indicators["volatility_index"] = self.get_volatility_index(symbol)
+            indicators["vwap"] = self.get_vwap(symbol)
             try:
-                indicators: dict[str, float | tuple[float, float, float] | None] = {}
-                indicators["rsi"] = self.get_rsi(symbol)
-                indicators["ema"] = self.get_ema(symbol)
-                indicators["sma"] = self.get_sma(symbol)
-                macd = self.get_macd(symbol)
-                if macd is not None:
-                    (
-                        indicators["macd"],
-                        indicators["macd_signal"],
-                        indicators["macd_histogram"],
-                    ) = macd
-                else:
-                    indicators["macd"] = indicators["macd_signal"] = indicators[
-                        "macd_histogram"
-                    ] = None
-                bands = self.get_bollinger_bands(symbol)
-                if bands is not None:
-                    (
-                        indicators["bollinger_upper"],
-                        indicators["bollinger_middle"],
-                        indicators["bollinger_lower"],
-                    ) = bands
-                else:
-                    indicators["bollinger_upper"] = indicators["bollinger_middle"] = (
-                        indicators["bollinger_lower"]
-                    ) = None
-                indicators["atr"] = self.get_atr(symbol)
-                indicators["atr_trend"] = self.get_atr_trend(symbol)
-                indicators["volatility_index"] = self.get_volatility_index(symbol)
-                indicators["vwap"] = self.get_vwap(symbol)
+                self._augment_session_metrics(symbol, indicators)
+            except Exception:
+                pass  # Session metrics are non-critical — don't crash pipeline
+            # ✅ FIX S1: Expose latest-bar OHLC for strategies that need it
+            history = self._histories.get(symbol)
+            if history and len(history) > 0:
+                closes = history.get_closes(1)
+                highs = history.get_highs(1)
+                lows = history.get_lows(1)
+                opens = (
+                    history.get_opens(1) if hasattr(history, "get_opens") else closes
+                )
+                if closes:
+                    indicators.setdefault("close", float(closes[-1]))
+                if highs:
+                    indicators.setdefault("high", float(highs[-1]))
+                if lows:
+                    indicators.setdefault("low", float(lows[-1]))
+                if opens:
+                    indicators.setdefault("open", float(opens[-1]))
+            _always_include = {
+                "vwap",
+                "atr",
+                "volume",
+                "avg_volume",
+                "rsi",
+                "high",
+                "low",
+                "close",
+                "open",
+                "bollinger_upper",
+                "bollinger_lower",
+                "bollinger_middle",
+                "minutes_since_open",
+                "minutes_until_close",
+                "volume_spike_ratio",
+                "bar_range",
+            }
+            name_set: set[str] = set()
+            if names is None:
+                log_throttled(
+                    LOGGER,
+                    f"indicator_names_defaulted_{symbol}",
+                    "Condition met: indicator_names_defaulted",
+                    interval_sec=60.0,
+                    extra={
+                        "event": "indicator_engine_names_defaulted",
+                        "symbol": symbol,
+                    },
+                )
+            else:
                 try:
-                    self._augment_session_metrics(symbol, indicators)
-                except Exception:
-                    pass  # Session metrics are non-critical — don't crash pipeline
-                # ✅ FIX S1: Expose latest-bar OHLC for strategies that need it
-                history = self._histories.get(symbol)
-                if history and len(history) > 0:
-                    closes = history.get_closes(1)
-                    highs = history.get_highs(1)
-                    lows = history.get_lows(1)
-                    opens = (
-                        history.get_opens(1) if hasattr(history, "get_opens") else closes
-                    )
-                    if closes:
-                        indicators.setdefault("close", float(closes[-1]))
-                    if highs:
-                        indicators.setdefault("high", float(highs[-1]))
-                    if lows:
-                        indicators.setdefault("low", float(lows[-1]))
-                    if opens:
-                        indicators.setdefault("open", float(opens[-1]))
-                _always_include = {
-                    "vwap",
-                    "atr",
-                    "volume",
-                    "avg_volume",
-                    "rsi",
-                    "high",
-                    "low",
-                    "close",
-                    "open",
-                    "bollinger_upper",
-                    "bollinger_lower",
-                    "bollinger_middle",
-                    "minutes_since_open",
-                    "minutes_until_close",
-                    "volume_spike_ratio",
-                    "bar_range",
-                }
-                name_set: set[str] = set()
-                if names is None:
+                    name_set = {str(name) for name in names if name is not None}
+                except TypeError as e:
                     log_throttled(
                         LOGGER,
-                        f"indicator_names_defaulted_{symbol}",
-                        "Condition met: indicator_names_defaulted",
+                        f"indicator_names_invalid_{symbol}",
+                        "Condition met: indicator_names_invalid",
                         interval_sec=60.0,
                         extra={
-                            "event": "indicator_engine_names_defaulted",
+                            "event": "indicator_engine_names_invalid",
                             "symbol": symbol,
                         },
                     )
-                else:
-                    try:
-                        name_set = {str(name) for name in names if name is not None}
-                    except TypeError as e:
-                        log_throttled(
-                            LOGGER,
-                            f"indicator_names_invalid_{symbol}",
-                            "Condition met: indicator_names_invalid",
-                            interval_sec=60.0,
-                            extra={
-                                "event": "indicator_engine_names_invalid",
-                                "symbol": symbol,
-                            },
-                        )
-                        LOGGER.error(
-                            "Failure in IndicatorEngine.get_indicators: %s",
-                            e,
-                            extra={
-                                "event": "indicator_engine_names_error",
-                                "symbol": symbol,
-                            },
-                            exc_info=e,
-                        )
-                        name_set = set()
-                all_names = name_set | _always_include
-                requested: dict[str, float | tuple[float, float, float] | None] = {}
-                for name in all_names:
-                    key = str(name)
-                    if key in indicators:
-                        requested[key] = indicators[key]
-                return requested
-            except Exception as e:
-                LOGGER.error(
-                    "Failure in IndicatorEngine.get_indicators: %s",
-                    e,
-                    extra={
-                        "event": "indicator_engine_get_indicators_error",
-                        "symbol": symbol,
-                    },
-                    exc_info=e,
-                )
-                return {}
+                    LOGGER.error(
+                        "Failure in IndicatorEngine.get_indicators: %s",
+                        e,
+                        extra={
+                            "event": "indicator_engine_names_error",
+                            "symbol": symbol,
+                        },
+                        exc_info=e,
+                    )
+                    name_set = set()
+            all_names = name_set | _always_include
+            requested: dict[str, float | tuple[float, float, float] | None] = {}
+            for name in all_names:
+                key = str(name)
+                if key in indicators:
+                    requested[key] = indicators[key]
+            return requested
+        except Exception as e:
+            LOGGER.error(
+                "Failure in IndicatorEngine.get_indicators: %s",
+                e,
+                extra={
+                    "event": "indicator_engine_get_indicators_error",
+                    "symbol": symbol,
+                },
+                exc_info=e,
+            )
+            return {}
 
     def get_rsi(self, symbol: str, period: int = 14) -> float | None:
         """Calculate RSI. Returns None if insufficient data."""
