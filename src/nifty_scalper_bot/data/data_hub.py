@@ -329,10 +329,27 @@ class DataHub:
 
             payload["timestamp"] = int(time.time() * 1000)
 
-        # 3. 🔥 CRITICAL REDIRECT 🔥
-        # Send to the async pipeline to trigger MessageBus, Strategies, and Greeks.
-        # This makes Polling/Rest/Scout sources "Alive".
-        self.ingest_tick_sync(payload)
+        with self._lock:
+            self._quotes[canonical_symbol] = dict(payload)
+
+        if self._message_bus is not None:
+            message = Message(
+                type=MessageType.TICK,
+                timestamp=datetime.now(timezone.utc),
+                data=payload,
+                source="data_hub",
+            )
+            try:
+                publish_result = self._message_bus.publish(message)
+                if asyncio.iscoroutine(publish_result):
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        asyncio.run(publish_result)
+                    else:
+                        loop.create_task(publish_result)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error("Failure in DataHub.store_quote: %s", exc, exc_info=exc)
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
         """Atomically replace the entire position snapshot."""

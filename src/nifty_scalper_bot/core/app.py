@@ -3542,19 +3542,19 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             # B. Fallback Defaults
             sym_upper = symbol.upper()
             if "NIFTY" in sym_upper:
-                return 75  # Force 75 for NIFTY
+                return 65  # Updated NIFTY lot size fallback
             if "BANKNIFTY" in sym_upper:
                 return 15
             return 1
         except Exception:
             # C. Safety Net
             if "NIFTY" in symbol.upper():
-                return 75
+                return 65
             return 1
 
     # Always attach the provider
     risk_manager.set_lot_size_provider(_lot_size_lookup)
-    LOGGER.info("✅ Wired Lot Size Provider to Risk Manager (NIFTY=75)")
+    LOGGER.info("✅ Wired Lot Size Provider to Risk Manager (NIFTY=65)")
 
     risk_state: RiskState | None = None
     try:
