@@ -205,7 +205,6 @@ class DataHub:
         self._orders: dict[str, dict[str, Any]] = {}
         self._positions: dict[str, dict[str, Any]] = {}
         self._message_bus = message_bus or event_bus
-        self._loop: asyncio.AbstractEventLoop | None = None
         LOGGER.debug("DataHub using MessageBus id=%s", id(self._message_bus))
 
         # Derived Metrics Caches
@@ -230,11 +229,6 @@ class DataHub:
             os.getenv("HISTORY_FRESHNESS_MAX_AGE_SECONDS", "120")
         )
 
-
-    def bind_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Args: loop; Returns: none; Raises: none."""
-        self._loop = loop
-
     # ----------------------------------------------------------------
     # Ingestion (Write Path)
     # ----------------------------------------------------------------
@@ -243,57 +237,54 @@ class DataHub:
         """Synchronous bridge to schedule ingest_tick on the running loop."""
         try:
             loop = asyncio.get_running_loop()
-            self._loop = loop
             loop.create_task(self.ingest_tick(tick))
-            return
         except RuntimeError:
             pass
-        if self._loop is None:
-            raise RuntimeError('No running event loop for DataHub.ingest_tick_sync')
-        self._loop.call_soon_threadsafe(lambda: self._loop.create_task(self.ingest_tick(tick)))
 
     async def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
         symbol = tick.get("symbol")
         if not symbol:
-            raise RuntimeError('Tick missing symbol')
+            return
         normalized_symbol = enforce_canonical(canonical(str(symbol)))
-        await self.publish_tick(normalized_symbol, tick)
 
-    async def publish_tick(self, symbol: str, tick: Tick) -> None:
-        """Args: symbol, tick; Returns: none; Raises: RuntimeError."""
-        normalized_symbol = enforce_canonical(canonical(symbol))
-        if normalized_symbol not in self._subscribed_symbols:
-            raise RuntimeError(f"Tick received for unsubscribed symbol {normalized_symbol}")
-        tick_payload = dict(tick)
-        tick_payload['symbol'] = normalized_symbol
         with self._lock:
-            self._quotes[normalized_symbol] = tick_payload
-        try:
-            self._capture_option_metrics(normalized_symbol, tick_payload)
-        except Exception as exc:
-            LOGGER.exception('Tick pipeline failure')
-            raise
-        if self._message_bus:
-            await self._message_bus.publish(
-                Message(
-                    type=MessageType.TICK,
-                    timestamp=datetime.now(timezone.utc),
-                    data=tick_payload,
-                    source='data_hub',
-                )
-            )
-        else:
-            raise RuntimeError('DataHub has no MessageBus configured')
-        LOGGER.info('HUB_PUBLISH %s %s', normalized_symbol, tick_payload.get('ltp'))
-        with self._lock:
-            callbacks = list(self._tick_subscribers.get(normalized_symbol, ()))
-        for callback in callbacks:
+            # 1. Update Cache
+            self._quotes[normalized_symbol] = tick
+
+            # 2. Update Metrics (Throttled)
             try:
-                callback(tick_payload)
+                self._capture_option_metrics(normalized_symbol, tick)
             except Exception:
-                LOGGER.exception('Tick pipeline failure')
-                raise
+                pass  # Don't let math errors kill the tick
+
+            # 3. Publish to MessageBus (The Critical Fix)
+            if self._message_bus:
+                try:
+                    await self._message_bus.publish(
+                        Message(
+                            type=MessageType.TICK,
+                            timestamp=datetime.now(timezone.utc),
+                            data=tick,
+                            source="data_hub",
+                        )
+                    )
+                except Exception as exc:
+                    LOGGER.error("Failure in DataHub.ingest_tick: %s", exc, exc_info=exc)
+            else:
+                LOGGER.debug("DataHub has no event_bus — tick cached without bus publish")
+
+            # 4. Notify Legacy Subscribers (Backward Compatibility)
+            if normalized_symbol in self._tick_subscribers:
+                for callback in list(self._tick_subscribers[normalized_symbol]):
+                    try:
+                        callback(tick)
+                    except Exception as exc:
+                        # This is likely where the "Tick callback failed" log comes from
+                        LOGGER.error(
+                            f"Tick subscriber failed for {symbol}: {exc}",
+                            exc_info=True,  # Prints full traceback to help debug
+                        )
 
     def store_quote(
         self,

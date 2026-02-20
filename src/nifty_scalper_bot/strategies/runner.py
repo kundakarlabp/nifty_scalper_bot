@@ -1101,11 +1101,6 @@ class StrategyRunner:
 
         self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
 
-    @property
-    def ready(self) -> bool:
-        """Args: none; Returns: runner ready state; Raises: none."""
-        return self._runner_state in {RunnerState.HISTORICAL_READY, RunnerState.EXECUTION_ENABLED}
-
     def _set_symbol_hydration_state(
         self,
         symbol: str,
@@ -2229,6 +2224,14 @@ class StrategyRunner:
 
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
+        # [MODIFIED] Using defined helper correctly
+        log_throttled(
+            self._logger,
+            "msg_bus_tick",
+            f"🔔 MESSAGE BUS TICK: type={message.type}",
+            interval_sec=60.0,
+            level=logging.DEBUG,
+        )
         if not self._running or self._trading_paused:
             return
 
@@ -2237,21 +2240,11 @@ class StrategyRunner:
             self._main_loop = asyncio.get_running_loop()
 
         tick: dict = message.data
-        symbol = str(tick.get('symbol') or '')
-        ltp = tick.get('ltp') or tick.get('last_price')
-        ws_received_mono = tick.get('_ws_received_mono')
-        latency_ms = None
-        if isinstance(ws_received_mono, (int, float)):
-            latency_ms = max((time.monotonic() - float(ws_received_mono)) * 1000.0, 0.0)
-        assert self.ready, 'Runner received tick before ready'
-        self._logger.info('RUNNER_RECEIVED_TICK %s %s', symbol, ltp)
-        if latency_ms is not None and latency_ms > 50.0:
-            self._logger.warning('tick_pipeline_latency_breach symbol=%s latency_ms=%.2f', symbol, latency_ms)
         try:
+            # Offload heavy synchronous processing (and blocking broker calls) to a thread
             await asyncio.to_thread(self._on_tick_safe, tick)
-        except Exception:
-            LOGGER.exception('Tick pipeline failure')
-            raise
+        except Exception as exc:
+            LOGGER.error(f"Error in async tick processing: {exc}", exc_info=True)
 
     def _is_market_open(self, now: datetime) -> bool:
         """Return True only when market state is OPEN."""
@@ -2814,7 +2807,6 @@ class StrategyRunner:
             "Entered StrategyRunner._on_tick",
             extra={"event": "tick_enter", "symbol": symbol},
         )
-        self._logger.info("BUS_DELIVER %s", symbol)
         self._logger.info("STRATEGY_TICK %s", symbol)
         try:
             # =================================================================

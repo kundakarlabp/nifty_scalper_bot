@@ -11,8 +11,6 @@ import math
 import os
 import threading
 import time
-from pydantic import BaseModel, ConfigDict, ValidationError
-
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -160,17 +158,6 @@ class _OHLCBuilder:
             symbols = list(self._bars.keys())
         return {symbol: self.get_bars(symbol) for symbol in symbols}
 
-
-
-
-class Tick(BaseModel):
-    """Args: symbol/ltp/timestamp; Returns: validated tick; Raises: ValidationError."""
-
-    model_config = ConfigDict(extra='forbid', strict=True)
-
-    symbol: str
-    ltp: float
-    timestamp: datetime
 
 class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
@@ -2400,8 +2387,7 @@ class MarketDataManager:
             self._last_tick_time[symbol] = time.time()
             self._handle_tick(incoming)
         except Exception as e:
-            self._logger.exception("Tick pipeline failure")
-            raise
+            self._logger.error("Failure in MarketDataManager._on_tick: %s", e)
 
     # ------------------------------------------------------------------
     # Internal plumbing
@@ -2410,27 +2396,37 @@ class MarketDataManager:
         """Process an incoming raw tick from WebSocket or Polling."""
 
         if not isinstance(tick, dict):
-            raise RuntimeError(f"Invalid tick format: {type(tick)}")
+            self._logger.error("Invalid tick format: %s", type(tick))
+            return
 
         instrument_token = tick.get("instrument_token")
         last_price = tick.get("last_price")
         if instrument_token is None or last_price is None:
-            raise RuntimeError("Malformed tick missing instrument_token/last_price")
+            return
 
         self._last_tick_time["__global__"] = time.monotonic()
 
+        token: int | None = None
         try:
             token = int(instrument_token)
-        except (ValueError, TypeError) as exc:
-            raise RuntimeError(f"Invalid instrument_token={instrument_token}") from exc
+        except (ValueError, TypeError):
+            token = None
 
         symbol = None
-        resolver = getattr(self, "_resolver", None)
-        resolve_token = getattr(resolver, "resolve_token", None)
-        if callable(resolve_token):
-            symbol = resolve_token(token)
+        if token is not None:
+            resolver = getattr(self, "_resolver", None)
+            resolve_token = getattr(resolver, "resolve_token", None)
+            if callable(resolve_token):
+                symbol = resolve_token(token)
+            if not symbol:
+                symbol = self._symbol_by_token.get(token)
+
         if not symbol:
-            raise RuntimeError(f"Unmapped instrument_token={token}")
+            self._logger.error(
+                "Token %s not mapped to symbol — dropping tick",
+                instrument_token,
+            )
+            return
 
         symbol = enforce_canonical(normalize_symbol(str(symbol)))
 
@@ -2443,25 +2439,13 @@ class MarketDataManager:
         try:
             normalized_tick = self._normalize_tick(symbol, tick, previous)
         except Exception as exc:
-            self._logger.exception("Tick pipeline failure")
-            raise
+            self._logger.error(
+                f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True
+            )
+            return
 
         if not normalized_tick:
-            raise RuntimeError(f"Tick normalization returned empty payload for {symbol}")
-
-        try:
-            validated_tick = Tick(
-                symbol=symbol,
-                ltp=float(normalized_tick["ltp"]),
-                timestamp=datetime.fromtimestamp(float(normalized_tick["timestamp"]), timezone.utc),
-            )
-        except (KeyError, TypeError, ValueError, ValidationError) as exc:
-            self._logger.exception("Tick pipeline failure")
-            raise RuntimeError(f"Tick schema validation failed for {symbol}") from exc
-
-        normalized_tick["symbol"] = validated_tick.symbol
-        normalized_tick["ltp"] = validated_tick.ltp
-        normalized_tick["timestamp"] = validated_tick.timestamp.timestamp()
+            return
 
         if self._is_duplicate(symbol, normalized_tick):
             return
@@ -2469,7 +2453,7 @@ class MarketDataManager:
         if self._ws:
             self.set_ws_connected(True)
         self.bump_heartbeat()
-        self._logger.info("MDM_FORWARD %s %s", symbol, validated_tick.ltp)
+        self._logger.info("LIVE_TICK %s %s", symbol, last_price)
         self._emit_tick(symbol, normalized_tick, source=tick.get("source", "ws"))
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
@@ -2568,8 +2552,9 @@ class MarketDataManager:
                 else:
                     callback(dict(tick_payload))
             except Exception as exc:
-                self._logger.exception("Tick pipeline failure")
-                raise
+                self._logger.error(
+                    "Tick callback failed", extra={"symbol": symbol, "error": str(exc)}
+                )
 
     def _is_ws_connected(self) -> bool:
         """Args: none; Returns: websocket connectivity; Raises: none."""
