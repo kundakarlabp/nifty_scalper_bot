@@ -2243,7 +2243,16 @@ class StrategyRunner:
         latency_ms = None
         if isinstance(ws_received_mono, (int, float)):
             latency_ms = max((time.monotonic() - float(ws_received_mono)) * 1000.0, 0.0)
-        assert self.ready, 'Runner received tick before ready'
+        # Guard: runner not ready yet (startup race) — drop tick gracefully.
+        # assert self.ready would raise AssertionError into the MessageBus dispatch loop,
+        # permanently killing the TICK dispatcher task and blackholing all future ticks.
+        if not self.ready:
+            self._logger.debug(
+                "Runner not ready — dropping tick for %s (startup warmup)",
+                symbol,
+                extra={"event": "runner_tick_dropped_not_ready", "symbol": symbol},
+            )
+            return
         self._logger.info('RUNNER_RECEIVED_TICK %s %s', symbol, ltp)
         if latency_ms is not None and latency_ms > 50.0:
             self._logger.warning('tick_pipeline_latency_breach symbol=%s latency_ms=%.2f', symbol, latency_ms)
@@ -3182,6 +3191,12 @@ class StrategyRunner:
             # PHASE 6: RISK CHECK (Block trading if risk conditions not met)
             # =================================================================
 
+            # ── Observable: L7 Risk Gate ──
+            self._logger.debug(
+                "RISK_GATE symbol=%s stage=RiskEngine",
+                symbol,
+                extra={"event": "risk_gate_check", "symbol": symbol, "pipeline_stage": "RISK_ENGINE"},
+            )
             if not self._risk_allows_trading(symbol):
                 log_throttled(
                     self._logger,
@@ -3189,6 +3204,7 @@ class StrategyRunner:
                     f"⛔ Risk Block Active: {symbol}. Trading Halted.",
                     interval_sec=30.0,
                     level=logging.WARNING,
+                    extra={"event": "risk_gate_blocked", "symbol": symbol, "pipeline_stage": "RISK_ENGINE"},
                 )
                 return
             if self._runner_state != RunnerState.EXECUTION_ENABLED:
@@ -3258,28 +3274,20 @@ class StrategyRunner:
                     else None
                 )
                 if spot_tick is None and self._market_data is not None:
-                    try:
-                        spot_token = int(
-                            self._market_data.get_token("NSE:NIFTY 50") or 0
-                        )
-                        if spot_token > 0:
-                            loop = self._main_loop
-                            if loop is not None:
-                                fut = asyncio.run_coroutine_threadsafe(
-                                    self._market_data.wait_for_live_tick(
-                                        spot_token,
-                                        timeout=2,
-                                    ),
-                                    loop,
-                                )
-                                spot_tick = fut.result(timeout=2.5)
-                    except Exception as exc:
-                        self._logger.error(
-                            "Failure in StrategyRunner._on_tick wait_for_live_spot: %s",
-                            exc,
-                            exc_info=True,
-                        )
-                        return
+                    # ── Non-blocking: use cached tick only.
+                    # The previous path used fut.result(timeout=2.5) which BLOCKS
+                    # the KiteConnect WS OS thread for up to 2.5 s per option tick,
+                    # freezing the entire tick pipeline and causing cascade staleness.
+                    # If NSE:NIFTY 50 tick is not yet in cache, skip this evaluation
+                    # cycle — it will retry on the very next tick (< 1 s away).
+                    log_throttled(
+                        self._logger,
+                        "spot_tick_cache_miss",
+                        "SPOT_MISS: NSE:NIFTY 50 not in cache — skipping eval cycle (non-blocking)",
+                        interval_sec=10.0,
+                        level=logging.DEBUG,
+                        extra={"event": "spot_tick_cache_miss", "symbol": symbol},
+                    )
                 if not spot_tick:
                     return
                 spot_ts = _extract_float(spot_tick, "timestamp", "ts", "ts_ms")
@@ -3717,8 +3725,18 @@ class StrategyRunner:
                             "timestamp": now.isoformat(),
                         }
 
+                # ── Observable: L8 Execution Engine entry ──
                 self._logger.info(
-                    f"🚀 SIGNAL EXECUTING: {symbol} | Action={signal.action} | Reason={signal.reason}"
+                    "EXEC_TRIGGER symbol=%s action=%s reason=%s price=%.2f stage=ExecutionEngine",
+                    symbol, signal.action, signal.reason, price,
+                    extra={
+                        "event": "exec_trigger",
+                        "symbol": symbol,
+                        "action": signal.action,
+                        "reason": signal.reason,
+                        "price": price,
+                        "pipeline_stage": "EXECUTION_ENGINE",
+                    },
                 )
                 self._handle_signal(signal, price, now)
         except Exception as e:
