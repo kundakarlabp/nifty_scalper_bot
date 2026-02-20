@@ -465,7 +465,7 @@ class MarketRegimeManager:
                 return
 
             # ✅ PROOF OF LIFE LOG
-            logger.info(
+            logger.debug(
                 "Regime snapshot refreshed from indicators",
                 extra={
                     "event": "regime_snapshot_refreshed",

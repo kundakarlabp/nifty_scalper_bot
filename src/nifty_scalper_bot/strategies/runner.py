@@ -551,6 +551,8 @@ class StrategyRunner:
         self._session_gap_count: dict[str, int] = {}
         self._runner_state: RunnerState = RunnerState.STARTING
         self._active_orphan_guards: set[str] = set()
+        self._signals_last_hour: Deque[float] = deque(maxlen=1000)
+        self._last_signal_frequency_check_ts: float = 0.0
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -2279,6 +2281,14 @@ class StrategyRunner:
                 level=logging.DEBUG,
             )
             return
+
+        if self._runner_state != RunnerState.EXECUTION_ENABLED:
+            self._logger.debug(
+                "Execution blocked: runner_state=%s",
+                self._runner_state,
+                extra={"event": "execution_blocked_state"},
+            )
+            return
         try:
             # Offload heavy synchronous processing (and blocking broker calls) to a thread
             await asyncio.to_thread(self._on_tick_safe, tick)
@@ -2828,30 +2838,44 @@ class StrategyRunner:
             return False
         return True
 
-    def _risk_allows_trading(self, symbol: str | None) -> bool:
-        """Return whether risk engine allows entering strategy flow."""
+    def _risk_allows_trading_with_reason(self, symbol: str | None) -> tuple[bool, str]:
+        """Return whether risk engine allows entering strategy flow with reason."""
         try:
             rm = self._risk_manager
             if rm is None:
-                return True
+                return True, "risk_manager_unavailable"
             if hasattr(rm, "is_circuit_breaker_tripped"):
-                tripped, _ = rm.is_circuit_breaker_tripped()
+                tripped, reason = rm.is_circuit_breaker_tripped()
                 if tripped:
-                    return False
+                    return False, str(reason or "circuit_breaker_tripped")
             if hasattr(rm, "can_trade"):
-                return bool(rm.can_trade(symbol or "GLOBAL"))
+                allowed = bool(rm.can_trade(symbol or "GLOBAL"))
+                return allowed, "can_trade" if allowed else "can_trade_blocked"
             if hasattr(rm, "risk_gate_should_trade"):
                 result = rm.risk_gate_should_trade()
-                return bool(result[0] if isinstance(result, tuple) else result)
+                allowed = bool(result[0] if isinstance(result, tuple) else result)
+                reason = str(result[1]) if isinstance(result, tuple) and len(result) > 1 else (
+                    "risk_gate_allowed" if allowed else "risk_gate_blocked"
+                )
+                return allowed, reason
             if hasattr(rm, "can_trade_now"):
                 result = rm.can_trade_now()
-                return bool(result[0] if isinstance(result, tuple) else result)
+                allowed = bool(result[0] if isinstance(result, tuple) else result)
+                reason = str(result[1]) if isinstance(result, tuple) and len(result) > 1 else (
+                    "can_trade_now_allowed" if allowed else "can_trade_now_blocked"
+                )
+                return allowed, reason
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
-                "Failure in _risk_allows_trading: %s", exc, exc_info=True
+                "Failure in _risk_allows_trading_with_reason: %s", exc, exc_info=True
             )
-            return False
-        return False
+            return False, "risk_exception"
+        return False, "risk_manager_no_supported_gate"
+
+    def _risk_allows_trading(self, symbol: str | None) -> bool:
+        """Return whether risk engine allows entering strategy flow."""
+        allowed, _ = self._risk_allows_trading_with_reason(symbol)
+        return allowed
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
@@ -3225,8 +3249,14 @@ class StrategyRunner:
             # PHASE 6: RISK CHECK (Block trading if risk conditions not met)
             # =================================================================
 
-            if not self._risk_allows_trading(symbol):
-                self._logger.warning("RISK_BLOCK", extra={"symbol": symbol})
+            allowed, reason = self._risk_allows_trading_with_reason(symbol)
+            if not allowed:
+                self._logger.warning(
+                    "Trade blocked by risk manager | symbol=%s | reason=%s",
+                    symbol,
+                    reason,
+                    extra={"event": "risk_block"},
+                )
                 return
             if self._runner_state != RunnerState.EXECUTION_ENABLED:
                 log_throttled(
@@ -3684,6 +3714,23 @@ class StrategyRunner:
                             return
                         self._last_global_eval_ts = time.monotonic()
                         signal = self._strategy_manager.generate_signal(symbol, price)
+                        if signal is not None:
+                            self._signals_last_hour.append(time.time())
+
+                        now_ts = time.time()
+                        if now_ts - self._last_signal_frequency_check_ts >= 300.0:
+                            self._last_signal_frequency_check_ts = now_ts
+                            signals_last_60m = sum(
+                                1
+                                for signal_ts in self._signals_last_hour
+                                if now_ts - signal_ts <= 3600
+                            )
+                            if signals_last_60m < 2:
+                                self._logger.warning(
+                                    "Low signal frequency detected (%s in last hour)",
+                                    signals_last_60m,
+                                    extra={"event": "low_signal_frequency"},
+                                )
                         cycle_stats = getattr(self, "_strategy_cycle_stats", None)
                         if cycle_stats is None:
                             cycle_stats = {}
