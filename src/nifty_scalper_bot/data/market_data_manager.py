@@ -2465,11 +2465,11 @@ class MarketDataManager:
         )
         self._tick_stats[symbol] += 1
         now = time.monotonic()
-        if now - self._last_tick_stats_log >= 5.0:
+        if now - self._last_tick_stats_log >= 15.0:
             summary = ", ".join(
                 f"{sym}:{cnt}" for sym, cnt in sorted(self._tick_stats.items())
             )
-            self._logger.info(f"TICK_RATE_5S {summary}")
+            self._logger.debug(f"TICK_RATE_15S {summary}")
             self._tick_stats.clear()
             self._last_tick_stats_log = now
         self._emit_tick(symbol, normalized_tick, source="ws")
@@ -3731,7 +3731,7 @@ class MarketDataManager:
                     "WS subscribe skipped (no token)", extra={"symbol": symbol}
                 )
                 return
-            self._logger.info(
+            self._logger.debug(
                 "EVENT|subscribe|%s|token=%s|mode=full",
                 symbol,
                 token,

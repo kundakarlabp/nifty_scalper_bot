@@ -328,7 +328,7 @@ class RiskManager:
                 self._balance_source = "live"
                 # [FIX] Log only once every 60s
                 if now - self._last_log_time >= 60.0:
-                    self._logger.info(
+                    self._logger.debug(
                         "Condition met: balance_updated_from_data_hub",
                         extra={
                             "event": "balance_updated",

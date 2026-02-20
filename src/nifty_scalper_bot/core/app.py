@@ -3394,13 +3394,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 market_regime_detector.ingest_tick,
             )
             data_hub.subscribe_ticks(regime_symbol, callback)
-            LOGGER.info(f"Regime detector subscribed via DataHub to {regime_symbol}")
+            LOGGER.debug(f"Regime detector subscribed via DataHub to {regime_symbol}")
 
         elif hasattr(streamer, "register_handler") and hasattr(
             market_regime_detector, "ingest_tick"
         ):
             streamer.register_handler(market_regime_detector.ingest_tick)
-            LOGGER.info(f"Regime detector subscribed via Streamer to {regime_symbol}")
+            LOGGER.debug(f"Regime detector subscribed via Streamer to {regime_symbol}")
 
     except Exception as exc:
         LOGGER.error(
@@ -5571,7 +5571,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             for idx, sym in enumerate(targets, start=1):
                 try:
-                    LOGGER.info(f"📥 Hydration {idx}/{len(targets)}: {sym}")
+                    LOGGER.debug(f"📥 Hydration {idx}/{len(targets)}: {sym}")
 
                     records = await asyncio.to_thread(
                         ctx.broker_client.get_ohlc,

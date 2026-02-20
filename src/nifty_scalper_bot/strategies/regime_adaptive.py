@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Deque, Dict, Iterable, Mapping, MutableMapping
@@ -20,7 +21,7 @@ from nifty_scalper_bot.strategies.signal_generator import (
     Strategy,
 )
 from nifty_scalper_bot.utils.env import coalesce_bool
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
 
@@ -128,10 +129,28 @@ class RegimeAdaptiveStrategy(Strategy):
             extra={"event": "regime_adaptive_generate", "symbol": symbol},
         )
         if position is not None:
+            log_throttled(
+                self._logger,
+                f"no_signal_position_{symbol}",
+                "No signal | symbol=%s | rsi=%s | ema_fast=%s | ema_slow=%s"
+                % (symbol, indicators.get("rsi"), indicators.get("ema_fast"), indicators.get("ema_slow")),
+                interval_sec=60.0,
+                level=logging.DEBUG,
+                extra={"event": "signal_evaluated"},
+            )
             return None
         snapshot = self._build_market_snapshot(symbol)
         regime_snapshot = self._resolve_regime(symbol, indicators, snapshot)
         if regime_snapshot is None or snapshot is None:
+            log_throttled(
+                self._logger,
+                f"no_signal_snapshot_{symbol}",
+                "No signal | symbol=%s | rsi=%s | ema_fast=%s | ema_slow=%s"
+                % (symbol, indicators.get("rsi"), indicators.get("ema_fast"), indicators.get("ema_slow")),
+                interval_sec=60.0,
+                level=logging.DEBUG,
+                extra={"event": "signal_evaluated"},
+            )
             return None
         adjustments = self._resolve_adjustments(indicators, regime_snapshot)
         regime = regime_snapshot.regime
@@ -160,6 +179,15 @@ class RegimeAdaptiveStrategy(Strategy):
                     "stats": dict(self._filter_stats),
                 },
             )
+            log_throttled(
+                self._logger,
+                f"no_signal_filters_{symbol}",
+                "No signal | symbol=%s | rsi=%s | ema_fast=%s | ema_slow=%s"
+                % (symbol, indicators.get("rsi"), indicators.get("ema_fast"), indicators.get("ema_slow")),
+                interval_sec=60.0,
+                level=logging.DEBUG,
+                extra={"event": "signal_evaluated"},
+            )
             return None
 
         block_entries = self._normalize_block_entries(adjustments)
@@ -183,11 +211,13 @@ class RegimeAdaptiveStrategy(Strategy):
         kelly_fraction = self._kelly_fraction(symbol)
         volatility_adjustment = self._volatility_adjustment(indicators)
         sizing_multiplier = self._extract_sizing_multiplier(adjustments)
+        regime_size_multiplier = 0.5 if regime.lower() == "volatile" else 1.0
         raw_quantity = (
             self._thresholds.base_lots
             * kelly_fraction
             * volatility_adjustment
             * sizing_multiplier
+            * regime_size_multiplier
         )
         quantity = max(1, int(round(max(raw_quantity, 1.0))))
         block_multiplier = 1.0
@@ -214,6 +244,8 @@ class RegimeAdaptiveStrategy(Strategy):
                 "quantity": quantity,
                 "confidence": regime_snapshot.confidence,
                 "sizing_multiplier": sizing_multiplier,
+            "regime_size_multiplier": regime_size_multiplier,
+                "regime_size_multiplier": regime_size_multiplier,
                 "block_multiplier": block_multiplier,
             },
         )
@@ -413,10 +445,7 @@ class RegimeAdaptiveStrategy(Strategy):
 
             bypassed_regime = False
             if regime.lower() == "consolidation":
-                if self._regime_filter_bypass:
-                    bypassed_regime = True
-                else:
-                    reasons.append("consolidation_regime")
+                bypassed_regime = True
 
             if reasons:
                 self._filter_stats["blocked"] += 1

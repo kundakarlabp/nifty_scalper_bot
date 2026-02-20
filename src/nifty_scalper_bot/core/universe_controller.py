@@ -27,7 +27,7 @@ class UniverseController:
 
         if added or removed:
             # Log only on transitions to avoid legacy per-tick warning spam.
-            LOGGER.info(
+            LOGGER.debug(
                 "Universe membership changed",
                 extra={
                     "event": "universe_membership_changed",
