@@ -66,6 +66,13 @@ class GammaScalpingStrategyConfig(EliteStrategyConfig):
 
 
 @dataclass(slots=True)
+class TuesdayGammaBuyerStrategyConfig(EliteStrategyConfig):
+    """Tuesday Gamma Buyer: expiry day and ATR-risk controls."""
+    atr_multiplier: float = 1.2
+    target_multiplier: float = 1.8
+
+
+@dataclass(slots=True)
 class CPRBreakoutStrategyConfig(EliteStrategyConfig):
     """CPR Breakout: Pivot width thresholds."""
     narrow_cpr_threshold: float = 0.25
@@ -118,6 +125,9 @@ class EliteStrategiesSettings:
     vwap: VWAPProStrategyConfig = field(default_factory=VWAPProStrategyConfig)
     oi_max_pain: OIMaxPainStrategyConfig = field(default_factory=OIMaxPainStrategyConfig)
     gamma_scalping: GammaScalpingStrategyConfig = field(default_factory=GammaScalpingStrategyConfig)
+    tuesday_gamma_buyer: TuesdayGammaBuyerStrategyConfig = field(
+        default_factory=lambda: TuesdayGammaBuyerStrategyConfig(enabled=False)
+    )
     cpr: CPRBreakoutStrategyConfig = field(default_factory=CPRBreakoutStrategyConfig)
     order_flow: OrderFlowStrategyConfig = field(default_factory=OrderFlowStrategyConfig)
     bb_squeeze: BBSqueezeStrategyConfig = field(default_factory=BBSqueezeStrategyConfig)
@@ -139,6 +149,7 @@ __all__ = [
     "VWAPProStrategyConfig",
     "OIMaxPainStrategyConfig",
     "GammaScalpingStrategyConfig",
+    "TuesdayGammaBuyerStrategyConfig",
     "CPRBreakoutStrategyConfig",
     "OrderFlowStrategyConfig",
     "BBSqueezeStrategyConfig",

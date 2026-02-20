@@ -45,6 +45,7 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     RSIDivergenceStrategyConfig,
     SMCStrategyConfig,
     StraddleThetaStrategyConfig,
+    TuesdayGammaBuyerStrategyConfig,
     VWAPProStrategyConfig,
 )
 from nifty_scalper_bot.strategies.elite_validator import (
@@ -1019,6 +1020,14 @@ def _build_elite_settings() -> EliteStrategiesSettings:
             min_gamma=_env_float("GAMMA_THRESHOLD", default=0.0005),
         )
 
+        # 6b. Tuesday Gamma Buyer
+        tuesday_gamma_cfg = TuesdayGammaBuyerStrategyConfig(
+            enabled=_env_bool("ENABLE_TUESDAY_GAMMA_BUYER", default=False),
+            min_confidence=_env_float("TUESDAY_GAMMA_MIN_CONFIDENCE", default=65.0),
+            atr_multiplier=_env_float("TUESDAY_GAMMA_ATR_MULTIPLIER", default=1.2),
+            target_multiplier=_env_float("TUESDAY_GAMMA_TARGET_MULTIPLIER", default=1.8),
+        )
+
         # 7. OI Max Pain (Unlocked)
         oi_cfg = OIMaxPainStrategyConfig(
             enabled=_env_bool("OI_MAX_PAIN_ENABLED", default=True),
@@ -1070,6 +1079,7 @@ def _build_elite_settings() -> EliteStrategiesSettings:
             orb=orb_cfg,
             straddle=straddle_cfg,
             gamma_scalping=gamma_cfg,
+            tuesday_gamma_buyer=tuesday_gamma_cfg,
             oi_max_pain=oi_cfg,
             cpr=cpr_cfg,
             order_flow=of_cfg,

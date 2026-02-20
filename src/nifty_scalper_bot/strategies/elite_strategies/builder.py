@@ -14,6 +14,7 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import EliteStr
 from nifty_scalper_bot.strategies.elite_strategies.bb_squeeze import BBSqueezeStrategy
 from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import CPRBreakoutStrategy
 from nifty_scalper_bot.strategies.elite_strategies.gamma_scalping import GammaScalpingStrategy
+from nifty_scalper_bot.strategies.elite_tuesday_gamma_buyer import EliteTuesdayGammaBuyer
 from nifty_scalper_bot.strategies.elite_strategies.oi_max_pain import OIMaxPainStrategy
 from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
@@ -49,6 +50,7 @@ def build_elite_strategies(
         "vwap": VWAPProStrategy,
         "oi_max_pain": OIMaxPainStrategy,
         "gamma_scalping": GammaScalpingStrategy,
+        "tuesday_gamma_buyer": EliteTuesdayGammaBuyer,
         "cpr": CPRBreakoutStrategy,
         "order_flow": OrderFlowStrategy,
         "bb_squeeze": BBSqueezeStrategy,
@@ -107,6 +109,7 @@ def get_strategy_tags(settings: EliteStrategiesSettings) -> Dict[str, List[str]]
         "vwap": "VWAP Pro Pullback",
         "oi_max_pain": "OI Mean Reversion",
         "gamma_scalping": "Gamma Acceleration",
+        "tuesday_gamma_buyer": "Tuesday Gamma Buyer",
         "cpr": "CPR Trend Breakout",
         "order_flow": "Order Flow Imbalance",
         "bb_squeeze": "BB Volatility Squeeze",

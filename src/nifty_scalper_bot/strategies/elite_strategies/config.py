@@ -17,6 +17,7 @@ from .config_models import (
     RSIDivergenceStrategyConfig,
     SMCStrategyConfig,
     StraddleThetaStrategyConfig,
+    TuesdayGammaBuyerStrategyConfig,
     VWAPProStrategyConfig,
 )
 
@@ -28,6 +29,7 @@ ELITE_STRATEGY_MODULES = [
     "vwap_pro",
     "oi_max_pain",
     "gamma_scalping",
+    "elite_tuesday_gamma_buyer",
     "cpr_breakout",
     "order_flow",
     "bb_squeeze",
@@ -49,5 +51,6 @@ __all__ = [
     "RSIDivergenceStrategyConfig",
     "SMCStrategyConfig",
     "StraddleThetaStrategyConfig",
+    "TuesdayGammaBuyerStrategyConfig",
     "VWAPProStrategyConfig",
 ]
