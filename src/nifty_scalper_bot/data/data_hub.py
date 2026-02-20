@@ -205,6 +205,7 @@ class DataHub:
         self._orders: dict[str, dict[str, Any]] = {}
         self._positions: dict[str, dict[str, Any]] = {}
         self._message_bus = message_bus or event_bus
+        self._loop: asyncio.AbstractEventLoop | None = None
         LOGGER.debug("DataHub using MessageBus id=%s", id(self._message_bus))
 
         # Derived Metrics Caches
@@ -215,10 +216,6 @@ class DataHub:
         # Throttling for heavy math (Greeks/IV)
         self._last_greeks_update: dict[str, float] = {}
         self._greeks_throttle_sec = 0.5
-
-        # Asyncio event loop reference for thread-safe tick ingestion.
-        # Set via set_event_loop() from the asyncio startup context.
-        self._main_loop: asyncio.AbstractEventLoop | None = None
 
         # Subscribers
         self._tick_subscribers: dict[str, set[TickListener]] = {}
@@ -233,140 +230,70 @@ class DataHub:
             os.getenv("HISTORY_FRESHNESS_MAX_AGE_SECONDS", "120")
         )
 
+
+    def bind_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Args: loop; Returns: none; Raises: none."""
+        self._loop = loop
+
     # ----------------------------------------------------------------
     # Ingestion (Write Path)
     # ----------------------------------------------------------------
 
-    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Wire the running asyncio event loop so ticks from OS threads can be
-        safely dispatched.  Must be called from within the asyncio task that
-        owns the loop (i.e. inside ``startup_sequence``).
-
-        Args:
-            loop: The running asyncio event loop.
-        """
-        self._main_loop = loop
-        # Also propagate to message_bus so it can do publish_from_thread
-        if self._message_bus is not None and hasattr(self._message_bus, "_loop"):
-            self._message_bus._loop = loop
-        LOGGER.info("DataHub event loop wired: id=%s", id(loop))
-
     def ingest_tick_sync(self, tick: dict) -> None:
-        """Thread-safe synchronous bridge: may be called from *any* OS thread.
-
-        Schedules ``ingest_tick`` on the captured asyncio event loop via
-        ``loop.call_soon_threadsafe`` so the actual async work (MessageBus
-        publish, cache update) runs correctly on the event-loop thread.
-
-        Falls back to a direct synchronous path when no loop is available
-        (e.g. unit-test context) so existing tests keep passing.
-        """
-        loop = self._main_loop
-        if loop is not None and loop.is_running():
-            # The ONLY correct way to schedule a coroutine from an OS thread.
-            loop.call_soon_threadsafe(
-                loop.create_task,  # type: ignore[arg-type]
-                self.ingest_tick(tick),
-            )
-        else:
-            # Fallback: try asyncio.get_running_loop() in case we ARE in async
-            # context (e.g. PollingStreamer running inside asyncio.to_thread).
-            try:
-                running_loop = asyncio.get_running_loop()
-                running_loop.create_task(self.ingest_tick(tick))
-            except RuntimeError:
-                # No loop available at all — run synchronous cache update only.
-                self._ingest_tick_sync_fallback(tick)
-
-    def _ingest_tick_sync_fallback(self, tick: dict) -> None:
-        """Minimal sync tick ingestion when no asyncio loop is reachable.
-
-        Updates the quote cache and fires ``_tick_subscribers`` synchronously.
-        Does NOT publish to ``_message_bus`` (which requires an asyncio queue).
-        This path should only be hit in unit-test or startup-race edge cases.
-        """
-        symbol = tick.get("symbol")
-        if not symbol:
+        """Synchronous bridge to schedule ingest_tick on the running loop."""
+        try:
+            loop = asyncio.get_running_loop()
+            self._loop = loop
+            loop.create_task(self.ingest_tick(tick))
             return
-        normalized_symbol = enforce_canonical(canonical(str(symbol)))
-        with self._lock:
-            self._quotes[normalized_symbol] = tick
-        if normalized_symbol in self._tick_subscribers:
-            for callback in list(self._tick_subscribers[normalized_symbol]):
-                try:
-                    callback(tick)
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.debug("_ingest_tick_sync_fallback callback failed: %s", exc)
+        except RuntimeError:
+            pass
+        if self._loop is None:
+            raise RuntimeError('No running event loop for DataHub.ingest_tick_sync')
+        self._loop.call_soon_threadsafe(lambda: self._loop.create_task(self.ingest_tick(tick)))
 
     async def ingest_tick(self, tick: Tick) -> None:
-        """Process an incoming market tick (runs on the asyncio event loop)."""
+        """Process an incoming market tick."""
         symbol = tick.get("symbol")
         if not symbol:
-            LOGGER.error(
-                "DataHub.ingest_tick: tick missing 'symbol' field — dropped",
-                extra={"event": "hub_tick_no_symbol", "pipeline_stage": "MARKET_STATE_UPDATE"},
-            )
-            return
+            raise RuntimeError('Tick missing symbol')
         normalized_symbol = enforce_canonical(canonical(str(symbol)))
+        await self.publish_tick(normalized_symbol, tick)
 
-        # ── Observable: L3 pipeline stage marker ──
-        LOGGER.debug(
-            "HUB_INGEST symbol=%s ltp=%s stage=MarketStateUpdate",
-            normalized_symbol,
-            tick.get("ltp"),
-            extra={
-                "event": "hub_ingest",
-                "symbol": normalized_symbol,
-                "pipeline_stage": "MARKET_STATE_UPDATE",
-            },
-        )
-
-        if self._message_bus is None:
-            # Fail-fast: this is a misconfiguration — log as ERROR, not silent return.
-            LOGGER.error(
-                "DataHub.ingest_tick: no MessageBus configured — tick for %s DROPPED",
-                normalized_symbol,
-                extra={"event": "hub_no_message_bus", "pipeline_stage": "MARKET_STATE_UPDATE"},
-            )
-            return
-
+    async def publish_tick(self, symbol: str, tick: Tick) -> None:
+        """Args: symbol, tick; Returns: none; Raises: RuntimeError."""
+        normalized_symbol = enforce_canonical(canonical(symbol))
+        if normalized_symbol not in self._subscribed_symbols:
+            raise RuntimeError(f"Tick received for unsubscribed symbol {normalized_symbol}")
+        tick_payload = dict(tick)
+        tick_payload['symbol'] = normalized_symbol
         with self._lock:
-            # 1. Update Cache
-            self._quotes[normalized_symbol] = tick
-
-            # 2. Update Metrics (Throttled)
-            try:
-                self._capture_option_metrics(normalized_symbol, tick)
-            except Exception:
-                pass  # Don't let math errors kill the tick
-
-        # 3. Publish to MessageBus — this coroutine is always called from the
-        #    asyncio event loop (scheduled via call_soon_threadsafe or directly),
-        #    so await is safe here.
+            self._quotes[normalized_symbol] = tick_payload
         try:
+            self._capture_option_metrics(normalized_symbol, tick_payload)
+        except Exception as exc:
+            LOGGER.exception('Tick pipeline failure')
+            raise
+        if self._message_bus:
             await self._message_bus.publish(
                 Message(
                     type=MessageType.TICK,
                     timestamp=datetime.now(timezone.utc),
-                    data=tick,
-                    source="data_hub",
+                    data=tick_payload,
+                    source='data_hub',
                 )
             )
-        except Exception as exc:
-            LOGGER.error("Failure in DataHub.ingest_tick: %s", exc, exc_info=exc)
-
-        # 4. Notify Legacy Subscribers (Backward Compatibility)
-        if normalized_symbol in self._tick_subscribers:
-            for callback in list(self._tick_subscribers[normalized_symbol]):
-                try:
-                    callback(tick)
-                except Exception as exc:
-                    LOGGER.error(
-                        "Tick subscriber failed for %s: %s",
-                        symbol,
-                        exc,
-                        exc_info=True,
-                    )
+        else:
+            raise RuntimeError('DataHub has no MessageBus configured')
+        LOGGER.info('HUB_PUBLISH %s %s', normalized_symbol, tick_payload.get('ltp'))
+        with self._lock:
+            callbacks = list(self._tick_subscribers.get(normalized_symbol, ()))
+        for callback in callbacks:
+            try:
+                callback(tick_payload)
+            except Exception:
+                LOGGER.exception('Tick pipeline failure')
+                raise
 
     def store_quote(
         self,
@@ -389,11 +316,7 @@ class DataHub:
 
         # Ensure symbol presence
         canonical_symbol = enforce_canonical(canonical(symbol))
-        if canonical_symbol.count(":") != 1:
-            raise RuntimeError(
-                f"DataHub.store_quote: malformed symbol {canonical_symbol!r} "
-                "(expected exactly one ':' separator e.g. 'NSE:NIFTY 50')"
-            )
+        assert canonical_symbol.count(":") == 1
         payload["symbol"] = canonical_symbol
 
         # Ensure timestamp (critical for freshness checks)
@@ -567,11 +490,7 @@ class DataHub:
     def subscribe_ticks(self, symbol: str, callback: TickListener) -> None:
         """Register a callback for tick updates on a symbol."""
         normalized = enforce_canonical(canonical(symbol))
-        if normalized.count(":") != 1:
-            raise RuntimeError(
-                f"DataHub.subscribe_ticks: malformed symbol {normalized!r} "
-                "(expected exactly one ':' separator)"
-            )
+        assert normalized.count(":") == 1
         with self._lock:
             if normalized not in self._tick_subscribers:
                 self._tick_subscribers[normalized] = set()

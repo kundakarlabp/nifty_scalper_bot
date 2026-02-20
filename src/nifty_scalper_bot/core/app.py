@@ -5758,21 +5758,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             if not subscribed_symbols:
                 LOGGER.critical("⛔ STRATEGY SUBSCRIPTION LIST IS EMPTY")
 
-            if streamer and tokens_to_poll:
-                # WebSocketManager.subscribe() is a coroutine — calling it without
-                # await creates a coroutine object that is immediately garbage-collected
-                # (no tokens actually subscribed).  Use subscribe_tokens() which is sync
-                # and merges tokens into the pending set, then resubscribes when connected.
-                if hasattr(streamer, "subscribe_tokens"):
-                    streamer.subscribe_tokens(tokens_to_poll)
-                    LOGGER.info("✅ Wired %d tokens to WebSocket streamer", len(tokens_to_poll))
-                elif hasattr(streamer, "subscribe"):
-                    subscribe_fn = streamer.subscribe
-                    if asyncio.iscoroutinefunction(subscribe_fn):
-                        asyncio.create_task(subscribe_fn(tokens_to_poll))
-                    else:
-                        subscribe_fn(tokens_to_poll)
-                    LOGGER.info("✅ Wired %d tokens to streamer", len(tokens_to_poll))
+            if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
+                streamer.subscribe(tokens_to_poll)
+                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
             if polling_fallback_streamer is not None and tokens_to_poll:
                 polling_fallback_streamer.subscribe(tokens_to_poll)
 
@@ -5880,38 +5868,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.message_bus:
                     LOGGER.info("🚀 Starting MessageBus Dispatchers...")
                     ctx.message_bus.start()
-
-                # ── CRITICAL: wire the running asyncio loop into DataHub so that
-                # ticks arriving on KiteConnect's background thread (or any OS
-                # thread) can be safely dispatched to the asyncio queue via
-                # loop.call_soon_threadsafe.  Without this, every WS tick throws
-                # RuntimeError("no running event loop") and is silently dropped.
-                _running_loop = asyncio.get_running_loop()
-                # Wire all DataHub instances (MDM may hold a separate ref)
-                _data_hubs_to_wire = [
-                    data_hub,
-                    ctx.data_hub,
-                    getattr(ctx.market_data_manager, "data_hub", None),
-                    getattr(ctx.strategy_runner, "_data_hub", None),
-                ]
-                _wired_ids: set[int] = set()
-                for _dh in _data_hubs_to_wire:
-                    if _dh is not None and id(_dh) not in _wired_ids and hasattr(_dh, "set_event_loop"):
-                        _dh.set_event_loop(_running_loop)
-                        _wired_ids.add(id(_dh))
-                LOGGER.info(
-                    "✅ DataHub event loop wired on %d instance(s) — thread-safe tick ingestion active",
-                    len(_wired_ids),
-                )
-
-                # Also wire MDM so its _emit_tick can dispatch async callbacks
-                # (e.g. DataHub.ingest_tick) from the KiteConnect WS background thread
-                # without asyncio.run() deadlock or get_running_loop() RuntimeError.
-                if ctx.market_data_manager is not None and hasattr(
-                    ctx.market_data_manager, "set_event_loop"
-                ):
-                    ctx.market_data_manager.set_event_loop(_running_loop)
-                    LOGGER.info("✅ MDM event loop wired — async callbacks thread-safe")
 
                 if ctx.order_manager:
                     ctx.order_manager.start_monitoring()

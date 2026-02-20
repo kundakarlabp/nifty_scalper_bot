@@ -573,29 +573,13 @@ class RiskManager:
         return True, ""
 
     def is_circuit_breaker_tripped(self) -> tuple[bool, str]:
-        """Return the circuit breaker flag and reason.
-
-        Fail-safe: if the breaker state itself is unreadable (attribute error,
-        corruption), treat as TRIPPED to prevent trading on corrupt risk state.
-        """
+        """Return the circuit breaker flag and reason."""
         try:
             tripped = bool(self._breaker_tripped)
             reason = self._breaker_reason or ""
             return tripped, reason
-        except Exception as exc:  # noqa: BLE001
-            # Fail-fast observable: log the corruption and return tripped=True.
-            # Returning (False, '') here would silently allow trading on a broken
-            # risk state — the most dangerous possible silent failure in the system.
-            try:
-                self._logger.error(
-                    "is_circuit_breaker_tripped state read failed — treating as TRIPPED: %s",
-                    exc,
-                    extra={"event": "risk_breaker_read_error"},
-                    exc_info=exc,
-                )
-            except Exception:
-                pass
-            return True, f"breaker_state_read_error: {exc}"
+        except Exception:
+            return False, ""
 
     def is_circuit_breaker_active(self) -> bool:
         try:
