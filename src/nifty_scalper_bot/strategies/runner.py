@@ -57,7 +57,12 @@ from nifty_scalper_bot.utils.market_hours import (
 )
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.reasons import canonical as canonical_reason
-from nifty_scalper_bot.utils.symbols import canonical, is_strategy_instrument
+from nifty_scalper_bot.utils.symbols import (
+    canonical,
+    enforce_canonical,
+    is_strategy_instrument,
+    normalize_symbol,
+)
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.data_hub import DataHub
@@ -225,6 +230,7 @@ class StrategyRunnerConfig:
 class RunnerState(Enum):
     """State machine for strategy runner lifecycle."""
 
+    STARTING = 1
     BOOTING = 1
     HISTORICAL_READY = 2
     LIVE_READY = 3
@@ -393,7 +399,9 @@ class StrategyRunner:
         self._message_bus = message_bus
         self._config = config or StrategyRunnerConfig()
         self._logger = get_logger(__name__)
-        self._logger.debug("StrategyRunner using MessageBus id=%s", id(self._message_bus))
+        self._logger.debug(
+            "StrategyRunner using MessageBus id=%s", id(self._message_bus)
+        )
         # ✅ FIX 1: Ensure 'data' directory exists to prevent Persistence Crash
         try:
             os.makedirs("data", exist_ok=True)
@@ -405,11 +413,16 @@ class StrategyRunner:
         self._bracket_manager = bracket_manager
         self._symbol_source: MarketDataManager | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._legacy_tick_subscription_mode = os.getenv(
+            "STRATEGY_RUNNER_LEGACY_SUBSCRIBE", "false"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         # Time block logging throttle
         self._time_block_logged: Dict[str, float] = {}
 
-        if self._message_bus is not None:
-            self._message_bus.subscribe(MessageType.TICK, self._handle_tick_message)
+        assert (
+            self._message_bus is not None
+        ), "MessageBus not injected into StrategyRunner"
+        self._message_bus.subscribe(MessageType.TICK, self._handle_tick_message)
 
         hedge_env = os.getenv("NSB__ALLOW_HEDGE_ENTRIES", "false").strip().lower()
         self._allow_hedge_entries = hedge_env in {"1", "true", "yes", "on"}
@@ -520,6 +533,7 @@ class StrategyRunner:
         self._symbol_bar_count: dict[str, int] = {}
         self._last_eval_ts: dict[str, float] = {}
         self._last_global_eval_ts: float = time.monotonic()
+        self._last_tick_seen_ts: float = time.monotonic()
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._hydration_ready_streak: dict[str, int] = {}
         self._frozen_universe: set[str] = set()
@@ -535,7 +549,7 @@ class StrategyRunner:
         self._history_cache_dir.mkdir(parents=True, exist_ok=True)
         self._hydrate_failures: dict[str, int] = {}
         self._session_gap_count: dict[str, int] = {}
-        self._runner_state: RunnerState = RunnerState.BOOTING
+        self._runner_state: RunnerState = RunnerState.STARTING
         self._active_orphan_guards: set[str] = set()
 
     # ==================== LIFECYCLE MANAGEMENT ====================
@@ -547,6 +561,8 @@ class StrategyRunner:
                 return
             self._running = True
             self._trading_paused = False
+            assert isinstance(self._active_symbols, set)
+            assert len(self._active_symbols) > 0
             symbols = list(self._active_symbols)
             self._frozen_universe = set(symbols)
             self._universe_controller.update(symbols)
@@ -989,22 +1005,27 @@ class StrategyRunner:
         """Subscribe to tick updates for a symbol."""
         callback = self._callbacks.get(symbol)
         if callback is None:
+
             def _callback(tick: Mapping[str, Any], sym: str = symbol) -> None:
                 self._on_tick(sym, tick)
+
             callback = _callback
             self._callbacks[symbol] = callback
 
         if self._data_hub is not None:
-            # Primary path: data_hub.subscribe_ticks wires DataHub → MDM._subscribers
-            # so WS ticks reach this callback via MDM._emit_tick directly.
+            # Primary deterministic path: DataHub subscription only.
             try:
                 self._data_hub.subscribe_ticks(symbol, callback)
             except Exception as exc:  # noqa: BLE001
                 self._logger.error(
                     "Failure in StrategyRunner._subscribe_symbol: %s", exc
                 )
-        else:
+        elif self._legacy_tick_subscription_mode:
             self._market_data.subscribe(symbol, callback)
+        else:
+            self._logger.error(
+                "DataHub unavailable and legacy subscription mode disabled"
+            )
 
     def ingest_historical_bar(self, data: dict) -> None:
         """
@@ -1055,7 +1076,7 @@ class StrategyRunner:
         """
         with self._lock:
             for sym in symbols:
-                normalized = canonical(sym)
+                normalized = enforce_canonical(normalize_symbol(sym))
                 # 1. Register Active (Critical for main loop)
                 self._active_symbols.add(normalized)
                 self._tracked_symbols.add(normalized)
@@ -1078,7 +1099,8 @@ class StrategyRunner:
 
         # 5. THE KILL SWITCH: Prevents fallback backfill logic from running
         self._startup_hydrated = True
-        self._runner_state = RunnerState.HISTORICAL_READY
+        self._runner_state = RunnerState.EXECUTION_ENABLED
+        self._logger.info("🚀 StrategyRunner execution enabled.")
 
         try:
             if self._market_data is not None and self._main_loop is not None:
@@ -1091,7 +1113,6 @@ class StrategyRunner:
                         self._main_loop,
                     )
                     fut.result(timeout=10.5)
-                self._runner_state = RunnerState.EXECUTION_ENABLED
         except Exception as exc:
             self._logger.error(
                 "Failure in StrategyRunner.mark_ready live tick gate: %s",
@@ -2266,7 +2287,7 @@ class StrategyRunner:
             symbol_value = tick.get("symbol")
             if not symbol_value:
                 return
-            symbol = self._normalize_symbol(str(symbol_value))
+            symbol = enforce_canonical(normalize_symbol(str(symbol_value)))
             if symbol not in self._tracked_symbols:
                 return
             price = tick.get("last_price") or tick.get("ltp")
@@ -2298,14 +2319,18 @@ class StrategyRunner:
             return
 
         try:
-            normalized_symbol = str(symbol)
+            normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
             now_mono = time.monotonic()
+            self._last_tick_seen_ts = now_mono
             self._health_watchdog()
+            self._logger.debug(
+                "PIPELINE_OK",
+                extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
+            )
             last_eval = self._last_eval_ts.get(normalized_symbol, 0.0)
             if now_mono - last_eval < 0.05:
                 return
             self._last_eval_ts[normalized_symbol] = now_mono
-            self._last_global_eval_ts = now_mono
             self._logger.debug(
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
@@ -2322,8 +2347,13 @@ class StrategyRunner:
     def _health_watchdog(self) -> None:
         """Args: none; Returns: none; Raises: none."""
         now = time.monotonic()
-        if now - self._last_global_eval_ts > 60.0:
-            self._logger.error("No strategy evaluation in 60s despite live ticks.")
+        if (
+            now - self._last_global_eval_ts > 5.0
+            and now - self._last_tick_seen_ts <= 5.0
+        ):
+            self._logger.error(
+                "⚠️ No strategy evaluations in 5s despite ticks flowing."
+            )
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
@@ -2851,7 +2881,6 @@ class StrategyRunner:
                         if isinstance(tick_err_map, dict):
                             tick_err_map[symbol] = True
 
-
             # =================================================================
             # PHASE 0: EARLY EXIT CHECKS (Fast path for non-trading scenarios)
             # =================================================================
@@ -3175,15 +3204,13 @@ class StrategyRunner:
             # =================================================================
 
             if not self._risk_allows_trading(symbol):
-                log_throttled(
-                    self._logger,
-                    f"risk_block_{symbol}",
-                    f"⛔ Risk Block Active: {symbol}. Trading Halted.",
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                )
+                self._logger.warning("RISK_BLOCK", extra={"symbol": symbol})
                 return
             if self._runner_state != RunnerState.EXECUTION_ENABLED:
+                self._logger.debug(
+                    "EXECUTION_BLOCKED",
+                    extra={"state": str(self._runner_state)},
+                )
                 return
 
             if skip_strategy:
@@ -3630,6 +3657,7 @@ class StrategyRunner:
                         ):
                             self._logger.warning("Stale tick — skipping execution")
                             return
+                        self._last_global_eval_ts = time.monotonic()
                         signal = self._strategy_manager.generate_signal(symbol, price)
                         cycle_stats = getattr(self, "_strategy_cycle_stats", None)
                         if cycle_stats is None:
@@ -5303,7 +5331,7 @@ class StrategyRunner:
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
         """Normalize symbol to canonical exchange-qualified form."""
-        normalized = canonical(symbol)
+        normalized = enforce_canonical(normalize_symbol(symbol))
         if not normalized:
             msg = "symbol must not be empty"
             raise ValueError(msg)
