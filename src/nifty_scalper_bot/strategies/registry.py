@@ -12,6 +12,7 @@ ELITE_MODULES = [
     "vwap_pro",
     "oi_max_pain",
     "gamma_scalping",
+    "elite_tuesday_gamma_buyer",
     "cpr_breakout",
     "order_flow",
     "bb_squeeze",
@@ -40,6 +41,11 @@ CLASS_MAP: dict[str, tuple[str, str, Callable[[], Any] | None]] = {
         "gamma_scalping",
         "GammaScalpingStrategy",
         config_models.GammaScalpingStrategyConfig,
+    ),
+    "Tuesday Gamma Buyer": (
+        "elite_tuesday_gamma_buyer",
+        "EliteTuesdayGammaBuyer",
+        config_models.TuesdayGammaBuyerStrategyConfig,
     ),
     "CPR Breakout": (
         "cpr_breakout",

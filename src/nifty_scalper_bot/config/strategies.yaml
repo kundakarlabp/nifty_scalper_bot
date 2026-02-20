@@ -9,3 +9,4 @@ enabled_strategies:
   - rsi_divergence
   - orb_pro
   - straddle_theta
+  - elite_tuesday_gamma_buyer
