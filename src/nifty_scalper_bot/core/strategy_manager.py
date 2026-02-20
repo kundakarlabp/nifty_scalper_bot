@@ -1688,7 +1688,6 @@ class StrategyManager(_BaseStrategyManager):
             "Entered StrategyManager.generate_signal",
             extra={"event": "scored_strategy_generate", "symbol": symbol},
         )
-        log.info('STRATEGY_EVAL %s', symbol)
         def _log_reject(
             reason_code: str, context: dict[str, t.Any] | None = None
         ) -> None:
@@ -1986,7 +1985,6 @@ class StrategyManager(_BaseStrategyManager):
                         "confidence": combined.confidence,
                     },
                 )
-                log.info('SIGNAL_GENERATED %s %s', symbol, combined.action)
                 return combined
         elif combined is None:
             log.info(
