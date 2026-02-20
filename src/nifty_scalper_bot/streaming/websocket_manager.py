@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import random
-import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from datetime import time as dtime
 from enum import Enum
+import random
+import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -171,7 +170,6 @@ class WebSocketManager:
         if self._on_tick_callback is not None and not suppress_warning:
             self._logger.warning("WS|Replacing existing tick callback")
         self._on_tick_callback = callback
-
 
     def set_fallback_callbacks(
         self,
@@ -580,14 +578,18 @@ class WebSocketManager:
         else:
             self._logger.debug(
                 "Condition met: websocket_handlers_bound callback=%s",
-                getattr(self._on_tick_callback, "__name__", type(self._on_tick_callback).__name__),
+                getattr(
+                    self._on_tick_callback,
+                    "__name__",
+                    type(self._on_tick_callback).__name__,
+                ),
             )
 
     def _on_connect(self, ws: KiteTicker, response: dict[str, Any]) -> None:
         """Args: ws/response; Returns: none; Raises: none."""
 
         try:
-            del ws, response
+            del response
             self._last_pong_mono = time.monotonic()
             self._connected.set()
             self._state = ConnectionState.CONNECTED
@@ -595,6 +597,13 @@ class WebSocketManager:
                 "WebSocket CONNECTED successfully | tokens=%d",
                 len(self._tokens),
             )
+            if self._tokens:
+                token_list = sorted(self._tokens)
+                ws.subscribe(token_list)
+                ws.set_mode(ws.MODE_FULL, token_list)
+                self._logger.info(
+                    "WebSocket subscribed to %d tokens", len(self._tokens)
+                )
             if self._on_connect_callback is not None:
                 self._on_connect_callback()
             self._schedule_async(self._resubscribe_if_connected())
@@ -607,6 +616,14 @@ class WebSocketManager:
         del ws
         if not ticks:
             return
+
+        market_data_manager = getattr(self, "_market_data_manager", None)
+        process_ticks = getattr(market_data_manager, "process_ticks", None)
+        if callable(process_ticks):
+            try:
+                process_ticks(ticks)
+            except Exception as e:
+                self._logger.error("Failure in _on_ticks.process_ticks: %s", e)
 
         if not isinstance(ticks, list):
             self._logger.error("Invalid ticks payload type: %s", type(ticks))
@@ -635,7 +652,7 @@ class WebSocketManager:
                     self._schedule_coroutine(loop, result)
             except Exception as exc:
                 self._logger.error("Failure dispatching tick: %s", exc, exc_info=True)
-        
+
     def _on_pong(self, _ws: KiteTicker, _payload: Any | None = None) -> None:
         """Args: ws/payload; Returns: none; Raises: none."""
 

@@ -2272,6 +2272,7 @@ class StrategyRunner:
             if symbol_value
             else "UNKNOWN"
         )
+        self._logger.debug("RUNNER_RECEIVED_TICK %s", symbol)
         if not self.ready:
             log_throttled(
                 self._logger,
