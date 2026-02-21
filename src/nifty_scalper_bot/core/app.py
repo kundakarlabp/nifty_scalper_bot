@@ -5281,6 +5281,14 @@ async def startup_sequence(ctx: BotContext) -> None:
         os.getenv("PORT"),
     )
 
+    loop = asyncio.get_running_loop()
+    if ctx.data_hub is not None:
+        ctx.data_hub.set_event_loop(loop)
+    if ctx.market_data_manager is not None and hasattr(
+        ctx.market_data_manager, "set_event_loop"
+    ):
+        ctx.market_data_manager.set_event_loop(loop)
+
     # =========================================================
     # Create Data Directory
     # =========================================================
