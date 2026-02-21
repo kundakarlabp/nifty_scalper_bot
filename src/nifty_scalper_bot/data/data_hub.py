@@ -230,18 +230,21 @@ class DataHub:
         self._history_freshness_max_age_seconds = float(
             os.getenv("HISTORY_FRESHNESS_MAX_AGE_SECONDS", "120")
         )
+        self._main_loop: asyncio.AbstractEventLoop | None = None
 
     # ----------------------------------------------------------------
     # Ingestion (Write Path)
     # ----------------------------------------------------------------
 
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Wire main asyncio loop for thread-safe tick ingestion."""
+        self._main_loop = loop
+
     def ingest_tick_sync(self, tick: dict) -> None:
-        """Synchronous bridge to schedule ingest_tick on the running loop."""
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.ingest_tick(tick))
-        except RuntimeError:
-            pass
+        """Called from KiteConnect OS thread; schedules tick ingest safely."""
+        loop = self._main_loop
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(loop.create_task, self.ingest_tick(tick))
 
     async def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
@@ -266,37 +269,31 @@ class DataHub:
             except Exception:
                 pass  # Don't let math errors kill the tick
 
-            # 3. Publish to MessageBus (The Critical Fix)
-            if self._message_bus:
-                try:
-                    await self._message_bus.publish(
-                        Message(
-                            type=MessageType.TICK,
-                            timestamp=datetime.now(timezone.utc),
-                            data=dict(canonical_tick),
-                            source="data_hub",
-                        )
+        # 3. Publish to MessageBus (outside lock)
+        if self._message_bus:
+            try:
+                await self._message_bus.publish(
+                    Message(
+                        type=MessageType.TICK,
+                        timestamp=datetime.now(timezone.utc),
+                        data=dict(canonical_tick),
+                        source="data_hub",
                     )
-                except Exception as exc:
-                    LOGGER.error(
-                        "Failure in DataHub.ingest_tick: %s", exc, exc_info=exc
-                    )
-            else:
-                LOGGER.debug(
-                    "DataHub has no event_bus — tick cached without bus publish"
                 )
+            except Exception as exc:
+                LOGGER.error("Failure in DataHub.ingest_tick: %s", exc, exc_info=True)
+        else:
+            LOGGER.debug("DataHub has no event_bus — tick cached without bus publish")
 
-            # 4. Notify Legacy Subscribers (Backward Compatibility)
-            if normalized_symbol in self._tick_subscribers:
-                for callback in list(self._tick_subscribers[normalized_symbol]):
-                    try:
-                        callback(dict(canonical_tick))
-                    except Exception as exc:
-                        # This is likely where the "Tick callback failed" log comes from
-                        LOGGER.error(
-                            f"Tick subscriber failed for {symbol}: {exc}",
-                            exc_info=True,  # Prints full traceback to help debug
-                        )
+        # 4. Notify Legacy Subscribers (outside lock)
+        with self._lock:
+            callbacks = list(self._tick_subscribers.get(normalized_symbol, ()))
+
+        for callback in callbacks:
+            try:
+                callback(dict(canonical_tick))
+            except Exception as exc:
+                LOGGER.error("Tick subscriber failed: %s", exc, exc_info=True)
 
     def store_quote(
         self,
