@@ -532,6 +532,7 @@ class StrategyRunner:
         self._symbol_states: dict[str, SymbolState] = {}
         self._symbol_bar_count: dict[str, int] = {}
         self._last_eval_ts: dict[str, float] = {}
+        self._eval_gate_lock = threading.Lock()
         self._last_global_eval_ts: float = time.monotonic()
         self._last_tick_seen_ts: float = time.monotonic()
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
@@ -2318,7 +2319,10 @@ class StrategyRunner:
                 return
             symbol = enforce_canonical(normalize_symbol(str(symbol_value)))
             if symbol not in self._tracked_symbols:
-                return
+                if symbol in self._active_symbols:
+                    self._tracked_symbols.add(symbol)
+                else:
+                    return
             price = tick.get("last_price") or tick.get("ltp")
             if not isinstance(price, (int, float)):
                 return
@@ -2353,17 +2357,21 @@ class StrategyRunner:
                 raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
-            if now_mono - self._last_global_eval_ts > 5.0:
-                self._logger.error("No strategy evaluation in 5s despite ticks flowing")
+            if self.ready and now_mono - self._last_global_eval_ts > 5.0:
+                self._logger.warning(
+                    "Strategy evaluation stalled >5s",
+                    extra={"event": "strategy_eval_stall"},
+                )
             self._health_watchdog()
             self._logger.debug(
                 "PIPELINE_OK",
                 extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
             )
-            last_eval = self._last_eval_ts.get(normalized_symbol, 0.0)
-            if now_mono - last_eval < 0.05:
-                return
-            self._last_eval_ts[normalized_symbol] = now_mono
+            with self._eval_gate_lock:
+                last_eval = self._last_eval_ts.get(normalized_symbol, 0.0)
+                if now_mono - last_eval < 0.05:
+                    return
+                self._last_eval_ts[normalized_symbol] = now_mono
             self._logger.debug(
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
