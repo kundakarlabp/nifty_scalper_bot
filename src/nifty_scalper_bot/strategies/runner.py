@@ -531,7 +531,8 @@ class StrategyRunner:
         self._history_ready_by_symbol: dict[str, bool] = {}
         self._symbol_states: dict[str, SymbolState] = {}
         self._symbol_bar_count: dict[str, int] = {}
-        self._last_eval_ts: dict[str, float] = {}
+        self._last_eval_ts: dict[str, float] = defaultdict(float)
+        self._eval_gate_lock = threading.Lock()
         self._last_global_eval_ts: float = time.monotonic()
         self._last_tick_seen_ts: float = time.monotonic()
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
@@ -553,6 +554,11 @@ class StrategyRunner:
         self._active_orphan_guards: set[str] = set()
         self._signals_last_hour: Deque[float] = deque(maxlen=1000)
         self._last_signal_frequency_check_ts: float = 0.0
+        self._last_eval_queue_log_ts: float = 0.0
+        self._eval_queue_depth = 0
+        self._eval_queue_peak = 0
+        self._eval_queue_lock = threading.Lock()
+        self._eval_in_progress_symbols: set[str] = set()
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -2318,7 +2324,10 @@ class StrategyRunner:
                 return
             symbol = enforce_canonical(normalize_symbol(str(symbol_value)))
             if symbol not in self._tracked_symbols:
-                return
+                if symbol in self._active_symbols:
+                    self._tracked_symbols.add(symbol)
+                else:
+                    return
             price = tick.get("last_price") or tick.get("ltp")
             if not isinstance(price, (int, float)):
                 return
@@ -2353,22 +2362,53 @@ class StrategyRunner:
                 raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
-            if now_mono - self._last_global_eval_ts > 5.0:
-                self._logger.error("No strategy evaluation in 5s despite ticks flowing")
+            if self.ready and now_mono - self._last_global_eval_ts > 5.0:
+                self._logger.warning(
+                    "Strategy evaluation stalled >5s",
+                    extra={"event": "strategy_eval_stall"},
+                )
             self._health_watchdog()
             self._logger.debug(
                 "PIPELINE_OK",
                 extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
             )
-            last_eval = self._last_eval_ts.get(normalized_symbol, 0.0)
-            if now_mono - last_eval < 0.05:
-                return
-            self._last_eval_ts[normalized_symbol] = now_mono
+            with self._eval_gate_lock:
+                last_eval = self._last_eval_ts[normalized_symbol]
+                if now_mono - last_eval < 0.05:
+                    return
+                self._last_eval_ts[normalized_symbol] = now_mono
             self._logger.debug(
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
             )
-            self._on_tick(normalized_symbol, tick)
+            with self._eval_gate_lock:
+                if normalized_symbol in self._eval_in_progress_symbols:
+                    return
+                self._eval_in_progress_symbols.add(normalized_symbol)
+            with self._eval_queue_lock:
+                self._eval_queue_depth += 1
+                self._eval_queue_peak = max(
+                    self._eval_queue_peak,
+                    self._eval_queue_depth,
+                )
+                eval_queue_depth = self._eval_queue_depth
+                eval_queue_peak = self._eval_queue_peak
+            now_queue_log = time.monotonic()
+            if now_queue_log - self._last_eval_queue_log_ts > 10.0:
+                self._logger.debug(
+                    "EvalQueue depth=%d peak=%d",
+                    eval_queue_depth,
+                    eval_queue_peak,
+                    extra={"event": "eval_queue_stats"},
+                )
+                self._last_eval_queue_log_ts = now_queue_log
+            try:
+                self._on_tick(normalized_symbol, tick)
+            finally:
+                with self._eval_queue_lock:
+                    self._eval_queue_depth = max(0, self._eval_queue_depth - 1)
+                with self._eval_gate_lock:
+                    self._eval_in_progress_symbols.discard(normalized_symbol)
         except Exception as exc:
             LOGGER.error(
                 "Critical error in _on_tick for %s: %s",
@@ -2380,12 +2420,12 @@ class StrategyRunner:
     def _health_watchdog(self) -> None:
         """Args: none; Returns: none; Raises: none."""
         now = time.monotonic()
-        if (
-            now - self._last_global_eval_ts > 5.0
-            and now - self._last_tick_seen_ts <= 5.0
-        ):
-            self._logger.error(
-                "⚠️ No strategy evaluations in 5s despite ticks flowing."
+        tick_flowing = (now - self._last_tick_seen_ts) <= 5.0
+        eval_stalled = (now - self._last_global_eval_ts) > 5.0
+        if self.ready and tick_flowing and eval_stalled:
+            self._logger.warning(
+                "Strategy eval stalled while ticks flowing",
+                extra={"event": "strategy_eval_stall"},
             )
 
     # ✅ FIX: New Method to Prime Indicators

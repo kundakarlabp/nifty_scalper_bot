@@ -214,6 +214,9 @@ class MarketDataManager:
         self._last_tick_log_time = time.monotonic()
         self._last_tick_time: dict[str, float] = {}
         self._tick_bus: Any | None = None
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._async_dispatch_drops = 0
+        self._last_async_drop_log = time.monotonic()
         self._ws_connected = False
         self._hydration_status: dict[str, str] = {}
         self._last_hb_mono: float | None = None
@@ -2364,6 +2367,16 @@ class MarketDataManager:
         except Exception as e:
             self._logger.error("Failure in MarketDataManager.attach_tick_bus: %s", e)
 
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Args: loop; Returns: none; Raises: none."""
+        try:
+            if self._main_loop is not None:
+                self._logger.warning("Event loop already wired — ignoring rewire")
+                return
+            self._main_loop = loop
+        except Exception as e:
+            self._logger.error("Failure in MarketDataManager.set_event_loop: %s", e)
+
     def _on_tick(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
         try:
@@ -2536,7 +2549,8 @@ class MarketDataManager:
         if source != "ws":
             self.bump_heartbeat()
         now_mono = time.monotonic()
-        if now_mono - self._last_tick_log_time >= 5.0:
+        tick_stats_interval = float(os.getenv("TICK_STATS_INTERVAL", "5.0"))
+        if now_mono - self._last_tick_log_time >= tick_stats_interval:
             self._logger.debug(
                 "EVENT|tick_stats|cached=%d|ticks_last_5s=%d",
                 len(self._tick_cache),
@@ -2544,29 +2558,37 @@ class MarketDataManager:
             )
             self._tick_counter = 0
             self._last_tick_log_time = now_mono
-        # Forward WS ticks to tick_bus so DataHub → MessageBus → StrategyRunner receives them.
-        # Guard: only in WS mode (self._ws is not None) and only for ws-sourced ticks.
-        # MDM._on_tick skips WS-source ticks (added below) to break the re-entry loop.
-        if source == "ws" and self._ws is not None and self._tick_bus is not None:
-            try:
-                publish = getattr(self._tick_bus, "publish", None)
-                if callable(publish):
-                    publish(dict(tick_payload))
-            except Exception as exc:  # noqa: BLE001
-                self._logger.debug("tick_bus forward failed: %s", exc)
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
             pass
         for callback in callbacks:
             try:
-                # [FIX] Handle Async Callbacks (DataHub) vs Sync (Legacy)
                 if asyncio.iscoroutinefunction(callback):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(callback(dict(tick_payload)))
-                    except RuntimeError:
-                        asyncio.run(callback(dict(tick_payload)))
+                    loop = self._main_loop
+                    if loop is not None and loop.is_running():
+                        loop.call_soon_threadsafe(
+                            lambda: loop.create_task(callback(dict(tick_payload)))
+                        )
+                    else:
+                        with self._lock:
+                            self._async_dispatch_drops += 1
+                            async_dispatch_drops = self._async_dispatch_drops
+                        now = time.monotonic()
+                        if now - self._last_async_drop_log > 5.0:
+                            self._logger.warning(
+                                "Async tick dispatch drops=%d",
+                                async_dispatch_drops,
+                                extra={"event": "async_dispatch_drops"},
+                            )
+                            self._last_async_drop_log = now
+                        self._logger.warning(
+                            "Async tick callback dropped — main loop not wired",
+                            extra={
+                                "event": "async_callback_no_loop",
+                                "symbol": symbol,
+                            },
+                        )
                 else:
                     callback(dict(tick_payload))
             except Exception as exc:
