@@ -215,6 +215,8 @@ class MarketDataManager:
         self._last_tick_time: dict[str, float] = {}
         self._tick_bus: Any | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._async_dispatch_drops = 0
+        self._last_async_drop_log = time.monotonic()
         self._ws_connected = False
         self._hydration_status: dict[str, str] = {}
         self._last_hb_mono: float | None = None
@@ -2368,6 +2370,9 @@ class MarketDataManager:
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Args: loop; Returns: none; Raises: none."""
         try:
+            if self._main_loop is not None:
+                self._logger.warning("Event loop already wired — ignoring rewire")
+                return
             self._main_loop = loop
         except Exception as e:
             self._logger.error("Failure in MarketDataManager.set_event_loop: %s", e)
@@ -2544,7 +2549,8 @@ class MarketDataManager:
         if source != "ws":
             self.bump_heartbeat()
         now_mono = time.monotonic()
-        if now_mono - self._last_tick_log_time >= 5.0:
+        tick_stats_interval = float(os.getenv("TICK_STATS_INTERVAL", "5.0"))
+        if now_mono - self._last_tick_log_time >= tick_stats_interval:
             self._logger.debug(
                 "EVENT|tick_stats|cached=%d|ticks_last_5s=%d",
                 len(self._tick_cache),
@@ -2562,10 +2568,20 @@ class MarketDataManager:
                     loop = self._main_loop
                     if loop is not None and loop.is_running():
                         loop.call_soon_threadsafe(
-                            loop.create_task,
-                            callback(dict(tick_payload)),
+                            lambda: loop.create_task(callback(dict(tick_payload)))
                         )
                     else:
+                        with self._lock:
+                            self._async_dispatch_drops += 1
+                            async_dispatch_drops = self._async_dispatch_drops
+                        now = time.monotonic()
+                        if now - self._last_async_drop_log > 5.0:
+                            self._logger.warning(
+                                "Async tick dispatch drops=%d",
+                                async_dispatch_drops,
+                                extra={"event": "async_dispatch_drops"},
+                            )
+                            self._last_async_drop_log = now
                         self._logger.warning(
                             "Async tick callback dropped — main loop not wired",
                             extra={
