@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     )
 
 LOGGER = get_logger(__name__)
+RELAX_REGIME_FILTER = os.getenv("RELAX_REGIME_FILTER", "false").lower() == "true"
 _THROTTLE_CACHE: Dict[str, float] = {}
 _THROTTLE_LOCK = threading.Lock()
 
@@ -559,6 +560,12 @@ class StrategyRunner:
         self._eval_queue_peak = 0
         self._eval_queue_lock = threading.Lock()
         self._eval_in_progress_symbols: set[str] = set()
+        self._eval_counter = 0
+        self._signal_counter = 0
+        self._regime_block_counter = 0
+        self._capital_block_counter = 0
+        self._spot_stale_flag = False
+        self._last_summary_log = time.monotonic()
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -2372,9 +2379,10 @@ class StrategyRunner:
                 "PIPELINE_OK",
                 extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
             )
+            self._eval_counter += 1
             with self._eval_gate_lock:
                 last_eval = self._last_eval_ts[normalized_symbol]
-                if now_mono - last_eval < 0.05:
+                if now_mono - last_eval < 0.5:
                     return
                 self._last_eval_ts[normalized_symbol] = now_mono
             self._logger.debug(
@@ -2416,6 +2424,24 @@ class StrategyRunner:
                 exc,
                 exc_info=True,
             )
+        finally:
+            now = time.monotonic()
+            if now - self._last_summary_log >= 60.0:
+                self._logger.info(
+                    "ENGINE_SUMMARY",
+                    extra={
+                        "evals": self._eval_counter,
+                        "signals": self._signal_counter,
+                        "regime_blocks": self._regime_block_counter,
+                        "capital_blocks": self._capital_block_counter,
+                        "runner_state": str(self._runner_state),
+                    },
+                )
+                self._eval_counter = 0
+                self._signal_counter = 0
+                self._regime_block_counter = 0
+                self._capital_block_counter = 0
+                self._last_summary_log = now
 
     def _health_watchdog(self) -> None:
         """Args: none; Returns: none; Raises: none."""
@@ -3361,6 +3387,13 @@ class StrategyRunner:
                 if hydration_state != SymbolState.READY:
                     return
 
+                history = self._symbol_history.get(symbol)
+                if not history:
+                    return
+                latest_bar = history[-1]
+                if not getattr(latest_bar, "is_closed", True):
+                    return
+
                 bars = (
                     self._market_data.get_ohlc_bars(symbol) if self._market_data else []
                 )
@@ -3400,8 +3433,18 @@ class StrategyRunner:
                 spot_ts = _extract_float(spot_tick, "timestamp", "ts", "ts_ms")
                 if spot_ts is not None and spot_ts > 1_000_000_000_000:
                     spot_ts = spot_ts / 1000.0
-                if spot_ts is not None and (time.time() - float(spot_ts)) > 2.0:
-                    return
+                spot_age = (
+                    time.time() - float(spot_ts) if spot_ts is not None else None
+                )
+                spot_max_age = 2.0
+                if spot_age is not None and spot_age > spot_max_age:
+                    if not self._spot_stale_flag:
+                        self._spot_stale_flag = True
+                        self._logger.warning("SPOT_STALE")
+                else:
+                    if self._spot_stale_flag:
+                        self._spot_stale_flag = False
+                        self._logger.info("SPOT_RECOVERED")
 
                 # Heartbeat logging for derivatives (confirms data flow)
                 if "NIFTY" in symbol and any(x in symbol for x in ["FUT", "CE", "PE"]):
@@ -3716,16 +3759,18 @@ class StrategyRunner:
                     )
                     regime_ready = self._regime_manager_ready()
 
+                    effective_regime_ready = regime_ready or RELAX_REGIME_FILTER
                     if not (
                         index_indicators_ready
                         and symbol_indicators_ready
-                        and regime_ready
+                        and effective_regime_ready
                     ):
                         reason = "index_indicators_not_ready"
                         if not symbol_indicators_ready:
                             reason = "symbol_indicators_not_ready"
-                        elif not regime_ready:
+                        elif not effective_regime_ready:
                             reason = "regime_manager_not_ready"
+                            self._regime_block_counter += 1
                         self._warn_symbol_gate(
                             "indicator_invalid",
                             symbol,
@@ -3756,6 +3801,19 @@ class StrategyRunner:
                         self._last_global_eval_ts = time.monotonic()
                         signal = self._strategy_manager.generate_signal(symbol, price)
                         if signal is not None:
+                            self._signal_counter += 1
+                            self._logger.info(
+                                "SIGNAL_GENERATED",
+                                extra={
+                                    "strategy": str(
+                                        signal.metadata.get("strategy")
+                                        if signal.metadata
+                                        else "unknown"
+                                    ),
+                                    "symbol": symbol,
+                                    "direction": signal.action,
+                                },
+                            )
                             self._signals_last_hour.append(time.time())
 
                         now_ts = time.time()
@@ -4728,6 +4786,18 @@ class StrategyRunner:
                 sized_qty = min(int(sized_qty), size_by_margin)
 
             if sized_qty <= 0:
+                lot_size = 65
+                if hasattr(self._risk_manager, "_resolve_lot_size"):
+                    try:
+                        lot_size = int(self._risk_manager._resolve_lot_size(trade_symbol))
+                    except Exception:
+                        lot_size = 65
+                required_margin = float(trade_price) * float(lot_size)
+                if required_margin <= available_margin and entry_side == "BUY":
+                    sized_qty = lot_size
+
+            if sized_qty <= 0:
+                self._capital_block_counter += 1
                 self._logger.info(
                     "Insufficient capital",
                     extra={"event": "insufficient_capital", "symbol": trade_symbol},
@@ -4879,6 +4949,15 @@ class StrategyRunner:
 
             order_id = None
             if use_virtual_bracket:
+                self._logger.info(
+                    "ORDER_ATTEMPT",
+                    extra={
+                        "symbol": trade_symbol,
+                        "direction": signal.action,
+                        "qty": int(sized_qty),
+                        "price": execution_price,
+                    },
+                )
                 try:
                     order_id = self._order_manager.place_bracket_order(
                         symbol=trade_symbol,
@@ -4905,6 +4984,15 @@ class StrategyRunner:
                     order_id = None
 
             if not order_id:
+                self._logger.info(
+                    "ORDER_ATTEMPT",
+                    extra={
+                        "symbol": trade_symbol,
+                        "direction": signal.action,
+                        "qty": int(sized_qty),
+                        "price": execution_price,
+                    },
+                )
                 order_id = self._order_manager.place_order(
                     symbol=trade_symbol,
                     side=entry_side,
