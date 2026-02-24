@@ -77,6 +77,15 @@ def test_risk_manager_cooldown_after_rejection() -> None:
     assert risk.cooldown_remaining() > 0.0
 
 
+def test_risk_manager_exposes_available_balance_on_init() -> None:
+    settings = RiskSettings(per_trade_risk_pct=1.0)
+    pm = DummyPositionManager(realized=0.0)
+
+    risk = _make_risk_manager(settings=settings, pm=pm, balance=12_345.0)
+
+    assert risk.available_balance == 12_345.0
+
+
 def test_suggest_position_size_returns_lot_multiple() -> None:
     settings = RiskSettings(per_trade_risk_pct=1.0)
     pm = DummyPositionManager(realized=0.0)
