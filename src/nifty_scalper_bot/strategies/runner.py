@@ -3092,7 +3092,7 @@ class StrategyRunner:
                     if cooldown_until and now_ts < cooldown_until:
                         cooldown_ok = False
                         break
-            capital_ok = bool(self._risk_manager.available_balance() > 0.0)
+            capital_ok = bool(self._risk_manager.available_balance > 0.0)
             self._logger.debug(
                 "EVAL_GATE_STATUS",
                 extra={
@@ -3874,7 +3874,11 @@ class StrategyRunner:
                             self._logger.warning("Stale tick — skipping execution")
                             return
                         self._last_global_eval_ts = time.monotonic()
-                        signal = self._strategy_manager.generate_signal(symbol, price)
+                        try:
+                            signal = self._strategy_manager.generate_signal(symbol, price)
+                        except Exception:
+                            self._logger.exception("Signal evaluation failure")
+                            signal = None
                         if signal is not None:
                             self._signal_counter += 1
                             self._logger.info(
@@ -4894,7 +4898,7 @@ class StrategyRunner:
                         extra={
                             "event": "qty_zero",
                             "symbol": trade_symbol,
-                            "available_balance": self._risk_manager.available_balance(),
+                            "available_balance": self._risk_manager.available_balance,
                         },
                     )
                     self._qty_zero_log_ts[trade_symbol] = now_mono
