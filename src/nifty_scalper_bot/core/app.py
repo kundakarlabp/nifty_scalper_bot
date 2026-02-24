@@ -5717,6 +5717,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info(f"🔧 Processing {len(targets)} symbols for wiring...")
             resolved_count = 0
             unresolved_symbols = []
+            live_mode_enabled = bool(ctx.settings.enable_live)
 
             for sym in targets:
                 if mdm:
@@ -5725,7 +5726,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                 tok = None
                 if ctx.instrument_resolver:
                     tok = ctx.instrument_resolver.resolve(sym)
+                    if tok is None and live_mode_enabled:
+                        raise RuntimeError(f"Live mode: Missing token for {sym}")
                     if tok:
+                        if mdm:
+                            mdm.register_symbol(sym, tok)
                         tokens_to_poll.append(tok)
                         resolved_count += 1
                         LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
@@ -5813,12 +5818,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 if ctx.instrument_resolver
                                 else None
                             )
+                            if tok is None and live_mode_enabled:
+                                raise RuntimeError(f"Live mode: Missing token for {sym}")
+                            if tok and ctx.market_data_manager:
+                                ctx.market_data_manager.register_symbol(sym, tok)
                             if (
                                 tok
                                 and ctx.streamer
                                 and hasattr(ctx.streamer, "subscribe")
                             ):
                                 ctx.streamer.subscribe([tok])
+                            if (
+                                tok
+                                and ctx.websocket_manager is not None
+                                and ctx.websocket_manager.is_connected()
+                            ):
+                                ctx.websocket_manager.resubscribe([tok])
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.add_symbol(sym)
 

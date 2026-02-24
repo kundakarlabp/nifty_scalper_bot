@@ -66,3 +66,30 @@ async def test_single_reconnect_task_is_scheduled(
         assert manager._ticker is not None
     finally:
         await manager.disconnect()
+
+
+def test_resubscribe_adds_and_subscribes_unique_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+
+    subscribed: list[list[int]] = []
+    modes: list[tuple[str, list[int]]] = []
+
+    class RecordingTicker(FakeKiteTicker):
+        def subscribe(self, tokens: list[int]) -> None:
+            subscribed.append(tokens)
+
+        def set_mode(self, mode: str, tokens: list[int]) -> None:
+            modes.append((mode, tokens))
+
+    manager = ws_module.WebSocketManager("k", "t", trading_window_enabled=False)
+    ticker = RecordingTicker("k", "t", reconnect=False)
+    manager._ticker = ticker
+    manager._connected.set()
+
+    manager.resubscribe([12, 13, 12])
+
+    assert manager._tokens == {12, 13}
+    assert subscribed == [[12, 13]]
+    assert modes == [(ticker.MODE_FULL, [12, 13])]

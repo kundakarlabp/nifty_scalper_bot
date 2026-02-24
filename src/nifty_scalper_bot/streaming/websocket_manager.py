@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import time as dtime
 from enum import Enum
-import random
-import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -270,6 +270,25 @@ class WebSocketManager:
 
         self._merge_tokens(tokens)
         self._schedule_async(self._resubscribe_if_connected())
+
+    def resubscribe(self, tokens: list[int]) -> None:
+        """Args: tokens; Returns: none; Raises: none."""
+
+        try:
+            if not tokens:
+                return
+            unique_tokens = sorted({int(token) for token in tokens})
+            if not unique_tokens:
+                return
+            self._merge_tokens(unique_tokens)
+            ticker = self._ticker
+            if ticker is None or not self._connected.is_set():
+                return
+            ticker.subscribe(unique_tokens)
+            ticker.set_mode(ticker.MODE_FULL, unique_tokens)
+            self._logger.info("WebSocket resubscribed to %d tokens", len(unique_tokens))
+        except Exception as e:
+            self._logger.error("WebSocket resubscribe failed: %s", e, exc_info=True)
 
     def unsubscribe_tokens(self, tokens: Sequence[int]) -> None:
         """Args: tokens; Returns: none; Raises: none."""
@@ -603,6 +622,16 @@ class WebSocketManager:
                 ws.set_mode(ws.MODE_FULL, token_list)
                 self._logger.info(
                     "WebSocket subscribed to %d tokens", len(self._tokens)
+                )
+                symbol_map = getattr(
+                    getattr(self, "_market_data_manager", None),
+                    "_symbol_by_token",
+                    {},
+                )
+                self._logger.info(
+                    "WebSocket subscribed tokens=%d symbols=%d",
+                    len(self._tokens),
+                    len(symbol_map),
                 )
             if self._on_connect_callback is not None:
                 self._on_connect_callback()
