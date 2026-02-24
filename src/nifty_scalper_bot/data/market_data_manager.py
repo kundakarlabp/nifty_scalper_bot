@@ -4005,7 +4005,24 @@ class MarketDataManager:
         *,
         now: float | None = None,
     ) -> bool:
-        signature = (tick.get("ltp"), tick.get("bid"), tick.get("ask"))
+        ex_ts = (
+            tick.get("exchange_timestamp")
+            or tick.get("last_trade_time")
+            or tick.get("timestamp")
+            or 0
+        )
+
+        volume = tick.get("volume_traded_today") or tick.get("volume") or 0
+        oi = tick.get("oi") or tick.get("open_interest") or 0
+
+        signature = (
+            tick.get("ltp"),
+            tick.get("bid"),
+            tick.get("ask"),
+            int(volume) // 100 if volume else 0,
+            int(oi) // 100 if oi else 0,
+            int(ex_ts) // 1000 if ex_ts else 0,
+        )
         current = float(now) if now is not None else time.monotonic()
         last = self._last_signature.get(symbol)
         if last is None:

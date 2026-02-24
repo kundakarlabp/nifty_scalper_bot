@@ -2386,7 +2386,7 @@ class StrategyRunner:
             self._eval_counter += 1
             with self._eval_gate_lock:
                 last_eval = self._last_eval_ts[normalized_symbol]
-                if now_mono - last_eval < 0.5:
+                if now_mono - last_eval < 0.05:
                     return
                 self._last_eval_ts[normalized_symbol] = now_mono
             self._logger.debug(
@@ -3077,6 +3077,33 @@ class StrategyRunner:
             )
             source = tick.get("source", "unknown")
             is_seed = bool(tick.get("seed"))
+            normalized_symbol = symbol
+            history_ready = bool(self._history_ready_by_symbol.get(symbol, False))
+            spot_age: float | None = None
+            current_regime = getattr(self, "_current_regime", None)
+            cooldown_ok = True
+            cooldown_map = getattr(self, "_pyramid_reject_cooldown", {})
+            if cooldown_map:
+                now_ts = time_module.time()
+                cooldown_symbol = self._normalize_symbol(symbol)
+                directions = ["BUY"] if self._options_long_only else ["BUY", "SELL"]
+                for direction in directions:
+                    cooldown_until = cooldown_map.get((cooldown_symbol, direction))
+                    if cooldown_until and now_ts < cooldown_until:
+                        cooldown_ok = False
+                        break
+            capital_ok = bool(self._risk_manager.available_balance() > 0.0)
+            self._logger.debug(
+                "EVAL_GATE_STATUS",
+                extra={
+                    "symbol": normalized_symbol,
+                    "history_ready": history_ready,
+                    "spot_age": spot_age,
+                    "regime": str(current_regime),
+                    "cooldown_ok": cooldown_ok,
+                    "capital_ok": capital_ok,
+                },
+            )
 
             if is_seed and price <= 0:
                 log_throttled(
@@ -3395,7 +3422,10 @@ class StrategyRunner:
                 if not history:
                     return
                 latest_bar = history[-1]
-                if not getattr(latest_bar, "is_closed", True):
+                bar = latest_bar
+                if not hasattr(bar, "is_closed"):
+                    return
+                if not bar.is_closed:
                     return
                 raw_bar_ts = getattr(latest_bar, "timestamp", None)
                 bar_ts = (
@@ -3451,7 +3481,9 @@ class StrategyRunner:
                 spot_age = (
                     time.time() - float(spot_ts) if spot_ts is not None else None
                 )
-                spot_max_age = 2.0
+                spot_max_age = float(
+                    os.environ.get("SPOT_STALENESS_SEC", "30.0")
+                )
                 if spot_age is not None and spot_age > spot_max_age:
                     spot_stale = True
 
@@ -4840,6 +4872,19 @@ class StrategyRunner:
                     sized_qty = lot_size
 
             if sized_qty <= 0:
+                required_capital = float(trade_price) * float(
+                    int(self._risk_manager._resolve_lot_size(trade_symbol))
+                    if hasattr(self._risk_manager, "_resolve_lot_size")
+                    else 0
+                )
+                self._logger.warning(
+                    "POSITION_SIZE_ZERO",
+                    extra={
+                        "symbol": trade_symbol,
+                        "required_capital": required_capital,
+                        "available_capital": available_margin,
+                    },
+                )
                 self._capital_block_counter += 1
                 now_mono = time.monotonic()
                 last_log = self._qty_zero_log_ts.get(trade_symbol, 0.0)
