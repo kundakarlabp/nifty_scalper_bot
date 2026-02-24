@@ -119,6 +119,7 @@ class RiskManager:
     _broker_client: Any | None = field(init=False, repr=False, default=None)
     _data_hub: "DataHub | None" = field(init=False, repr=False, default=None)
     _cached_balance: float = field(init=False, repr=False, default=0.0)
+    _available_balance: float = field(init=False, repr=False, default=0.0)
     _last_balance_refresh: float = field(init=False, repr=False, default=0.0)
     _balance_cache_ttl: float = field(init=False, repr=False, default=60.0)
     _balance_force_refresh: float = field(init=False, repr=False, default=0.0)
