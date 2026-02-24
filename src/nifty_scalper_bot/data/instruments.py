@@ -392,10 +392,12 @@ class InstrumentResolver:
         with self._lock:
             self._neg_cache[key] = now_ts + self._neg_ttl
             self._warned_no_token.add(key.split(":", 1)[-1])
-        LOGGER.warning("instrument_resolver_no_token", extra={"event": "instrument_resolver_no_token", "symbol": key})
-        if os.getenv("ENABLE_LIVE", "false").strip().lower() == "true":
-            raise RuntimeError(
-                f"InstrumentResolver: No token found for symbol {symbol}"
+        if token is None:
+            if get_settings().enable_live:
+                raise RuntimeError(f"Missing instrument token for {symbol}")
+            LOGGER.warning(
+                "instrument_resolver_no_token",
+                extra={"event": "instrument_resolver_no_token", "symbol": key},
             )
         return None
 

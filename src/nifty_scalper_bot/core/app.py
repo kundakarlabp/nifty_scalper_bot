@@ -5464,7 +5464,9 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                 # Format expiry code (Zerodha convention)
                 if _is_monthly:
-                    _date_code = _next_expiry.strftime("%y%b").upper()  # "26FEB"
+                    expiry_code = _next_expiry.strftime("%y%b").upper()
+                    assert len(expiry_code) == 5, "Invalid expiry format"
+                    _date_code = expiry_code  # "26FEB"
                 else:
                     _y = _next_expiry.strftime("%y")  # "26"
                     _d = _next_expiry.strftime("%d")  # "11"
@@ -5473,12 +5475,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                         _next_expiry.month, str(_next_expiry.month)
                     )  # "2" for Feb
                     _date_code = f"{_y}{_m}{_d}"  # "26211" for Feb 11, 2026
+                    expiry_code = _date_code
 
                 # Use current ATM strike (approximate)
                 _atm_strike = 25600  # Default; ideally get from live NIFTY price
 
                 # Generate dynamic test symbol
-                test_sym = f"NFO:NIFTY{_date_code}{_atm_strike}CE"
+                test_sym = f"NFO:NIFTY{expiry_code}{_atm_strike}CE"
                 LOGGER.info(
                     f"📝 Testing dynamic NFO symbol: {test_sym} (Expiry: {_next_expiry})"
                 )
@@ -5654,6 +5657,17 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                     await asyncio.sleep(HYDRATION_DELAY_SEC)
 
+            if get_settings().enable_live and ctx.market_data_manager is not None:
+                failed = [
+                    s
+                    for s, status in ctx.market_data_manager._hydration_status.items()
+                    if str(status).strip().lower() not in {"hydrated", "ready"}
+                ]
+                if failed:
+                    raise RuntimeError(
+                        f"Startup hydration incomplete for symbols: {failed}"
+                    )
+
             # =========================================================
             # ✅ WORLD CLASS FIX: FINALIZE RUNNER STATE
             # =========================================================
@@ -5751,6 +5765,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                         f"🔴 UNRESOLVED SYMBOLS (will NOT be polled): {unresolved_symbols}"
                     )
             LOGGER.info(f"✅ tokens_to_poll has {len(tokens_to_poll)} tokens")
+            LOGGER.info(
+                "WS_SUBSCRIPTION_SUMMARY tokens=%d symbols=%d",
+                len(tokens_to_poll),
+                len(getattr(mdm, "_symbol_by_token", {})) if mdm is not None else 0,
+            )
             subscribed_symbols = sorted({sym for sym in targets})
             LOGGER.critical(
                 "📊 STRATEGY SUBSCRIBED SYMBOLS: %s",

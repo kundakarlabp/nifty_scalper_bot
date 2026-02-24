@@ -176,6 +176,7 @@ class RiskManager:
         self._lot_size_lookup = None
         self._lot_size_symbol = None
         self._cached_balance = float(self.account_balance)
+        self._available_balance = float(self._cached_balance)
         self._last_balance_refresh = 0.0
         refresh_interval = max(
             5.0,
@@ -219,6 +220,14 @@ class RiskManager:
     def balance_source_label(self) -> str:
         """Return label describing the origin of the cached balance."""
         return self._balance_source
+
+    @property
+    def available_balance(self) -> float:
+        """Args: none. Returns: available balance snapshot. Raises: None."""
+        try:
+            return float(getattr(self, "_available_balance", 0.0) or 0.0)
+        except Exception:
+            return 0.0
 
     def set_broker_client(self, broker_client: Any | None) -> None:
         """Attach the broker client used for ancillary integrations."""
@@ -307,6 +316,7 @@ class RiskManager:
                 fallback_balance = self._resolve_env_balance_fallback()
             self.account_balance = float(fallback_balance)
             self._cached_balance = self.account_balance
+            self._available_balance = float(self._cached_balance)
             self._last_balance_refresh = now
             self._balance_source = "cache" if fallback_balance > 0 else "env"
             self._notify_unified_manager(
@@ -324,6 +334,7 @@ class RiskManager:
             if balance is not None and balance > 0:
                 self.account_balance = float(balance)
                 self._cached_balance = self.account_balance
+                self._available_balance = float(self._cached_balance)
                 self._last_balance_refresh = now
                 self._balance_source = "live"
                 # [FIX] Log only once every 60s
@@ -347,6 +358,7 @@ class RiskManager:
             if cached_balance_value is not None and cached_balance_value > 0:
                 self.account_balance = cached_balance_value
                 self._cached_balance = cached_balance_value
+                self._available_balance = float(self._cached_balance)
                 self._last_balance_refresh = now
                 self._balance_source = "cache"
                 self._notify_unified_manager(
@@ -377,6 +389,7 @@ class RiskManager:
 
             self.account_balance = float(fallback_value)
             self._cached_balance = self.account_balance
+            self._available_balance = float(self._cached_balance)
             self._last_balance_refresh = now
             self._balance_source = "env"
             self._notify_unified_manager(self.account_balance, source="env")
@@ -386,6 +399,7 @@ class RiskManager:
         if fallback_balance <= 0:
             fallback_balance = self._resolve_env_balance_fallback()
             self._cached_balance = float(fallback_balance)
+            self._available_balance = float(self._cached_balance)
             self.account_balance = float(fallback_balance)
             self._balance_source = "env"
         else:
