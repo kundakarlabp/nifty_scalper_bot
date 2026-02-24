@@ -18,7 +18,7 @@ def now_ist() -> datetime:
 
 def next_weekday(start_date: date, target_weekday: int) -> date:
     days_ahead = target_weekday - start_date.weekday()
-    if days_ahead <= 0:
+    if days_ahead < 0:
         days_ahead += 7
     return start_date + timedelta(days=days_ahead)
 
