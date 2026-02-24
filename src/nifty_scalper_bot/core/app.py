@@ -13,7 +13,7 @@ import asyncio  # Required for startup reconciliation and background tasks
 from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from importlib import import_module
 import inspect
 import logging
@@ -2253,6 +2253,99 @@ def _get_symbols(
 
     universe.update_underlying(float(ltp))
     final_symbols = universe.get_filtered_universe(float(ltp))
+
+    def _coerce_expiry_date(expiry_raw: Any) -> date | None:
+        """Parse resolver expiry payload. Args: expiry_raw. Returns: expiry date or None. Raises: None."""
+        try:
+            if expiry_raw is None:
+                return None
+            if isinstance(expiry_raw, datetime):
+                return expiry_raw.date()
+            if isinstance(expiry_raw, date):
+                return expiry_raw
+            value = str(expiry_raw).strip()
+            if not value:
+                return None
+            if "T" in value:
+                value = value.split("T", 1)[0]
+            return date.fromisoformat(value)
+        except Exception as exc:
+            LOGGER.error("Failure in _coerce_expiry_date: %s", exc)
+            return None
+
+    def _resolve_hydration_symbol(symbol: str) -> str:
+        """Resolve symbol to a hydrated token-backed contract. Args: symbol. Returns: tradable symbol. Raises: None."""
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol or resolver is None:
+            return normalized_symbol
+        try:
+            if resolver.resolve(normalized_symbol):
+                return normalized_symbol
+        except Exception as exc:
+            LOGGER.error("Failure in _resolve_hydration_symbol: %s", exc)
+
+        try:
+            base_symbol = normalized_symbol.split(":", 1)[-1]
+            if not base_symbol.startswith("NIFTY"):
+                return normalized_symbol
+            option_type = "CE" if base_symbol.endswith("CE") else "PE"
+            strike_text = base_symbol[:-2]
+            strike_digits = "".join(ch for ch in strike_text if ch.isdigit())
+            if not strike_digits:
+                return normalized_symbol
+            requested_strike = int(strike_digits[-5:])
+            contracts = resolver.option_contracts("NIFTY")
+            if not contracts:
+                return normalized_symbol
+
+            today = datetime.now().date()
+            eligible: list[tuple[int, date, str]] = []
+            for contract in contracts:
+                contract_symbol = (
+                    str(contract.get("tradingsymbol") or "").strip().upper()
+                )
+                if not contract_symbol.endswith(option_type):
+                    continue
+                contract_strike_raw = contract.get("strike")
+                if contract_strike_raw in (None, ""):
+                    continue
+                try:
+                    contract_strike = int(round(float(contract_strike_raw)))
+                except (TypeError, ValueError):
+                    continue
+                expiry_date = _coerce_expiry_date(contract.get("expiry"))
+                if expiry_date is None or expiry_date < today:
+                    continue
+                eligible.append((contract_strike, expiry_date, contract_symbol))
+
+            if not eligible:
+                return normalized_symbol
+
+            eligible.sort(
+                key=lambda item: (
+                    abs(item[0] - requested_strike),
+                    abs((item[1] - today).days),
+                    item[2],
+                )
+            )
+            remapped = f"NFO:{eligible[0][2]}"
+            if resolver.resolve(remapped):
+                LOGGER.warning(
+                    "option_symbol_hydration_remapped",
+                    extra={
+                        "event": "option_symbol_hydration_remapped",
+                        "requested": normalized_symbol,
+                        "resolved": remapped,
+                    },
+                )
+                return remapped
+            return normalized_symbol
+        except Exception as exc:
+            LOGGER.error("Failure in _resolve_hydration_symbol: %s", exc)
+            return normalized_symbol
+
+    final_symbols = [_resolve_hydration_symbol(sym) for sym in final_symbols]
+    final_symbols = list(dict.fromkeys(sym for sym in final_symbols if sym))
     LOGGER.debug("OptionUniv: Universe refreshed -> %s", final_symbols)
 
     if _LATEST_CTX:
