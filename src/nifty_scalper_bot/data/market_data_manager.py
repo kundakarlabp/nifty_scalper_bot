@@ -2498,6 +2498,19 @@ class MarketDataManager:
             self._token_by_symbol[symbol] = token_int
             self._symbol_by_token[token_int] = symbol
 
+    def register_symbol(self, symbol: str, token: int) -> None:
+        """Args: symbol/token; Returns: none; Raises: RuntimeError on bad data."""
+
+        normalized_symbol = enforce_canonical(normalize_symbol(str(symbol or "")))
+        if normalized_symbol.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
+        token_int = int(token)
+        with self._lock:
+            if self._token_by_symbol.get(normalized_symbol) == token_int:
+                return
+            self._token_by_symbol[normalized_symbol] = token_int
+            self._symbol_by_token[token_int] = normalized_symbol
+
     def _store_tick(self, symbol: str, tick: dict[str, Any]) -> None:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
 
