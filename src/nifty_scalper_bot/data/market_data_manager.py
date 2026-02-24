@@ -295,7 +295,7 @@ class MarketDataManager:
         self._health_monitor_thread: threading.Thread | None = None
         self._zombie_symbol = "NSE:NIFTY 50"
         self._zombie_tick_threshold_sec = self._parse_float_env(
-            "ZOMBIE_TICK_THRESHOLD_SEC", default=20.0, minimum=1.0
+            "ZOMBIE_TICK_THRESHOLD_SEC", default=60.0, minimum=10.0
         )
         self._zombie_restart_failures = 0
         self._zombie_restart_window = self._parse_float_env(

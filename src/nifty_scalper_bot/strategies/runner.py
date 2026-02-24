@@ -564,6 +564,10 @@ class StrategyRunner:
         self._signal_counter = 0
         self._regime_block_counter = 0
         self._capital_block_counter = 0
+        self._last_candle_eval: dict[str, float] = {}
+        self._regime_skip_log_ts: dict[str, float] = {}
+        self._qty_zero_log_ts: dict[str, float] = {}
+        self._last_spot_warn_ts = 0.0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
 
@@ -3393,6 +3397,16 @@ class StrategyRunner:
                 latest_bar = history[-1]
                 if not getattr(latest_bar, "is_closed", True):
                     return
+                raw_bar_ts = getattr(latest_bar, "timestamp", None)
+                bar_ts = (
+                    float(raw_bar_ts.timestamp())
+                    if hasattr(raw_bar_ts, "timestamp")
+                    else float(raw_bar_ts or 0.0)
+                )
+                last_eval_ts = self._last_candle_eval.get(symbol)
+                if last_eval_ts == bar_ts:
+                    return
+                self._last_candle_eval[symbol] = bar_ts
 
                 bars = (
                     self._market_data.get_ohlc_bars(symbol) if self._market_data else []
@@ -3428,8 +3442,9 @@ class StrategyRunner:
                             exc_info=True,
                         )
                         return
+                spot_stale = False
                 if not spot_tick:
-                    return
+                    spot_stale = True
                 spot_ts = _extract_float(spot_tick, "timestamp", "ts", "ts_ms")
                 if spot_ts is not None and spot_ts > 1_000_000_000_000:
                     spot_ts = spot_ts / 1000.0
@@ -3438,9 +3453,17 @@ class StrategyRunner:
                 )
                 spot_max_age = 2.0
                 if spot_age is not None and spot_age > spot_max_age:
+                    spot_stale = True
+
+                if spot_stale:
+                    if time.monotonic() - self._last_spot_warn_ts > 30:
+                        self._logger.warning(
+                            "Spot data stale — evaluation continuing cautiously",
+                            extra={"event": "spot_stale"},
+                        )
+                        self._last_spot_warn_ts = time.monotonic()
                     if not self._spot_stale_flag:
                         self._spot_stale_flag = True
-                        self._logger.warning("SPOT_STALE")
                 else:
                     if self._spot_stale_flag:
                         self._spot_stale_flag = False
@@ -3582,6 +3605,13 @@ class StrategyRunner:
             # =================================================================
             # PHASE 9: SIGNAL SELECTION & STRATEGY MANAGER EVALUATION
             # =================================================================
+
+            self._eval_counter = getattr(self, "_eval_counter", 0) + 1
+            if self._eval_counter % 50 == 0:
+                self._logger.info(
+                    "Strategy evaluation heartbeat",
+                    extra={"event": "eval_heartbeat", "count": self._eval_counter},
+                )
 
             signal = generated_signal
             upper_symbol = symbol.upper()
@@ -3771,6 +3801,19 @@ class StrategyRunner:
                         elif not effective_regime_ready:
                             reason = "regime_manager_not_ready"
                             self._regime_block_counter += 1
+                            now_mono = time.monotonic()
+                            last_log = self._regime_skip_log_ts.get(symbol, 0.0)
+                            if now_mono - last_log > 60.0:
+                                self._logger.info(
+                                    "Strategy skipped due to regime mismatch",
+                                    extra={
+                                        "event": "regime_skip",
+                                        "symbol": symbol,
+                                        "regime": "unknown",
+                                        "allowed": ["ready"],
+                                    },
+                                )
+                                self._regime_skip_log_ts[symbol] = now_mono
                         self._warn_symbol_gate(
                             "indicator_invalid",
                             symbol,
@@ -4798,10 +4841,18 @@ class StrategyRunner:
 
             if sized_qty <= 0:
                 self._capital_block_counter += 1
-                self._logger.info(
-                    "Insufficient capital",
-                    extra={"event": "insufficient_capital", "symbol": trade_symbol},
-                )
+                now_mono = time.monotonic()
+                last_log = self._qty_zero_log_ts.get(trade_symbol, 0.0)
+                if now_mono - last_log > 60.0:
+                    self._logger.warning(
+                        "Position sizing returned zero — insufficient capital or risk blocked",
+                        extra={
+                            "event": "qty_zero",
+                            "symbol": trade_symbol,
+                            "available_balance": self._risk_manager.available_balance(),
+                        },
+                    )
+                    self._qty_zero_log_ts[trade_symbol] = now_mono
                 return
 
             # Validate Position Limits
