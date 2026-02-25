@@ -3328,6 +3328,8 @@ class StrategyRunner:
                 completed_bar = builder.update(float(price), volume, timestamp)
                 if completed_bar is not None:
                     self._ingest_bar(symbol, completed_bar)
+                else:
+                    return
             except ValueError as exc:
                 if getattr(builder, "_last_error_ts", 0) < now.timestamp() - 60:
                     self._logger.warning(f"Bar update issue for {symbol}: {exc}")

@@ -177,6 +177,7 @@ class MarketDataManager:
         MarketDataManager constructor.
         """
         self._broker = broker
+        self._rest_client = broker
         self._websocket = websocket
         # FIX: Explicitly assign self._ws for internal use
         self._ws = websocket
@@ -2485,7 +2486,8 @@ class MarketDataManager:
             self._logger.debug(f"TICK_RATE_15S {summary}")
             self._tick_stats.clear()
             self._last_tick_stats_log = now
-        self._emit_tick(symbol, normalized_tick, source="ws")
+        tick_source = str(tick.get("source", "ws") or "ws").lower()
+        self._emit_tick(symbol, normalized_tick, source=tick_source)
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
@@ -2553,6 +2555,8 @@ class MarketDataManager:
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
         self._store_tick(symbol, tick)
+        if source == "warmup":
+            return
         callbacks: list[TickCallback]
         tick_payload = dict(tick)
         with self._lock:
@@ -2608,6 +2612,83 @@ class MarketDataManager:
                 self._logger.error(
                     "Tick callback failed", extra={"symbol": symbol, "error": str(exc)}
                 )
+
+    async def warmup_history(
+        self,
+        symbols: list[str],
+        lookback_minutes: int = 30,
+    ) -> None:
+        """Warm caches from minute candles; Args: symbols/lookback; Returns: None; Raises: RuntimeError."""
+
+        try:
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(minutes=lookback_minutes)
+
+            self._logger.info(
+                "WARMUP_START symbols=%d lookback=%dmin",
+                len(symbols),
+                lookback_minutes,
+            )
+
+            rest_client = self._rest_client
+            fetcher = getattr(rest_client, "get_historical_data", None)
+            if not callable(fetcher):
+                fetcher = getattr(rest_client, "historical_data", None)
+            if not callable(fetcher):
+                raise RuntimeError("WARMUP failed: historical data client unavailable")
+
+            for symbol in symbols:
+                canonical_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+                token = self._token_by_symbol.get(canonical_symbol)
+                if not token:
+                    raise RuntimeError(
+                        f"WARMUP failed: missing token for {canonical_symbol}"
+                    )
+
+                if asyncio.iscoroutinefunction(fetcher):
+                    candles = await fetcher(
+                        instrument_token=token,
+                        from_date=start_time,
+                        to_date=end_time,
+                        interval="minute",
+                    )
+                else:
+                    candles = await asyncio.to_thread(
+                        fetcher,
+                        token,
+                        start_time,
+                        end_time,
+                        "minute",
+                    )
+
+                for candle in candles or ():
+                    candle_dt = candle.get("date")
+                    if isinstance(candle_dt, str):
+                        try:
+                            candle_dt = datetime.fromisoformat(
+                                candle_dt.replace("Z", "+00:00")
+                            )
+                        except ValueError:
+                            continue
+                    if not isinstance(candle_dt, datetime):
+                        continue
+                    if candle_dt.tzinfo is None:
+                        candle_dt = candle_dt.replace(tzinfo=timezone.utc)
+
+                    synthetic_tick = {
+                        "instrument_token": token,
+                        "symbol": symbol,
+                        "last_price": float(candle.get("close", 0.0)),
+                        "volume": candle.get("volume", 0),
+                        "timestamp": float(candle_dt.timestamp()),
+                        "source": "warmup",
+                    }
+                    self._handle_tick(synthetic_tick)
+
+            self._logger.info("WARMUP_COMPLETE")
+        except Exception as e:
+            self._logger.error("Failure in warmup_history: %s", e)
+            raise
 
     def _is_ws_connected(self) -> bool:
         """Args: none; Returns: websocket connectivity; Raises: none."""

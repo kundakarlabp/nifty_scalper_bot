@@ -5825,6 +5825,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             resolved_count = 0
             unresolved_symbols = []
             live_mode_enabled = bool(ctx.settings.enable_live)
+            active_symbols: list[str] = []
 
             for sym in targets:
                 if mdm:
@@ -5839,6 +5840,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         if mdm:
                             mdm.register_symbol(sym, tok)
                         tokens_to_poll.append(tok)
+                        active_symbols.append(sym)
                         resolved_count += 1
                         LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
                     else:
@@ -5846,6 +5848,24 @@ async def startup_sequence(ctx: BotContext) -> None:
                         LOGGER.warning(f"⚠️ UNRESOLVED (no token): {sym}")
 
                 ctx.strategy_runner.add_symbol(sym)
+
+            if mdm and active_symbols:
+                required_candles = int(
+                    getattr(ctx.strategy_runner, "_required_candles", 0)
+                )
+                lookback_minutes = 30
+                if (
+                    live_mode_enabled
+                    and required_candles > 0
+                    and lookback_minutes < required_candles
+                ):
+                    raise RuntimeError("Warmup lookback insufficient for indicators")
+                await mdm.warmup_history(
+                    symbols=active_symbols,
+                    lookback_minutes=lookback_minutes,
+                )
+                if ctx.strategy_runner and hasattr(ctx.strategy_runner, "mark_ready"):
+                    ctx.strategy_runner.mark_ready(active_symbols)
 
             LOGGER.info(
                 f"📊 Resolution summary: {resolved_count}/{len(targets)} resolved"

@@ -417,3 +417,40 @@ def test_zombie_restart_circuit_opens_after_failed_reconnects(
     manager._trigger_zombie_ws_restart()
 
     assert manager._zombie_breaker_open_until == 162.0
+
+
+@pytest.mark.asyncio
+async def test_warmup_history_primes_cache_without_emitting_callbacks(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager.register_symbol('NSE:NIFTY23', 123)
+
+    events: list[dict[str, Any]] = []
+    manager.subscribe('NSE:NIFTY23', events.append)
+
+    class RestStub:
+        async def get_historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    'date': datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
+                    'close': 101.0,
+                    'volume': 50,
+                },
+                {
+                    'date': datetime(2024, 1, 1, 10, 1, tzinfo=timezone.utc),
+                    'close': 102.0,
+                    'volume': 80,
+                },
+            ]
+
+    manager._rest_client = RestStub()
+
+    await manager.warmup_history(['NSE:NIFTY23'], lookback_minutes=30)
+
+    assert events == []
+    latest = manager.get_latest_tick('NSE:NIFTY23')
+    assert latest is not None
+    assert latest['ltp'] == pytest.approx(102.0)
+    bars = manager.get_ohlc_bars('NSE:NIFTY23')
+    assert bars
