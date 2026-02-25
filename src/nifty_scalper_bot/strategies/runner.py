@@ -3351,6 +3351,11 @@ class StrategyRunner:
 
             allowed, reason = self._risk_allows_trading_with_reason(symbol)
             if not allowed:
+                self._logger.info(
+                    "RISK_BLOCKED: %s",
+                    reason,
+                    extra={"event": "risk_block", "symbol": symbol, "reason": reason},
+                )
                 self._logger.warning(
                     "Trade blocked by risk manager | symbol=%s | reason=%s",
                     symbol,
