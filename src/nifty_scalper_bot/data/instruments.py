@@ -90,6 +90,15 @@ class Instrument:
     raw: Optional[Mapping[str, Any]] = None
 
 
+@dataclass(frozen=True, slots=True)
+class OptionContract:
+    """Resolved option contract model. Args: tradingsymbol, expiry, strike. Returns: OptionContract. Raises: None."""
+
+    tradingsymbol: str
+    expiry: date
+    strike: float
+
+
 class BrokerError(Exception):
     """Generic broker/resolver error sentinel."""
 
@@ -820,6 +829,59 @@ class InstrumentResolver:
             lst = list(self._option_contracts.get(key) or [])
         # return shallow copy to avoid accidental external mutation
         return [dict(item) for item in lst]
+
+    def get_option_contracts(self, underlying: str) -> List[OptionContract]:
+        """Return normalized option contracts. Args: underlying. Returns: OptionContract list. Raises: None."""
+        try:
+            contracts = self.option_contracts(underlying)
+            normalized: list[OptionContract] = []
+            for contract in contracts:
+                tradingsymbol = str(contract.get("tradingsymbol") or "").strip().upper()
+                if not tradingsymbol:
+                    continue
+                expiry_raw = contract.get("expiry")
+                expiry_value: date | None = None
+                if isinstance(expiry_raw, datetime):
+                    expiry_value = expiry_raw.date()
+                elif isinstance(expiry_raw, date):
+                    expiry_value = expiry_raw
+                elif expiry_raw:
+                    text = str(expiry_raw).strip()
+                    if "T" in text:
+                        text = text.split("T", 1)[0]
+                    try:
+                        expiry_value = date.fromisoformat(text)
+                    except ValueError:
+                        expiry_value = None
+                strike_raw = contract.get("strike")
+                if expiry_value is None or strike_raw in (None, ""):
+                    continue
+                try:
+                    strike = float(strike_raw)
+                except (TypeError, ValueError):
+                    continue
+                normalized.append(
+                    OptionContract(
+                        tradingsymbol=tradingsymbol,
+                        expiry=expiry_value,
+                        strike=strike,
+                    )
+                )
+            return normalized
+        except Exception as exc:
+            LOGGER.error("Failure in get_option_contracts: %s", exc)
+            return []
+
+    def get_token(self, symbol: str | int | None) -> Optional[int]:
+        """Return token for symbol. Args: symbol. Returns: token or None. Raises: RuntimeError."""
+        token = self.resolve(symbol)
+        if not token:
+            if get_settings().enable_live:
+                raise RuntimeError(
+                    f"Resolver failed: {symbol} not found in instrument dump"
+                )
+            return None
+        return token
 
     def sync_nfo_from_broker(self, instruments: list) -> int:
         """

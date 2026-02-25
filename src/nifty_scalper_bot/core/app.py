@@ -2254,98 +2254,38 @@ def _get_symbols(
     universe.update_underlying(float(ltp))
     final_symbols = universe.get_filtered_universe(float(ltp))
 
-    def _coerce_expiry_date(expiry_raw: Any) -> date | None:
-        """Parse resolver expiry payload. Args: expiry_raw. Returns: expiry date or None. Raises: None."""
-        try:
-            if expiry_raw is None:
-                return None
-            if isinstance(expiry_raw, datetime):
-                return expiry_raw.date()
-            if isinstance(expiry_raw, date):
-                return expiry_raw
-            value = str(expiry_raw).strip()
-            if not value:
-                return None
-            if "T" in value:
-                value = value.split("T", 1)[0]
-            return date.fromisoformat(value)
-        except Exception as exc:
-            LOGGER.error("Failure in _coerce_expiry_date: %s", exc)
-            return None
+    if resolver is None:
+        LOGGER.error("Strategy skipped — instrument resolver unavailable")
+        return []
 
-    def _resolve_hydration_symbol(symbol: str) -> str:
-        """Resolve symbol to a hydrated token-backed contract. Args: symbol. Returns: tradable symbol. Raises: None."""
-        normalized_symbol = str(symbol or "").strip().upper()
-        if not normalized_symbol or resolver is None:
-            return normalized_symbol
-        try:
-            if resolver.resolve(normalized_symbol):
-                return normalized_symbol
-        except Exception as exc:
-            LOGGER.error("Failure in _resolve_hydration_symbol: %s", exc)
+    contracts = resolver.get_option_contracts(underlying="NIFTY")
+    today = datetime.now().date()
+    valid_contracts = [c for c in contracts if c.expiry >= today]
+    if not valid_contracts:
+        raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
 
-        try:
-            base_symbol = normalized_symbol.split(":", 1)[-1]
-            if not base_symbol.startswith("NIFTY"):
-                return normalized_symbol
-            option_type = "CE" if base_symbol.endswith("CE") else "PE"
-            strike_text = base_symbol[:-2]
-            strike_digits = "".join(ch for ch in strike_text if ch.isdigit())
-            if not strike_digits:
-                return normalized_symbol
-            requested_strike = int(strike_digits[-5:])
-            contracts = resolver.option_contracts("NIFTY")
-            if not contracts:
-                return normalized_symbol
+    nearest_expiry = min(c.expiry for c in valid_contracts)
+    filtered = [c for c in valid_contracts if c.expiry == nearest_expiry]
+    unique_strikes = sorted({c.strike for c in filtered})
+    if len(unique_strikes) < 2:
+        raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
+    strike_step = unique_strikes[1] - unique_strikes[0]
+    if strike_step <= 0:
+        raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
 
-            today = datetime.now().date()
-            eligible: list[tuple[int, date, str]] = []
-            for contract in contracts:
-                contract_symbol = (
-                    str(contract.get("tradingsymbol") or "").strip().upper()
-                )
-                if not contract_symbol.endswith(option_type):
-                    continue
-                contract_strike_raw = contract.get("strike")
-                if contract_strike_raw in (None, ""):
-                    continue
-                try:
-                    contract_strike = int(round(float(contract_strike_raw)))
-                except (TypeError, ValueError):
-                    continue
-                expiry_date = _coerce_expiry_date(contract.get("expiry"))
-                if expiry_date is None or expiry_date < today:
-                    continue
-                eligible.append((contract_strike, expiry_date, contract_symbol))
-
-            if not eligible:
-                return normalized_symbol
-
-            eligible.sort(
-                key=lambda item: (
-                    abs(item[0] - requested_strike),
-                    abs((item[1] - today).days),
-                    item[2],
-                )
-            )
-            remapped = f"NFO:{eligible[0][2]}"
-            if resolver.resolve(remapped):
-                LOGGER.warning(
-                    "option_symbol_hydration_remapped",
-                    extra={
-                        "event": "option_symbol_hydration_remapped",
-                        "requested": normalized_symbol,
-                        "resolved": remapped,
-                    },
-                )
-                return remapped
-            return normalized_symbol
-        except Exception as exc:
-            LOGGER.error("Failure in _resolve_hydration_symbol: %s", exc)
-            return normalized_symbol
-
-    final_symbols = [_resolve_hydration_symbol(sym) for sym in final_symbols]
+    atm = round(ltp / strike_step) * strike_step
+    selected = [c for c in filtered if abs(c.strike - atm) <= 200]
+    final_symbols = [c.tradingsymbol for c in selected]
     final_symbols = list(dict.fromkeys(sym for sym in final_symbols if sym))
+
+    if not final_symbols:
+        raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
+
+    LOGGER.info(
+        "RESOLVED_CONTRACTS count=%d expiry=%s",
+        len(final_symbols),
+        nearest_expiry,
+    )
     LOGGER.debug("OptionUniv: Universe refreshed -> %s", final_symbols)
 
     if _LATEST_CTX:
