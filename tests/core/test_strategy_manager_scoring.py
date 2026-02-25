@@ -41,7 +41,12 @@ class _DummyIndicatorEngine:
     ) -> dict[str, float | None]:
         """Return indicators as zeroed values for requested names."""
 
-        return {str(name): 0.0 for name in names}
+        values = {str(name): 0.0 for name in names}
+        values["vwap"] = 100.0
+        values["exchange_vwap"] = 100.0
+        values["volume"] = 10_000.0
+        values["avg_volume"] = 8_000.0
+        return values
 
 
 class _DummyPositionManager:
@@ -123,3 +128,68 @@ def test_strategy_manager_dynamic_allocation_and_disable() -> None:
     final_allocations = manager.get_allocation_snapshot()
     assert "Beta" in final_allocations
     assert sum(final_allocations.values()) == pytest.approx(1.0)
+
+
+class _SignalStrategy(_DummyStrategy):
+    """Strategy stub that always returns a BUY signal."""
+
+    def generate_signal(
+        self,
+        symbol: str,
+        indicators: t.Mapping[str, t.Any],
+        current_price: float,
+        position: t.Any,
+    ) -> Signal | None:
+        return Signal(
+            action='BUY',
+            symbol=symbol,
+            quantity=2,
+            confidence=0.7,
+            reason='test',
+            stop_loss=current_price - 1,
+            take_profit=current_price + 2,
+            metadata={},
+        )
+
+
+class _BlockedRegimeManager:
+    def can_trade(self, context: t.Mapping[str, t.Any] | None = None) -> bool:
+        return False
+
+    def get_filter_reasons(self) -> list[str]:
+        return ['regime_block_volatile']
+
+    def get_latest_snapshot(self) -> t.Any:
+        return None
+
+
+def test_regime_block_scales_signal_when_adaptive_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('USE_REGIME_ADAPTIVE', 'true')
+    manager = StrategyManager(
+        [_SignalStrategy('Alpha')],
+        _DummyIndicatorEngine(),
+        _DummyPositionManager(),
+        market_regime_manager=_BlockedRegimeManager(),
+    )
+
+    signal = manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0)
+
+    assert signal is not None
+    assert signal.action == 'BUY'
+    assert signal.metadata.get('regime_scale') == pytest.approx(1.0)
+
+
+def test_regime_block_can_still_block_when_adaptive_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('USE_REGIME_ADAPTIVE', 'false')
+    manager = StrategyManager(
+        [_SignalStrategy('Alpha')],
+        _DummyIndicatorEngine(),
+        _DummyPositionManager(),
+        market_regime_manager=_BlockedRegimeManager(),
+    )
+
+    signal = manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0)
+
+    assert signal is None

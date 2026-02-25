@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import sqrt
+import os
 from statistics import mean, pstdev
 import time
 import typing as t
@@ -965,6 +966,16 @@ class StrategyManager(_BaseStrategyManager):
         self._last_regime_gate: tuple[bool, tuple[str, ...], str | None] | None = None
         self._last_regime_gate_at: float = 0.0
         self._regime_gate_cooldown = 10.0
+        self._use_regime_adaptive = (
+            os.getenv("USE_REGIME_ADAPTIVE", "true").strip().lower() == "true"
+        )
+        self._observability_counters: dict[str, int] = {
+            "signals_generated": 0,
+            "signals_blocked_by_regime": 0,
+            "signals_blocked_by_risk": 0,
+            "orders_submitted": 0,
+        }
+        self._last_metrics_log_ts = time.time()
         self._no_signal_summary: dict[str, int] = {
             'total': 0,
             'missing_indicators': 0,
@@ -1688,6 +1699,10 @@ class StrategyManager(_BaseStrategyManager):
             "Entered StrategyManager.generate_signal",
             extra={"event": "scored_strategy_generate", "symbol": symbol},
         )
+        log.info(
+            "Condition met: strategy_evaluation_start",
+            extra={"event": "strategy_evaluation_start", "symbol": symbol},
+        )
         def _log_reject(
             reason_code: str, context: dict[str, t.Any] | None = None
         ) -> None:
@@ -1751,6 +1766,7 @@ class StrategyManager(_BaseStrategyManager):
         regime_manager = self._regime_manager
         regime_snapshot: RegimeSnapshot | None = None
         adjustments: dict[str, t.Any] = {}
+        regime_scale = 1.0
         if regime_manager is not None:
             gate_context = {"component": "strategy_manager", "symbol": symbol}
             try:
@@ -1764,6 +1780,17 @@ class StrategyManager(_BaseStrategyManager):
                     snapshot=regime_snapshot,
                 )
                 if not allowed:
+                    self._observability_counters["signals_blocked_by_regime"] += 1
+                    log.info(
+                        "Condition met: strategy_regime_scale_fallback",
+                        extra={
+                            "event": "strategy_regime_scale_fallback",
+                            "symbol": symbol,
+                            "gate_reasons": list(reasons),
+                            "scale": 1.0,
+                        },
+                    )
+                if not allowed and not self._use_regime_adaptive:
                     _log_reject(
                         "data_invalid",
                         {"gate_reasons": reasons, "gate": "regime_manager"},
@@ -1781,6 +1808,22 @@ class StrategyManager(_BaseStrategyManager):
             regime_snapshot.adjustments, t.Mapping
         ):
             adjustments = dict(regime_snapshot.adjustments)
+        regime_scale = self._extract_regime_scale(adjustments)
+        regime_name = (
+            regime_snapshot.regime if isinstance(regime_snapshot, RegimeSnapshot) else None
+        )
+        log.info(
+            "REGIME=%s, scale=%.3f",
+            regime_name or "unknown",
+            regime_scale,
+            extra={
+                "event": "strategy_regime_scaling",
+                "symbol": symbol,
+                "regime": regime_name,
+                "scale": regime_scale,
+                "use_regime_adaptive": self._use_regime_adaptive,
+            },
+        )
         score_map = self._recompute_scores()
         indicators_raw = self._indicator_engine.get_indicators(
             symbol, self._required_indicators
@@ -1817,6 +1860,7 @@ class StrategyManager(_BaseStrategyManager):
             invalid_reason = "data_invalid"
 
         if invalid_reason is not None:
+            self._observability_counters["signals_blocked_by_risk"] += 1
             count = self._symbol_invalid_counts.get(symbol, 0) + 1
             self._symbol_invalid_counts[symbol] = count
             if count > self._symbol_invalid_threshold:
@@ -1976,6 +2020,21 @@ class StrategyManager(_BaseStrategyManager):
                     )
                     combined = None
             if combined:
+                scaled_quantity = max(1, int(round(combined.quantity * regime_scale)))
+                combined = Signal(
+                    action=combined.action,
+                    symbol=combined.symbol,
+                    quantity=scaled_quantity,
+                    confidence=combined.confidence,
+                    reason=combined.reason,
+                    stop_loss=combined.stop_loss,
+                    take_profit=combined.take_profit,
+                    metadata={
+                        **dict(combined.metadata),
+                        "regime_scale": regime_scale,
+                        "regime": regime_name,
+                    },
+                )
                 log.info(
                     "Condition met: scored_signal_ready",
                     extra={
@@ -1983,8 +2042,11 @@ class StrategyManager(_BaseStrategyManager):
                         "symbol": symbol,
                         "action": combined.action,
                         "confidence": combined.confidence,
+                        "quantity": combined.quantity,
                     },
                 )
+                self._observability_counters["signals_generated"] += 1
+                self._emit_metrics_snapshot()
                 return combined
         elif combined is None:
             log.info(
@@ -2036,6 +2098,39 @@ class StrategyManager(_BaseStrategyManager):
                 },
             )
         return None
+
+    def _emit_metrics_snapshot(self) -> None:
+        """Args: None. Returns: None. Raises: Exception."""
+
+        now_ts = time.time()
+        if now_ts - self._last_metrics_log_ts < 300.0:
+            return
+        self._last_metrics_log_ts = now_ts
+        log.info(
+            "Condition met: strategy_metrics_snapshot",
+            extra={
+                "event": "strategy_metrics_snapshot",
+                "metrics": dict(self._observability_counters),
+            },
+        )
+
+    def _extract_regime_scale(self, adjustments: t.Mapping[str, t.Any]) -> float:
+        """Args: adjustments. Returns: float. Raises: Exception."""
+
+        try:
+            raw = (
+                adjustments.get("position_scale")
+                or adjustments.get("size_multiplier")
+                or adjustments.get("sizing_multiplier")
+                or 1.0
+            )
+            scale = float(raw)
+            if scale <= 0:
+                return 1.0
+            return min(scale, 3.0)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in StrategyManager._extract_regime_scale: %s", exc)
+            return 1.0
 
     def _bounded_confidence(self, candidate: float | None) -> float:
         """Clamp candidate confidence to an acceptable range.

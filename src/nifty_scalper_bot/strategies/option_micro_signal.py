@@ -51,11 +51,11 @@ class OptionMicroSignal:
     adverse_ticks: int
     tick_size: float = 0.05
     ema_half_life_ms: float = 500.0
-    _position: PositionSide = field(init=False, default="FLAT")
+    spread_threshold_pct: float | None = None
+    momentum_z_threshold: float | None = None
     _last_mid: float | None = field(init=False, default=None)
     _microvol: float = field(init=False, default=0.0)
     _last_ts_ns: int = field(init=False, default=0)
-    _entry_mid: float | None = field(init=False, default=None)
 
     def on_tick(
         self,
@@ -66,6 +66,10 @@ class OptionMicroSignal:
         last_size: int,
         depth: int,
         ts_ns: int,
+        symbol: str | None = None,
+        portfolio: object | None = None,
+        position_side: PositionSide = "FLAT",
+        entry_mid: float | None = None,
     ) -> SignalDecision:
         """Process a new tick and return the resulting decision.
 
@@ -122,6 +126,7 @@ class OptionMicroSignal:
 
             spread = max(ask - bid, self.tick_size)
             mid = (ask + bid) / 2.0
+            spread_pct = (spread / max(mid, self.tick_size)) * 100.0
             if self._last_mid is None:
                 self._last_mid = mid
                 self._last_ts_ns = ts_ns
@@ -130,6 +135,7 @@ class OptionMicroSignal:
             delta_mid = mid - self._last_mid
             delta_abs = abs(delta_mid)
             features['spread'] = spread
+            features['spread_pct'] = spread_pct
             features['mid'] = mid
             features['delta_mid'] = delta_mid
             features['depth'] = float(depth)
@@ -142,7 +148,9 @@ class OptionMicroSignal:
             features['microvol'] = self._microvol
 
             snmom = delta_mid / max(spread, self.tick_size)
+            momentum_z = delta_mid / max(self._microvol, self.tick_size)
             features['snmom'] = snmom
+            features['momentum_z'] = momentum_z
 
             ltt_flag = math.isclose(
                 last_price, bid, abs_tol=self.tick_size / 2
@@ -150,27 +158,42 @@ class OptionMicroSignal:
             features['ltt'] = 1.0 if ltt_flag else 0.0
 
             decision = SignalDecision(False, False, None, None, features)
-            if spread > self.spread_limit or depth < self.min_depth:
+            spread_limit_pct = self.spread_threshold_pct
+            if spread_limit_pct is None:
+                spread_limit_pct = (self.spread_limit / max(mid, self.tick_size)) * 100.0
+            if spread_pct > spread_limit_pct or depth < self.min_depth:
                 LOGGER.info(
                     'Condition met: option_micro_signal_liquidity_block',
                     extra={
                         'event': 'option_micro_signal_liquidity_block',
                         'spread': spread,
+                        'spread_pct': spread_pct,
                         'depth': depth,
                     },
                 )
                 self._update_state(mid, ts_ns)
                 return decision
 
-            if self._position == 'FLAT':
+            effective_side: PositionSide = position_side
+            if effective_side == 'FLAT' and portfolio is not None and symbol:
+                has_open = getattr(portfolio, 'has_open_position', None)
+                if callable(has_open) and bool(has_open(symbol)):
+                    LOGGER.info(
+                        'Condition met: option_micro_signal_open_position_block',
+                        extra={'event': 'option_micro_signal_open_position_block', 'symbol': symbol},
+                    )
+                    self._update_state(mid, ts_ns)
+                    return decision
+            momentum_gate = self.momentum_z_threshold
+            if momentum_gate is None:
+                momentum_gate = self.snmom_threshold
+            if effective_side == 'FLAT':
                 if (
-                    snmom > self.snmom_threshold
+                    momentum_z > momentum_gate
                     and self._microvol > self.microvol_threshold
                     and ltt_flag
                     and math.isclose(last_price, ask, abs_tol=self.tick_size / 2)
                 ):
-                    self._position = 'LONG'
-                    self._entry_mid = mid
                     LOGGER.info(
                         'Condition met: option_micro_signal_long_entry',
                         extra={'event': 'option_micro_signal_long_entry'},
@@ -179,13 +202,11 @@ class OptionMicroSignal:
                         True, False, 'LONG', 'LONG_ENTRY', features
                     )
                 elif (
-                    snmom < -self.snmom_threshold
+                    momentum_z < -momentum_gate
                     and self._microvol > self.microvol_threshold
                     and ltt_flag
                     and math.isclose(last_price, bid, abs_tol=self.tick_size / 2)
                 ):
-                    self._position = 'SHORT'
-                    self._entry_mid = mid
                     LOGGER.info(
                         'Condition met: option_micro_signal_short_entry',
                         extra={'event': 'option_micro_signal_short_entry'},
@@ -194,21 +215,19 @@ class OptionMicroSignal:
                         True, False, 'SHORT', 'SHORT_ENTRY', features
                     )
             else:
-                exit_reason = self._should_exit(mid, snmom)
+                exit_reason = self._should_exit(mid, momentum_z, effective_side, entry_mid)
                 if exit_reason:
                     LOGGER.info(
                         'Condition met: option_micro_signal_exit',
                         extra={
                             'event': 'option_micro_signal_exit',
                             'reason': exit_reason,
-                            'side': self._position,
+                            'side': effective_side,
                         },
                     )
                     decision = SignalDecision(
-                        False, True, self._position, exit_reason, features
+                        False, True, effective_side, exit_reason, features
                     )
-                    self._position = 'FLAT'
-                    self._entry_mid = None
 
             self._update_state(mid, ts_ns)
             return decision
@@ -221,22 +240,33 @@ class OptionMicroSignal:
             )
             return SignalDecision(False, False, None, None, features)
 
-    def _should_exit(self, mid: float, snmom: float) -> str | None:
-        if self._position == "LONG":
+    def _should_exit(
+        self,
+        mid: float,
+        momentum_z: float,
+        position_side: PositionSide,
+        entry_mid: float | None,
+    ) -> str | None:
+        """Args: mid, momentum_z, position_side, entry_mid. Returns: optional reason. Raises: None."""
+
+        momentum_gate = self.momentum_z_threshold
+        if momentum_gate is None:
+            momentum_gate = self.snmom_threshold
+        if position_side == "LONG":
             if (
-                self._entry_mid is not None
-                and (self._entry_mid - mid) >= self.tick_size * self.adverse_ticks
+                entry_mid is not None
+                and (entry_mid - mid) >= self.tick_size * self.adverse_ticks
             ):
                 return "HARD_STOP"
-            if snmom < -self.snmom_threshold:
+            if momentum_z < -momentum_gate:
                 return "MOMENTUM_REVERSAL"
-        elif self._position == "SHORT":
+        elif position_side == "SHORT":
             if (
-                self._entry_mid is not None
-                and (mid - self._entry_mid) >= self.tick_size * self.adverse_ticks
+                entry_mid is not None
+                and (mid - entry_mid) >= self.tick_size * self.adverse_ticks
             ):
                 return "HARD_STOP"
-            if snmom > self.snmom_threshold:
+            if momentum_z > momentum_gate:
                 return "MOMENTUM_REVERSAL"
         return None
 

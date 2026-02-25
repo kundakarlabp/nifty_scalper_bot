@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from datetime import date, datetime, timezone
 from math import isfinite
 from typing import (
@@ -26,21 +27,49 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checking only
     from nifty_scalper_bot.data.instruments import InstrumentResolver
 
 LOGGER = get_logger(__name__)
+_SYMBOL_STRIKE_PATTERN = re.compile(r"(?P<strike>\d{4,6})(?P<option>CE|PE)$", re.IGNORECASE)
+_SYMBOL_EXPIRY_PATTERN = re.compile(r"(\d{2}[A-Z]{3}\d{2}|\d{6})")
 
 
 def _parse_strike_from_symbol(ts: str) -> float | None:
-    s = (ts or "").upper()
-    tail = s.rsplit("CE", 1)[0].rsplit("PE", 1)[0] if s.endswith(("CE", "PE")) else s
-    num = ""
+    """Extract strike from Zerodha-style option symbols. Args: ts. Returns: strike or None. Raises: None."""
+
+    symbol = (ts or "").strip().upper().split(":")[-1]
+    match = _SYMBOL_STRIKE_PATTERN.search(symbol)
+    if match is not None:
+        try:
+            return float(match.group("strike"))
+        except (TypeError, ValueError):
+            return None
+    tail = symbol.rsplit("CE", 1)[0].rsplit("PE", 1)[0] if symbol.endswith(("CE", "PE")) else symbol
+    digits = ""
     for ch in reversed(tail):
         if ch.isdigit():
-            num = ch + num
+            digits = ch + digits
         else:
             break
     try:
-        return float(num) if num else None
-    except Exception:  # pragma: no cover - defensive
+        return float(digits) if digits else None
+    except (TypeError, ValueError):
         return None
+
+
+def _extract_expiry_token(symbol: str) -> str | None:
+    """Extract expiry token from trading symbol. Args: symbol. Returns: expiry token or None. Raises: None."""
+
+    normalized = (symbol or "").strip().upper().split(":")[-1]
+    match = _SYMBOL_EXPIRY_PATTERN.search(normalized)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _nearest_strike(price: float, step: int = 50) -> float:
+    """Return nearest strike for *price*. Args: price, step. Returns: strike. Raises: None."""
+
+    if step <= 0:
+        return float(price)
+    return float(round(price / step) * step)
 
 
 @dataclass(frozen=True, slots=True)
@@ -657,7 +686,17 @@ class StrikeSelector:
                 contracts,
                 key=lambda c: _delta_score(c.delta, target),
             )
-        return sorted(contracts, key=lambda c: abs(c.strike - underlying_price))
+        step = int(getattr(self._selector_settings, "strike_step", 50) or 50)
+        atm = _nearest_strike(underlying_price, step)
+        window = float(max(step, 1) * 2)
+        active_contracts = [
+            contract
+            for contract in contracts
+            if abs(float(contract.strike) - atm) <= window
+        ]
+        if not active_contracts:
+            active_contracts = list(contracts)
+        return sorted(active_contracts, key=lambda c: abs(c.strike - underlying_price))
 
     def _within_delta(self, contract: _OptionContract) -> bool:
         mode = (self._selector_settings.mode or "ATM").strip().upper()
@@ -727,4 +766,9 @@ def _normalize_exchange_symbol(symbol: str) -> str:
     return normalized
 
 
-__all__ = ["StrikeSelector", "SelectedContract"]
+__all__ = [
+    "StrikeSelector",
+    "SelectedContract",
+    "_parse_strike_from_symbol",
+    "_extract_expiry_token",
+]
