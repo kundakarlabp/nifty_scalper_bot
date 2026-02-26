@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     )
 
 LOGGER = get_logger(__name__)
-RELAX_REGIME_FILTER = os.getenv("RELAX_REGIME_FILTER", "false").lower() == "true"
+RELAX_REGIME_FILTER = os.getenv("RELAX_REGIME_FILTER", "true").lower() != "false"  # default True: regime starts with no snapshot
 _THROTTLE_CACHE: Dict[str, float] = {}
 _THROTTLE_LOCK = threading.Lock()
 
@@ -3710,6 +3710,15 @@ class StrategyRunner:
                     "Strategy evaluation heartbeat",
                     extra={"event": "eval_heartbeat", "count": self._eval_counter},
                 )
+            # Visible INFO trace so Railway logs confirm PHASE 9 is reached
+            log_throttled(
+                self._logger,
+                f"phase9_entry_{symbol}",
+                f"🔍 PHASE9 ENTERED: {symbol} | price={price:.2f} | "
+                f"skip={skip_strategy} | runner={self._runner_state}",
+                interval_sec=60.0,
+                level=logging.INFO,
+            )
 
             signal = generated_signal
             upper_symbol = symbol.upper()
@@ -3872,7 +3881,7 @@ class StrategyRunner:
                         f"strategy_eval_{symbol}",
                         f"🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._required_candles}",
                         interval_sec=30.0,
-                        level=logging.DEBUG,
+                        level=logging.INFO,
                     )
                     if not self._indicator_engine.has_min_bars(
                         symbol, self._required_candles
@@ -3937,17 +3946,28 @@ class StrategyRunner:
                             f"indicators_ready_{symbol}",
                             f"✅ INDICATORS READY: {symbol} | Calling StrategyManager...",
                             interval_sec=60.0,
-                            level=logging.DEBUG,
+                            level=logging.INFO,
                         )
 
                         mdm_last_tick = getattr(
                             self._market_data, "_last_tick_time", {}
                         ).get(symbol)
+                        # Use 30s threshold for options/futures (low-liquidity ticks
+                        # are normal for NFO). 3s was too tight and blocked evaluation.
+                        _is_option = any(x in symbol for x in ("CE", "PE", "FUT"))
+                        _stale_thresh = 30.0 if _is_option else 5.0
                         if (
                             isinstance(mdm_last_tick, (int, float))
-                            and time.time() - float(mdm_last_tick) > 3.0
+                            and time.time() - float(mdm_last_tick) > _stale_thresh
                         ):
-                            self._logger.warning("Stale tick — skipping execution")
+                            log_throttled(
+                                self._logger,
+                                f"stale_mdm_tick_{symbol}",
+                                f"⏰ Stale MDM tick — skipping: {symbol} "
+                                f"age={time.time()-float(mdm_last_tick):.1f}s",
+                                interval_sec=30.0,
+                                level=logging.WARNING,
+                            )
                             return
                         self._last_global_eval_ts = time.monotonic()
                         self._logger.info(
