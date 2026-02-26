@@ -1271,13 +1271,48 @@ class StrategyRunner:
         return self.update_symbol_hydration(symbol, bars, indicators)
 
     def _update_symbol_readiness(self, symbol: str) -> SymbolState:
-        """Update lifecycle state from bar history and cumulative VWAP health."""
+        """Update lifecycle state from bar history and cumulative VWAP health.
+
+        Uses _symbol_history for volume/VWAP when live bars exist.
+        When _symbol_history is empty (startup, before first live minute bar),
+        falls back to indicator_engine bar count (which includes the 1125 hydrated
+        bars loaded at startup) so the bar-count gate does not falsely return HYDRATING.
+        """
         bars = self._symbol_history.get(symbol, [])
         vol_sum = sum(float(getattr(bar, "volume", 0)) for bar in bars)
         state = self._symbol_state.get(symbol)
         vwap_val = float(state.vwap) if state and state.vwap else 0.0
+
+        # When no live bars exist yet, try to supplement VWAP/volume from the
+        # tick-based accumulator so the hydration check has real numbers to work with.
+        if not bars:
+            vwap_state = self._vwap_state.get(symbol, {})
+            cum_vol = float(vwap_state.get("cum_vol", 0.0))
+            cum_pv  = float(vwap_state.get("cum_pv",  0.0))
+            vol_sum = cum_vol
+            if vwap_val == 0.0 and cum_vol > 0.0:
+                vwap_val = cum_pv / cum_vol
+
         indicators = {symbol: {"vwap": vwap_val, "cum_volume": vol_sum}}
-        return self.update_symbol_hydration(symbol, bars, indicators)
+
+        # ── Bar-count: prefer live bars; fall back to indicator_engine ──────────
+        # update_symbol_hydration uses len(bars) as the bar-count gate.  Passing
+        # the raw (empty) _symbol_history list at startup gives bar_count=0, which
+        # is always < required_candles → HYDRATING — overriding the READY state
+        # that mark_ready() already set.  If the indicator engine holds enough bars
+        # (it does after startup hydration), synthesise a dummy list of that length.
+        # update_symbol_hydration never iterates bar items — it only calls len().
+        effective_bars: list = bars
+        if len(bars) < self._required_candles and self._indicator_engine is not None:
+            try:
+                ind_history = self._indicator_engine.get_history(symbol) or []
+                if len(ind_history) >= self._required_candles:
+                    # Provide a list of the correct length; individual items unused.
+                    effective_bars = [None] * len(ind_history)  # type: ignore[list-item]
+            except Exception:
+                pass  # fall through to actual bars — hydration will be HYDRATING
+
+        return self.update_symbol_hydration(symbol, effective_bars, indicators)
 
     def update_symbol_hydration(
         self,
@@ -1354,12 +1389,16 @@ class StrategyRunner:
             state["last_valid_vwap"] = 0.0
             state["mode"] = "primary"
             state["last_reset_date"] = session_date
+            # Reset the VWAP-readiness streak so a new day's VWAP must be validated
+            # from scratch before being considered "ready".
             self._hydration_ready_streak[symbol] = 0
-            self._set_symbol_hydration_state(
-                symbol,
-                SymbolState.HYDRATING,
-                allow_downgrade=True,
-            )
+            # ── FIX (2026-02-26): DO NOT set hydration state to HYDRATING here.
+            # _ensure_symbol_vwap_state is responsible for VWAP session data only.
+            # Resetting hydration state here with allow_downgrade=True was forcibly
+            # overriding the READY state set by mark_ready() on the first tick of
+            # every trading day, causing all strategy evaluation to be blocked until
+            # the bar-count check slowly promoted back.  Hydration state transitions
+            # are the responsibility of _update_symbol_readiness, not the VWAP layer.
         return state
 
     def _ingest_bar(
@@ -3452,16 +3491,32 @@ class StrategyRunner:
                         symbol, SymbolState.DISCOVERED
                     )
 
-                # FIX-B: DEGRADED means data-quality concern (e.g. startup boundary gap)
-                # but the symbol HAS sufficient bar history and VWAP to produce signals.
-                # Only DISCOVERED / HYDRATING genuinely lack data — block those, not DEGRADED.
-                if hydration_state not in (SymbolState.READY, SymbolState.DEGRADED):
+                # ── Hydration-state gate ─────────────────────────────────────────────
+                # DEGRADED = data-quality concern (e.g. startup boundary gap) but the
+                # symbol has enough bars and VWAP → allow through.
+                # HYDRATING = genuinely needs more data.  EXCEPTION: after startup hydration
+                # is complete (_startup_hydrated=True) the readiness updater can still return
+                # HYDRATING when _symbol_history is empty (no live bars yet).  If the indicator
+                # engine already has the required bars, promote to DEGRADED so evaluation fires.
+                # This is the safety net; FIX1 and FIX2 above are the primary guards.
+                effective_hydration = hydration_state
+                if (
+                    hydration_state == SymbolState.HYDRATING
+                    and getattr(self, "_startup_hydrated", False)
+                    and self._indicator_engine is not None
+                    and self._indicator_engine.has_min_bars(symbol, self._required_candles)
+                ):
+                    effective_hydration = SymbolState.DEGRADED
+
+                if effective_hydration not in (SymbolState.READY, SymbolState.DEGRADED):
                     log_throttled(
                         self._logger,
                         f"p7_not_ready_{symbol}",
-                        f"⏳ PHASE7 hydration pending: {symbol} state={hydration_state.value}",
+                        f"⏳ PHASE7 hydration pending: {symbol} "
+                        f"raw_state={hydration_state.value} "
+                        f"startup_hydrated={getattr(self,'_startup_hydrated',False)}",
                         interval_sec=30.0,
-                        level=logging.DEBUG,
+                        level=logging.INFO,
                     )
                     return
 
