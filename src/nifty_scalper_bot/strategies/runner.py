@@ -3404,11 +3404,16 @@ class StrategyRunner:
                 return
 
             # =================================================================
-            # PHASE 7: STRATEGY PREPARATION (Skip during warmup)
+            # PHASE 7: STRATEGY PREPARATION
             # =================================================================
-
-            if in_warmup:
-                return
+            # NOTE: in_warmup is intentionally NOT a return gate here.
+            # Warmup blocks execution via RunnerState.EXECUTION_ENABLED (PHASE 6
+            # already returns if _runner_state != EXECUTION_ENABLED).  Adding a
+            # second warmup return in PHASE 7 meant that even after the 15-second
+            # grace period expired the evaluation flow never restarted on the same
+            # tick, because ticks arriving between seconds 0–15 set _startup_timestamp
+            # and the next tick (after 15s) continued past the bar builder but then
+            # returned here unconditionally.  Remove it entirely.
             if not self._validate_symbol_for_cycle(symbol):
                 return
 
@@ -3460,51 +3465,50 @@ class StrategyRunner:
                     )
                     return
 
-                history = self._symbol_history.get(symbol)
-                if not history:
-                    return
-                latest_bar = history[-1]
-                bar = latest_bar
-
-                # FIX-A: OneMinuteBar (slots=True dataclass) has NO is_closed attribute.
-                # All bars in _symbol_history are completed bars — they were only added by
-                # _ingest_bar() which is called exclusively when builder.update() returns a
-                # completed bar.  The hasattr/is_closed check was silently blocking 100% of
-                # evaluations.  Replace with an explicit completed-bar check via end timestamp.
-                raw_bar_ts = getattr(latest_bar, "timestamp", None)
-                if raw_bar_ts is None:
-                    return
-                bar_ts = (
-                    float(raw_bar_ts.timestamp())
-                    if hasattr(raw_bar_ts, "timestamp")
-                    else float(raw_bar_ts or 0.0)
-                )
-                if bar_ts <= 0:
-                    return
-
-                # FIX-D: Same-bar-skip — only skip if we already evaluated THIS bar ts.
-                # Previously used _last_candle_eval; now unified with _last_bar_ts to avoid
-                # the mark_ready() pre-initialisation causing the first live bar to be skipped.
-                last_eval_ts = self._last_candle_eval.get(symbol, 0.0)
-                if last_eval_ts == bar_ts:
-                    return
-                self._last_candle_eval[symbol] = bar_ts
-
-                # FIX-C: get_ohlc_bars() reads from _OHLCBuilder which only accumulates
-                # LIVE ticks — it has 0 bars at startup even though _symbol_history holds
-                # 1125 hydrated bars.  Use _symbol_history length as the bar-count gate,
-                # falling back to _ohlc_builder only when history is empty.
-                history_bar_count = len(history)
+                # ── Bar-count check ──────────────────────────────────────────────────
+                # _symbol_history is populated only by _ingest_bar() which fires on
+                # COMPLETED live bars (minute boundary).  At startup it is EMPTY even
+                # though _indicator_engine already holds 1125 hydrated close prices.
+                # Requiring history to be non-empty was blocking ALL evaluation until
+                # the first live minute bar completed (up to 59 seconds after startup).
+                # Use indicator_engine.has_min_bars() which counts hydrated bars too.
                 min_bars_needed = self._required_candles or 20
-                if history_bar_count < min_bars_needed:
+                if not self._indicator_engine.has_min_bars(symbol, min_bars_needed):
                     log_throttled(
                         self._logger,
                         f"p7_bars_low_{symbol}",
-                        f"⏳ PHASE7 bar count low: {symbol} has={history_bar_count} need={min_bars_needed}",
+                        f"⏳ PHASE7 indicator bars low: {symbol} need={min_bars_needed}",
                         interval_sec=60.0,
                         level=logging.DEBUG,
                     )
                     return
+
+                # ── Same-bar-skip (per-minute evaluation throttle) ───────────────────
+                # Evaluate at most once per completed bar.  Use the current 60-second
+                # bucket timestamp so that every tick within the same minute shares the
+                # same key, and we only call generate_signal once per minute per symbol.
+                # Fallback to _last_bar_ts when _symbol_history has no live bars yet.
+                history = self._symbol_history.get(symbol)
+                if history:
+                    raw_bar_ts = getattr(history[-1], "timestamp", None)
+                    bar_ts = (
+                        float(raw_bar_ts.timestamp())
+                        if raw_bar_ts and hasattr(raw_bar_ts, "timestamp")
+                        else float(raw_bar_ts or 0.0)
+                    )
+                else:
+                    # No completed live bar yet — use current minute bucket so we still
+                    # evaluate once per minute even before the first bar closes.
+                    _now_ts = time.time()
+                    bar_ts = _now_ts - (_now_ts % 60)  # floor to current minute
+
+                if bar_ts <= 0:
+                    return
+
+                last_eval_ts = self._last_candle_eval.get(symbol, 0.0)
+                if last_eval_ts == bar_ts:
+                    return
+                self._last_candle_eval[symbol] = bar_ts
 
                 spot_tick = (
                     self._market_data.get_latest_tick("NSE:NIFTY 50")
@@ -3807,7 +3811,13 @@ class StrategyRunner:
                                 return
                         if last_bar_ts:
                             bar_age = (now - last_bar_ts).total_seconds()
-                            if bar_age > 120.0:
+                            # Only reject on stale bar when _symbol_history has live bars.
+                            # mark_ready() pre-initialises _last_bar_ts to datetime.now()
+                            # which means bar_age grows unboundedly until the first live
+                            # bar completes.  Without this guard, every tick for the first
+                            # ~15+ minutes hits bar_age > 120 and silently returns.
+                            has_live_bars = bool(self._symbol_history.get(symbol))
+                            if has_live_bars and bar_age > 120.0:
                                 log_throttled(
                                     self._logger,
                                     f"strategy_eval_stale_bar_{symbol}",
