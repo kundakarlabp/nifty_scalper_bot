@@ -402,11 +402,19 @@ class InstrumentResolver:
             self._neg_cache[key] = now_ts + self._neg_ttl
             self._warned_no_token.add(key.split(":", 1)[-1])
         if token is None:
-            if get_settings().enable_live:
-                raise RuntimeError(f"Missing instrument token for {symbol}")
+            # Log at WARNING in both live and paper mode.
+            # In live mode we previously raised RuntimeError which propagated as an
+            # unhandled exception during startup symbol resolution, crashing the
+            # instrument-load loop and leaving some symbols without tokens.
+            # Callers already handle None return (skip or fallback) — raising here
+            # is overly destructive.  The negative cache prevents log spam.
             LOGGER.warning(
                 "instrument_resolver_no_token",
-                extra={"event": "instrument_resolver_no_token", "symbol": key},
+                extra={
+                    "event": "instrument_resolver_no_token",
+                    "symbol": key,
+                    "live_mode": get_settings().enable_live,
+                },
             )
         return None
 

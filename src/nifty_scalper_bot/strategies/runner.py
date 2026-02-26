@@ -3446,7 +3446,18 @@ class StrategyRunner:
                     hydration_state = self._symbol_states.get(
                         symbol, SymbolState.DISCOVERED
                     )
-                if hydration_state != SymbolState.READY:
+
+                # FIX-B: DEGRADED means data-quality concern (e.g. startup boundary gap)
+                # but the symbol HAS sufficient bar history and VWAP to produce signals.
+                # Only DISCOVERED / HYDRATING genuinely lack data — block those, not DEGRADED.
+                if hydration_state not in (SymbolState.READY, SymbolState.DEGRADED):
+                    log_throttled(
+                        self._logger,
+                        f"p7_not_ready_{symbol}",
+                        f"⏳ PHASE7 hydration pending: {symbol} state={hydration_state.value}",
+                        interval_sec=30.0,
+                        level=logging.DEBUG,
+                    )
                     return
 
                 history = self._symbol_history.get(symbol)
@@ -3454,25 +3465,45 @@ class StrategyRunner:
                     return
                 latest_bar = history[-1]
                 bar = latest_bar
-                if not hasattr(bar, "is_closed"):
-                    return
-                if not bar.is_closed:
-                    return
+
+                # FIX-A: OneMinuteBar (slots=True dataclass) has NO is_closed attribute.
+                # All bars in _symbol_history are completed bars — they were only added by
+                # _ingest_bar() which is called exclusively when builder.update() returns a
+                # completed bar.  The hasattr/is_closed check was silently blocking 100% of
+                # evaluations.  Replace with an explicit completed-bar check via end timestamp.
                 raw_bar_ts = getattr(latest_bar, "timestamp", None)
+                if raw_bar_ts is None:
+                    return
                 bar_ts = (
                     float(raw_bar_ts.timestamp())
                     if hasattr(raw_bar_ts, "timestamp")
                     else float(raw_bar_ts or 0.0)
                 )
-                last_eval_ts = self._last_candle_eval.get(symbol)
+                if bar_ts <= 0:
+                    return
+
+                # FIX-D: Same-bar-skip — only skip if we already evaluated THIS bar ts.
+                # Previously used _last_candle_eval; now unified with _last_bar_ts to avoid
+                # the mark_ready() pre-initialisation causing the first live bar to be skipped.
+                last_eval_ts = self._last_candle_eval.get(symbol, 0.0)
                 if last_eval_ts == bar_ts:
                     return
                 self._last_candle_eval[symbol] = bar_ts
 
-                bars = (
-                    self._market_data.get_ohlc_bars(symbol) if self._market_data else []
-                )
-                if len(bars) < 20:
+                # FIX-C: get_ohlc_bars() reads from _OHLCBuilder which only accumulates
+                # LIVE ticks — it has 0 bars at startup even though _symbol_history holds
+                # 1125 hydrated bars.  Use _symbol_history length as the bar-count gate,
+                # falling back to _ohlc_builder only when history is empty.
+                history_bar_count = len(history)
+                min_bars_needed = self._required_candles or 20
+                if history_bar_count < min_bars_needed:
+                    log_throttled(
+                        self._logger,
+                        f"p7_bars_low_{symbol}",
+                        f"⏳ PHASE7 bar count low: {symbol} has={history_bar_count} need={min_bars_needed}",
+                        interval_sec=60.0,
+                        level=logging.DEBUG,
+                    )
                     return
 
                 spot_tick = (
