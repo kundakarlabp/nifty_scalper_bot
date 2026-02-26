@@ -3362,6 +3362,9 @@ class StrategyRunner:
                     reason,
                     extra={"event": "risk_block"},
                 )
+                manager = getattr(self, "_strategy_manager", None)
+                if manager is not None and hasattr(manager, "increment_observability_counter"):
+                    manager.increment_observability_counter("signals_blocked_by_risk")
                 return
             if self._runner_state != RunnerState.EXECUTION_ENABLED:
                 log_throttled(
@@ -3381,9 +3384,6 @@ class StrategyRunner:
             # =================================================================
 
             if in_warmup:
-                return
-            if not self._is_market_open(now):
-                self._logger.info("EVENT|blocked|market_hours")
                 return
             if not self._validate_symbol_for_cycle(symbol):
                 return
@@ -4100,28 +4100,24 @@ class StrategyRunner:
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX: EARLY TIME GUARD (Check BEFORE any processing)
         # ═══════════════════════════════════════════════════════════
-        from nifty_scalper_bot.utils.market_hours import (
-            get_time_status,
-            is_market_hours_cached,
-        )
+        from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
 
-        if not is_market_hours_cached():
-            # Throttle logging to once per minute per symbol
+        exchange_open = is_market_hours_cached()
+        allow_signal_generation = True
+        allow_execution = bool(exchange_open)
+        if allow_signal_generation and not allow_execution:
             cache_key = f"time_block_{signal.symbol}"
             if not hasattr(self, "_time_block_logged"):
                 self._time_block_logged = {}
-
             now = timestamp.timestamp()
             last_logged = self._time_block_logged.get(cache_key, 0)
-
-            if now - last_logged > 60:  # Log once per minute
-                _, reason = get_time_status()
-                self._logger.debug(
-                    f"⏰ Signal blocked (outside market hours): {signal.symbol} | {reason}"
+            if now - last_logged > 60:
+                self._logger.info(
+                    "Condition met: after_market_signal_allowed_execution_blocked",
+                    extra={"event": "after_market_signal_allowed_execution_blocked", "symbol": signal.symbol},
                 )
                 self._time_block_logged[cache_key] = now
-
-            return  # ❌ STOP HERE - Don't process signal
+            return
         # ═══════════════════════════════════════════════════════════
 
         self._logger.info(
@@ -5113,6 +5109,9 @@ class StrategyRunner:
                 )
             if order_id:
                 self._mark_order_in_flight(trade_symbol, base_symbol)
+                manager = getattr(self, "_strategy_manager", None)
+                if manager is not None and hasattr(manager, "increment_observability_counter"):
+                    manager.increment_observability_counter("orders_submitted")
 
             # ✅ Update State Timers (Debounce)
             with self._lock:
