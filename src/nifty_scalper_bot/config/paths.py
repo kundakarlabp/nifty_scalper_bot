@@ -18,7 +18,7 @@ def get_data_dir() -> Path:
     1. DATA_DIR environment variable
     2. /app/data (if exists and writable)
     3. ./data (current working directory)
-    4. /tmp/nifty_scalper_data (always writable fallback)
+    4. DATA_DIR or ./data fallback
     """
     # Check DATA_DIR env var first
     data_dir_env = os.getenv("DATA_DIR")
@@ -49,10 +49,7 @@ def get_data_dir() -> Path:
     except (PermissionError, OSError):
         pass
     
-    # Fallback to /tmp
-    tmp_data = Path("/tmp/nifty_scalper_data")
-    tmp_data.mkdir(parents=True, exist_ok=True)
-    return tmp_data
+    return cwd_data
 
 
 def get_data_path(filename: str) -> Path:

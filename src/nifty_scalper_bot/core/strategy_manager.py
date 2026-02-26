@@ -12,6 +12,8 @@ from statistics import mean, pstdev
 import time
 import typing as t
 
+from nifty_scalper_bot.config import settings as app_settings
+from nifty_scalper_bot.core.adaptive_calibration import AdaptiveParameterStore, WalkForwardOptimizer
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.infra.metrics import METRICS
@@ -966,9 +968,7 @@ class StrategyManager(_BaseStrategyManager):
         self._last_regime_gate: tuple[bool, tuple[str, ...], str | None] | None = None
         self._last_regime_gate_at: float = 0.0
         self._regime_gate_cooldown = 10.0
-        self._use_regime_adaptive = (
-            os.getenv("USE_REGIME_ADAPTIVE", "true").strip().lower() == "true"
-        )
+        self._use_regime_adaptive = bool(app_settings.USE_REGIME_ADAPTIVE)
         self._observability_counters: dict[str, int] = {
             "signals_generated": 0,
             "signals_blocked_by_regime": 0,
@@ -976,6 +976,13 @@ class StrategyManager(_BaseStrategyManager):
             "orders_submitted": 0,
         }
         self._last_metrics_log_ts = time.time()
+        self._adaptive_store = AdaptiveParameterStore(window_trades=app_settings.ADAPTIVE_WINDOW_TRADES)
+        self._optimizer = WalkForwardOptimizer(recalibrate_every=app_settings.ADAPTIVE_RECALIBRATE_EVERY)
+        self._regime_fallback_scale = float(app_settings.REGIME_FALLBACK_SCALE)
+        self._avg_confidence_window: deque[float] = deque(maxlen=500)
+        self._avg_kelly_window: deque[float] = deque(maxlen=500)
+        self._market_open_since_ts: float | None = None
+        self._last_zero_signal_check_ts = 0.0
         self._no_signal_summary: dict[str, int] = {
             'total': 0,
             'missing_indicators': 0,
@@ -1809,6 +1816,12 @@ class StrategyManager(_BaseStrategyManager):
         ):
             adjustments = dict(regime_snapshot.adjustments)
         regime_scale = self._extract_regime_scale(adjustments)
+        if regime_manager is not None:
+            try:
+                if not regime_manager.can_trade(context={"component": "strategy_manager_fallback", "symbol": symbol}) and self._use_regime_adaptive:
+                    regime_scale = min(regime_scale, max(self._regime_fallback_scale, 0.0))
+            except Exception as exc:
+                log.error("Failure in StrategyManager.generate_signal regime fallback: %s", exc, exc_info=exc)
         regime_name = (
             regime_snapshot.regime if isinstance(regime_snapshot, RegimeSnapshot) else None
         )
@@ -2025,7 +2038,7 @@ class StrategyManager(_BaseStrategyManager):
                     action=combined.action,
                     symbol=combined.symbol,
                     quantity=scaled_quantity,
-                    confidence=combined.confidence,
+                    confidence=float(dict(combined.metadata).get("probability", combined.confidence)),
                     reason=combined.reason,
                     stop_loss=combined.stop_loss,
                     take_profit=combined.take_profit,
@@ -2046,6 +2059,8 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
                 self._observability_counters["signals_generated"] += 1
+                self._avg_confidence_window.append(float(combined.confidence))
+                self._avg_kelly_window.append(float(dict(combined.metadata).get("kelly_fraction", 0.0)))
                 self._emit_metrics_snapshot()
                 return combined
         elif combined is None:
@@ -2111,8 +2126,18 @@ class StrategyManager(_BaseStrategyManager):
             extra={
                 "event": "strategy_metrics_snapshot",
                 "metrics": dict(self._observability_counters),
+                "avg_confidence": (sum(self._avg_confidence_window) / len(self._avg_confidence_window)) if self._avg_confidence_window else 0.0,
+                "avg_kelly_fraction": (sum(self._avg_kelly_window) / len(self._avg_kelly_window)) if self._avg_kelly_window else 0.0,
+                "regime": getattr(self._regime_state, "regime", None),
+                "rolling_sharpe": float(self._performance.get("_aggregate", StrategyPerformance()).sharpe_ratio()),
             },
         )
+
+    def increment_observability_counter(self, key: str) -> None:
+        """Args: key. Returns: None. Raises: None."""
+
+        if key in self._observability_counters:
+            self._observability_counters[key] += 1
 
     def _extract_regime_scale(self, adjustments: t.Mapping[str, t.Any]) -> float:
         """Args: adjustments. Returns: float. Raises: Exception."""

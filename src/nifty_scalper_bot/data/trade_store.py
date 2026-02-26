@@ -69,7 +69,7 @@ class TradeStore:
                 LOGGER.debug(f"✅ TradeStore directory ready: {directory}")
             except (PermissionError, OSError) as e:
                 # ✅ FIX: Fallback to /tmp
-                fallback_dir = "/tmp/nifty_scalper_data"
+                fallback_dir = os.getenv("DATA_DIR", "data")
                 os.makedirs(fallback_dir, exist_ok=True)
                 old_path = self.filepath
                 self.filepath = os.path.join(fallback_dir, "trades.json")
@@ -79,7 +79,7 @@ class TradeStore:
         """Load trades from disk safely."""
         if not os.path.exists(self.filepath):
             # Also check fallback location
-            fallback = "/tmp/nifty_scalper_data/trades.json"
+            fallback = os.path.join(os.getenv("DATA_DIR", "data"), "trades.json")
             if os.path.exists(fallback):
                 self.filepath = fallback
                 LOGGER.info(f"📂 Loading trades from fallback: {fallback}")
@@ -160,7 +160,7 @@ class TradeStore:
             
         except PermissionError as e:
             # ✅ FIX: Try fallback location
-            fallback_path = "/tmp/nifty_scalper_data/trades.json"
+            fallback_path = os.path.join(os.getenv("DATA_DIR", "data"), "trades.json")
             os.makedirs(os.path.dirname(fallback_path), exist_ok=True)
             
             data = {k: _sanitize(asdict(v)) for k, v in self._trades.items()}

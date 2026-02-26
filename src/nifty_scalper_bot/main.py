@@ -72,7 +72,6 @@ def _ensure_data_directory() -> None:
     data_dirs = [
         Path("/app/data"),
         Path.cwd() / "data",
-        Path("/tmp/nifty_scalper_data"),
     ]
     
     for data_dir in data_dirs:
@@ -88,7 +87,7 @@ def _ensure_data_directory() -> None:
             print(f"⚠️ Cannot use {data_dir}: {e}", flush=True)
             continue
     
-    fallback = Path("/tmp/nifty_scalper_data")
+    fallback = Path.cwd() / "data"
     fallback.mkdir(parents=True, exist_ok=True)
     os.environ["DATA_DIR"] = str(fallback)
     print(f"⚠️ Using fallback data directory: {fallback}", flush=True)

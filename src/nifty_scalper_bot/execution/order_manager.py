@@ -4985,7 +4985,7 @@ class OrderManager:
                 test_file.unlink()
             except (PermissionError, OSError):
                 # Fallback to /tmp for Railway/Cloud environments
-                path = Path("/tmp/nifty_scalper_data/orders.json")
+                path = Path(os.getenv("DATA_DIR", "data")) / "orders.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 self._logger.warning(f"⚠️ Using /tmp fallback: {path}")
             
@@ -5103,7 +5103,7 @@ class OrderManager:
         
         if not path.exists():
             # Try /tmp fallback location
-            fallback = Path("/tmp/nifty_scalper_data/orders.json")
+            fallback = Path(os.getenv("DATA_DIR", "data")) / "orders.json"
             if fallback.exists():
                 path = fallback
                 self._logger.info(f"📂 Loading orders from fallback: {path}")

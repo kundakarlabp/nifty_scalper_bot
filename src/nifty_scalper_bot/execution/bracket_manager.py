@@ -1883,7 +1883,7 @@ class BracketManager:
             test_file.unlink()
         except (PermissionError, OSError):
             # ✅ FIX: Fallback to /tmp
-            path = Path("/tmp/nifty_scalper_data/virtual_brackets.json")
+            path = Path(os.getenv("DATA_DIR", "data")) / "virtual_brackets.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             LOGGER.warning(f"⚠️ Using /tmp fallback for brackets: {path}")
         
