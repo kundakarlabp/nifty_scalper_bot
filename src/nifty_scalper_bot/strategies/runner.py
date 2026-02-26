@@ -1217,13 +1217,34 @@ class StrategyRunner:
             self._logger.debug("history_cache_write_failed: %s", exc)
 
     def _has_session_candle_gaps(self, symbol: str) -> bool:
-        """Return True when current-session minute history has timestamp gaps."""
+        """Return True when RECENT live session history has timestamp gaps.
+
+        Only the last 90 minutes of today's session bars are examined.
+        Historical hydration bars span multiple days and always leave a
+        gap at the hydration-to-live boundary (typically 5-30 min at
+        market open).  Including that boundary in the gap check would
+        permanently degrade every symbol at startup, blocking all signal
+        evaluation.  Restricting the window to 90 minutes means:
+          • The hydration gap is ignored on startup.
+          • Any real mid-session data outage (>2 min gap) is still caught.
+          • Symbols recover automatically once continuous live bars arrive.
+        """
         history = self._symbol_history.get(symbol, [])
         if len(history) < 2:
             self._session_gap_count[symbol] = 0
             return False
-        session_date = datetime.now(timezone.utc).date()
-        session_bars = [bar for bar in history if bar.timestamp.date() == session_date]
+        now_utc = datetime.now(timezone.utc)
+        session_date = now_utc.date()
+        cutoff = now_utc - timedelta(minutes=90)
+        # Only inspect today's bars that fall within the 90-minute window.
+        session_bars = [
+            bar for bar in history
+            if bar.timestamp.date() == session_date and bar.timestamp >= cutoff
+        ]
+        if len(session_bars) < 2:
+            # Not enough recent bars to assess gaps — treat as gap-free.
+            self._session_gap_count[symbol] = 0
+            return False
         gaps = 0
         for prev, curr in zip(session_bars, session_bars[1:]):
             if (curr.timestamp - prev.timestamp).total_seconds() > 120:
@@ -3328,8 +3349,11 @@ class StrategyRunner:
                 completed_bar = builder.update(float(price), volume, timestamp)
                 if completed_bar is not None:
                     self._ingest_bar(symbol, completed_bar)
-                else:
-                    return
+                # NOTE: Do NOT return here when completed_bar is None.
+                # The position manager (PHASE 5) must receive every tick to
+                # track unrealised P&L and update stop-loss levels in real time.
+                # Strategy evaluation is already guarded by the same-bar-skip
+                # check in PHASE 9 so it still runs only once per completed bar.
             except ValueError as exc:
                 if getattr(builder, "_last_error_ts", 0) < now.timestamp() - 60:
                     self._logger.warning(f"Bar update issue for {symbol}: {exc}")
@@ -3703,7 +3727,11 @@ class StrategyRunner:
 
             # If no immediate signal, delegate to complex StrategyManager
             current_state = self._symbol_states.get(symbol, SymbolState.DISCOVERED)
-            if current_state != SymbolState.READY:
+            # DEGRADED means a data-quality concern (e.g. a single session gap at the
+            # hydration-to-live boundary) but the symbol HAS enough bar history and a
+            # valid VWAP to produce meaningful signals.  Only DISCOVERED and HYDRATING
+            # genuinely lack sufficient data — block those, not DEGRADED.
+            if current_state not in (SymbolState.READY, SymbolState.DEGRADED):
                 self._log_once_per_symbol_per_bar(
                     symbol,
                     "strategy_eval_skipped_not_ready",
@@ -3881,6 +3909,15 @@ class StrategyRunner:
                             self._logger.warning("Stale tick — skipping execution")
                             return
                         self._last_global_eval_ts = time.monotonic()
+                        self._logger.info(
+                            "strategy_evaluation_start",
+                            extra={
+                                "event": "strategy_evaluation_start",
+                                "symbol": symbol,
+                                "price": price,
+                                "state": current_state.value,
+                            },
+                        )
                         try:
                             signal = self._strategy_manager.generate_signal(symbol, price)
                         except Exception:
