@@ -701,6 +701,12 @@ class StrategyRunner:
             self._tracked_symbols.add(normalized)
             self._symbol_states.setdefault(normalized, SymbolState.DISCOVERED)
             self._set_symbol_hydration_state(normalized, SymbolState.HYDRATING)
+            # FIX (2026-02-27): Initialize _last_bar_ts for dynamically-added symbols.
+            # Options arrive via add_symbol() not mark_ready(), so _last_bar_ts is never
+            # set.  PHASE 9 sees None → "bar_not_finalized" → _mark_symbol_unready →
+            # HYDRATING → PHASE 7 blocks all future ticks → permanent lockout for options.
+            if normalized not in self._last_bar_ts:
+                self._last_bar_ts[normalized] = datetime.now(timezone.utc)
             # Update tracked universe snapshot only when membership changes.
             self._universe_controller.update(self._active_symbols)
 
@@ -3433,9 +3439,9 @@ class StrategyRunner:
                 log_throttled(
                     self._logger,
                     "execution_blocked",
-                    f"Execution blocked: state={self._runner_state}",
-                    interval_sec=10.0,
-                    level=logging.DEBUG,
+                    f"⛔ Execution blocked: runner_state={self._runner_state}",
+                    interval_sec=30.0,
+                    level=logging.WARNING,
                 )
                 return
 
@@ -3529,12 +3535,13 @@ class StrategyRunner:
                 # Use indicator_engine.has_min_bars() which counts hydrated bars too.
                 min_bars_needed = self._required_candles or 20
                 if not self._indicator_engine.has_min_bars(symbol, min_bars_needed):
+                    _ind_count = len(self._indicator_engine.get_history(symbol) or [])
                     log_throttled(
                         self._logger,
                         f"p7_bars_low_{symbol}",
-                        f"⏳ PHASE7 indicator bars low: {symbol} need={min_bars_needed}",
+                        f"⏳ PHASE7 bars low: {symbol} need={min_bars_needed} has={_ind_count}",
                         interval_sec=60.0,
-                        level=logging.DEBUG,
+                        level=logging.INFO,
                     )
                     return
 
@@ -3628,8 +3635,8 @@ class StrategyRunner:
                         self._logger,
                         f"heartbeat_{symbol}",
                         f"💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}",
-                        interval_sec=30.0,
-                        level=logging.DEBUG,
+                        interval_sec=60.0,
+                        level=logging.INFO,
                     )
 
                 # =============================================================
@@ -3807,20 +3814,13 @@ class StrategyRunner:
                 and time_module.time() < backoff_until
             ):
                 remaining = max(0.0, backoff_until - time_module.time())
-                self._logger.debug(
-                    "strategy_eval_skipped_stale_data",
-                    extra={
-                        "event": "strategy_eval_skipped_stale_data",
-                        "symbol": symbol,
-                        "backoff_until": backoff_until,
-                        "remaining_s": remaining,
-                        "detail_code": getattr(
-                            self, "_data_freshness_backoff_detail", None
-                        ),
-                        "symbol_checked": getattr(
-                            self, "_data_freshness_backoff_symbol", None
-                        ),
-                    },
+                log_throttled(
+                    self._logger,
+                    f"freshness_backoff_{symbol}",
+                    f"⏰ Freshness backoff: {symbol} remaining={remaining:.1f}s "
+                    f"detail={getattr(self,'_data_freshness_backoff_detail',None)}",
+                    interval_sec=30.0,
+                    level=logging.WARNING,
                 )
                 return
 
@@ -3845,13 +3845,17 @@ class StrategyRunner:
                         last_eval = getattr(state, "_last_strategy_eval", None)
                         last_bar_ts = self._last_bar_ts.get(symbol)
                         if last_bar_ts is None:
-                            self._warn_symbol_gate(
-                                "bar_not_finalized",
-                                symbol,
-                                "No finalized minute bar available for strategy evaluation",
-                                reason="missing_finalized_bar",
+                            # FIX (2026-02-27): Soft skip — do NOT call _mark_symbol_unready.
+                            # That sets HYDRATING → PHASE 7 blocks → permanent cycle.
+                            # Instead seed _last_bar_ts = now and retry next tick.
+                            log_throttled(
+                                self._logger,
+                                f"bar_ts_init_{symbol}",
+                                f"⚙️  Seeding _last_bar_ts for {symbol} (first eval tick)",
+                                interval_sec=60.0,
+                                level=logging.INFO,
                             )
-                            self._mark_symbol_unready(symbol, "bar_not_finalized")
+                            self._last_bar_ts[symbol] = now
                             return
                         if last_bar_ts and state._last_eval_bar_ts:
                             if last_bar_ts <= state._last_eval_bar_ts:
