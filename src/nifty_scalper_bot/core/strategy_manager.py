@@ -994,7 +994,7 @@ class StrategyManager(_BaseStrategyManager):
         self._no_signal_last_summary_ts = time.time()
         self._symbol_invalid_counts: dict[str, int] = {}
         self._symbol_temporarily_ineligible: dict[str, str] = {}
-        self._symbol_invalid_threshold = 3  # intent: suspend after consecutive invalid data
+        self._symbol_invalid_threshold = 10  # ✅ FIX #2a: Raised from 3→10; options have legitimate data gaps at open/reconnect
         required: set[str] = set()
         for strategy in strategies:
             required.update(strategy.get_required_indicators())
@@ -1862,13 +1862,36 @@ class StrategyManager(_BaseStrategyManager):
         vwap = indicators.get("vwap") or indicators.get("exchange_vwap")
         volume = indicators.get("volume")
         avg_volume = indicators.get("avg_volume")
+        # ✅ FIX #2b: avg_volume grace period (120s) — options legitimately have avg_volume=0
+        # at market open (9:15–9:20 AM). Cache last valid value and use it within grace window.
+        _now_ts = time.time()
+        if not hasattr(self, "_sm_last_valid_avg_vol"):
+            self._sm_last_valid_avg_vol: dict = {}
+            self._sm_last_valid_avg_vol_ts: dict = {}
+        try:
+            _avg_raw = float(avg_volume) if avg_volume is not None else 0.0
+            if _avg_raw > 0:
+                self._sm_last_valid_avg_vol[symbol] = _avg_raw
+                self._sm_last_valid_avg_vol_ts[symbol] = _now_ts
+            elif (_now_ts - self._sm_last_valid_avg_vol_ts.get(symbol, 0)) < 120.0:
+                avg_volume = self._sm_last_valid_avg_vol.get(symbol, avg_volume)
+        except (TypeError, ValueError):
+            pass
         try:
             if vwap is None or float(vwap) <= 0.0:
                 invalid_reason = "vwap_zero_or_invalid"
             elif volume is None or float(volume) <= 0.0:
                 invalid_reason = "volume_below_threshold"
             elif avg_volume is None or float(avg_volume) <= 0.0:
-                invalid_reason = "volume_below_threshold"
+                # ✅ FIX #2b: avg_volume=0 after grace period is transient; let individual strategies
+                # handle it (VWAPPro has its own 120s grace). Don't block the whole pipeline.
+                log_throttled(
+                    log,
+                    key=f"avg_vol_zero_gate:{symbol}",
+                    msg=f"avg_volume=0 for {symbol} (past grace), delegating to strategies",
+                    interval_sec=60.0,
+                    extra={"event": "avg_volume_zero_delegated", "symbol": symbol},
+                )
         except (TypeError, ValueError):
             invalid_reason = "data_invalid"
 
@@ -2038,7 +2061,7 @@ class StrategyManager(_BaseStrategyManager):
                     action=combined.action,
                     symbol=combined.symbol,
                     quantity=scaled_quantity,
-                    confidence=float(dict(combined.metadata).get("probability", combined.confidence)),
+                    confidence=combined.confidence,  # ✅ FIX #6: Was metadata.get("probability", combined.confidence); that bypassed score weighting
                     reason=combined.reason,
                     stop_loss=combined.stop_loss,
                     take_profit=combined.take_profit,

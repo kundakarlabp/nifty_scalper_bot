@@ -617,7 +617,7 @@ ORDER_TRUNCATE_TO_LOT = _env_bool("ORDER_TRUNCATE_TO_LOT", default=True)
 ORDER_ALLOW_NAKED_SHORTS = _env_bool("ORDER_ALLOW_NAKED_SHORTS", default=False)
 
 MIN_LOTS_PER_TRADE = _env_int("MIN_LOTS_PER_TRADE", default=1, minimum=1)
-MAX_LOTS_PER_TRADE = _env_int("MAX_LOTS_PER_TRADE", default=1, minimum=1)
+MAX_LOTS_PER_TRADE = _env_int("MAX_LOTS_PER_TRADE", default=2, minimum=1)  # ✅ FIX #4: Was 1; risk settings used default=3. Aligned to 2 (conservative start)
 RISK_FALLBACK_PRICE_MOVE_PCT = _env_float(
     "RISK_FALLBACK_PRICE_MOVE_PCT", default=2.0, minimum=0.0
 )
@@ -1194,7 +1194,7 @@ def _build_risk_settings() -> RiskSettings:
     if max_lots < min_lots:
         max_lots = min_lots
     atr_multiple = _env_float("ATR_MULT", default=1.0, minimum=0.0)
-    contract_lot_size = _env_int("NIFTY_LOT_SIZE", default=65, minimum=1)
+    contract_lot_size = _env_int("NIFTY_LOT_SIZE", default=75, minimum=1)  # ✅ FIX #3: NIFTY lot size is 75 since Nov 2024 (was incorrectly 65)
     return RiskSettings(
         daily_loss_pct=daily_loss_pct,
         daily_pnl_cap_pct=_env_float(

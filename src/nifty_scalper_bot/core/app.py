@@ -3968,10 +3968,16 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             "updated_at": snapshot.updated_at,
         }
 
+    # ✅ FIX #1: min_confidence was missing → defaulted to 0.60 in parent class.
+    # After _apply_weighted_confidence multiplies by score weight (~0.5 cold start),
+    # VWAPPro's 0.85 confidence becomes 0.425 < 0.60 → ALL signals silently filtered.
+    # Correct threshold is post-weighting aware: 0.35 allows signals to pass.
+    _global_min_conf = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.35"))
     strategy_manager = StrategyManager(
         strategies=strategy_instances,
         indicator_engine=indicator_engine,
         position_manager=position_manager,
+        min_confidence=_global_min_conf,
         data_hub=data_hub,
         orchestrator=orchestrator,
         futures_symbol=_get_current_nifty_futures_symbol(),

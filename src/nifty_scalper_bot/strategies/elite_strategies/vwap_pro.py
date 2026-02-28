@@ -28,8 +28,8 @@ class VWAPProStrategy(EliteStrategy):
     """
 
     MIN_BARS_REQUIRED = 10
-    COOLDOWN_SECONDS = 60
-    VWAP_ACCEPTANCE_BARS = 2
+    COOLDOWN_SECONDS = 45    # ✅ FIX #5: Reduced from 60s → 45s; prevents overtrading while capturing fast NIFTY moves
+    VWAP_ACCEPTANCE_BARS = 1  # ✅ FIX #5: Reduced from 2 → 1; index bias gate is already a strong 2-condition filter
     TELEMETRY_LOG_EVERY = 5
     VOLUME_GRACE_SECONDS = 120.0
 
@@ -45,6 +45,7 @@ class VWAPProStrategy(EliteStrategy):
         "_last_valid_volume_ts",
         "_reject_reason_counts",
         "_index_bias_degraded_logged",
+        "_index_bias_missing_logged",   # ✅ FIX #5b: Was missing from __slots__ but set in __init__ and read in _evaluate_signal
         "_last_valid_index_vwap",
         "_bias_failover_logged_bar",
     )
