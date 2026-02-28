@@ -729,7 +729,7 @@ class RiskSettings:
     min_lots_per_trade: int = 1
     max_lots_per_trade: int = 6
     atr_stop_multiple: float = 1.0
-    contract_lot_size: int = 75
+    contract_lot_size: int = 65  # NIFTY options lot size = 65 (current)
     allow_pyramiding: bool = False
     signal_debounce_seconds: float = 60.0
 
@@ -1194,7 +1194,7 @@ def _build_risk_settings() -> RiskSettings:
     if max_lots < min_lots:
         max_lots = min_lots
     atr_multiple = _env_float("ATR_MULT", default=1.0, minimum=0.0)
-    contract_lot_size = _env_int("NIFTY_LOT_SIZE", default=75, minimum=1)  # ✅ FIX #3: NIFTY lot size is 75 since Nov 2024 (was incorrectly 65)
+    contract_lot_size = _env_int("NIFTY_LOT_SIZE", default=65, minimum=1)  # NIFTY options lot size = 65 (current)
     return RiskSettings(
         daily_loss_pct=daily_loss_pct,
         daily_pnl_cap_pct=_env_float(
