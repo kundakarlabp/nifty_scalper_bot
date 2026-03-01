@@ -136,25 +136,14 @@ class OrderFlowStrategy(EliteStrategy):
                     tp1 = current_price + (risk * 1.6)
                     tp2 = current_price + (risk * 3.2)
 
-            # --- Bearish Setup (Sell the Resistance) ---
-            # Condition: Aggressive Sellers (Asks > 1.6x Bids -> Ratio < 0.6) OR Resistance Wall
-            # Context: Price must be < VWAP (Downtrend)
-            elif (imbalance_ratio < ratio_max or has_ask_wall) and current_price < vwap:
-                if vol > (avg_vol * 0.5):
-                    side = "SELL"
-                    risk_mult = 1.2 if imbalance_ratio < (ratio_max * 0.7) else 1.0
-                    risk = atr * risk_mult
-                    stop_loss = current_price + risk
-                    tp1 = current_price - (risk * 1.6)
-                    tp2 = current_price - (risk * 3.2)
+            # --- Bearish Setup SKIPPED (long-only options buying) ---
+            # Aggressive sellers / ask walls below VWAP would imply buying PE options.
+            # Previously emitted SELL which blocked BUY trades via _combine_signals.
+            # Strategy selects the symbol to pass in; PE option BUY is handled by signal direction.
 
             if not side:
                 return None
-            if (
-                side == "BUY" and (stop_loss >= current_price or tp1 <= current_price)
-            ) or (
-                side == "SELL" and (stop_loss <= current_price or tp1 >= current_price)
-            ):
+            if stop_loss >= current_price or tp1 <= current_price:
                 LOGGER.info(
                     "Condition met: invalid order flow brackets",
                     extra={

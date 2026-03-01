@@ -1170,12 +1170,17 @@ class OrderExecutionHub:
         bid: float | None,
         ask: float | None,
     ) -> float:
-        """Return spread-aware ATR floor for execution safety."""
-
+        """Return spread-aware ATR floor for execution safety.
+        
+        ATR floor ensures SL/TP is never smaller than bid-ask spread × 1.5.
+        Previously used execution_price * 0.012 which incorrectly fired on strike-price
+        values (₹25000 → ₹300 floor, overriding a valid ₹12.5 ATR from data_hub).
+        Option premiums (₹30–₹500) need a spread-based floor, not a price-pct floor.
+        """
         spread = 0.0
         if bid is not None and ask is not None and ask >= bid:
             spread = float(ask - bid)
-        min_atr = max(float(execution_price) * 0.012, spread * 1.5, 1.0)
+        min_atr = max(spread * 1.5, 1.0)  # at least ₹1 regardless of spread
         return max(float(raw_atr), min_atr)
 
     def _get_current_regime(

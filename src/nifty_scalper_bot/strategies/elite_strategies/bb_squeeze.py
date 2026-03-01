@@ -97,12 +97,12 @@ class BBSqueezeStrategy(EliteStrategy):
             if bandwidth_pct > (squeeze_threshold * 2.0):
                 return None
 
-            # 3. Detect Directional Breakout
+            # 3. Detect Directional Breakout — BUY ONLY (long-only options buying)
+            # Bearish breakout (price < lower band) cannot be traded via options buying
+            # without margin; skip to prevent SELL signals conflicting with other strategies.
             side = ""
             if current_price > upper:
                 side = "BUY"
-            elif current_price < lower:
-                side = "SELL"
 
             if not side:
                 return None
@@ -120,32 +120,15 @@ class BBSqueezeStrategy(EliteStrategy):
 
             # Stop Loss: The Middle Band (Mean)
             # In a true breakout, price should NOT return to the mean.
-            if side == "BUY":
-                stop_loss = mid if mid < current_price else current_price - (atr * 1.2)
-            else:
-                stop_loss = mid if mid > current_price else current_price + (atr * 1.2)
+            stop_loss = mid if mid < current_price else current_price - (atr * 1.2)
 
             risk = abs(current_price - stop_loss)
             if risk <= 0:
                 risk = atr * 1.2
-                stop_loss = (
-                    current_price - risk if side == "BUY" else current_price + risk
-                )
-            tp1 = (
-                current_price + (risk * 1.8)
-                if side == "BUY"
-                else current_price - (risk * 1.8)
-            )
-            tp2 = (
-                current_price + (risk * 3.6)
-                if side == "BUY"
-                else current_price - (risk * 3.6)
-            )
-            if (
-                side == "BUY" and (stop_loss >= current_price or tp1 <= current_price)
-            ) or (
-                side == "SELL" and (stop_loss <= current_price or tp1 >= current_price)
-            ):
+                stop_loss = current_price - risk
+            tp1 = current_price + (risk * 1.8)
+            tp2 = current_price + (risk * 3.6)
+            if stop_loss >= current_price or tp1 <= current_price:
                 LOGGER.info(
                     "Condition met: invalid bb squeeze brackets",
                     extra={

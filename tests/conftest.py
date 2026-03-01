@@ -45,7 +45,7 @@ class DeterministicStrategy:
 @pytest.fixture
 def sample_price_data() -> pd.DataFrame:
     rng = np.random.default_rng(seed=42)
-    index = pd.date_range("2024-01-01", periods=120, freq="1H")
+    index = pd.date_range("2024-01-01", periods=120, freq="1h")
     base = np.linspace(100, 105, len(index))
     noise = rng.normal(scale=0.3, size=len(index))
     price = base + noise

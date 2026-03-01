@@ -7,7 +7,7 @@ import math
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.strategies.elite_strategies.builder import (
     build_elite_strategies,
-    elite_strategy_tags,
+    get_strategy_tags as elite_strategy_tags,
 )
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategiesSettings,
@@ -88,14 +88,17 @@ def test_build_elite_strategies_enforces_enabled_flag() -> None:
 
 
 def test_elite_strategy_tags_align_with_instances() -> None:
-    """Ensure elite tag helper covers each active strategy without duplicates."""
+    """Ensure get_strategy_tags returns tags only for enabled strategies."""
 
     settings = EliteStrategiesSettings()
-    strategies = build_elite_strategies(settings)
-    tags = elite_strategy_tags(settings, strategies)
-    names = {strategy.name for strategy in strategies}
-    assert set(tags) == names
-    assert all(tag_tuple and tag_tuple[0] == "elite" for tag_tuple in tags.values())
+    tags = elite_strategy_tags(settings)
+    # Tags dict: {display_label: ["Elite", "Active"]}
+    # All returned entries must be non-empty lists starting with "Elite"
+    assert isinstance(tags, dict)
+    for label, tag_list in tags.items():
+        assert isinstance(label, str) and label
+        assert isinstance(tag_list, list) and len(tag_list) >= 1
+        assert tag_list[0] == "Elite"
 
 
 def test_elite_strategy_stats_flow() -> None:

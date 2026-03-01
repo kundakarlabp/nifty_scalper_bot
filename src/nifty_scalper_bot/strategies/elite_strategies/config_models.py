@@ -126,7 +126,7 @@ class EliteStrategiesSettings:
     oi_max_pain: OIMaxPainStrategyConfig = field(default_factory=OIMaxPainStrategyConfig)
     gamma_scalping: GammaScalpingStrategyConfig = field(default_factory=GammaScalpingStrategyConfig)
     tuesday_gamma_buyer: TuesdayGammaBuyerStrategyConfig = field(
-        default_factory=lambda: TuesdayGammaBuyerStrategyConfig(enabled=False)
+        default_factory=TuesdayGammaBuyerStrategyConfig  # enabled=True by default; strategy self-gates to Tuesdays
     )
     cpr: CPRBreakoutStrategyConfig = field(default_factory=CPRBreakoutStrategyConfig)
     order_flow: OrderFlowStrategyConfig = field(default_factory=OrderFlowStrategyConfig)

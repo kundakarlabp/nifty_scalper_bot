@@ -148,20 +148,10 @@ class CPRBreakoutStrategy(EliteStrategy):
                 tp1 = r1 if r1 > current_price else (current_price + atr * 2)
                 tp2 = tp1 + (atr * 2)
 
-            # --- Bearish Breakout ---
-            # Condition: Price breaks below BC (Bottom Central) or S1
-            elif current_price < bc and (vol / avg_vol) > 1.2:
-                # Filter: Don't sell if right above S1 support
-                if current_price > s1 and (current_price - s1) < (atr * 0.5):
-                    return None
-
-                side = "SELL"
-                breakout_level = bc
-                # Stop Loss: Above TC
-                stop_loss = tc + (atr * 0.5)
-                # Targets: S1, S2
-                tp1 = s1 if s1 < current_price else (current_price - atr * 2)
-                tp2 = tp1 - (atr * 2)
+            # --- Bearish Breakout — SKIPPED (long-only options buying) ---
+            # A bearish CPR break cannot be traded without writing options.
+            # Previously emitted SELL which conflicted with VWAPPro/SMC BUY signals
+            # in _combine_signals → "weak consensus" → trade cancelled. Now skipped.
 
             if not side:
                 return None
@@ -172,11 +162,12 @@ class CPRBreakoutStrategy(EliteStrategy):
             if risk_pct > 1.0:
                 return None # Too risky for a scalp
 
-            # 6. Confidence Scoring
-            # Base 75%. Boost if Narrow CPR (Trend Day)
-            confidence = 75.0
-            if is_narrow_cpr: confidence += 15.0 # Very high probability
-            if is_compressed: confidence += 5.0  # NR7 breakout
+            # 6. Confidence Scoring (0.0–1.0 scale — was wrongly 75.0/15.0/5.0 → passed as 75x)
+            confidence = 0.75
+            if is_narrow_cpr:
+                confidence += 0.15  # Very high probability on trend day
+            if is_compressed:
+                confidence += 0.05  # NR7-like compression breakout
 
             LOGGER.info(
                 f"🚀 CPR Breakout: {symbol} {side} | Narrow: {is_narrow_cpr} | CPR Width: {cpr_width:.2f}",
@@ -191,7 +182,7 @@ class CPRBreakoutStrategy(EliteStrategy):
             return EliteSignal(
                 symbol=symbol,
                 signal=side,
-                confidence=min(confidence, 99.0),
+                confidence=min(confidence, 0.99),
                 entry_price=current_price,
                 stop_loss=stop_loss,
                 target=tp1,
