@@ -137,39 +137,20 @@ class StraddleThetaStrategy(EliteStrategy):
 
             # 7. Confidence Scoring
             # Base 75%. Boost if Theta is massive or ADX is dead flat.
-            confidence = 75.0
-            if adx < 15.0: confidence += 10.0
-            if theta < -5.0: confidence += 10.0
+            confidence = 0.75  # Was 75.0 — wrong scale (should be 0.0–1.0)
+            if adx < 15.0: confidence += 0.10
+            if theta < -5.0: confidence += 0.10
 
-            # 8. Construct Signal
-            LOGGER.info(
-                f"⚡ Theta Setup: Sell {symbol} | ADX: {adx:.1f} | Theta: {theta:.2f} | Delta: {delta:.2f}",
-                extra={
-                    "event": "straddle_theta_signal",
-                    "symbol": symbol,
-                    "adx": adx,
-                    "theta": theta,
-                    "iv": iv
-                }
+            # 8. Straddle/theta selling requires option WRITING (margin ~₹1L+ per lot).
+            # This bot buys options only. Emitting SELL here would be rejected by the broker
+            # (no margin) and conflicts with VWAPPro BUY signals in _combine_signals.
+            # Strategy is correctly disabled by default (STRADDLE_ENABLED=false).
+            # Guard here prevents accidental activation from creating SELL signals.
+            LOGGER.debug(
+                f"⚡ Theta Setup skipped (long-only bot cannot write options): {symbol}",
+                extra={"event": "straddle_theta_skip_long_only", "symbol": symbol},
             )
-
-            return EliteSignal(
-                symbol=symbol,
-                signal="SELL",  # Shorting the Option
-                confidence=min(confidence, 99.0),
-                entry_price=current_price,
-                stop_loss=stop_loss,
-                target=tp1,
-                quantity=self._theta_config.quantity or 1,
-                strategy_name="Straddle_Theta_Pro",
-                metadata={
-                    "type": "Theta_Decay_Short",
-                    "adx_regime": "Ranging",
-                    "theta": round(theta, 2),
-                    "iv": round(iv, 2),
-                    "delta": round(delta, 2)
-                }
-            )
+            return None
 
         except Exception as e:
             # Prevent single strategy crash from stopping the bot

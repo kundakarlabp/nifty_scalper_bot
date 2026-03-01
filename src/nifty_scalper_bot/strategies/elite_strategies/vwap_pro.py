@@ -580,6 +580,28 @@ class VWAPProStrategy(EliteStrategy):
                 _emit_no_signal("vwap_zero_or_invalid")
                 return None
 
+            # 💰 MINIMUM PREMIUM FILTER — avoid illiquid deep OTM options
+            # Options below ₹30 have: huge bid-ask spreads (often ₹1-3), near-zero liquidity,
+            # and SL based on ATR becomes meaningless (SL = ₹30 - ₹3 = ₹27 = 10% risk on fill).
+            # ATM NIFTY options trade at ₹80-₹300+; anything below ₹30 is deep OTM junk.
+            _min_premium = float(os.getenv("VWAP_MIN_PREMIUM", "30"))
+            if current_price < _min_premium:
+                self._telemetry["skipped_data"] += 1
+                if self._telemetry["skipped_data"] <= 5 or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY == 0:
+                    LOGGER.info(
+                        f"💰 MIN PREMIUM: {symbol} | price={current_price:.2f} < min={_min_premium:.0f} — skipping illiquid option",
+                        extra={"event": "vwap_pro_min_premium_reject", "symbol": symbol, "price": current_price},
+                    )
+                self._log_no_signal_reason(
+                    "premium_too_low",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
+                    context={"min_premium": _min_premium},
+                )
+                _emit_no_signal("premium_too_low")
+                return None
+
             # ✅ FIX 3: Allow entry within 1 ATR below VWAP.
             # Index bias already confirms direction. This only rejects collapsing premiums.
             _vwap_slack = atr * 1.0

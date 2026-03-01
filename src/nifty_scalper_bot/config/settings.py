@@ -727,7 +727,7 @@ class RiskSettings:
     trading_day_reset_hour_utc: int = 3
     breaker_auto_shadow: bool = True
     min_lots_per_trade: int = 1
-    max_lots_per_trade: int = 6
+    max_lots_per_trade: int = 2  # Was 6 — disagrees with _build_risk_settings env default(3); set 2 for conservative live trading
     atr_stop_multiple: float = 1.0
     contract_lot_size: int = 65  # NIFTY options lot size = 65 (current)
     allow_pyramiding: bool = False
@@ -1036,9 +1036,9 @@ def _build_elite_settings() -> EliteStrategiesSettings:
             min_gamma=_env_float("GAMMA_THRESHOLD", default=0.0005),
         )
 
-        # 6b. Tuesday Gamma Buyer
+        # 6b. Tuesday Gamma Buyer — default ON (Tuesdays are NIFTY expiry day; highest gamma)
         tuesday_gamma_cfg = TuesdayGammaBuyerStrategyConfig(
-            enabled=_env_bool("ENABLE_TUESDAY_GAMMA_BUYER", default=False),
+            enabled=_env_bool("ENABLE_TUESDAY_GAMMA_BUYER", default=True),
             min_confidence=_env_float("TUESDAY_GAMMA_MIN_CONFIDENCE", default=65.0),
             atr_multiplier=_env_float("TUESDAY_GAMMA_ATR_MULTIPLIER", default=1.2),
             target_multiplier=_env_float("TUESDAY_GAMMA_TARGET_MULTIPLIER", default=1.8),
@@ -1048,7 +1048,7 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         oi_cfg = OIMaxPainStrategyConfig(
             enabled=_env_bool("OI_MAX_PAIN_ENABLED", default=True),
             min_confidence=_env_float("OI_MIN_CONFIDENCE", default=40.0),
-            min_deviation_pct=_env_float("OI_MIN_DISTANCE_POINTS", default=50.0),
+            min_deviation_pct=_env_float("OI_MIN_DISTANCE_PCT", default=0.5),  # % distance from max pain (was 50.0 pts — wrong scale; never fired)
         )
 
         # 8. CPR Breakout (Unlocked)
@@ -1190,7 +1190,7 @@ def _build_risk_settings() -> RiskSettings:
             "RISK_LOSS_COOLDOWN_SEC", default=90.0, minimum=0.0
         )
     min_lots = _env_int("MIN_LOTS_PER_TRADE", default=1, minimum=1)
-    max_lots = _env_int("MAX_LOTS_PER_TRADE", default=3, minimum=1)
+    max_lots = _env_int("MAX_LOTS_PER_TRADE", default=2, minimum=1)  # Was 3 — now aligned with RiskSettings dataclass default
     if max_lots < min_lots:
         max_lots = min_lots
     atr_multiple = _env_float("ATR_MULT", default=1.0, minimum=0.0)

@@ -73,16 +73,29 @@ class RSIDivergenceStrategy(EliteStrategy):
             # 1. Safe Data Extraction (Fast Path)
             # Use defaults to prevent crashing if an indicator is temporarily missing
             rsi = float(indicators.get("rsi") or 50.0)
-            atr = float(indicators.get("atr") or 0.0)
+            _raw_atr = float(indicators.get("atr") or 0.0)
+            # ATR floor: 1% of premium, min ₹1 — prevents zero SL/TP on low-premium options
+            atr = max(_raw_atr, current_price * 0.01, 1.0)
             volume = float(indicators.get("volume") or 0.0)
 
-            # 2. Update Internal History
+            # Use NIFTY index price for divergence detection (NOT option premium).
+            # Divergence on index LTP is meaningful (index made LL, RSI made HL = reversal).
+            # Option premium prices are noisy and don't form reliable swing highs/lows.
+            index_ltp = float(
+                indicators.get("nifty_index_ltp")
+                or indicators.get("nifty_fut_ltp")
+                or 0.0
+            )
+            # If no index data available, fall back to option price (degraded mode — less accurate)
+            track_price = index_ltp if index_ltp > 0 else current_price
+
+            # 2. Update Internal History (track index price, not option premium)
             # We need history to detect Swings (Highs/Lows)
             if symbol not in self._price_history:
                 self._price_history[symbol] = deque(maxlen=60)
             
             history = self._price_history[symbol]
-            history.append((current_price, rsi, volume))
+            history.append((track_price, rsi, volume))
 
             # Need minimum bars to detect swings (window * 2 + 1)
             window = 5  # Swing pivot window
@@ -140,22 +153,15 @@ class RSIDivergenceStrategy(EliteStrategy):
                     rsi_lower_high = last_swing[2] < prev_swing[2]
                     
                     if price_higher_high and rsi_lower_high and rsi > 60:
-                        LOGGER.info(f"🐻 Bearish Divergence on {symbol} (RSI: {rsi:.1f})")
-                        return EliteSignal(
-                            symbol=symbol,
-                            signal="SELL",
-                            confidence=0.80,
-                            entry_price=current_price,
-                            stop_loss=current_price + (atr * 2.0),
-                            target=current_price - (atr * 4.0),
-                            quantity=self._config.quantity or 1,
-                            strategy_name="RSI_Div_Pro",
-                            metadata={
-                                "type": "Bearish Divergence",
-                                "rsi": rsi,
-                                "atr": atr
-                            }
+                        # Long-only mode: bearish divergence means price may reverse DOWN.
+                        # We cannot short options (Zerodha requires writing margin).
+                        # Skip this signal — do NOT emit SELL which conflicts with BUY signals
+                        # from VWAPPro and cancels valid trades in _combine_signals.
+                        LOGGER.debug(
+                            f"🐻 Bearish divergence SKIPPED (long-only): {symbol} RSI={rsi:.1f}",
+                            extra={"event": "rsi_bearish_skip_long_only", "symbol": symbol, "rsi": rsi},
                         )
+                        return None
 
             return None
 

@@ -112,33 +112,21 @@ class OIMaxPainStrategy(EliteStrategy):
                 side = "BUY"
                 reason = "Oversold_Magnet_Pull"
 
-            # --- Bearish Reversion (Short) ---
-            # Condition 1: Price is significantly ABOVE Max Pain (Magnet is below)
-            # Condition 2: Price is ABOVE VWAP (Overbought)
-            # Condition 3: MACD Histogram is Negative/Tick-down (Momentum shifting down)
-            elif (dist_mp_pct > min_dist) and (current_price > vwap) and (hist < 0):
-                side = "SELL"
-                reason = "Overbought_Magnet_Pull"
+            # --- Bearish Reversion SKIPPED (long-only options buying) ---
+            # Overbought + price above max pain → potential reversal DOWN.
+            # Cannot be traded via options buying without margin.
+            # Previously emitted SELL → conflicted with VWAPPro BUY in _combine_signals.
 
             if not side:
                 return None
 
-            # 6. Risk Management
-            # Reversion trades need room to breathe, but hard stops if momentum accelerates.
+            # 6. Risk Management (BUY-only now)
             if atr <= 0:
                 atr = current_price * 0.005
 
             risk = atr * 1.3
-            if side == "BUY":
-                stop_loss = current_price - risk
-                candidates = [
-                    level for level in (vwap, max_pain) if level > current_price
-                ]
-            else:
-                stop_loss = current_price + risk
-                candidates = [
-                    level for level in (vwap, max_pain) if level < current_price
-                ]
+            stop_loss = current_price - risk
+            candidates = [level for level in (vwap, max_pain) if level > current_price]
 
             candidates_sorted = sorted(
                 candidates, key=lambda level: abs(level - current_price)
@@ -147,27 +135,12 @@ class OIMaxPainStrategy(EliteStrategy):
                 tp1, tp2 = candidates_sorted[:2]
             elif len(candidates_sorted) == 1:
                 tp1 = candidates_sorted[0]
-                tp2 = (
-                    current_price + (risk * 2.6)
-                    if side == "BUY"
-                    else current_price - (risk * 2.6)
-                )
+                tp2 = current_price + (risk * 2.6)
             else:
-                tp1 = (
-                    current_price + (risk * 1.3)
-                    if side == "BUY"
-                    else current_price - (risk * 1.3)
-                )
-                tp2 = (
-                    current_price + (risk * 2.6)
-                    if side == "BUY"
-                    else current_price - (risk * 2.6)
-                )
-            if (
-                side == "BUY" and (stop_loss >= current_price or tp1 <= current_price)
-            ) or (
-                side == "SELL" and (stop_loss <= current_price or tp1 >= current_price)
-            ):
+                tp1 = current_price + (risk * 1.3)
+                tp2 = current_price + (risk * 2.6)
+
+            if stop_loss >= current_price or tp1 <= current_price:
                 LOGGER.info(
                     "Condition met: invalid max pain brackets",
                     extra={
@@ -188,7 +161,7 @@ class OIMaxPainStrategy(EliteStrategy):
 
             # Boost if Price is BOTH far from VWAP and Max Pain (Double Confluence)
             if abs(dist_mp_pct) > (min_dist * 2):
-                confidence += 10.0
+                confidence += 0.10  # Was 10.0 — that made confidence = 10.7 → scaled to 1.0 by normalizer but still wrong
 
             # Boost if we are very close to expiry (Max Pain gravity is stronger)
             # (Logic implies manual adjustment or external day check, simplified here)

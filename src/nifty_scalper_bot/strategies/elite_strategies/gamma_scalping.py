@@ -124,24 +124,18 @@ class GammaScalpingStrategy(EliteStrategy):
             if vol_ratio < 1.0:  # At least average volume
                 return None
 
-            # 6. Construct Signal (Buy Scalp)
-            # 6. Construct Signal (Buy Scalp)
-            # ✅ FIX: Options Long-Only Mode handling
-            import os
-
-            options_long_only = os.getenv("OPTIONS_LONG_ONLY", "true").lower() == "true"
-
+            # 6. Construct Signal — always long-only (BUY options, never sell/short)
+            # Bullish momentum → BUY CE (Call). Bearish momentum → BUY PE (Put).
+            # SELL was only reachable if OPTIONS_LONG_ONLY=false env var was set,
+            # which was a footgun: Zerodha needs margin to sell options.
             option_type = None
             if bullish_momentum:
                 side = "BUY"
-                option_type = "CE"  # Bullish = Call
+                option_type = "CE"
             else:
-                # Bearish momentum
-                if options_long_only:
-                    side = "BUY"  # BUY the PUT option
-                    option_type = "PE"  # Bearish = Put
-                else:
-                    side = "SELL"  # Only for futures/short-selling mode
+                # Bearish momentum → buy PE option (long put, not short call)
+                side = "BUY"
+                option_type = "PE"
 
             # Fallback ATR
             if atr <= 0:
@@ -152,20 +146,11 @@ class GammaScalpingStrategy(EliteStrategy):
             rr_1 = 1.4
             rr_2 = 2.8
 
-            if side == "BUY":
-                stop_loss = current_price - risk
-                tp1 = current_price + (risk * rr_1)
-                tp2 = current_price + (risk * rr_2)
-            else:
-                stop_loss = current_price + risk
-                tp1 = current_price - (risk * rr_1)
-                tp2 = current_price - (risk * rr_2)
+            stop_loss = current_price - risk
+            tp1 = current_price + (risk * rr_1)
+            tp2 = current_price + (risk * rr_2)
 
-            if (
-                side == "BUY" and (stop_loss >= current_price or tp1 <= current_price)
-            ) or (
-                side == "SELL" and (stop_loss <= current_price or tp1 >= current_price)
-            ):
+            if stop_loss >= current_price or tp1 <= current_price:
                 LOGGER.info(
                     "Condition met: invalid gamma scalping brackets",
                     extra={

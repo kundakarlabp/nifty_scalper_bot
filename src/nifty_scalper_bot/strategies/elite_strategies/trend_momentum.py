@@ -85,34 +85,8 @@ class TrendMomentumStrategy(EliteStrategy):
                     }
                 )
 
-            # SELL (for short positions or closing longs)
-            elif trend_pct < -1.0 and rsi > 30 and vol_ratio > 0.8:
-                if trend_pct < -5.0:
-                    return None
-                    
-                stop_loss = current_price + (atr * 2.0)
-                target = current_price - (atr * 3.0)
-                
-                LOGGER.info(
-                    f"🔻 Trend Momentum SELL: {symbol} | Trend={trend_pct:.2f}% | RSI={rsi:.1f}",
-                    extra={"event": "trend_momentum_signal", "symbol": symbol}
-                )
-                
-                return EliteSignal(
-                    symbol=symbol,
-                    signal="SELL",
-                    confidence=min(70 + (vol_ratio * 10), 90),
-                    entry_price=current_price,
-                    stop_loss=stop_loss,
-                    target=target,
-                    quantity=1,
-                    strategy_name="Trend_Momentum",
-                    metadata={
-                        "trend_pct": round(trend_pct, 2),
-                        "vol_ratio": round(vol_ratio, 2),
-                        "rsi": round(rsi, 1)
-                    }
-                )
+            # Bearish trend: cannot short options without margin. Skip.
+            # (trend_pct < -1.0 would have triggered SELL — blocked in long-only mode)
 
             return None
 
