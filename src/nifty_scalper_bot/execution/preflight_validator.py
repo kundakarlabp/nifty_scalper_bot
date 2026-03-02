@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import deque
@@ -11,7 +12,7 @@ from typing import Any, Deque, Mapping
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 
 @dataclass(slots=True)
@@ -472,7 +473,15 @@ class PreFlightValidator:
                 fetch = getattr(self._datahub, "get_latest_tick", None)
             tick = fetch(symbol) if callable(fetch) else None
             if not tick:
-                self._logger.warning("Quote staleness: No tick for %s", symbol)
+                # No tick is normal at startup / before subscription warms up — throttle to 60s
+                log_throttled(
+                    self._logger,
+                    key=f"preflight_no_tick:{symbol}",
+                    msg=f"Quote staleness: No tick for {symbol}",
+                    level=logging.DEBUG,
+                    interval_sec=60.0,
+                    extra={"event": "preflight_no_tick", "symbol": symbol},
+                )
                 return {
                     "detail": "No tick available",
                     "current_value": None,
@@ -480,14 +489,17 @@ class PreFlightValidator:
                 }
             timestamp = tick.get("timestamp")
             if timestamp is None:
-                self._logger.warning(
-                    "Quote staleness: Tick missing timestamp for %s, tick: %s",
-                    symbol,
-                    tick,
+                log_throttled(
+                    self._logger,
+                    key=f"preflight_no_ts:{symbol}",
+                    msg=f"Quote staleness: Tick missing timestamp for {symbol}",
+                    level=logging.DEBUG,
+                    interval_sec=60.0,
+                    extra={"event": "preflight_no_timestamp", "symbol": symbol},
                 )
                 return {
                     "detail": "Tick missing timestamp",
-                    "current_value": tick,
+                    "current_value": None,
                     "limit": self._settings.quote_max_age_ms,
                 }
             age_ms = abs(now - float(timestamp)) * 1000.0
@@ -542,41 +554,59 @@ class PreFlightValidator:
             bid = tick.get("best_bid") or tick.get("bid")
             ask = tick.get("best_ask") or tick.get("ask")
             if bid is None or ask is None:
-                self._logger.warning(
-                    "Spread check: Missing bid/ask for %s, tick: %s", symbol, tick
+                # Missing bid/ask is normal for options before first quote — throttle to 60s
+                log_throttled(
+                    self._logger,
+                    key=f"preflight_spread_no_ba:{symbol}",
+                    msg=f"Spread check: Missing bid/ask for {symbol}",
+                    level=logging.DEBUG,
+                    interval_sec=60.0,
+                    extra={"event": "preflight_spread_incomplete", "symbol": symbol},
                 )
                 return {
                     "detail": "Incomplete order book",
-                    "current_value": tick,
+                    "current_value": None,
                     "limit": self._settings.spread_max_pct,
                 }
             try:
                 bid_f = float(bid)
                 ask_f = float(ask)
             except (TypeError, ValueError):
-                self._logger.warning(
-                    "Spread check: Spread inputs invalid for %s, tick: %s", symbol, tick
+                log_throttled(
+                    self._logger,
+                    key=f"preflight_spread_invalid:{symbol}",
+                    msg=f"Spread check: invalid bid/ask for {symbol}",
+                    level=logging.DEBUG,
+                    interval_sec=60.0,
+                    extra={"event": "preflight_spread_invalid", "symbol": symbol},
                 )
                 return {
                     "detail": "Spread inputs invalid",
-                    "current_value": tick,
+                    "current_value": None,
                     "limit": self._settings.spread_max_pct,
                 }
             if bid_f <= 0 or ask_f <= 0:
-                self._logger.warning(
-                    "Spread check: Non-positive bid/ask for %s, tick: %s", symbol, tick
+                log_throttled(
+                    self._logger,
+                    key=f"preflight_spread_nonpos:{symbol}",
+                    msg=f"Spread check: non-positive bid/ask for {symbol} bid={bid_f} ask={ask_f}",
+                    level=logging.DEBUG,
+                    interval_sec=60.0,
+                    extra={"event": "preflight_spread_nonpositive", "symbol": symbol},
                 )
                 return {
                     "detail": "Spread inputs non-positive",
-                    "current_value": tick,
+                    "current_value": None,
                     "limit": self._settings.spread_max_pct,
                 }
             if bid_f >= ask_f:
-                self._logger.warning(
-                    "Spread check: Inverted orderbook for %s, bid: %s, ask: %s",
-                    symbol,
-                    bid_f,
-                    ask_f,
+                log_throttled(
+                    self._logger,
+                    key=f"preflight_spread_inverted:{symbol}",
+                    msg=f"Spread check: inverted orderbook for {symbol} bid={bid_f} ask={ask_f}",
+                    level=logging.DEBUG,
+                    interval_sec=60.0,
+                    extra={"event": "preflight_spread_inverted", "symbol": symbol},
                 )
                 return {
                     "detail": "Inverted order book",
@@ -914,31 +944,28 @@ class PreFlightValidator:
                 except (TypeError, ValueError):
                     confidence = 0.0
             
-            # [FIX] CRITICAL: Fail-Closed if Regime is Missing
-            # If the bot is "blind" (no regime data), we BLOCK trading.
+            # Regime data unavailable (startup warmup or detector not yet run).
+            # Do NOT block trading — regime is advisory, not a hard gate.
             if regime is None:
-                 return {
-                    "detail": "Regime data missing",
-                    "current_value": None,
-                    "limit": "valid_snapshot"
-                 }
+                self._logger.debug(
+                    "preflight_regime_unavailable_allow",
+                    extra={"event": "preflight_regime_unavailable", "symbol": symbol},
+                )
+                return None  # Allow — regime is warming up
 
-            # 2. Volatility Logic
-            # If the market is NOT Volatile (e.g., TRENDING, RANGING), allow trade.
+            # 2. Volatility Logic — only block when market is VOLATILE with high confidence.
             if str(regime).upper() != "VOLATILE":
                 return None
 
-            # If Market IS Volatile, check if confidence is high enough to block.
+            # If Market IS Volatile, block when confidence is high.
             threshold = self._settings.regime_block_volatile
-            
-            # Block if confidence is high (or unknown/None default safe)
             if confidence is None or confidence >= threshold:
                 return {
                     "detail": "Volatile regime",
                     "current_value": confidence,
                     "limit": threshold,
                 }
-            
+
             return None
 
         except Exception as exc:  # noqa: BLE001

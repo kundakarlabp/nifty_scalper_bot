@@ -1706,8 +1706,8 @@ class StrategyManager(_BaseStrategyManager):
             "Entered StrategyManager.generate_signal",
             extra={"event": "scored_strategy_generate", "symbol": symbol},
         )
-        log.info(
-            "Condition met: strategy_evaluation_start",
+        log.debug(
+            "strategy_evaluation_start",
             extra={"event": "strategy_evaluation_start", "symbol": symbol},
         )
         def _log_reject(
@@ -1788,8 +1788,11 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 if not allowed:
                     self._observability_counters["signals_blocked_by_regime"] += 1
-                    log.info(
-                        "Condition met: strategy_regime_scale_fallback",
+                    log_throttled(
+                        log,
+                        key=f"regime_scale_fallback:{symbol}",
+                        msg="strategy_regime_scale_fallback",
+                        interval_sec=30.0,
                         extra={
                             "event": "strategy_regime_scale_fallback",
                             "symbol": symbol,
@@ -1825,10 +1828,8 @@ class StrategyManager(_BaseStrategyManager):
         regime_name = (
             regime_snapshot.regime if isinstance(regime_snapshot, RegimeSnapshot) else None
         )
-        log.info(
-            "REGIME=%s, scale=%.3f",
-            regime_name or "unknown",
-            regime_scale,
+        log.debug(
+            "strategy_regime_scaling",
             extra={
                 "event": "strategy_regime_scaling",
                 "symbol": symbol,
@@ -1959,8 +1960,8 @@ class StrategyManager(_BaseStrategyManager):
         for strategy in self._strategies:
             if strategy.name in self._disabled_strategies:
                 disabled.append(strategy.name)
-                log.info(
-                    "Condition met: strategy_disabled_skipped",
+                log.debug(
+                    "strategy_disabled_skipped",
                     extra={
                         "event": "strategy_disabled_skipped",
                         "strategy": strategy.name,
@@ -2087,8 +2088,11 @@ class StrategyManager(_BaseStrategyManager):
                 self._emit_metrics_snapshot()
                 return combined
         elif combined is None:
-            log.info(
-                "Condition met: strategy_manager_no_combined_signal",
+            log_throttled(
+                log,
+                key=f"strategy_manager_no_combined:{symbol}",
+                msg="strategy_manager_no_combined_signal",
+                interval_sec=30.0,
                 extra={
                     "event": "strategy_manager_no_combined_signal",
                     "symbol": symbol,
@@ -2106,8 +2110,11 @@ class StrategyManager(_BaseStrategyManager):
             )
             _emit_no_signal("data_invalid", {"stage": "combine"})
         else:
-            log.info(
-                "Condition met: strategy_manager_filtered_signal",
+            log_throttled(
+                log,
+                key=f"strategy_manager_filtered:{symbol}",
+                msg="strategy_manager_filtered_signal",
+                interval_sec=30.0,
                 extra={
                     "event": "strategy_manager_filtered_signal",
                     "symbol": symbol,

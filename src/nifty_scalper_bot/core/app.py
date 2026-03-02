@@ -5703,8 +5703,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                     if str(status).strip().lower() not in {"hydrated", "ready"}
                 ]
                 if failed:
-                    raise RuntimeError(
-                        f"Startup hydration incomplete for symbols: {failed}"
+                    # WARN only — do NOT raise. RuntimeError here aborts before mark_ready()
+                    # is called, leaving runner stuck in HISTORICAL_READY and blocking all trades.
+                    LOGGER.warning(
+                        "startup_hydration_incomplete_symbols=%s — proceeding to mark_ready",
+                        failed,
+                        extra={
+                            "event": "startup_hydration_incomplete_warn",
+                            "failed_symbols": failed,
+                        },
                     )
 
             # =========================================================

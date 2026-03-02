@@ -352,6 +352,9 @@ class MarketRegimeManager:
         try:
             with self._lock:
                 current = self._current
+            if current is None:
+                return None
+            return str(current.regime) if current.regime is not None else None
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "Failure in MarketRegimeManager.get_current_regime: %s",

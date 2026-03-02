@@ -588,7 +588,13 @@ class StrategyRunner:
             self._frozen_universe = set(symbols)
             self._universe_controller.update(symbols)
             self._history_gate_failed = False
-            self._runner_state = RunnerState.HISTORICAL_READY
+            # ✅ CRITICAL FIX: Only set HISTORICAL_READY if mark_ready() has NOT already
+            # promoted the state to EXECUTION_ENABLED.  The startup sequence calls
+            # mark_ready() → EXECUTION_ENABLED, then calls start() seconds later.
+            # Without this guard start() resets the state to HISTORICAL_READY and the
+            # bot never trades — "Execution blocked: HISTORICAL_READY" in every tick.
+            if self._runner_state != RunnerState.EXECUTION_ENABLED:
+                self._runner_state = RunnerState.HISTORICAL_READY
             self._history_ready_by_symbol = {symbol: False for symbol in symbols}
             for symbol in symbols:
                 self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
@@ -4796,7 +4802,7 @@ class StrategyRunner:
         if signal.metadata and signal.metadata.get("ignore_vwap"):
             should_check_vwap = False
             self._logger.debug(
-                f"ℹ️ VWAP Check Bypassed by Strategy: {signal.strategy_name}"
+                f"ℹ️ VWAP Check Bypassed by Strategy: {signal.metadata.get('strategy', signal.reason)}"
             )
 
         current_vwap = None

@@ -12,7 +12,7 @@ import hashlib
 import math
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
 
@@ -1195,15 +1195,6 @@ class StrategyManager:
         """
         MASTER EXECUTION LOOP.
         """
-        self._logger.critical(
-            f"📋 StrategyManager.generate_signal ENTERED | {symbol}"
-        )
-        # ✅ DIAGNOSTIC: Log strategy count at entry
-        self._logger.info(
-            f"📋 StrategyManager.generate_signal | {symbol} | "
-            f"strategies={len(self._strategies)} | names={[s.name for s in self._strategies]}"
-        )
-
         logger.debug(
             "Entered StrategyManager.generate_signal",
             extra={"event": "strategy_manager_generate", "symbol": symbol},
@@ -1238,11 +1229,15 @@ class StrategyManager:
         self._augment_futures_metrics(indicators)
 
         # ✅ DIAGNOSTIC: Log all available indicators
-        self._logger.info(
-            f"📈 Indicators for {symbol}: keys={list(indicators.keys())} | "
-            f"bar_count={indicators.get('bar_count', 'MISSING')} | "
-            f"rsi={indicators.get('rsi', 'MISSING')} | "
-            f"ema={indicators.get('ema', 'MISSING')}"
+        logger.debug(
+            "indicators_snapshot",
+            extra={
+                "event": "strategy_indicators_snapshot",
+                "symbol": symbol,
+                "bar_count": indicators.get("bar_count"),
+                "rsi": indicators.get("rsi"),
+                "ema": indicators.get("ema"),
+            },
         )
 
         # 4. Evaluate Strategies
@@ -1256,18 +1251,19 @@ class StrategyManager:
 
         for strategy in self._strategies:
             try:
-                # ✅ Log entry into each strategy evaluation
-                self._logger.info(
-                    f"🔍 Evaluating: {strategy.name} | {symbol}",
-                    extra={"event": "strategy_eval_start", "strategy": strategy.name},
+                # DEBUG only: per-strategy entry is too noisy at INFO
+                logger.debug(
+                    "strategy_eval_enter",
+                    extra={"event": "strategy_eval_start", "strategy": strategy.name, "symbol": symbol},
                 )
 
                 # Gating: Min Bars
                 strategy_min_bars = getattr(strategy, "MIN_BARS_REQUIRED", 3)
                 if bar_count < strategy_min_bars:
-                    self._logger.info(
-                        f"⏭️ SKIP {strategy.name}: need {strategy_min_bars} bars, have {bar_count} | {symbol}",
-                        extra={"event": "strategy_skip_bars"},
+                    logger.debug(
+                        "strategy_skip_bars",
+                        extra={"event": "strategy_skip_bars", "strategy": strategy.name,
+                               "need": strategy_min_bars, "have": bar_count},
                     )
                     skip_count += 1
                     continue
@@ -1277,9 +1273,14 @@ class StrategyManager:
                 missing = [k for k in reqs if indicators.get(k) is None]
 
                 if missing:
-                    self._logger.info(
-                        f"⏭️ SKIP {strategy.name}: missing {missing} | {symbol}",
-                        extra={"event": "strategy_skip_indicators", "missing": missing},
+                    # Throttle to once per 60s per strategy — missing indicators repeat every tick
+                    log_throttled(
+                        self._logger,
+                        key=f"strategy_skip_missing:{strategy.name}:{symbol}",
+                        msg=f"SKIP {strategy.name}: missing indicators {missing} | {symbol}",
+                        interval_sec=60.0,
+                        extra={"event": "strategy_skip_indicators", "strategy": strategy.name,
+                               "missing": missing, "symbol": symbol},
                     )
                     skip_count += 1
                     continue
@@ -1288,17 +1289,17 @@ class StrategyManager:
                 if vix < 12.0 and (
                     "Breakout" in strategy.name or "ORB" in strategy.name
                 ):
-                    self._logger.info(
-                        f"⏭️ SKIP {strategy.name}: low VIX={vix:.1f} | {symbol}",
-                        extra={"event": "strategy_skip_vix"},
+                    logger.debug(
+                        "strategy_skip_vix",
+                        extra={"event": "strategy_skip_vix", "strategy": strategy.name, "vix": vix},
                     )
                     skip_count += 1
                     continue
 
                 eval_count += 1
-                self._logger.info(
-                    f"✅ Calling {strategy.name}.generate_signal() | {symbol}",
-                    extra={"event": "strategy_call"},
+                logger.debug(
+                    "strategy_call",
+                    extra={"event": "strategy_call", "strategy": strategy.name, "symbol": symbol},
                 )
 
                 # ---------------------------------------------------------
@@ -1355,7 +1356,7 @@ class StrategyManager:
                     )
 
                     self._logger.info(
-                        f"📊 Signal from {strategy.name}: {signal.action} | conf={signal.confidence:.2f} | {symbol}",
+                        f"📊 SIGNAL: {strategy.name} → {signal.action} | conf={signal.confidence:.2f} | {symbol}",
                         extra={
                             "event": "strategy_signal_generated",
                             "strategy": strategy.name,
@@ -1364,11 +1365,12 @@ class StrategyManager:
                         },
                     )
                 else:
-                    self._logger.info(
-                        f"📭 {strategy.name} returned None | {symbol}",
+                    logger.debug(
+                        "strategy_no_signal",
                         extra={
                             "event": "strategy_no_signal",
                             "strategy": strategy.name,
+                            "symbol": symbol,
                         },
                     )
 
@@ -1376,11 +1378,12 @@ class StrategyManager:
                 self._logger.exception(f"❌ Strategy {strategy.name} FAILED: {exc}")
                 continue
 
-        # ✅ FIX: Change to INFO level so we can see in production logs
-        self._logger.info(
-            f"📊 StrategyManager Stats: {symbol} | "
-            f"Evaluated={eval_count} | Skipped={skip_count} | "
-            f"Signals={len(all_signals)} | Strategies={len(self._strategies)}",
+        # Throttled summary: visible once per 30s per symbol, not every tick
+        log_throttled(
+            self._logger,
+            key=f"strategy_manager_stats:{symbol}",
+            msg=f"📊 Strategy eval: {symbol} | evaluated={eval_count} skipped={skip_count} signals={len(all_signals)}",
+            interval_sec=30.0,
             extra={
                 "event": "strategy_manager_stats",
                 "symbol": symbol,
