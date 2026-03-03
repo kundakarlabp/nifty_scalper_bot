@@ -536,6 +536,7 @@ class StrategyRunner:
         self._eval_gate_lock = threading.Lock()
         self._last_global_eval_ts: float = time.monotonic()
         self._last_tick_seen_ts: float = time.monotonic()
+        self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._hydration_ready_streak: dict[str, int] = {}
         self._frozen_universe: set[str] = set()
@@ -1528,7 +1529,10 @@ class StrategyRunner:
                             vwap_state["mode"] = "fallback_last_close"
                             state.vwap = float(bar.close)
                             vwap_state["last_valid_vwap"] = float(bar.close)
-                    self._last_cumulative_volume[symbol] = int(cum_vol)
+                    # ✅ FIX: Removed _last_cumulative_volume overwrite. cum_vol is
+                    # the VWAP accumulator (sum of per-bar deltas), NOT the exchange raw
+                    # cumulative volume. Overwriting here corrupts future delta calculations.
+                    pass
 
             # 🔥 THE TRIGGER: Run Strategy Logic
             # [FIX] Removed .on_bar() call as StrategyManager is signal-driven (via ticks), not bar-driven.
@@ -2445,10 +2449,15 @@ class StrategyRunner:
                 raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
-            if self.ready and now_mono - self._last_global_eval_ts > 5.0:
+            # ✅ FIX: Throttle stall warning to 30s — same-bar-skip causes expected
+            # gaps between _last_global_eval_ts updates (one eval per bar ≈ 60s cycle).
+            if (self.ready and now_mono - self._last_global_eval_ts > 5.0
+                    and now_mono - self._last_stall_warn_ts > 30.0):
+                self._last_stall_warn_ts = now_mono
                 self._logger.warning(
-                    "Strategy evaluation stalled >5s",
-                    extra={"event": "strategy_eval_stall"},
+                    "Strategy evaluation stalled >5s (once per 30s)",
+                    extra={"event": "strategy_eval_stall",
+                           "stall_sec": round(now_mono - self._last_global_eval_ts, 1)},
                 )
             self._health_watchdog()
             self._logger.debug(
@@ -2524,10 +2533,14 @@ class StrategyRunner:
         now = time.monotonic()
         tick_flowing = (now - self._last_tick_seen_ts) <= 5.0
         eval_stalled = (now - self._last_global_eval_ts) > 5.0
-        if self.ready and tick_flowing and eval_stalled:
+        # ✅ FIX: Throttle — same-bar-skip keeps eval_stalled=True for the whole bar.
+        # Only warn if stall > 90s (longer than one full bar cycle) to avoid spam.
+        genuine_stall = (now - self._last_global_eval_ts) > 90.0
+        if self.ready and tick_flowing and eval_stalled and genuine_stall:
             self._logger.warning(
-                "Strategy eval stalled while ticks flowing",
-                extra={"event": "strategy_eval_stall"},
+                "Strategy eval genuinely stalled while ticks flowing (>90s)",
+                extra={"event": "strategy_eval_stall",
+                       "stall_sec": round(now - self._last_global_eval_ts, 1)},
             )
 
     # ✅ FIX: New Method to Prime Indicators
@@ -3490,8 +3503,12 @@ class StrategyRunner:
                 cum_vol = float(vwap_state.get("cum_vol", 0.0))
                 if state.vwap is None and cum_vol > 0:
                     state.vwap = float(vwap_state.get("cum_pv", 0.0)) / cum_vol
-
-                self._last_cumulative_volume[symbol] = int(cum_vol)
+                # ✅ FIX: DO NOT overwrite _last_cumulative_volume with the internal VWAP
+                # accumulator (cum_vol = sum of bar deltas since session open).
+                # _last_cumulative_volume must track the EXCHANGE's raw cumulative volume
+                # so the delta computation in PHASE FIX S5 stays correct.
+                # Overwriting it here with a different accumulator caused delta =
+                # raw_exchange_vol - vwap_cum_vol → wrong huge delta → avg_volume = 1.357B.
                 last_hydration_bar = self._last_readiness_update_by_symbol.get(symbol)
                 if last_hydration_bar != self._last_bar_ts.get(symbol):
                     self._last_readiness_update_by_symbol[symbol] = (

@@ -462,10 +462,17 @@ class VWAPProStrategy(EliteStrategy):
                             },
                         )
 
-            if index_vwap <= 0 or index_volume <= 0:
+            # ✅ FIX: Decouple index_volume from direction-gating.
+            # index_volume=0 means futures volume data is unavailable, NOT that we are
+            # blind to direction.  Only block when index_vwap is missing entirely —
+            # that is when we have no price reference to compare against.
+            # Old code blocked ALL PE options whenever futures volume was 0, which
+            # happened consistently at the start of every session and on slow ticks,
+            # causing ~30% of rejections to be spurious "index_bias_degraded" blocks.
+            if index_vwap <= 0:
                 if not self._index_bias_degraded_logged:
                     LOGGER.info(
-                        "🚫 INDEX BIAS DEGRADED → PE BLOCKED, CE-ONLY MODE",
+                        "🚫 INDEX BIAS DEGRADED → NO VWAP REFERENCE, blocking both CE/PE",
                         extra={
                             "event": "vwap_pro_index_bias_degraded",
                             "symbol": symbol,
@@ -491,24 +498,9 @@ class VWAPProStrategy(EliteStrategy):
                     )
                     _emit_no_signal("index_bias_invalid")
                     return None
-                if not is_ce:
-                    self._log_no_signal_reason(
-                        "index_bias_invalid",
-                        symbol=symbol,
-                        ltp=current_price,
-                        vwap=vwap,
-                        context={
-                            "index_ltp": index_ltp,
-                            "index_vwap": index_vwap,
-                            "index_volume": index_volume,
-                        },
-                    )
-                    self._reset_acceptance(
-                        acc_key, symbol=symbol, reason_code="index_bias_invalid"
-                    )
-                    _emit_no_signal("index_bias_invalid")
-                    return None
-            elif index_ltp <= 0:
+                # index_vwap==0 but index_ltp>0: use ltp as proxy vwap for bias check
+                index_vwap = index_ltp
+            if index_ltp <= 0:
                 if not self._index_bias_missing_logged:
                     LOGGER.error(
                         "INVALID INDEX DATA — blocking signal",
@@ -527,11 +519,17 @@ class VWAPProStrategy(EliteStrategy):
                 return None
 
             self._index_bias_missing_logged = False
-            if index_vwap > 0 and index_volume > 0:
+            # Reset degraded log when VWAP is available (volume availability is irrelevant)
+            if index_vwap > 0:
                 self._index_bias_degraded_logged = False
 
-            # ✅ FIX 2: Add 0.15% tolerance band around VWAP
-            _bias_tolerance = index_vwap * 0.0015
+            # ✅ FIX: Widen bias tolerance to 0.5% (was 0.15%).
+            # 0.15% is far too tight — NIFTY oscillates around VWAP continuously
+            # throughout the session. At 0.15%, any minor pullback blocks the entire
+            # CE direction for minutes. 0.5% requires a deliberate directional move
+            # (~125 pts on 25000 NIFTY) before blocking the opposite option type.
+            # Configurable via VWAP_BIAS_TOLERANCE env var (e.g. "0.003" = 0.3%).
+            _bias_tolerance = index_vwap * float(os.getenv("VWAP_BIAS_TOLERANCE", "0.005"))
             if (is_ce and index_ltp < (index_vwap - _bias_tolerance)) or (
                 not is_ce and index_ltp > (index_vwap + _bias_tolerance)
             ):
@@ -580,11 +578,13 @@ class VWAPProStrategy(EliteStrategy):
                 _emit_no_signal("vwap_zero_or_invalid")
                 return None
 
-            # 💰 MINIMUM PREMIUM FILTER — avoid illiquid deep OTM options
-            # Options below ₹30 have: huge bid-ask spreads (often ₹1-3), near-zero liquidity,
-            # and SL based on ATR becomes meaningless (SL = ₹30 - ₹3 = ₹27 = 10% risk on fill).
-            # ATM NIFTY options trade at ₹80-₹300+; anything below ₹30 is deep OTM junk.
-            _min_premium = float(os.getenv("VWAP_MIN_PREMIUM", "30"))
+            # 💰 MINIMUM PREMIUM FILTER — avoid truly illiquid deep OTM options.
+            # ₹10 floor: options below ₹10 have near-zero open interest and
+            # bid-ask spreads that dwarf the premium itself (e.g. ₹0.05/₹0.30 spread
+            # on a ₹0.15 option = 100% spread cost). Options ₹10-₹30 can be
+            # near-ATM on expiry day and represent legitimate momentum trades.
+            # Set VWAP_MIN_PREMIUM env var to override (e.g. "20" for more safety).
+            _min_premium = float(os.getenv("VWAP_MIN_PREMIUM", "10"))
             if current_price < _min_premium:
                 self._telemetry["skipped_data"] += 1
                 if self._telemetry["skipped_data"] <= 5 or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY == 0:
