@@ -554,6 +554,8 @@ class StrategyRunner:
         self._session_gap_count: dict[str, int] = {}
         self._runner_state: RunnerState = RunnerState.STARTING
         self._active_orphan_guards: set[str] = set()
+        self._orphan_retry_count: dict[str, int] = {}
+        self._orphan_retry_last_attempt: dict[str, float] = {}
         self._signals_last_hour: Deque[float] = deque(maxlen=1000)
         self._last_signal_frequency_check_ts: float = 0.0
         self._last_eval_queue_log_ts: float = 0.0
@@ -594,7 +596,10 @@ class StrategyRunner:
             # mark_ready() → EXECUTION_ENABLED, then calls start() seconds later.
             # Without this guard start() resets the state to HISTORICAL_READY and the
             # bot never trades — "Execution blocked: HISTORICAL_READY" in every tick.
-            if self._runner_state != RunnerState.EXECUTION_ENABLED:
+            if self._runner_state in (
+                RunnerState.STARTING,
+                RunnerState.BOOTING,
+            ):
                 self._runner_state = RunnerState.HISTORICAL_READY
             self._history_ready_by_symbol = {symbol: False for symbol in symbols}
             for symbol in symbols:
@@ -4409,6 +4414,18 @@ class StrategyRunner:
                 if self._bracket_manager.is_symbol_managed(symbol):
                     continue  # Already protected, skip
 
+                now = time.time()
+                if symbol in self._orphan_retry_last_attempt:
+                    if now - self._orphan_retry_last_attempt[symbol] < 10:
+                        self._active_orphan_guards.discard(symbol)
+                        continue
+                if self._orphan_retry_count.get(symbol, 0) >= 3:
+                    self._logger.error(
+                        "Orphan adoption disabled after max retries: %s", symbol
+                    )
+                    self._active_orphan_guards.discard(symbol)
+                    continue
+
                 # 3. Log the adoption
                 self._logger.warning(
                     f"🔧 AUTO-ADOPTING ORPHAN: {symbol} ({side}) | "
@@ -4422,6 +4439,8 @@ class StrategyRunner:
                     bracket_id = self._bracket_manager.attach_orphan_position(
                         symbol=symbol, side=side, qty=qty, entry_price=entry
                     )
+                    self._orphan_retry_count.pop(symbol, None)
+                    self._orphan_retry_last_attempt.pop(symbol, None)
                     adopted_count += 1
                     self._logger.info(
                         f"✅ Orphan protected: {symbol} | Bracket={bracket_id}"
@@ -4433,8 +4452,10 @@ class StrategyRunner:
                     except (AttributeError, TypeError):
                         pass  # Position might be frozen/immutable
 
-                except Exception as e:
-                    self._logger.error(f"❌ Failed to adopt orphan {symbol}: {e}")
+                except Exception:
+                    self._orphan_retry_count[symbol] = self._orphan_retry_count.get(symbol, 0) + 1
+                    self._orphan_retry_last_attempt[symbol] = now
+                    self._logger.exception("Failed orphan adoption")
                 finally:
                     self._active_orphan_guards.discard(symbol)
 

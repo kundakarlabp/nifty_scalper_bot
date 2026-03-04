@@ -10070,7 +10070,10 @@ class OrderManager:
             self._logger.warning(f"Subscription attempt warning: {e}")
 
         # --- STEP 1: Determine Valid Base Price ---
-        base_price = float(average_price)
+        try:
+            base_price = float(average_price)
+        except (TypeError, ValueError):
+            base_price = 0.0
         current_ltp = 0.0
 
         # Try to get fresh LTP from Cache (might be empty if cold start)
@@ -10080,17 +10083,16 @@ class OrderManager:
                 current_ltp = float(quote.get("last_price") or quote.get("ltp") or 0.0)
 
         # Use LTP if base_price is invalid (0.0)
-        if base_price <= 0:
+        if not base_price or base_price <= 0:
             if current_ltp > 0:
                 base_price = current_ltp
                 self._logger.warning(f"⚠️ Using LTP {base_price} for guard (Broker avg_price was 0)")
-            else:
-                # [FIX] Return False gracefully, but we are now SUBSCRIBED.
-                # The next reconciliation loop will succeed.
-                self._logger.warning(
-                    f"⏳ Cannot guard {symbol} yet: Waiting for Tick/LTP (tracking ensured)"
-                )
-                return False
+            if not base_price:
+                try:
+                    raise ValueError("Cannot determine entry price")
+                except ValueError as exc:
+                    self._logger.error("Failure in guard_orphan_position: %s", exc)
+                    return False
 
         # --- STEP 2: Fix Accounting ---
         if not consume_existing:
