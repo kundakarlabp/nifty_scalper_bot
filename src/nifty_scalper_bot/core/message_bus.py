@@ -112,7 +112,12 @@ class MessageBus:
         
         # Normal publish (bus is running)
         try:
-            await self.queues[message.type].put(message)
+            queue = self.queues[message.type]
+            if queue.qsize() > 4000:
+                with suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                    queue.task_done()
+            await queue.put(message)
         except asyncio.QueueFull:
             log_throttled(
                 LOGGER,

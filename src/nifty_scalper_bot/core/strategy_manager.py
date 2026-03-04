@@ -23,6 +23,7 @@ from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 log = get_logger(__name__)
 
@@ -1702,6 +1703,7 @@ class StrategyManager(_BaseStrategyManager):
             None.
         """
 
+        symbol = normalize_symbol(symbol)
         log.debug(
             "Entered StrategyManager.generate_signal",
             extra={"event": "scored_strategy_generate", "symbol": symbol},
@@ -1957,6 +1959,7 @@ class StrategyManager(_BaseStrategyManager):
         disabled: list[str] = []
         empty: list[str] = []
         errors: list[str] = []
+        evaluation_start = time.monotonic()
         for strategy in self._strategies:
             if strategy.name in self._disabled_strategies:
                 disabled.append(strategy.name)
@@ -1990,6 +1993,18 @@ class StrategyManager(_BaseStrategyManager):
                 base_signal, strategy.name, entry
             )
             signals.append(adjusted)
+            break
+
+        elapsed = time.monotonic() - evaluation_start
+        if elapsed > 3.0:
+            log.warning(
+                "Strategy evaluation exceeded watchdog threshold",
+                extra={
+                    "event": "strategy_eval_watchdog",
+                    "symbol": symbol,
+                    "elapsed_seconds": elapsed,
+                },
+            )
 
         if not signals:
             missing = sorted(

@@ -34,7 +34,12 @@ def enforce_canonical(symbol: str) -> str:
 
 def normalize_symbol(symbol: str) -> str:
     """Args: symbol; Returns: normalized exchange-qualified symbol; Raises: none."""
-    return canonical(symbol)
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        return ""
+    if ":" not in raw:
+        return f"NFO:{raw}"
+    return raw
 
 
 def unique_normalized_symbols(symbols: Iterable[str]) -> list[str]:
