@@ -1,31 +1,30 @@
 """
 World-class ATR-based trailing stop controller.
 """
+
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Literal, Callable, Optional, Any, TYPE_CHECKING
+from typing import Any, Callable, Literal
 
+from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
 from nifty_scalper_bot.utils.logging import get_logger
 
-# Import SafeATRProvider for type hinting and runtime use
-# ✅ FIX: Export ATRSnapshot so other modules can import it from here
-from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider, ATRSnapshot
-
-if TYPE_CHECKING:
-    from nifty_scalper_bot.storage.journal import AtomicKV
-
 # --- DATA STRUCTURES ---
+
 
 @dataclass
 class TrailingSpec:
     """Configuration for trailing stop behavior."""
-    trail_by: float      # Initial/Fallback trailing distance
-    step: float          # Minimum price move to update SL
-    activation: float    # Profit % before trailing activates
+
+    trail_by: float  # Initial/Fallback trailing distance
+    step: float  # Minimum price move to update SL
+    activation: float  # Profit % before trailing activates
+
 
 # --- CONTROLLER ---
+
 
 class AdaptiveTrailingController:
     """
@@ -34,7 +33,7 @@ class AdaptiveTrailingController:
     - Data staleness protection
     - Graceful degradation
     """
-    
+
     def __init__(
         self,
         symbol: str,
@@ -46,8 +45,8 @@ class AdaptiveTrailingController:
         get_ltp: Callable[[str], float | None],
         modify_order: Callable,
         atr_provider: SafeATRProvider,
-        journal: Any, # Accepts AtomicKV or MockJournal
-        atr_multiplier: float = 2.0
+        journal: Any,  # Accepts AtomicKV or MockJournal
+        atr_multiplier: float = 2.0,
     ):
         self.symbol = symbol
         self.side = side
@@ -55,7 +54,7 @@ class AdaptiveTrailingController:
         self.current_sl = entry  # Will be updated
         self.sl_order_id = sl_order_id
         self.variety = variety
-        
+
         self.spec = spec
         self._get_ltp = get_ltp
         self._modify = modify_order
@@ -63,7 +62,7 @@ class AdaptiveTrailingController:
         self._journal = journal
         self._logger = get_logger(__name__)
         self.atr_multiplier = atr_multiplier
-        
+
         # State tracking
         self.trailing_active = False
         self.highest_price = entry if side == "LONG" else entry
@@ -72,53 +71,50 @@ class AdaptiveTrailingController:
         self.update_count = 0
         self.failed_modifications = 0
         self._last_atr_value = 0.0
-        
+
         # Emergency halt flags
         self._halted = False
         self._halt_reason: str | None = None
-    
+
     def on_tick(self, tick: dict | None = None) -> None:
         """Process price tick and update trailing stop if needed"""
-        
+
         # 1. SAFETY: Check if halted
         if self._halted:
             return
-        
+
         # 2. VALIDATE LTP
         # We accept tick data or fetch it
         ltp = None
         if tick:
-            ltp = tick.get('ltp') or tick.get('last_price')
-        
+            ltp = tick.get("ltp") or tick.get("last_price")
+
         if not ltp:
             ltp = self._get_ltp(self.symbol)
-            
+
         if ltp is None or float(ltp) <= 0:
-            return # Silent return to avoid log spam on missing ticks
-        
+            return  # Silent return to avoid log spam on missing ticks
+
         ltp = float(ltp)
-        
+
         # Update High/Low Watermarks
         if self.side == "LONG":
-            if ltp > self.highest_price: self.highest_price = ltp
+            if ltp > self.highest_price:
+                self.highest_price = ltp
         else:
-            if ltp < self.lowest_price: self.lowest_price = ltp
-        
-        # 3. FETCH ATR WITH VALIDATION
-        atr_snapshot = self._atr.get_atr(
-            self.symbol, 
-            fallback=self.spec.trail_by
-        )
-        
-        if atr_snapshot is None:
-            # Don't halt immediately, just skip update
-            return
-        
-        if not atr_snapshot.is_fresh(max_age_sec=60.0):
-            # Log warning but don't halt unless it persists
-            return
+            if ltp < self.lowest_price:
+                self.lowest_price = ltp
 
-        self._last_atr_value = float(atr_snapshot.value)
+        # 3. FETCH ATR WITH VALIDATION
+        atr_snapshot = self._atr.get_atr(self.symbol, fallback=self.spec.trail_by)
+        if atr_snapshot is None:
+            trail_distance = self.entry_price * 0.005
+            self._last_atr_value = float(trail_distance)
+        else:
+            if not atr_snapshot.is_fresh(max_age_sec=60.0):
+                return
+            self._last_atr_value = float(atr_snapshot.value)
+            trail_distance = self._calculate_trail_distance(atr_snapshot, ltp)
 
         # 4. CHECK ACTIVATION
         profit_pct = self._calculate_profit_pct(ltp)
@@ -130,18 +126,17 @@ class AdaptiveTrailingController:
             if profit_pct >= activation_pct:
                 self.trailing_active = True
                 self._logger.info(
-                    f"🚀 Trailing stop ACTIVATED for {self.symbol} at {profit_pct:.2f}% profit",
+                    "🚀 Trailing stop ACTIVATED for %s at %.2f%% profit",
+                    self.symbol,
+                    profit_pct,
                     extra={"event": "trailing_activated", "profit_pct": profit_pct},
                 )
             else:
                 return  # Not profitable enough yet
-        
-        # 5. CALCULATE DYNAMIC TRAIL DISTANCE
-        trail_distance = self._calculate_trail_distance(atr_snapshot, ltp)
-        
-        # 6. UPDATE STOP LOSS IF NEEDED
+
+        # 5. UPDATE STOP LOSS IF NEEDED
         new_sl = self._calculate_new_sl(ltp, trail_distance)
-        
+
         try:
             if self._should_update_sl(new_sl):
                 success = self._execute_sl_update(new_sl)
@@ -154,105 +149,103 @@ class AdaptiveTrailingController:
                     self.failed_modifications = 0
         except Exception as exc:  # noqa: BLE001
             self._logger.error("Failure in on_tick: %s", exc)
-    
+
     def _calculate_trail_distance(self, atr: Any, ltp: float) -> float:
         """Calculate dynamic trail distance based on ATR and regime."""
         base_atr = atr.value
-        
+
         # Detect volatility regime
         atr_pct_of_price = (base_atr / ltp) * 100
-        
-        multiplier = self.atr_multiplier
-        regime = "normal"
 
+        multiplier = self.atr_multiplier
         if atr_pct_of_price < 1.0:
-            multiplier = self.atr_multiplier * 0.75 # Tighten
-            regime = "low_vol"
+            multiplier = self.atr_multiplier * 0.75  # Tighten
         elif atr_pct_of_price > 3.0:
-            multiplier = self.atr_multiplier * 1.5 # Widen
-            regime = "high_vol"
-        
+            multiplier = self.atr_multiplier * 1.5  # Widen
+
         return base_atr * multiplier
-    
+
     def _calculate_new_sl(self, ltp: float, trail_distance: float) -> float:
         """Calculate new stop loss based on current price and trail distance"""
         if self.side == "LONG":
-            # For LONG, SL is Price - Distance. 
+            # For LONG, SL is Price - Distance.
             # We peg to Highest Price to prevent SL moving down when price drops.
-            anchor = self.highest_price 
+            anchor = self.highest_price
             return anchor - trail_distance
         else:  # SHORT
             anchor = self.lowest_price
             return anchor + trail_distance
-    
+
     def _should_update_sl(self, new_sl: float) -> bool:
         """Check if SL should be updated (Ratchet Logic)."""
         if self.side == "LONG":
             # Only move UP
-            if new_sl <= self.current_sl: return False
+            if new_sl <= self.current_sl:
+                return False
             improvement = new_sl - self.current_sl
         else:  # SHORT
             # Only move DOWN
-            if new_sl >= self.current_sl: return False
+            if new_sl >= self.current_sl:
+                return False
             improvement = self.current_sl - new_sl
-        
+
         # Check minimum step
         min_step = max(self.spec.step, self._last_atr_value * 0.1)
         if improvement < min_step:
             return False
-        
+
         return True
-    
+
     def _execute_sl_update(self, new_sl: float) -> bool:
         """Execute stop loss modification."""
         old_sl = self.current_sl
-        
+
         try:
-            # Round to valid tick size (Assuming 0.05 tick, rounding to 1 decimal is usually safe for NFO)
             new_sl_rounded = round(new_sl, 1)
-            
+
             # Attempt modification via callback
-            result = self._modify(
-                self.sl_order_id,
-                new_sl_rounded
-            )
-            
+            result = self._modify(self.sl_order_id, new_sl_rounded)
+
             if result:
                 self.current_sl = new_sl_rounded
                 self.last_update_time = time.time()
                 self.update_count += 1
-                
+
                 # Try to log to journal if available
-                if hasattr(self._journal, 'set'):
-                    self._journal.set(self.sl_order_id, {
-                        "current_sl": new_sl_rounded,
-                        "last_update": self.last_update_time,
-                        "update_count": self.update_count
-                    })
-                
+                if hasattr(self._journal, "set"):
+                    self._journal.set(
+                        self.sl_order_id,
+                        {
+                            "current_sl": new_sl_rounded,
+                            "last_update": self.last_update_time,
+                            "update_count": self.update_count,
+                        },
+                    )
+
                 self._logger.info(
                     f"✅ Trailing SL updated: {old_sl:.2f} → {new_sl_rounded:.2f}",
                     extra={
                         "event": "trailing_sl_updated",
                         "symbol": self.symbol,
-                        "new_sl": new_sl_rounded
-                    }
+                        "new_sl": new_sl_rounded,
+                    },
                 )
                 return True
             else:
                 return False
-                
+
         except Exception as exc:
             self._logger.error(f"SL mod error: {exc}")
             return False
-    
+
     def _emergency_halt(self, reason: str) -> None:
         """Stop trailing updates."""
-        if self._halted: return
+        if self._halted:
+            return
         self._halted = True
         self._halt_reason = reason
         self._logger.critical(f"🚨 Trailing HALT for {self.symbol}: {reason}")
-    
+
     def _calculate_profit_pct(self, ltp: float) -> float:
         """Calculate current profit percentage"""
         if self.side == "LONG":
