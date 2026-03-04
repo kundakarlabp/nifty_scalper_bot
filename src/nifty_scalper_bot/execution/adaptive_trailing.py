@@ -71,6 +71,7 @@ class AdaptiveTrailingController:
         self.last_update_time = time.time()
         self.update_count = 0
         self.failed_modifications = 0
+        self._last_atr_value = 0.0
         
         # Emergency halt flags
         self._halted = False
@@ -103,19 +104,7 @@ class AdaptiveTrailingController:
         else:
             if ltp < self.lowest_price: self.lowest_price = ltp
         
-        # 3. CHECK ACTIVATION
-        profit_pct = self._calculate_profit_pct(ltp)
-        if not self.trailing_active:
-            if profit_pct >= self.spec.activation:
-                self.trailing_active = True
-                self._logger.info(
-                    f"🚀 Trailing stop ACTIVATED for {self.symbol} at {profit_pct:.2f}% profit",
-                    extra={"event": "trailing_activated", "profit_pct": profit_pct}
-                )
-            else:
-                return  # Not profitable enough yet
-        
-        # 4. FETCH ATR WITH VALIDATION
+        # 3. FETCH ATR WITH VALIDATION
         atr_snapshot = self._atr.get_atr(
             self.symbol, 
             fallback=self.spec.trail_by
@@ -128,6 +117,21 @@ class AdaptiveTrailingController:
         if not atr_snapshot.is_fresh(max_age_sec=60.0):
             # Log warning but don't halt unless it persists
             return
+
+        self._last_atr_value = float(atr_snapshot.value)
+
+        # 4. CHECK ACTIVATION
+        profit_pct = self._calculate_profit_pct(ltp)
+        activation_pct = ((self._last_atr_value * 0.3) / self.entry_price) * 100
+        if not self.trailing_active:
+            if profit_pct >= activation_pct:
+                self.trailing_active = True
+                self._logger.info(
+                    f"🚀 Trailing stop ACTIVATED for {self.symbol} at {profit_pct:.2f}% profit",
+                    extra={"event": "trailing_activated", "profit_pct": profit_pct},
+                )
+            else:
+                return  # Not profitable enough yet
         
         # 5. CALCULATE DYNAMIC TRAIL DISTANCE
         trail_distance = self._calculate_trail_distance(atr_snapshot, ltp)
@@ -187,7 +191,8 @@ class AdaptiveTrailingController:
             improvement = self.current_sl - new_sl
         
         # Check minimum step
-        if improvement < self.spec.step:
+        min_step = max(self.spec.step, self._last_atr_value * 0.25)
+        if improvement < min_step:
             return False
         
         return True
