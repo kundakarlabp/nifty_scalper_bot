@@ -45,7 +45,7 @@ def validate_execution_config() -> list[str]:
                 errors.append("LIFECYCLE_TP2_R_TREND must be a number")
 
         mode = (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper() or "SHADOW"
-        if mode not in {"LIVE", "SHADOW", "PAPER"}:
+        if mode not in {"LIVE", "SIMULATION", "SHADOW", "PAPER"}:
             errors.append(f"Invalid EXECUTION_MODE: {mode}")
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
