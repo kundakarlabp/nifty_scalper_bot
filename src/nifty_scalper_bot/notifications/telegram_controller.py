@@ -109,7 +109,14 @@ from nifty_scalper_bot.utils.response_builder import EMOJI, RB, ResponseBuilder
 from telegram import Bot, Chat, InputFile, Message, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from telegram.request import HTTPXRequest  # ✅ NEW IMPORT
 
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
@@ -513,6 +520,7 @@ class TelegramBot:
         self.deps = deps
         self.deps.enable_polling_fallback = True
         self.deps.webhook_url = None
+        log.info("Telegram running in polling mode (Railway compatible)")
         self._app: Application | None = None
         self._shutdown_event: asyncio.Event | None = None
         self._fallback_lock: asyncio.Lock | None = None
@@ -565,6 +573,7 @@ class TelegramBot:
         self._pending_confirmation: dict[str, t.Any] | None = None
         self._started_at: datetime = datetime.now(timezone.utc)
         self._um: t.Any | None = None
+        self._message_debug_handler_registered = False
 
     # =========================================================================
     # ✅ CORRECTED STARTUP LOGIC (Single Source of Truth)
@@ -597,17 +606,26 @@ class TelegramBot:
                 if not self._command_registered(self._app, cmd):
                     self._app.add_handler(CommandHandler(cmd, handler))
 
-            if not self._app._initialized:  # noqa: SLF001
-                await self._app.initialize()
+            await self._app.initialize()
             if not self._app.running:
                 await self._app.start()
 
-            await self._app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            await self._app.bot.delete_webhook(drop_pending_updates=True)
+            try:
+                self._polling_task = asyncio.create_task(
+                    self._app.run_polling(
+                        allowed_updates=Update.ALL_TYPES,
+                        drop_pending_updates=True,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("Telegram polling failed: %s", exc, exc_info=True)
+                raise
             log.info("Telegram polling started successfully")
             self._ensure_alert_worker()
 
         except Exception as exc:  # noqa: BLE001
-            log.error("Telegram polling failed: %s", exc)
+            log.error("Telegram polling failed: %s", exc, exc_info=True)
 
     async def _start_polling_if_needed(self) -> None:
         """
@@ -852,6 +870,14 @@ class TelegramBot:
         """Return the authorized chat or ``None`` if access should be denied."""
         chat = update.effective_chat
         user = update.effective_user
+        message = update.effective_message
+
+        text = ""
+        if message is not None:
+            text = str(getattr(message, "text", "") or "").strip()
+        if text.startswith("/"):
+            command = text.split()[0]
+            log.info("Telegram command received: %s", command)
         
         if chat is None:
             log.warning("Received Telegram update without chat context")
@@ -4004,6 +4030,31 @@ class TelegramBot:
     # Command wiring
     # --------------
     def _wire_handlers(self, app: Application) -> None:
+        async def _debug_message(
+            update: Update, context: ContextTypes.DEFAULT_TYPE
+        ) -> None:
+            """Log every incoming Telegram message for diagnostics.
+
+            Args:
+                update: Telegram update payload.
+                context: Callback context from python-telegram-bot.
+
+            Returns:
+                None.
+
+            Raises:
+                None.
+            """
+
+            del context
+            message = getattr(update, "message", None)
+            text = getattr(message, "text", None)
+            log.debug("Telegram message received: %s", text)
+
+        if not self._message_debug_handler_registered:
+            app.add_handler(MessageHandler(filters.ALL, _debug_message))
+            self._message_debug_handler_registered = True
+
         def register(
             cmd: str,
             handler: t.Callable[[Update, t.Any], t.Coroutine[t.Any, t.Any, t.Any]],
@@ -5608,14 +5659,28 @@ class TelegramBot:
     async def cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await self._send_help(update, ctx)
 
+    @command_meta("/ping", "Telegram connectivity test")
     async def cmd_ping(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        chat = await self._guard(update)
-        if chat is None:
-            return
-        t0 = time.perf_counter()
-        m = await self._reply(chat, ctx, "pong…")
-        dt = (time.perf_counter() - t0) * 1000
-        await m.edit_text(f"pong ({dt:.0f} ms)")
+        """Reply with pong to validate Telegram command routing.
+
+        Args:
+            update: Telegram update payload invoking the command.
+            ctx: Callback context provided by python-telegram-bot.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+
+        try:
+            chat = await self._guard(update)
+            if chat is None:
+                return
+            await self._reply(chat, ctx, "pong")
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in cmd_ping: %s", exc, exc_info=exc)
 
     async def cmd_whoami(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat = await self._guard(update)
