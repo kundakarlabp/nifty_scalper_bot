@@ -29,7 +29,7 @@ class _Harness:
     def run_ticks(self, symbol: str, ticks: list[float]) -> None:
         """Args: symbol, ticks; Returns: None; Raises: None."""
         for price in ticks:
-            self._manager.on_tick_event({'symbol': symbol, 'ltp': price})
+            self._manager.on_tick_event({"symbol": symbol, "ltp": price})
 
     @property
     def exits(self) -> list[tuple[str, int]]:
@@ -41,42 +41,42 @@ def scenario_sl_gap() -> bool:
     """Args: none; Returns: bool; Raises: None."""
     h = _Harness()
     h._manager.register_virtual_bracket(
-        'sl-gap', 'NIFTY', 'BUY', 1, 200.0, 198.0, 220.0
+        "sl-gap", "NIFTY", "BUY", 1, 200.0, 198.0, 220.0
     )
-    h.run_ticks('NIFTY', [200.0, 198.0, 195.0, 190.0, 185.0])
+    h.run_ticks("NIFTY", [200.0, 198.0, 195.0, 190.0, 185.0])
     ok = len(h.exits) > 0
-    print(f'scenario_sl_gap: {"PASS" if ok else "FAIL"}')
+    LOGGER.info("SL_TRIGGERED scenario_sl_gap=%s", ok)
     return ok
 
 
 def scenario_fast_reversal() -> bool:
     """Args: none; Returns: bool; Raises: None."""
     h = _Harness()
-    h._manager.register_virtual_bracket('rev', 'NIFTY', 'BUY', 1, 200.0, 195.0, 210.0)
-    h.run_ticks('NIFTY', [200.0, 209.0, 203.0, 196.0, 194.0])
+    h._manager.register_virtual_bracket("rev", "NIFTY", "BUY", 1, 200.0, 195.0, 210.0)
+    h.run_ticks("NIFTY", [200.0, 209.0, 203.0, 196.0, 194.0])
     ok = len(h.exits) > 0
-    print(f'scenario_fast_reversal: {"PASS" if ok else "FAIL"}')
+    LOGGER.info("EXIT_EXECUTED scenario_fast_reversal=%s", ok)
     return ok
 
 
 def scenario_trailing_profit_lock() -> bool:
     """Args: none; Returns: bool; Raises: None."""
     h = _Harness()
-    h._manager.register_virtual_bracket('trail', 'NIFTY', 'BUY', 1, 200.0, 190.0, 240.0)
-    h.run_ticks('NIFTY', [200.0, 210.0, 220.0, 215.0])
-    state = h._manager._brackets.get('trail')
+    h._manager.register_virtual_bracket("trail", "NIFTY", "BUY", 1, 200.0, 190.0, 240.0)
+    h.run_ticks("NIFTY", [200.0, 210.0, 220.0, 215.0])
+    state = h._manager._brackets.get("trail")
     ok = bool(state and state.highest_ltp >= 220.0)
-    print(f'scenario_trailing_profit_lock: {"PASS" if ok else "FAIL"}')
+    LOGGER.info("PNL_UPDATE scenario_trailing_profit_lock=%s", ok)
     return ok
 
 
 def scenario_tp_spike() -> bool:
     """Args: none; Returns: bool; Raises: None."""
     h = _Harness()
-    h._manager.register_virtual_bracket('tp', 'NIFTY', 'BUY', 1, 200.0, 190.0, 205.0)
-    h.run_ticks('NIFTY', [200.0, 206.0])
+    h._manager.register_virtual_bracket("tp", "NIFTY", "BUY", 1, 200.0, 190.0, 205.0)
+    h.run_ticks("NIFTY", [200.0, 206.0])
     ok = len(h.exits) > 0
-    print(f'scenario_tp_spike: {"PASS" if ok else "FAIL"}')
+    LOGGER.info("EXIT_EXECUTED scenario_tp_spike=%s", ok)
     return ok
 
 
@@ -90,11 +90,16 @@ def main() -> None:
     ]
     passed = sum(1 for result in results if result)
     LOGGER.info(
-        'Condition met: stress_complete passed=%s total=%s',
+        "Condition met: stress_complete passed=%s total=%s",
         passed,
         len(results),
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
+
+
+def test_sl_gap() -> None:
+    """Args: none; Returns: None; Raises: AssertionError."""
+    assert scenario_sl_gap()

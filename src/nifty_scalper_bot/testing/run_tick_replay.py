@@ -40,16 +40,16 @@ class ReplayOrchestrator:
     def on_tick_event(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: None; Raises: None."""
         try:
-            symbol = str(tick.get('symbol') or '')
-            ltp = float(tick.get('ltp') or 0.0)
+            symbol = str(tick.get("symbol") or "")
+            ltp = float(tick.get("ltp") or 0.0)
             if not symbol or ltp <= 0:
                 return
             self.broker.set_price(symbol, ltp)
-            self.data_hub.ingest_tick_sync({'symbol': symbol, 'ltp': ltp})
-            self.order_manager.on_tick_event({'symbol': symbol, 'ltp': ltp})
-            self.bracket_manager.on_tick_event({'symbol': symbol, 'ltp': ltp})
+            self.data_hub.ingest_tick_sync({"symbol": symbol, "ltp": ltp})
+            self.order_manager.on_tick_event({"symbol": symbol, "ltp": ltp})
+            self.bracket_manager.on_tick_event({"symbol": symbol, "ltp": ltp})
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error('Failure in ReplayOrchestrator.on_tick_event: %s', exc)
+            LOGGER.error("Failure in ReplayOrchestrator.on_tick_event: %s", exc)
 
 
 def build_orchestrator() -> ReplayOrchestrator:
@@ -83,33 +83,38 @@ def build_orchestrator() -> ReplayOrchestrator:
             broker=broker,
         )
     except Exception as exc:  # noqa: BLE001
-        LOGGER.error('Failure in build_orchestrator: %s', exc)
+        LOGGER.error("Failure in build_orchestrator: %s", exc)
         raise
 
 
 def main() -> None:
     """Args: none; Returns: None; Raises: Exception."""
     parser = argparse.ArgumentParser(
-        description='Deterministic tick replay runner',
+        description="Deterministic tick replay runner",
     )
     parser.add_argument(
-        '--file',
+        "--file",
         required=True,
-        help='CSV file path with symbol,ltp,timestamp',
+        help="CSV file path with symbol,ltp,timestamp",
     )
     parser.add_argument(
-        '--speed',
+        "--speed",
         type=float,
         default=1.0,
-        help='Replay speed multiplier',
+        help="Replay speed multiplier",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Disable wall-clock delays and replay ticks deterministically",
     )
     args = parser.parse_args()
     engine = TickReplayEngine(tick_file=args.file, speed=args.speed)
     engine.load()
     orchestrator = build_orchestrator()
-    engine.replay(orchestrator.on_tick_event)
-    LOGGER.info('Condition met: replay_complete ticks=%s', engine.index)
+    engine.replay(orchestrator.on_tick_event, deterministic=args.deterministic)
+    LOGGER.info("Condition met: replay_complete ticks=%s", engine.index)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

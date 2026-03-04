@@ -9839,12 +9839,16 @@ class OrderManager:
                 lsym = normalize_symbol(str(pos.symbol))
                 local_map[lsym] = pos
 
-            for broker_sym, data in broker_map.items():
+            broker_positions = broker_map
+            local_positions = local_map
+
+            for broker_sym, data in broker_positions.items():
+                # Broker is authoritative: adopt any position missing locally.
                 # ✅ FIX: Ignore positions that are already closed (Qty 0)
                 if data['qty'] == 0:
                     continue
 
-                if broker_sym not in local_map:
+                if broker_sym not in local_positions:
                     
                     # [FIX 1] RACE CONDITION GUARD: 
                     # Check if we have touched this symbol recently (Pending Orders or Recent Fills).
@@ -9901,9 +9905,9 @@ class OrderManager:
 
             # 3. HANDLE GHOSTS & NAKED POSITIONS
             # ------------------------------------------------------
-            for lsym, pos in local_map.items():
+            for lsym, pos in local_positions.items():
                 # CASE A: Ghost (We think we have it, Broker says no)
-                if lsym not in broker_map:
+                if lsym not in broker_positions:
                     self._logger.warning(
                         f"👻 Ghost Position Found: {lsym}. Clearing local state.",
                         extra={"event": "ghost_cleared", "symbol": lsym}
@@ -9912,16 +9916,16 @@ class OrderManager:
                     self._generate_adjustment_order(lsym, -int(pos.quantity), 0.0)
 
                 # CASE B: Quantity Mismatch (Partial fills/Manual intervention)
-                elif broker_map[lsym]["qty"] != pos.quantity:
-                    diff = broker_map[lsym]["qty"] - pos.quantity
+                elif broker_positions[lsym]["qty"] != pos.quantity:
+                    diff = broker_positions[lsym]["qty"] - pos.quantity
                     self._logger.info(
-                        f"⚖️ Syncing Qty for {lsym}: Local {pos.quantity} -> Broker {broker_map[lsym]['qty']}",
+                        f"⚖️ Syncing Qty for {lsym}: Local {pos.quantity} -> Broker {broker_positions[lsym]['qty']}",
                         extra={"event": "qty_sync", "symbol": lsym}
                     )
                     self._generate_adjustment_order(lsym, diff, 0.0)
                 
                 # CASE C: Perfect Match... BUT IS IT SAFE? (The Missing Link)
-                elif broker_map[lsym]["qty"] == pos.quantity:
+                elif broker_positions[lsym]["qty"] == pos.quantity:
                     # 1. Check if a bracket is actually managing this symbol
                     is_managed = False
                     if self._bracket_manager:

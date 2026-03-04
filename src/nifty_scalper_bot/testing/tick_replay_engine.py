@@ -23,36 +23,40 @@ class TickReplayEngine:
 
     def load(self) -> None:
         """Args: none; Returns: None; Raises: OSError, ValueError."""
-        LOGGER.debug('Entered TickReplayEngine.load')
+        LOGGER.debug("Entered TickReplayEngine.load")
         try:
-            with open(self.tick_file, encoding='utf-8') as handle:
+            with open(self.tick_file, encoding="utf-8") as handle:
                 reader = csv.DictReader(handle)
                 for row in reader:
                     self.ticks.append(
                         {
-                            'symbol': str(row['symbol']),
-                            'ltp': float(row['ltp']),
-                            'timestamp': float(row['timestamp']),
+                            "symbol": str(row["symbol"]),
+                            "ltp": float(row["ltp"]),
+                            "timestamp": float(row["timestamp"]),
                         }
                     )
-            LOGGER.info('Condition met: tick_replay_loaded count=%s', len(self.ticks))
+            LOGGER.info("Condition met: tick_replay_loaded count=%s", len(self.ticks))
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error('Failure in TickReplayEngine.load: %s', exc)
+            LOGGER.error("Failure in TickReplayEngine.load: %s", exc)
             raise
 
-    def replay(self, tick_callback: Callable[[dict[str, Any]], None]) -> None:
-        """Args: tick_callback; Returns: None; Raises: Exception."""
-        LOGGER.debug('Entered TickReplayEngine.replay')
+    def replay(
+        self,
+        tick_callback: Callable[[dict[str, Any]], None],
+        deterministic: bool = False,
+    ) -> None:
+        """Args: tick_callback, deterministic; Returns: None; Raises: Exception."""
+        LOGGER.debug("Entered TickReplayEngine.replay")
         prev_ts: float | None = None
         try:
             for tick in self.ticks:
-                if prev_ts is not None:
-                    delay = (tick['timestamp'] - prev_ts) / max(self.speed, 0.0001)
+                if not deterministic and prev_ts is not None:
+                    delay = float(tick["timestamp"]) - prev_ts
                     if delay > 0:
-                        time.sleep(delay)
+                        time.sleep(delay / max(self.speed, 0.0001))
                 tick_callback(tick)
-                prev_ts = float(tick['timestamp'])
+                prev_ts = float(tick["timestamp"])
                 self.index += 1
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error('Failure in TickReplayEngine.replay: %s', exc)
+            LOGGER.error("Failure in TickReplayEngine.replay: %s", exc)
             raise

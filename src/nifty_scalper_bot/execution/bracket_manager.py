@@ -332,10 +332,10 @@ class BracketManager:
                                 if bracket is not None:
                                     bracket.exit_executed = False
                                     bracket.active = True
-                time.sleep(1.0)
+                time.sleep(0.25)
             except Exception as e:
                 LOGGER.error('Failure in _watchdog_exit_loop: %s', e)
-                time.sleep(1.0)
+                time.sleep(0.25)
 
     def shutdown(self) -> None:
         """Stop watchdog processing. Args: none; Returns: none; Raises: none."""
@@ -595,6 +595,8 @@ class BracketManager:
             self._brackets[order_id] = state
 
             if self._trailing_controller_factory:
+                if state.entry_order_id in self._trailing_controllers:
+                    return
                 controller = self._trailing_controller_factory(state)
                 self._trailing_controllers[state.entry_order_id] = controller
             
@@ -823,7 +825,7 @@ class BracketManager:
             for eid in relevant_ids:
                 b = self._brackets.get(eid)
                 # 🟢 FIX: Remove 'b.active' check so we can catch inactive ones
-                if b and b.remaining_quantity > 0:
+                if b and b.remaining_quantity > 0 and not b.exit_executed:
                     candidates.append(b)
         
         if not candidates:
@@ -933,6 +935,57 @@ class BracketManager:
         # ═══════════════════════════════════════════════════════════
         if exits_to_fire:
             self._fire_exits_batch(exits_to_fire)
+
+
+    def process_exit_checks(self, symbol: str, ltp: float) -> None:
+        """Process immediate SL checks on tick ingestion. Args: symbol, ltp; Returns: None; Raises: None."""
+        LOGGER.debug('Entered process_exit_checks')
+        try:
+            brackets = self._symbol_map.get(symbol, [])
+
+            for entry_id in brackets:
+
+                bracket = self._brackets.get(entry_id)
+
+                if not bracket or not bracket.active:
+                    continue
+
+                if bracket.side == "BUY" and ltp <= bracket.sl_trigger_price:
+                    LOGGER.info('SL_TRIGGERED symbol=%s entry_id=%s', bracket.symbol, bracket.entry_order_id)
+                    self._force_exit(bracket)
+
+                elif bracket.side == "SELL" and ltp >= bracket.sl_trigger_price:
+                    LOGGER.info('SL_TRIGGERED symbol=%s entry_id=%s', bracket.symbol, bracket.entry_order_id)
+                    self._force_exit(bracket)
+        except Exception as e:
+            LOGGER.error('Failure in process_exit_checks: %s', e)
+
+    def _force_exit(self, bracket: BracketState) -> None:
+        """Force bracket exit with retries. Args: bracket; Returns: None; Raises: None."""
+        symbol = normalize_symbol(bracket.symbol)
+
+        qty = bracket.remaining_quantity
+
+        if not symbol or qty <= 0:
+            return
+
+        for attempt in range(3):
+
+            try:
+
+                if self._exit_executor:
+                    self._exit_executor(symbol, qty)
+
+                bracket.active = False
+                bracket.exit_executed = True
+                LOGGER.info('EXIT_EXECUTED symbol=%s qty=%s attempt=%s', symbol, qty, attempt + 1)
+
+                return
+
+            except Exception as e:
+                LOGGER.error('Failure in _force_exit: %s', e)
+
+                time.sleep(0.5)
 
     def _evaluate_exit_fast(self, bracket: BracketState, ltp: float) -> dict | None:
         """
