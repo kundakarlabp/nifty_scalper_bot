@@ -875,6 +875,8 @@ class OrderManager:
             else:
                 if hasattr(bracket_manager, 'set_notifier'):
                     bracket_manager.set_notifier(self._notify_bracket_event)
+                if hasattr(bracket_manager, 'attach_exit_executor'):
+                    bracket_manager.attach_exit_executor(self.exit_position)
                 self._logger.info(
                     'Bracket manager attached to order manager',
                     extra={'event': 'order_manager.bracket_manager_attached'},
@@ -9806,9 +9808,9 @@ class OrderManager:
                 # NORMALIZE: Ensure strictly "EXCHANGE:SYMBOL" format (e.g., NFO:NIFTY...)
                 # Zerodha sometimes returns "NIFTY..." without NFO:
                 if ":" in raw_sym:
-                    clean_sym = normalize_symbol(raw_sym.upper())
+                    clean_sym = normalize_symbol(raw_sym)
                 else:
-                    clean_sym = normalize_symbol(f"{exch}:{raw_sym}".upper())
+                    clean_sym = normalize_symbol(f"{exch}:{raw_sym}")
 
                 broker_map[clean_sym] = {
                     "qty": qty, 
@@ -9822,7 +9824,7 @@ class OrderManager:
             all_local = list(self._positions.get_open_positions())
             local_map = {}
             for pos in all_local:
-                lsym = normalize_symbol(str(pos.symbol).upper())
+                lsym = normalize_symbol(str(pos.symbol))
                 local_map[lsym] = pos
 
             for broker_sym, data in broker_map.items():
@@ -9845,6 +9847,13 @@ class OrderManager:
                                     is_active_locally = True
                                     break
                                 # 2. If we finished an order < 15s ago -> SKIP (Give time to sync)
+                                if (
+                                    order.timestamp
+                                    and hasattr(order.timestamp, 'timestamp')
+                                    and time.time() - order.timestamp.timestamp() < 20
+                                ):
+                                    is_active_locally = True
+                                    break
                                 if order.timestamp:
                                     ts = order.timestamp.timestamp() if hasattr(order.timestamp, 'timestamp') else time.time()
                                     if time.time() - ts < 15.0:
@@ -10293,12 +10302,8 @@ class OrderManager:
         """Cancels all open orders for a specific symbol."""
         pending = self._pending_orders()
         for o in pending:
-            # Normalize check
-            o_sym = str(o.symbol).upper()
-            if ":" not in o_sym: o_sym = f"NFO:{o_sym}"
-            
-            target_sym = str(symbol).upper()
-            if ":" not in target_sym: target_sym = f"NFO:{target_sym}"
+            o_sym = normalize_symbol(str(o.symbol))
+            target_sym = normalize_symbol(str(symbol))
 
             if o_sym == target_sym:
                 self._logger.info(f"🧹 Auto-canceling stale order {o.order_id} for {symbol}")
