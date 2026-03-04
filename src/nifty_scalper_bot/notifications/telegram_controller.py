@@ -61,6 +61,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -510,6 +511,8 @@ class TelegramBot:
 
     def __init__(self, deps: TelegramDeps) -> None:
         self.deps = deps
+        self.deps.enable_polling_fallback = True
+        self.deps.webhook_url = None
         self._app: Application | None = None
         self._shutdown_event: asyncio.Event | None = None
         self._fallback_lock: asyncio.Lock | None = None
@@ -572,47 +575,39 @@ class TelegramBot:
         Unified startup for Telegram Bot.
         Handles Initialization -> Start -> Polling in one safe flow.
         """
-        # 1. GUARD: If app is already running, do absolutely nothing.
-        # This prevents the 'Conflict' error when app.py tries to start it twice.
         if self._app is not None and self._app.running:
-            log.warning("⚠️ TelegramBot start requested but already running. Ignoring.")
+            log.warning("TelegramBot start requested but already running. Ignoring.")
             return
 
-        log.info("🚀 Initializing TelegramBot execution...")
-
         try:
-            # 2. Build App if missing
             if self._app is None:
                 self._app = self.builder().build()
                 self._wire_handlers(self._app)
 
-            # 3. Lifecycle: Initialize & Start (Connects to Telegram API)
-            # Explicitly awaiting these prevents 'coroutine never awaited' warnings.
-            if not self._app._initialized:
+            command_handlers = (
+                ("status", self.cmd_status),
+                ("positions", self.cmd_positions),
+                ("signals", self.cmd_signals),
+                ("risk", self.cmd_risk),
+                ("logs", self.cmd_tail),
+                ("test_trade", self.cmd_test_trade),
+                ("engine_test", self.cmd_engine_test),
+            )
+            for cmd, handler in command_handlers:
+                if not self._command_registered(self._app, cmd):
+                    self._app.add_handler(CommandHandler(cmd, handler))
+
+            if not self._app._initialized:  # noqa: SLF001
                 await self._app.initialize()
             if not self._app.running:
                 await self._app.start()
 
-            # 4. Mode Selection
-            if self.deps.webhook_url:
-                log.info("Telegram attempting Webhook mode...")
-                started = await self._start_webhook_stack()
-                if not started and self.deps.enable_polling_fallback:
-                    log.warning("Webhook failed; switching to polling...")
-                    # Clear webhook before switching to polling
-                    await self._app.bot.delete_webhook(drop_pending_updates=True)
-                    await self._start_polling_if_needed()
-            elif self.deps.enable_polling_fallback:
-                log.info("Telegram using Polling mode.")
-                # Always clear webhook first to prevent API conflicts
-                await self._app.bot.delete_webhook(drop_pending_updates=True)
-                await self._start_polling_if_needed()
-
-            # 5. Start Alert Workers
+            await self._app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            log.info("Telegram polling started successfully")
             self._ensure_alert_worker()
 
-        except Exception as e:
-            log.error(f"❌ Telegram start sequence failed: {e}", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Telegram polling failed: %s", exc)
 
     async def _start_polling_if_needed(self) -> None:
         """
@@ -4140,6 +4135,7 @@ class TelegramBot:
                 "strategy_execution_management",
                 (
                     ("strategies", self.cmd_strategies, ("sig",)),
+                    ("signals", self.cmd_signals, ()),
                     (
                         "strategy_scores",
                         self.cmd_strategy_scores,
@@ -4169,6 +4165,8 @@ class TelegramBot:
                     ("cooldown", self.cmd_cooldown, ()),
                     ("pause", self.cmd_pause, ()),
                     ("resume", self.cmd_resume, ()),
+                    ("test_trade", self.cmd_test_trade, ()),
+                    ("engine_test", self.cmd_engine_test, ()),
                     ("test_flow", self.cmd_test_flow, ()),
                     ("paper", self.cmd_paper, ()),
                     ("paper_on", self.cmd_paper_on, ()),
@@ -8553,6 +8551,90 @@ class TelegramBot:
                     ctx,
                     "Unable to fetch strategies. Inspect logs for details.",
                 )
+
+    @command_meta(
+        "/signals",
+        "Show the most recent strategy signals from strategy manager/state.",
+    )
+    async def cmd_signals(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Return recent strategy signals. Args: update, ctx; Returns: None; Raises: None."""
+        log.debug("Entered cmd_signals", extra={"event": "telegram_cmd_signals_enter"})
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        try:
+            manager = getattr(self.deps, "strategy_manager", None)
+            signals: list[t.Any] = []
+            for attr in ("recent_signals", "signal_history", "last_signals"):
+                candidate = getattr(manager, attr, None) if manager is not None else None
+                if callable(candidate):
+                    with suppress(Exception):
+                        candidate = candidate()
+                if isinstance(candidate, list):
+                    signals = candidate
+                    break
+            if not signals:
+                await self._reply(chat, ctx, "No recent signals available.")
+                return
+            lines = ["Recent signals:"]
+            for item in signals[-10:]:
+                lines.append(f"- {item}")
+            await self._reply(chat, ctx, "\n".join(lines))
+        except Exception as e:  # noqa: BLE001
+            log.error("Failure in cmd_signals: %s", e)
+            await self._reply(chat, ctx, "Unable to fetch recent signals.")
+
+    @command_meta("/test_trade", "Run a lightweight execution-path test order.")
+    async def cmd_test_trade(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Place a single synthetic test trade. Args: update, ctx; Returns: None; Raises: None."""
+        log.debug("Entered cmd_test_trade", extra={"event": "telegram_cmd_test_trade_enter"})
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        try:
+            symbol = "NFO:NIFTY"
+            log.info("TEST TRADE TRIGGERED", extra={"event": "ENTRY_SIGNAL", "symbol": symbol})
+            order_manager = getattr(self.deps, "order_manager", None)
+            if order_manager is None:
+                await self._reply(chat, ctx, "Order manager unavailable.")
+                return
+            order_manager.place_order(
+                symbol=symbol,
+                side="BUY",
+                quantity=1,
+                order_type="MARKET",
+                strategy_name="telegram_test",
+                tag="telegram_test_trade",
+            )
+            await self._reply(chat, ctx, "Test trade executed in shadow mode.")
+        except Exception as e:  # noqa: BLE001
+            log.error("Failure in cmd_test_trade: %s", e)
+            await self._reply(chat, ctx, "Test trade failed.")
+
+    @command_meta("/engine_test", "Run run_engine_tests.py and return summary output.")
+    async def cmd_engine_test(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Run execution-engine tests command. Args: update, ctx; Returns: None; Raises: None."""
+        log.debug("Entered cmd_engine_test", extra={"event": "telegram_cmd_engine_test_enter"})
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        try:
+            result = subprocess.run(
+                ["python", "run_engine_tests.py", "--mode", "stress"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = (result.stdout or result.stderr or "No output")[:4000]
+            await self._reply(chat, ctx, output)
+        except Exception as e:  # noqa: BLE001
+            log.error("Failure in cmd_engine_test: %s", e)
+            await self._reply(chat, ctx, "Engine test failed to execute.")
+
     @command_meta("/panic", "🚨 EMERGENCY: Cancel all orders and flatten positions.")
     async def cmd_panic(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """🚨 EMERGENCY: Cancel all orders and close all positions immediately."""
