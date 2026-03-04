@@ -117,7 +117,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.request import HTTPXRequest  # ✅ NEW IMPORT
 
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
 
@@ -601,27 +600,17 @@ class TelegramBot:
                 ("logs", self.cmd_tail),
                 ("test_trade", self.cmd_test_trade),
                 ("engine_test", self.cmd_engine_test),
+                ("ping", self.cmd_ping),
             )
             for cmd, handler in command_handlers:
                 if not self._command_registered(self._app, cmd):
                     self._app.add_handler(CommandHandler(cmd, handler))
 
             await self._app.initialize()
-            if not self._app.running:
-                await self._app.start()
-
+            await self._app.start()
             await self._app.bot.delete_webhook(drop_pending_updates=True)
-            try:
-                self._polling_task = asyncio.create_task(
-                    self._app.run_polling(
-                        allowed_updates=Update.ALL_TYPES,
-                        drop_pending_updates=True,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.error("Telegram polling failed: %s", exc, exc_info=True)
-                raise
-            log.info("Telegram polling started successfully")
+            self._start_manual_polling_loop()
+            log.info("Telegram polling loop starting")
             self._ensure_alert_worker()
 
         except Exception as exc:  # noqa: BLE001
@@ -631,49 +620,24 @@ class TelegramBot:
         """
         Starts polling with explicit initialization to fix RuntimeError.
         """
-        if not self.deps.enable_polling_fallback:
+        if not self.deps.enable_polling_fallback or self._app is None:
             return
-        if self._app is None or self._app.updater is None:
-            return
-        
-        # GUARD: Stop if already running
-        if self._app.updater.running:
-            return
-
         try:
-            self._mark_polling_started()
-            
-            # ✅ FIX 1: Explicit Cool-down
-            await asyncio.sleep(2.0)
-            
-            log.info("📡 Starting Telegram Polling (Background)...")
+            await self._app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in _start_polling_if_needed: %s", exc)
+        self._start_manual_polling_loop()
 
-            # ✅ FIX 2: Clear Webhook safely
-            try:
-                await self._app.bot.delete_webhook(drop_pending_updates=True)
-            except Exception:
-                pass
+    def _start_manual_polling_loop(self) -> None:
+        """Start async update polling loop. Args: none. Returns: None. Raises: None."""
 
-            # ✅ FIX 3: Initialize the Updater explicitly
-            # This fixes 'RuntimeError: This Updater was not initialized via Updater.initialize!'
-            if not self._app.updater._initialized:
-                 await self._app.updater.initialize()
-
-            # ✅ FIX 4: Start Polling
-            await self._app.updater.start_polling(
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES,
-                poll_interval=2.0
-            )
-            
-            log.info("✅ Telegram Polling Active.")
-
-        except Exception as exc:
-            import traceback
-            log.error(f"❌ Polling CRASH: {exc}")
-            log.error(traceback.format_exc())
-            self._metrics.polling_errors += 1
-            self._mark_polling_stopped()
+        if self._polling_task is not None and not self._polling_task.done():
+            return
+        self._mark_polling_started()
+        self._polling_task = asyncio.create_task(
+            self._polling_loop(),
+            name="telegram-manual-polling",
+        )
 
   
     def _command_registered(self, app: Application, command: str) -> bool:
@@ -886,7 +850,13 @@ class TelegramBot:
         chat_id = int(chat.id)
         user_id = int(user.id) if user else "Unknown"
         username = user.username if user else "Unknown"
-        
+        log.info(
+            "Telegram message from chat_id=%s user=%s text=%s",
+            chat_id,
+            username,
+            text,
+        )
+
         # 1. Resolve Allowed ID (Primary Owner)
         allowed_primary = int(self.deps.chat_id)
         
@@ -3858,12 +3828,6 @@ class TelegramBot:
                 return
             if self._app is None:
                 return
-            updater = self._app.updater
-            if updater is None:
-                log.error(
-                    "PTB updater is not available; cannot start polling fallback."
-                )
-                return
             if self._webhook_server is not None:
                 await self._webhook_server.stop()
                 self._webhook_server = None
@@ -3873,32 +3837,33 @@ class TelegramBot:
             self._mark_polling_started()
             log.error("Telegram switching to polling fallback (%s)", reason)
             try:
-                self._polling_task = asyncio.create_task(
-                    self._polling_loop(updater),
-                    name="telegram-polling-fallback",
-                )
+                self._start_manual_polling_loop()
             except Exception as exc:  # pragma: no cover - defensive
                 self._mark_polling_stopped()
                 log.exception("Failed to spawn polling fallback task: %s", exc)
 
-    async def _polling_loop(self, updater: t.Any) -> None:
+    async def _polling_loop(self) -> None:
         """Run polling loop with backoff handling."""
 
         task = asyncio.current_task()
         try:
             log.warning("Telegram polling fallback active.")
+            offset: int | None = None
             while True:
                 if self._shutdown_event is not None and self._shutdown_event.is_set():
                     break
                 try:
-                    await updater.start_polling(
+                    if self._app is None:
+                        break
+                    updates = await self._app.bot.get_updates(
+                        offset=offset,
                         allowed_updates=Update.ALL_TYPES,
                         timeout=30,
-                        drop_pending_updates=False,
                     )
-                    if self._shutdown_event is not None:
-                        await self._shutdown_event.wait()
-                    break
+                    for update in updates:
+                        log.info("Telegram update received: %s", update)
+                        offset = update.update_id + 1
+                        await self._app.process_update(update)
                 except RetryAfter as exc:
                     self._metrics.polling_errors += 1
                     delay = float(
@@ -3913,11 +3878,8 @@ class TelegramBot:
                     await asyncio.sleep(self.deps.polling_interval_seconds)
                 except Exception as exc:  # pragma: no cover - defensive logging
                     self._metrics.polling_errors += 1
-                    log.exception("Telegram polling error: %s", exc)
-                    await asyncio.sleep(self.deps.polling_interval_seconds)
-                finally:
-                    with suppress(Exception):
-                        await updater.stop()
+                    log.error("Telegram polling error: %s", exc)
+                    await asyncio.sleep(2)
         except asyncio.CancelledError:
             raise
         finally:
@@ -4008,10 +3970,6 @@ class TelegramBot:
                 extra={"telegram_metrics": self._metrics.snapshot()},
             )
             return
-        updater = self._app.updater
-        if updater is not None:
-            with suppress(Exception):
-                await updater.stop()
         with suppress(Exception):
             await self._app.bot.delete_webhook(drop_pending_updates=True)
         with suppress(Exception):
@@ -15655,31 +15613,23 @@ class TelegramWebhookServer:
         return self._app
 
     async def start(self) -> None:
-        """Start the bot polling loop properly."""
-        if self._running:
+        """Start webhook HTTP server."""
+
+        if self._task is not None and not self._task.done():
             return
-
-        LOGGER.info("Starting Telegram Controller...")
         try:
-            # 1. Initialize & Start App
-            if not self.application.running:
-                await self.application.initialize()
-                await self.application.start()
-
-            # 2. FORCE START POLLING (Critical Fix)
-            # This ensures the bot actually listens to /commands
-            if self.application.updater:
-                await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-                LOGGER.info("✅ Telegram Polling Started Successfully")
-            else:
-                LOGGER.error("❌ Telegram Updater missing! Commands will not work.")
-
-            # 3. Register Menu
-            await self._set_commands()
-            self._running = True
-            
-        except Exception as e:
-            LOGGER.error(f"Failed to start Telegram Controller: {e}", exc_info=True)
+            config = uvicorn.Config(
+                self._app,
+                host=self._host,
+                port=self._port,
+                log_level="warning",
+                access_log=False,
+            )
+            self._server = uvicorn.Server(config)
+            self._task = asyncio.create_task(self._server.serve())
+        except Exception as exc:
+            log.error("Failure in TelegramWebhookServer.start: %s", exc)
+            raise RuntimeError("Failed to start Telegram webhook server") from exc
 
     async def stop(self) -> None:
         if self._server is None:
