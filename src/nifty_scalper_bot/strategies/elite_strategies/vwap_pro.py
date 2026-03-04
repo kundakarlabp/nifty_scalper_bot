@@ -254,7 +254,7 @@ class VWAPProStrategy(EliteStrategy):
     # ------------------------------------------------------------------ #
     # Core Signal Logic
     # ------------------------------------------------------------------ #
-
+    vwap = indicators.get("vwap")
     def _evaluate_signal(
         self,
         symbol: str,
