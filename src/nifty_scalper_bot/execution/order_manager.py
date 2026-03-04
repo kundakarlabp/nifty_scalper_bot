@@ -64,7 +64,7 @@ from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.pricing import canonical_price_source
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import canonical
-from nifty_scalper_bot.utils.symbols import is_strategy_instrument
+from nifty_scalper_bot.utils.symbols import is_strategy_instrument, normalize_symbol
 
 SOFT_BLOCK_CODES: set[str] = {
     "STALE",
@@ -1611,7 +1611,7 @@ class OrderManager:
             self.trade_store = TradeStore()
         from nifty_scalper_bot.data.trade_store import TradeIntent
 
-        normalized_symbol = symbol.strip().upper()
+        normalized_symbol = normalize_symbol(symbol)
         if not is_strategy_instrument(normalized_symbol):
             raise RuntimeError("Blocked non-NIFTY instrument")
         # ---------------------------------------------------------------------
@@ -9773,7 +9773,13 @@ class OrderManager:
         CRITICAL SYNC: Force local state to match Broker's Net Positions.
         Handles Manual Exits (Ghosts) and Unmanaged Trades (Orphans).
         """
+        reconcile_lock = getattr(self._bracket_manager, "_reconcile_lock", None)
+        lock_acquired = False
         try:
+            if reconcile_lock is not None:
+                lock_acquired = reconcile_lock.acquire(blocking=False)
+                if not lock_acquired:
+                    return
             # 1. FETCH TRUTH (Broker State)
             if not hasattr(self._broker, "get_positions"): 
                 return
@@ -9800,9 +9806,9 @@ class OrderManager:
                 # NORMALIZE: Ensure strictly "EXCHANGE:SYMBOL" format (e.g., NFO:NIFTY...)
                 # Zerodha sometimes returns "NIFTY..." without NFO:
                 if ":" in raw_sym:
-                    clean_sym = raw_sym.upper()
+                    clean_sym = normalize_symbol(raw_sym.upper())
                 else:
-                    clean_sym = f"{exch}:{raw_sym}".upper()
+                    clean_sym = normalize_symbol(f"{exch}:{raw_sym}".upper())
 
                 broker_map[clean_sym] = {
                     "qty": qty, 
@@ -9816,8 +9822,7 @@ class OrderManager:
             all_local = list(self._positions.get_open_positions())
             local_map = {}
             for pos in all_local:
-                lsym = str(pos.symbol).upper()
-                if ":" not in lsym: lsym = f"NFO:{lsym}"
+                lsym = normalize_symbol(str(pos.symbol).upper())
                 local_map[lsym] = pos
 
             for broker_sym, data in broker_map.items():
@@ -9923,6 +9928,9 @@ class OrderManager:
 
         except Exception as e:
             self._logger.error(f"Reconciliation Failed: {e}", exc_info=True)
+        finally:
+            if lock_acquired and reconcile_lock is not None:
+                reconcile_lock.release()
 
     def _adopt_orphan_position(self, symbol: str, data: dict) -> None:
         """
@@ -9933,7 +9941,9 @@ class OrderManager:
         """
         import time
         from datetime import datetime, timezone
-        
+
+        symbol = normalize_symbol(symbol)
+
         # 1. Safe Quantity Extraction
         try:
             qty = int(float(data.get('qty', 0)))
@@ -10030,6 +10040,8 @@ class OrderManager:
         2. Zero Price / Negative SL crashes
         3. DB Persistence errors
         """
+        symbol = normalize_symbol(symbol)
+
         if not self._bracket_manager or quantity == 0:
             return False
 

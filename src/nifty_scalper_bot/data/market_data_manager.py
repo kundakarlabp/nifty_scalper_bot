@@ -120,6 +120,23 @@ class _OHLCBuilder:
                 bar.close = price
                 bar.volume += volume_delta
             else:
+                if bucket:
+                    interval = timedelta(minutes=1)
+                    last_bar = bucket[-1]
+                    last_bar_time = last_bar.timestamp
+                    last_close = last_bar.close
+                    while last_bar_time + interval < timestamp:
+                        last_bar_time += interval
+                        bucket.append(
+                            _OHLCBar(
+                                timestamp=last_bar_time,
+                                open=last_close,
+                                high=last_close,
+                                low=last_close,
+                                close=last_close,
+                                volume=0.0,
+                            )
+                        )
                 bucket.append(
                     _OHLCBar(
                         timestamp=timestamp,

@@ -30,6 +30,7 @@ from typing import (
 )
 
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 try:
     from nifty_scalper_bot.data.bracket_store import BracketStore
 except ImportError:
@@ -268,6 +269,7 @@ class BracketManager:
         self._trail_notify_sl: Dict[str, float] = {}
         self._tick_error_logged: Dict[str, bool] = {}
         self._lock = _RLOCK_CLASS()
+        self._reconcile_lock = threading.Lock()
         self._running = True
         
         # Configuration
@@ -714,6 +716,7 @@ class BracketManager:
     # --------------------------------------------------------------------------
 
     def on_tick(self, symbol: str, ltp: float) -> None:
+        symbol = normalize_symbol(symbol)
         """
         Ultra-low-latency tick processing.
         
@@ -930,6 +933,7 @@ class BracketManager:
             None.
         """
         import time
+        symbol = normalize_symbol(symbol)
         now = time.time()
 
         approved_ids = set()
@@ -1388,9 +1392,14 @@ class BracketManager:
         # Try safe provider first
         if self._atr_provider:
             try:
-                snapshot = self._atr_provider.get_atr(symbol)
-                if snapshot and snapshot.value > 0:
-                    return snapshot.value
+                atr_value = None
+                if hasattr(self._atr_provider, "get_current_atr"):
+                    atr_value = self._atr_provider.get_current_atr(symbol)
+                elif hasattr(self._atr_provider, "get_atr"):
+                    snapshot = self._atr_provider.get_atr(symbol)
+                    atr_value = getattr(snapshot, "value", snapshot)
+                if atr_value is not None and float(atr_value) > 0:
+                    return float(atr_value)
             except Exception:
                 pass
         
@@ -1738,6 +1747,12 @@ class BracketManager:
             
             if count > 0:
                 LOGGER.info(f"🧹 Cleaned up {count} brackets for {symbol} due to: {reason}")
+
+    def reconcile_with_broker(self, callback: Callable[[], Any]) -> Any:
+        """Args: callback. Returns: callback result. Raises: Exception from callback."""
+        with self._reconcile_lock:
+            return callback()
+
 
     def sync_order_status(self, broker_order_id: str, status: str, filled_qty: int) -> None:
         """
@@ -2125,6 +2140,9 @@ class BracketManager:
         Wraps an existing naked position in a protective bracket.
         Called by Runner when 'ORPHAN GUARD' triggers.
         """
+        symbol = normalize_symbol(symbol)
+        if self._reconcile_lock.locked():
+            return ""
         oid = f"orphan_{int(time.time())}_{symbol}"
         now = time.time()
         last_attempt = self._orphan_retry_last_attempt.get(symbol)
@@ -2138,9 +2156,14 @@ class BracketManager:
         atr = entry_price * 0.01  # Default 1%
         try:
             if self._atr_provider:
-                calc_atr = self._atr_provider.get_current_atr(symbol)
-                if calc_atr and calc_atr > 0:
-                    atr = calc_atr
+                calc_atr = None
+                if hasattr(self._atr_provider, "get_current_atr"):
+                    calc_atr = self._atr_provider.get_current_atr(symbol)
+                elif hasattr(self._atr_provider, "get_atr"):
+                    atr_snapshot = self._atr_provider.get_atr(symbol)
+                    calc_atr = getattr(atr_snapshot, "value", atr_snapshot)
+                if calc_atr and float(calc_atr) > 0:
+                    atr = float(calc_atr)
         except Exception:
             self._orphan_retry_count[symbol] = self._orphan_retry_count.get(symbol, 0) + 1
             self._orphan_retry_last_attempt[symbol] = now
