@@ -605,7 +605,10 @@ class OrderManager:
         """Initialize with broker client and position manager."""
 
         self._broker = broker_client
-        execution_mode = str(os.getenv("EXECUTION_MODE", "LIVE")).strip().upper()
+        execution_mode = (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
+        enable_live = (os.getenv("ENABLE_LIVE", "false") or "false").strip().lower() == "true"
+        if execution_mode == "LIVE" and enable_live is False:
+            raise RuntimeError("LIVE mode requires ENABLE_LIVE=true")
         if execution_mode == "SIMULATION":
             try:
                 from nifty_scalper_bot.testing.simulated_broker import SimulatedZerodhaBroker
@@ -1844,6 +1847,12 @@ class OrderManager:
             f"🚀 Sending Order: {normalized_side} {quantity} {normalized_symbol} ({final_order_type})",
             extra={"event": "order_sending", "symbol": normalized_symbol, "signal_id": signal_id}
         )
+        self._logger.info(
+            "ORDER_SENT symbol=%s side=%s qty=%s",
+            normalized_symbol,
+            normalized_side,
+            quantity,
+        )
 
         # ---------------------------------------------------------------------
         # 7. EXECUTION LOOP (With Anti-Zombie Timeout)
@@ -1910,6 +1919,7 @@ class OrderManager:
                 if order_id:
                     # ✅ RESET Kill Switch on success
                     self._consecutive_failures = 0
+                    self._logger.info("ORDER_FILLED order_id=%s symbol=%s", order_id, normalized_symbol)
                     
                     # [FIX] Non-Blocking DB Update
                     # If this fails, we MUST NOT retry the order placement!
@@ -1949,6 +1959,7 @@ class OrderManager:
                             activate_immediately=False
                         )
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
+                        self._logger.info("BRACKET_CREATED order_id=%s symbol=%s", order_id, normalized_symbol)
 
                     # ✅ WORLD-CLASS: Fast fill confirmation & bracket activation
                     # This replaces the old 0.5s sleep
@@ -9841,6 +9852,7 @@ class OrderManager:
 
             broker_positions = broker_map
             local_positions = local_map
+            recently_handled = getattr(self, "_recent_orphans", set())
 
             for broker_sym, data in broker_positions.items():
                 # Broker is authoritative: adopt any position missing locally.
@@ -9849,6 +9861,16 @@ class OrderManager:
                     continue
 
                 if broker_sym not in local_positions:
+                    if broker_sym in recently_handled:
+                        continue
+
+                    recently_handled.add(broker_sym)
+                    self._recent_orphans = recently_handled
+
+                    if self._bracket_manager and self._bracket_manager.has_active_bracket(
+                        broker_sym
+                    ):
+                        continue
                     
                     # [FIX 1] RACE CONDITION GUARD: 
                     # Check if we have touched this symbol recently (Pending Orders or Recent Fills).
@@ -9875,6 +9897,14 @@ class OrderManager:
                                     if time.time() - ts < 15.0:
                                         is_active_locally = True
                                         break
+
+                                if (
+                                    order.timestamp
+                                    and hasattr(order.timestamp, "timestamp")
+                                    and time.time() - order.timestamp.timestamp() < 20
+                                ):
+                                    is_active_locally = True
+                                    break
                     
                     if is_active_locally:
                         # self._logger.debug(f"⏳ Skipping Orphan Check for {broker_sym} (Busy)")

@@ -951,11 +951,11 @@ class BracketManager:
                     continue
 
                 if bracket.side == "BUY" and ltp <= bracket.sl_trigger_price:
-                    LOGGER.info('SL_TRIGGERED symbol=%s entry_id=%s', bracket.symbol, bracket.entry_order_id)
+                    LOGGER.warning('SL_TRIGGERED symbol=%s', bracket.symbol)
                     self._force_exit(bracket)
 
                 elif bracket.side == "SELL" and ltp >= bracket.sl_trigger_price:
-                    LOGGER.info('SL_TRIGGERED symbol=%s entry_id=%s', bracket.symbol, bracket.entry_order_id)
+                    LOGGER.warning('SL_TRIGGERED symbol=%s', bracket.symbol)
                     self._force_exit(bracket)
         except Exception as e:
             LOGGER.error('Failure in process_exit_checks: %s', e)
@@ -978,7 +978,7 @@ class BracketManager:
 
                 bracket.active = False
                 bracket.exit_executed = True
-                LOGGER.info('EXIT_EXECUTED symbol=%s qty=%s attempt=%s', symbol, qty, attempt + 1)
+                LOGGER.info('EXIT_EXECUTED symbol=%s qty=%s', symbol, qty)
 
                 return
 
@@ -986,6 +986,8 @@ class BracketManager:
                 LOGGER.error('Failure in _force_exit: %s', e)
 
                 time.sleep(0.5)
+
+        LOGGER.critical('EXIT FAILED AFTER RETRIES symbol=%s', symbol)
 
     def _evaluate_exit_fast(self, bracket: BracketState, ltp: float) -> dict | None:
         """
@@ -1272,6 +1274,7 @@ class BracketManager:
                         f"SL {old_sl:.2f} → {new_sl:.2f} | "
                         f"Profit: {profit_pct:.1f}% | LTP: {ltp:.2f}"
                     )
+                    LOGGER.info('TRAILING_SL_UPDATED symbol=%s sl=%s', bracket.symbol, round(new_sl, 2))
                     if self._should_notify_trail(
                         bracket.entry_order_id, bracket.sl_trigger_price, old_sl
                     ):
@@ -1296,6 +1299,7 @@ class BracketManager:
                         f"SL {old_sl:.2f} → {new_sl:.2f} | "
                         f"Profit: {profit_pct:.1f}% | LTP: {ltp:.2f}"
                     )
+                    LOGGER.info('TRAILING_SL_UPDATED symbol=%s sl=%s', bracket.symbol, round(new_sl, 2))
                     if self._should_notify_trail(
                         bracket.entry_order_id, bracket.sl_trigger_price, old_sl
                     ):
