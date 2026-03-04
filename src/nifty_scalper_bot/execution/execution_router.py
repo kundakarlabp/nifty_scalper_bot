@@ -466,40 +466,30 @@ class ExecutionRouter:
             None. Execution failures are captured and converted.
         """
 
-        live_result = self._execute_live(request)
+        action = "WOULD_EXIT" if request.intent.upper() == "EXIT" else ("WOULD_BUY" if request.side.upper() == "BUY" else "WOULD_SELL")
+        LOGGER.info(
+            "%s symbol=%s qty=%s",
+            action,
+            request.symbol,
+            request.quantity,
+            extra={
+                "event": "execution_router_shadow_action",
+                "action": action,
+                "symbol": request.symbol,
+            },
+        )
         paper_result = self._execute_paper(request)
-        drift_bps = self._compute_drift_bps(live_result, paper_result)
-        self._stats["last_drift_bps"] = drift_bps
-        SHADOW_DRIFT.labels(symbol=request.symbol).observe(drift_bps)
-        if drift_bps >= self._settings.shadow_drift_threshold_bps:
-            self._stats["shadow_alerts"] += 1
-            LOGGER.warning(
-                "Shadow drift exceeded threshold",
-                extra={
-                    "event": "execution_router_shadow_drift",
-                    "symbol": request.symbol,
-                    "drift_bps": drift_bps,
-                },
-            )
-        status = live_result.status
-        order_id = live_result.order_id or paper_result.order_id
-        fill_qty = live_result.fill_quantity or paper_result.fill_quantity
-        fill_price = live_result.fill_price or paper_result.fill_price
-        rejection_reason = live_result.rejection_reason
-        if status in {"FAILED", "REJECTED"} and paper_result.status == "FILLED":
-            status = "FILLED"
-            fill_qty = paper_result.fill_quantity
-            fill_price = paper_result.fill_price
-            rejection_reason = rejection_reason or paper_result.rejection_reason
+        self._stats["last_drift_bps"] = 0.0
+        SHADOW_DRIFT.labels(symbol=request.symbol).observe(0.0)
         return ExecutionResult(
-            status=status,
-            order_id=order_id,
-            fill_quantity=fill_qty,
-            fill_price=fill_price,
-            rejection_reason=rejection_reason,
+            status=paper_result.status,
+            order_id=None,
+            fill_quantity=paper_result.fill_quantity,
+            fill_price=paper_result.fill_price,
+            rejection_reason=paper_result.rejection_reason,
             shadow_order_id=paper_result.order_id,
             shadow_fill_price=paper_result.fill_price,
-            attempts=live_result.attempts,
+            attempts=paper_result.attempts,
         )
 
     # ------------------------------------------------------------------

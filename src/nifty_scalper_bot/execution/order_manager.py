@@ -605,10 +605,22 @@ class OrderManager:
         """Initialize with broker client and position manager."""
 
         self._broker = broker_client
+        execution_mode = str(os.getenv("EXECUTION_MODE", "LIVE")).strip().upper()
+        if execution_mode == "SIMULATION":
+            try:
+                from nifty_scalper_bot.testing.simulated_broker import SimulatedZerodhaBroker
+
+                self._broker = SimulatedZerodhaBroker()
+                self._logger = get_logger(__name__)
+                self._logger.info("Condition met: using simulated broker backend")
+            except Exception as exc:  # noqa: BLE001
+                self._logger = get_logger(__name__)
+                self._logger.error("Failure in OrderManager.__init__ simulated broker swap: %s", exc)
         self._positions = position_manager
         self._limiter = rate_limiter
         self.trade_store = TradeStore()
-        self._logger = get_logger(__name__)
+        if not hasattr(self, "_logger"):
+            self._logger = get_logger(__name__)
         self._broker_circuit = CircuitBreaker()
         _data_dir = Path(os.getenv("DATA_DIR", "data"))
         _data_dir.mkdir(parents=True, exist_ok=True)

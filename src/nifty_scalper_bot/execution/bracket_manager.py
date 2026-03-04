@@ -337,6 +337,10 @@ class BracketManager:
                 LOGGER.error('Failure in _watchdog_exit_loop: %s', e)
                 time.sleep(1.0)
 
+    def shutdown(self) -> None:
+        """Stop watchdog processing. Args: none; Returns: none; Raises: none."""
+        self._running = False
+
     # --------------------------------------------------------------------------
     # 1. CORE API (Backward Compatible & Enhanced)
     # --------------------------------------------------------------------------
@@ -609,7 +613,12 @@ class BracketManager:
                     LOGGER.error(f"❌ Failed to persist bracket for {symbol}: {e}")
             
             # 7. Initialize Adaptive Controller (The "Brain")
-            if trailing_atr_mult and self._atr_provider and AdaptiveTrailingController:
+            if (
+                not self._trailing_controller_factory
+                and trailing_atr_mult
+                and self._atr_provider
+                and AdaptiveTrailingController
+            ):
                 try:
                     spec = TrailingSpec(
                         trail_by=20.0, # Fallback
@@ -1012,6 +1021,9 @@ class BracketManager:
                 symbol = normalize_symbol(bracket.symbol)
                 qty = int(action['qty'])
                 reason = str(action['reason'])
+                if not symbol or qty <= 0:
+                    LOGGER.warning('Skipping invalid exit payload symbol=%s qty=%s', symbol, qty)
+                    continue
 
                 LOGGER.warning('EXIT TRIGGERED: %s qty=%s reason=%s', symbol, qty, reason)
 

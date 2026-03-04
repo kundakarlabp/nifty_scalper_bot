@@ -122,7 +122,10 @@ class AdaptiveTrailingController:
 
         # 4. CHECK ACTIVATION
         profit_pct = self._calculate_profit_pct(ltp)
-        activation_pct = ((self._last_atr_value * 0.3) / self.entry_price) * 100
+        activation_pct = max(
+            ((self._last_atr_value * 0.2) / self.entry_price) * 100,
+            0.5,
+        )
         if not self.trailing_active:
             if profit_pct >= activation_pct:
                 self.trailing_active = True
@@ -139,15 +142,18 @@ class AdaptiveTrailingController:
         # 6. UPDATE STOP LOSS IF NEEDED
         new_sl = self._calculate_new_sl(ltp, trail_distance)
         
-        if self._should_update_sl(new_sl):
-            success = self._execute_sl_update(new_sl)
-            
-            if not success:
-                self.failed_modifications += 1
-                if self.failed_modifications >= 5:
-                    self._emergency_halt("5 consecutive SL modification failures")
-            else:
-                self.failed_modifications = 0
+        try:
+            if self._should_update_sl(new_sl):
+                success = self._execute_sl_update(new_sl)
+
+                if not success:
+                    self.failed_modifications += 1
+                    if self.failed_modifications >= 5:
+                        self._emergency_halt("5 consecutive SL modification failures")
+                else:
+                    self.failed_modifications = 0
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("Failure in on_tick: %s", exc)
     
     def _calculate_trail_distance(self, atr: Any, ltp: float) -> float:
         """Calculate dynamic trail distance based on ATR and regime."""
@@ -191,7 +197,7 @@ class AdaptiveTrailingController:
             improvement = self.current_sl - new_sl
         
         # Check minimum step
-        min_step = max(self.spec.step, self._last_atr_value * 0.25)
+        min_step = max(self.spec.step, self._last_atr_value * 0.1)
         if improvement < min_step:
             return False
         
