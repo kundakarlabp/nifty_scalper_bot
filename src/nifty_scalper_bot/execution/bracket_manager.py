@@ -256,6 +256,8 @@ class BracketManager:
         self._trailing_controllers: Dict[str, Any] = {}
         self._recent_ticks: Dict[str, deque] = {}
         self._max_tick_history = 20
+        self._orphan_retry_count: Dict[str, int] = {}
+        self._orphan_retry_last_attempt: Dict[str, float] = {}
     
         # Real-time Data Cache (Legacy Fallback)
         self._current_atr: Dict[str, float] = {}
@@ -2124,12 +2126,26 @@ class BracketManager:
         Called by Runner when 'ORPHAN GUARD' triggers.
         """
         oid = f"orphan_{int(time.time())}_{symbol}"
-        
+        now = time.time()
+        last_attempt = self._orphan_retry_last_attempt.get(symbol)
+        if last_attempt is not None and (now - last_attempt) < 10:
+            return oid
+        if self._orphan_retry_count.get(symbol, 0) >= 3:
+            LOGGER.error("Orphan adoption disabled after max retries: %s", symbol)
+            return oid
+
         # 1. Dynamic ATR Calculation (if provider available)
         atr = entry_price * 0.01  # Default 1%
-        if self._atr_provider:
-             calc_atr = self._atr_provider.get_current_atr(symbol)
-             if calc_atr and calc_atr > 0: atr = calc_atr
+        try:
+            if self._atr_provider:
+                calc_atr = self._atr_provider.get_current_atr(symbol)
+                if calc_atr and calc_atr > 0:
+                    atr = calc_atr
+        except Exception:
+            self._orphan_retry_count[symbol] = self._orphan_retry_count.get(symbol, 0) + 1
+            self._orphan_retry_last_attempt[symbol] = now
+            LOGGER.exception("Failed orphan adoption")
+            return oid
 
         # 2. Define Rescue Levels (1.5x Risk / 3.0x Reward)
         # Handle 'BUY'/'LONG' vs 'SELL'/'SHORT'
@@ -2156,6 +2172,8 @@ class BracketManager:
             activate_immediately=True  # 🟢 Critical: It's already live
         )
         
+        self._orphan_retry_count.pop(symbol, None)
+        self._orphan_retry_last_attempt.pop(symbol, None)
         LOGGER.warning(
             f"🧯 ORPHAN ATTACHED: {symbol} | Entry={entry_price:.2f} | "
             f"SL={sl:.2f} | TP={tp:.2f} | ID={oid}"

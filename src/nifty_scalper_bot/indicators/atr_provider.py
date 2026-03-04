@@ -114,15 +114,28 @@ class SafeATRProvider:
                         closes = hist.get_closes(1)
                         if closes and closes[0] > 0:
                             estimated = closes[0] * 0.015  # 1.5% of price
-                            return ATRSnapshot(
-                                value=estimated,
-                                timestamp=time(),
-                                source='estimated',
-                            )
+                            if estimated > 0 and math.isfinite(estimated):
+                                return ATRSnapshot(
+                                    value=estimated,
+                                    timestamp=time(),
+                                    source='estimated',
+                                )
                 except Exception:
                     pass
-                
-                return None
+
+                # 5. Final non-None fallback to keep risk guards operational
+                return ATRSnapshot(
+                    value=5.0,
+                    timestamp=time(),
+                    source='hardcoded_fallback',
+                )
+
+    def get_current_atr(self, symbol: str) -> float:
+        """Args: symbol. Returns: current ATR value. Raises: None."""
+        snapshot = self.get_atr(symbol)
+        if snapshot and snapshot.value > 0:
+            return float(snapshot.value)
+        return 5.0
 
     def _resolve_underlying_symbol(self, symbol: str) -> str:
         """Args: symbol. Returns: Underlying symbol. Raises: None."""
