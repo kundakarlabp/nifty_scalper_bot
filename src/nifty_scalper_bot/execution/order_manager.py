@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from threading import Event, RLock, Thread
+from nifty_scalper_bot.config.paths import get_data_dir
 from typing import (
     TYPE_CHECKING,
     Any,
