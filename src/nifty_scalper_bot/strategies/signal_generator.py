@@ -1202,6 +1202,11 @@ class StrategyManager:
             extra={"event": "strategy_manager_generate", "symbol": symbol},
         )
 
+        if self._data_hub is not None and not bool(
+            getattr(self._data_hub, "indicators_ready", False)
+        ):
+            return None
+
         # 1. Fetch Position State
         position = self._position_manager.get_position(symbol)
 
@@ -1256,7 +1261,7 @@ class StrategyManager:
             or indicators.get("vwap")
             or 0.0
         )
-        logger.info(
+        logger.debug(
             "INDICATOR_STATE symbol=%s bars=%s vwap=%s",
             symbol,
             bar_count,

@@ -279,7 +279,7 @@ class VWAPProStrategy(EliteStrategy):
                         self._vwap_acceptance_tracker.get(acc_key, 0) or 0
                     )
                     vwap_diff = float(current_price - (vwap or 0.0))
-                    LOGGER.info(
+                    LOGGER.debug(
                         "📉 NO SIGNAL | %s reason=%s",
                         symbol,
                         reason_code,

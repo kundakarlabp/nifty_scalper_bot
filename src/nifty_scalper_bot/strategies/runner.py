@@ -3809,7 +3809,7 @@ class StrategyRunner:
                 f"🔍 PHASE9 ENTERED: {symbol} | price={price:.2f} | "
                 f"skip={skip_strategy} | runner={self._runner_state}",
                 interval_sec=60.0,
-                level=logging.INFO,
+                level=logging.DEBUG,
             )
 
             signal = generated_signal
@@ -3970,7 +3970,7 @@ class StrategyRunner:
                         f"strategy_eval_{symbol}",
                         f"🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._required_candles}",
                         interval_sec=30.0,
-                        level=logging.INFO,
+                        level=logging.DEBUG,
                     )
                     if not self._indicator_engine.has_min_bars(
                         symbol, self._required_candles
@@ -4035,7 +4035,7 @@ class StrategyRunner:
                             f"indicators_ready_{symbol}",
                             f"✅ INDICATORS READY: {symbol} | Calling StrategyManager...",
                             interval_sec=60.0,
-                            level=logging.INFO,
+                            level=logging.DEBUG,
                         )
 
                         mdm_last_tick = getattr(
