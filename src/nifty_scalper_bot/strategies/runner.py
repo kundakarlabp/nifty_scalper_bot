@@ -519,9 +519,11 @@ class StrategyRunner:
         # We intentionally keep this sticky so per-symbol loops cannot spam checks/logs.
         self._risk_halt_active = False
         self._risk_halt_logged = False
+        warmup_bars = 20
         self._required_candles = max(
+            warmup_bars,
             self._config.min_indicator_bars,
-            int(os.getenv("REQUIRED_CANDLES", str(self._config.min_indicator_bars))),
+            int(os.getenv("REQUIRED_CANDLES", str(warmup_bars))),
         )
         self._max_symbol_count: int = int(os.getenv("STRATEGY_MAX_SYMBOL_COUNT", "32"))
         self._universe_controller = UniverseController()

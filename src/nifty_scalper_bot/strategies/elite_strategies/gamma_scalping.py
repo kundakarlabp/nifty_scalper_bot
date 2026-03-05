@@ -61,6 +61,7 @@ class GammaScalpingStrategy(EliteStrategy):
             "macd",  # Momentum Trigger
             "macd_signal",  # Signal Line
             "atr",  # Volatility for stops
+            "futures_vwap",
         }
 
     def _evaluate_signal(
@@ -87,9 +88,15 @@ class GammaScalpingStrategy(EliteStrategy):
             atr = float(indicators.get("atr") or 0.0)
             vol = float(indicators.get("volume") or 0.0)
             avg_vol = float(indicators.get("avg_volume") or 1.0)
+            futures_vwap = float(
+                indicators.get("futures_vwap")
+                or indicators.get("nifty_fut_vwap")
+                or indicators.get("nifty_index_vwap")
+                or 0.0
+            )
 
             # Sanity Checks
-            if current_price <= 0:
+            if current_price <= 0 or futures_vwap <= 0:
                 return None
 
             # 2. Logic: Gamma Filter (Acceleration)

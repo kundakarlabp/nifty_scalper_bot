@@ -1248,6 +1248,18 @@ class StrategyManager:
         bar_count = int(float(indicators.get("bar_count", 0)))
         vix = float(indicators.get("vix") or 15.0)
         regime_factor = self._get_regime_modifier(vix)
+        vwap = float(
+            indicators.get("futures_vwap")
+            or indicators.get("nifty_fut_vwap")
+            or indicators.get("vwap")
+            or 0.0
+        )
+        logger.info(
+            "INDICATOR_STATE symbol=%s bars=%s vwap=%s",
+            symbol,
+            bar_count,
+            vwap,
+        )
 
         for strategy in self._strategies:
             try:
@@ -1849,6 +1861,7 @@ class StrategyManager:
                 indicators["nifty_fut_ltp"] = indicators["nifty_index_ltp"]
             if indicators.get("nifty_index_vwap"):
                 indicators["nifty_fut_vwap"] = indicators["nifty_index_vwap"]
+                indicators["futures_vwap"] = indicators["nifty_index_vwap"]
 
             # Log for debugging
             if indicators.get("nifty_index_ltp") or indicators.get("nifty_index_vwap"):
