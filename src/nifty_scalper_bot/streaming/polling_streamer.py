@@ -50,6 +50,7 @@ class PollingStreamer:
         self._warn_on_rate_limit = bool(warn_on_rate_limit)
         self._kite_streamer = None  # Optional KiteTicker reference for health checks
         self._websocket_mode_enabled = False
+        self._last_poll_heartbeat = time.monotonic()
 
         # Metrics
         self._m_poll_ok = Counter("polling_success_total", "Successful poll cycles")
@@ -100,6 +101,10 @@ class PollingStreamer:
     def set_websocket_mode(self, enabled: bool) -> None:
         """Args: enabled; Returns: none; Raises: none."""
         self._websocket_mode_enabled = bool(enabled)
+
+    def last_poll_heartbeat(self) -> float:
+        """Return polling loop heartbeat monotonic timestamp."""
+        return float(self._last_poll_heartbeat)
 
     def subscribe(self, tokens: Sequence[int]) -> None:
         """Add tokens to the polling list and seed DataHub once before WS session.
@@ -212,6 +217,7 @@ class PollingStreamer:
 
         while not self._stop.is_set():
             started = time.monotonic()
+            self._last_poll_heartbeat = started
             try:
                 # Copy token list under lock
                 with self._lock:

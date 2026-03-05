@@ -26,13 +26,19 @@ class SignalArbitrator:
         self._state: dict[str, _SymbolState] = {}
         self._lock = threading.RLock()
 
-    def allow(self, signal: Any) -> bool:
-        """Check if a signal can pass. Args: signal. Returns: bool. Raises: None."""
-        symbol = str(getattr(signal, 'symbol', '') or '').upper()
-        action = str(getattr(signal, 'action', '') or '').upper()
+    def allow(self, signal: Any, action: str | None = None) -> bool:
+        """Check if a signal can pass. Args: signal/action. Returns: bool. Raises: None."""
+        if isinstance(signal, str):
+            symbol = str(signal or '').upper()
+            normalized_action = str(action or '').upper()
+        else:
+            symbol = str(getattr(signal, 'symbol', '') or '').upper()
+            normalized_action = str(
+                getattr(signal, 'action', action or '') or ''
+            ).upper()
         if not symbol:
             return False
-        direction = self._direction(action)
+        direction = self._direction(normalized_action)
         now = time.time()
         with self._lock:
             if symbol in self._active_symbols:
