@@ -72,16 +72,27 @@ class AdaptiveTrailingController:
         self.failed_modifications = 0
         self._last_atr_value = 0.0
 
-        # Emergency halt flags
+        # Recovery backoff — instead of permanent halt, use exponential backoff.
+        # After each failure group we wait longer, but always eventually retry.
         self._halted = False
         self._halt_reason: str | None = None
+        self._halt_until: float = 0.0        # monotonic; 0 = not halted
+        self._halt_backoff_sec: float = 5.0  # doubles on each halt, max 300 s
 
     def on_tick(self, tick: dict | None = None) -> None:
         """Process price tick and update trailing stop if needed"""
 
-        # 1. SAFETY: Check if halted
+        # 1. SAFETY: Check if halted (timed backoff, NOT permanent)
         if self._halted:
-            return
+            if time.monotonic() < self._halt_until:
+                return  # Still in backoff window
+            # Backoff window expired — reset and retry
+            self._halted = False
+            self.failed_modifications = 0
+            self._logger.info(
+                "Trailing stop backoff expired for %s — resuming",
+                self.symbol,
+            )
 
         # 2. VALIDATE LTP
         # We accept tick data or fetch it
@@ -239,12 +250,25 @@ class AdaptiveTrailingController:
             return False
 
     def _emergency_halt(self, reason: str) -> None:
-        """Stop trailing updates."""
+        """Temporarily pause trailing updates with exponential backoff.
+        
+        Instead of a permanent halt (which leaves positions unprotected for the
+        entire session after any transient broker API error), we back off for an
+        increasing interval and then automatically retry.
+        """
         if self._halted:
             return
         self._halted = True
         self._halt_reason = reason
-        self._logger.critical(f"🚨 Trailing HALT for {self.symbol}: {reason}")
+        self._halt_until = time.monotonic() + self._halt_backoff_sec
+        # Double backoff for next event, capped at 5 minutes
+        self._halt_backoff_sec = min(self._halt_backoff_sec * 2, 300.0)
+        self._logger.warning(
+            "⏸️ Trailing backoff for %s (%.0fs): %s",
+            self.symbol,
+            self._halt_backoff_sec / 2,  # log the actual wait, not next
+            reason,
+        )
 
     def _calculate_profit_pct(self, ltp: float) -> float:
         """Calculate current profit percentage"""

@@ -278,6 +278,12 @@ class BracketManager:
         # Configuration
         self._auto_reduce_sl = True
         self._stale_cleanup_age = 86400  # 24 hours
+        # Cache tiered-trailing thresholds once at startup — avoids os.getenv()
+        # on every tick (100-300 ticks/sec × N active brackets = hot path).
+        self._trail_tier1_pct = float(os.getenv("TRAIL_TIER1_PCT", "1.0"))
+        self._trail_tier2_pct = float(os.getenv("TRAIL_TIER2_PCT", "2.0"))
+        self._trail_tier3_pct = float(os.getenv("TRAIL_TIER3_PCT", "4.0"))
+        self._trail_tier4_pct = float(os.getenv("TRAIL_TIER4_PCT", "6.0"))
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_exit_loop,
             name='bracket-watchdog',
@@ -1211,8 +1217,6 @@ class BracketManager:
         Raises:
             None.
         """
-        import os
-        
         if not bracket.trailing_enabled:
             return
         
@@ -1236,8 +1240,11 @@ class BracketManager:
                     extra={"event": "trailing_atr_missing", "symbol": bracket.symbol},
                 )
                 bracket._atr_warning_logged = True
-            # Safe fallback keeps trailing math live without changing signal logic.
-            atr = bracket.stop_loss_price or 0.0
+            # CRITICAL FIX: Use 2% of entry_price as ATR fallback.
+            # NEVER use stop_loss_price (e.g. ₹120) as ATR — that causes
+            # Tier 3/4 to compute: high_water - (120 * 1.5) = negative SL,
+            # which disables the stop-loss entirely → unlimited loss exposure.
+            atr = bracket.entry_price * 0.02 if bracket.entry_price > 0 else 1.0
         
         # Calculate profit metrics
         if bracket.side == "BUY":
@@ -1332,16 +1339,14 @@ class BracketManager:
         - Tier 3 (4-6%): Protect 50% of profit + ATR trail
         - Tier 4 (> 6%): Protect 60% of profit + tight ATR trail
         """
-        import os
-        
         entry = bracket.entry_price
         current_sl = bracket.sl_trigger_price
         
-        # Configuration from environment
-        tier1_threshold = float(os.getenv("TRAIL_TIER1_PCT", "1.0"))
-        tier2_threshold = float(os.getenv("TRAIL_TIER2_PCT", "2.0"))
-        tier3_threshold = float(os.getenv("TRAIL_TIER3_PCT", "4.0"))
-        tier4_threshold = float(os.getenv("TRAIL_TIER4_PCT", "6.0"))
+        # Use instance-cached thresholds (set at __init__) — not os.getenv on every tick.
+        tier1_threshold = self._trail_tier1_pct
+        tier2_threshold = self._trail_tier2_pct
+        tier3_threshold = self._trail_tier3_pct
+        tier4_threshold = self._trail_tier4_pct
         
         # ═══════════════════════════════════════════════════════════
         # TIER 0: NO PROFIT (< 1%) - Use original SL

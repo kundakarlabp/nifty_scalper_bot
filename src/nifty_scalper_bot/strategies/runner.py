@@ -1844,17 +1844,46 @@ class StrategyRunner:
                 actions = {signal.action for signal in symbol_signals}
                 if len(actions) > 1:
                     sorted_actions = sorted(actions)
-                    self._logger.error(
-                        "Conflicting signals detected for %s: %s",
-                        symbol,
-                        sorted_actions,
-                        extra={
-                            "event": "signal_conflict",
-                            "symbol": symbol,
-                            "actions": sorted_actions,
-                        },
+                    # TRUE conflict: opposing directional signals (BUY vs SELL, or
+                    # CLOSE_LONG vs CLOSE_SHORT). Drop these — strategies genuinely disagree.
+                    directional = {"BUY", "SELL", "CLOSE_LONG", "CLOSE_SHORT"}
+                    active_directions = actions & directional
+                    # Opposing pairs that cannot be reconciled:
+                    is_true_conflict = (
+                        ("BUY" in active_directions and "SELL" in active_directions)
+                        or ("CLOSE_LONG" in active_directions and "CLOSE_SHORT" in active_directions)
                     )
-                    continue
+                    if is_true_conflict:
+                        self._logger.error(
+                            "Conflicting signals detected for %s: %s — dropping",
+                            symbol,
+                            sorted_actions,
+                            extra={
+                                "event": "signal_conflict",
+                                "symbol": symbol,
+                                "actions": sorted_actions,
+                            },
+                        )
+                        continue
+                    # Non-conflict mix (e.g. BUY + HOLD): keep highest-confidence
+                    # directional signal rather than discarding the whole batch.
+                    directional_signals = [
+                        s for s in symbol_signals if s.action in directional
+                    ]
+                    if directional_signals:
+                        best = max(
+                            directional_signals,
+                            key=lambda s: self._normalize_confidence(s.confidence),
+                        )
+                        self._logger.info(
+                            "Mixed actions for %s (%s) — using highest-confidence: %s",
+                            symbol,
+                            sorted_actions,
+                            best.action,
+                            extra={"event": "signal_mixed_resolved", "symbol": symbol},
+                        )
+                        aggregated[symbol] = best
+                        continue
 
                 normalized_confidences = [
                     self._normalize_confidence(sig.confidence) for sig in symbol_signals
