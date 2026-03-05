@@ -48,7 +48,7 @@ WORKDIR /app
 # FIX: Create data directories with proper permissions BEFORE
 # switching to non-root user
 # ============================================================
-RUN mkdir -p /app/data /tmp/nifty_scalper_data \
+RUN mkdir -p /app/data \
     && chmod 777 /app/data /tmp/nifty_scalper_data
 
 # Copy and setup entrypoint
