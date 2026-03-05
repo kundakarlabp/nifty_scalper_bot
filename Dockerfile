@@ -49,7 +49,7 @@ WORKDIR /app
 # switching to non-root user
 # ============================================================
 RUN mkdir -p /app/data \
-    && chmod 777 /app/data /tmp/nifty_scalper_data
+    && chmod 777 /app/data
 
 # Copy and setup entrypoint
 COPY entrypoint.sh /app/entrypoint.sh
@@ -64,7 +64,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 # NOTE: /app/data and /tmp/nifty_scalper_data are already chmod 777
 # so the appuser can write to them
 RUN groupadd -r appuser && useradd -r -g appuser appuser \
-    && chown -R appuser:appuser /app /tmp/nifty_scalper_data
+    && chown -R appuser:appuser /app
 
 USER appuser
 
