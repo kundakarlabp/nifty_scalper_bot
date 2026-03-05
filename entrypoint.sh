@@ -27,24 +27,10 @@ fi
 # === FIX: Ensure data directories are writable ===
 echo "📂 Setting up data directories..."
 
-# Check if /app/data exists and is writable
-if [ -d "/app/data" ]; then
-    if touch /app/data/.write_test 2>/dev/null; then
-        rm -f /app/data/.write_test
-        export DATA_DIR="/app/data"
-        echo "   ✅ Using /app/data (volume mounted, writable)"
-    else
-        echo "   ⚠️ /app/data exists but NOT writable (permission denied)"
-        export DATA_DIR="/tmp/nifty_scalper_data"
-        mkdir -p "$DATA_DIR"
-        echo "   ✅ Using fallback: $DATA_DIR"
-    fi
-else
-    # /app/data doesn't exist, use fallback
-    export DATA_DIR="/tmp/nifty_scalper_data"
-    mkdir -p "$DATA_DIR"
-    echo "   ✅ Using fallback: $DATA_DIR"
-fi
+# Always use /app/data
+export DATA_DIR="/app/data"
+mkdir -p "$DATA_DIR"
+echo "   ✅ Using /app/data"
 
 # Also ensure ./data exists for relative path code
 mkdir -p ./data 2>/dev/null || true
