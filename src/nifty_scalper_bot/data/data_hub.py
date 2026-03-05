@@ -285,6 +285,9 @@ class DataHub:
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._candle_builders: dict[str, CandleBuilder] = {}
         self.symbol_candles: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self.broker = getattr(self._mdm, "broker", None) or getattr(self._mdm, "_broker", None)
+        self.bar_aggregator = getattr(self._mdm, "bar_aggregator", None)
+        self.indicators_ready = False
 
     # ----------------------------------------------------------------
     # Ingestion (Write Path)
@@ -571,6 +574,42 @@ class DataHub:
             "source": source,
             "reason": None if is_fresh else "stale",
         }
+
+    async def warmup_indicators(
+        self, symbol: str, interval: str = "minute", bars: int = 50
+    ) -> None:
+        """Warm indicator state from broker candles. Args: symbol/interval/bars. Returns: None. Raises: None."""
+        try:
+            broker = self.broker
+            if broker is None:
+                LOGGER.warning("indicator_warmup_skipped_no_broker", extra={"symbol": symbol})
+                return
+            getter = getattr(broker, "get_historical_candles", None)
+            if not callable(getter):
+                LOGGER.warning(
+                    "indicator_warmup_skipped_no_historical_api",
+                    extra={"symbol": symbol},
+                )
+                return
+            candles = await asyncio.to_thread(
+                getter,
+                symbol=symbol,
+                interval=interval,
+                count=bars,
+            )
+            candle_rows = list(candles or [])
+            for candle in candle_rows:
+                if self.bar_aggregator and hasattr(self.bar_aggregator, "process_bar"):
+                    self.bar_aggregator.process_bar(candle)
+                try:
+                    normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+                    self.symbol_candles[normalized_symbol].append(dict(candle))
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.error("Failure in DataHub.warmup_indicators candle ingest: %s", exc)
+            self.indicators_ready = True
+            LOGGER.info("indicator_warmup_complete", extra={"bars": len(candle_rows)})
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("Failure in DataHub.warmup_indicators: %s", exc, exc_info=exc)
 
     # ----------------------------------------------------------------
     # Subscription Management

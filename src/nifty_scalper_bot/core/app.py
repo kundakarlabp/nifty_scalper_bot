@@ -5978,11 +5978,13 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                 if ctx.order_manager:
                     ctx.order_manager.start_monitoring()
-                if ctx.strategy_runner:
-                    instrument_cache_ready.wait()
-                    if not _data_ready(ctx.market_data_manager):
-                        LOGGER.info("waiting_for_live_ticks")
-                    ctx.strategy_runner.start()
+
+                instrument_cache_ready.wait()
+                warmup_targets = list(locals().get("targets", []) or [])
+                if ctx.data_hub and warmup_targets:
+                    for sym in warmup_targets:
+                        await ctx.data_hub.warmup_indicators(sym)
+
                 if not ctx.websocket_enabled and ctx.market_data_manager is not None:
                     ctx.market_data_manager._seed_completed = True
                 if ctx.websocket_enabled:
@@ -5997,6 +5999,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                         if inspect.isawaitable(res):
                             await res
                         ctx.stream_supervisor_started = True
+
+                if ctx.strategy_runner:
+                    if not _data_ready(ctx.market_data_manager):
+                        LOGGER.info("waiting_for_live_ticks")
+                    ctx.strategy_runner.start()
 
                 if ctx.telegram_bot:
                     LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")

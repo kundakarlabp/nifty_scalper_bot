@@ -203,6 +203,7 @@ class InstrumentResolver:
 
         # threading guard for caches
         self._lock = threading.RLock()
+        self._warmed = False
 
         # seed well-known tokens
         # self._seed_well_known()
@@ -278,6 +279,8 @@ class InstrumentResolver:
 
         # Finalize
         self._seed_well_known()
+        self._warmed = True
+        LOGGER.info("resolver_warm_loaded", extra={"event": "resolver_warm_loaded", "symbols": len(self._by_symbol)})
         LOGGER.info("InstrumentResolver ready with %d symbols", len(self._by_symbol), extra={"event": "instrument_resolver_ready"})
 
     # --- Helper Methods (Add these to the class) ---
@@ -328,6 +331,8 @@ class InstrumentResolver:
                 except Exception:
                     LOGGER.exception("instrument_resolver_ingest_error for row")
             self._seed_well_known()
+            self._warmed = True
+        LOGGER.info("resolver_warm_loaded", extra={"event": "resolver_warm_loaded", "symbols": len(self._by_symbol)})
         LOGGER.info("InstrumentResolver warmed from dump: symbols=%d", len(self._by_symbol), extra={"event": "instrument_resolver_warm_dump_complete"})
 
     def upsert(self, symbol: str, token: int, *, exchange: Optional[str] = None) -> None:
@@ -887,6 +892,8 @@ class InstrumentResolver:
 
     def get_token(self, symbol: str | int | None) -> Optional[int]:
         """Return token for symbol. Args: symbol. Returns: token or None. Raises: RuntimeError."""
+        if not self._warmed:
+            return None
         token = self.resolve(symbol)
         if not token:
             if get_settings().enable_live:

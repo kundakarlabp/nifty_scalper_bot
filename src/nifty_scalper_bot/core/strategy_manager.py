@@ -1758,6 +1758,7 @@ class StrategyManager(_BaseStrategyManager):
                     log,
                     throttle_key,
                     f"📉 NO SIGNAL | symbol={symbol} reason={reason_code}",
+                    level=10,
                     interval_sec=60.0,
                     extra=payload,
                 )

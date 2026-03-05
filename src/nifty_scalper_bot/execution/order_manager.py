@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 import nifty_scalper_bot.config.settings as app_settings
 from nifty_scalper_bot.core.trading_switch import TradingSwitchState, trading_switch
+from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.trade_store import TradeStore, TradeIntent
 from nifty_scalper_bot.data.bracket_store import BracketStore
@@ -656,6 +657,7 @@ class OrderManager:
         self._execution_policy: ExecutionPolicy | None = None
         self._options_policy = OptionsExecutionPolicy()
         self._risk_manager: RiskManager | None = None
+        self._signal_arbitrator = SignalArbitrator()
         self._client_order_index: dict[str, str] = {}
         self._last_skip_reason: str | None = None
         self._margin_block_events: deque[float] = deque()
@@ -1633,6 +1635,22 @@ class OrderManager:
         current_product = (product or "MIS").upper()
         is_intraday = (current_product == "MIS")
 
+        if not is_system_exit:
+            if self._positions.has_open_position(symbol):
+                self._logger.info("duplicate_entry_prevented")
+                return None
+            arbitration_payload = type(
+                "ArbitrationPayload",
+                (),
+                {"symbol": symbol, "action": side},
+            )()
+            if not self._signal_arbitrator.allow(arbitration_payload):
+                self._logger.info(
+                    "signal_arbitrator_blocked",
+                    extra={"symbol": symbol, "side": side},
+                )
+                return None
+
         # 3. THE INVARIANT CHECK
         if is_entry and is_intraday:
             # If SL is missing, None, or Zero -> REJECT
@@ -2045,6 +2063,8 @@ class OrderManager:
                                 # Don't fail the order just because pre-activation had issues
                                 self._logger.debug(f"Pre-activation note (non-critical): {exc}")
 
+                    if not is_system_exit:
+                        self._signal_arbitrator.register(normalized_symbol, side)
                     return order_id
                     
             except Exception as e:
@@ -4536,6 +4556,7 @@ class OrderManager:
         except Exception as e:
             self._logger.error(f"⚠️ Safety Net Cleanup Failed (Non-Critical): {e}")
 
+        self._signal_arbitrator.release(symbol)
         return exit_id
 
     def modify_order(self, order_id: str, price: float = 0.0, trigger_price: float = 0.0, quantity: int = 0) -> bool:

@@ -1345,6 +1345,10 @@ class PositionManager:
 
         return symbol.upper() in self._positions
 
+    def has_open_position(self, symbol: str) -> bool:
+        """Return whether an open position exists. Args: symbol. Returns: bool. Raises: None."""
+        return self.has_position(symbol)
+
     def get_total_exposure(self) -> float:
         """Return the total notional exposure across open positions."""
 
