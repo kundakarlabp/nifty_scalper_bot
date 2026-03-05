@@ -22,6 +22,7 @@ from functools import lru_cache
 import os
 from pathlib import Path
 from typing import Set
+from nifty_scalper_bot.config.paths import get_data_dir
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
