@@ -268,6 +268,7 @@ class VWAPProStrategy(EliteStrategy):
             extra={"event": "vwap_pro_signal_enter", "symbol": symbol},
         )
         try:
+            vwap = 0.0   # prevent closure error
 
             def _emit_no_signal(reason_code: str) -> None:
                 """Args: reason_code. Returns: None. Raises: Exception."""
@@ -277,7 +278,7 @@ class VWAPProStrategy(EliteStrategy):
                     accept_count = int(
                         self._vwap_acceptance_tracker.get(acc_key, 0) or 0
                     )
-                    vwap_diff = float(current_price - vwap)
+                    vwap_diff = float(current_price - (vwap or 0.0))
                     LOGGER.info(
                         "📉 NO SIGNAL | %s reason=%s",
                         symbol,
