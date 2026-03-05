@@ -37,7 +37,7 @@ from typing import (
 )
 
 import pytz
-
+from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
 from nifty_scalper_bot.data.robust_provider import (
     CircuitBreakerConfig,
