@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Mapping
 
+from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -25,8 +26,7 @@ class HubStore:
                 path = configured
             else:
                 # Persist inside DATA_DIR so hub state survives restarts.
-                data_dir = os.getenv("DATA_DIR", "data")
-                path = Path(data_dir) / "hub.db"
+                path = get_data_dir() / "hub.db"
                 log.info("HubStore using path: %s", path)
 
         self._path = Path(path)
@@ -38,12 +38,15 @@ class HubStore:
 
         self._lock = RLock()
         try:
-            self._conn = sqlite3.connect(self._path, check_same_thread=False)
+            self._conn = sqlite3.connect(self._path, check_same_thread=False, timeout=30)
         except sqlite3.OperationalError as e:
             log.error("Failed to open SQLite at %s: %s", self._path, e)
             raise
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA synchronous=NORMAL;")
+            self._conn.execute("PRAGMA temp_store=MEMORY;")
+            self._conn.execute("PRAGMA cache_size=-64000;")
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS wal (

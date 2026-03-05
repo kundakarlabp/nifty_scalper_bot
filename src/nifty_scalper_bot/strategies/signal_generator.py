@@ -12,6 +12,7 @@ import hashlib
 import math
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
+from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
@@ -1158,6 +1159,7 @@ class StrategyManager:
         self._last_index_vwap: float | None = None
         self._last_index_update_ts: float | None = None
         self._index_cache_log_ts: float | None = None
+        self._signal_arbitrator = SignalArbitrator()
 
         raw_config = config if config else (strategies[0].config if strategies else {})
         self._config = raw_config
@@ -1411,6 +1413,14 @@ class StrategyManager:
 
         # 5. Consensus / Ensemble Logic
         combined = self._combine_signals_ensemble(all_signals)
+        if combined is not None and not self._signal_arbitrator.allow(combined):
+            logger.info(
+                'signal_arbitration_block',
+                extra={'event': 'signal_arbitration_block', 'symbol': combined.symbol, 'action': combined.action},
+            )
+            return None
+        if combined is not None:
+            self._signal_arbitrator.register(combined.symbol, combined.action)
 
         if not combined:
             return None
@@ -1473,6 +1483,10 @@ class StrategyManager:
             )
 
         return None
+
+    def release_symbol(self, symbol: str) -> None:
+        """Release arbitration for symbol. Args: symbol. Returns: None. Raises: None."""
+        self._signal_arbitrator.release(symbol)
 
     def _combine_signals_ensemble(self, signals: list[Signal]) -> Signal | None:
         """Combine signals using confidence weights. Args: signals. Returns: Signal|None. Raises: None."""

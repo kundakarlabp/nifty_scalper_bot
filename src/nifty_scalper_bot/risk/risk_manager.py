@@ -956,6 +956,18 @@ class RiskManager:
             return False
         if snap.daily_loss_limit > 0 and snap.daily_realized <= -snap.daily_loss_limit:
             return False
+        max_trades = int(getattr(self.settings, "max_trades_per_day", 0) or 0)
+        max_open = int(getattr(self.settings, "max_open_positions", 0) or 0)
+        trades_today = int(getattr(self.position_manager, "trades_today", lambda: 0)() if callable(getattr(self.position_manager, "trades_today", None)) else 0)
+        open_positions = len(getattr(self.position_manager, "get_open_positions", lambda: [])() or [])
+        if max_trades > 0 and trades_today >= max_trades:
+            self._trip_breaker(f"max_trades_per_day breached: {trades_today}/{max_trades}")
+            self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_trades_per_day"})
+            return False
+        if max_open > 0 and open_positions > max_open:
+            self._trip_breaker(f"max_open_positions breached: {open_positions}/{max_open}")
+            self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_open_positions"})
+            return False
         return True
 
     def force_shadow(self, enabled: bool) -> None:  # pragma: no cover

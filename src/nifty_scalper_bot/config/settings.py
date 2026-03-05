@@ -893,25 +893,13 @@ class OptionUniverseSettings:
 
 
 def _default_instruments_csv_path() -> Path:
-    """Resolve to DATA_DIR volume so CSV persists across Railway restarts."""
-    import os
-    data_dir = os.getenv("DATA_DIR", "").strip()
-    if data_dir:
-        return Path(data_dir) / "instruments.csv"
-    if Path("/app/data").exists():
-        return Path("/app/data") / "instruments.csv"
-    return Path("/app/instruments.csv")
+    """Resolve canonical instruments.csv path. Args: none. Returns: Path. Raises: OSError."""
+    return get_data_dir() / "instruments.csv"
 
 
 def _default_instruments_db_path() -> Path:
-    """Resolve to DATA_DIR volume so SQLite cache persists across Railway restarts."""
-    import os
-    data_dir = os.getenv("DATA_DIR", "").strip()
-    if data_dir:
-        return Path(data_dir) / "cache.sqlite"
-    if Path("/app/data").exists():
-        return Path("/app/data") / "cache.sqlite"
-    return Path("/app/cache.sqlite")
+    """Resolve canonical cache.sqlite path. Args: none. Returns: Path. Raises: OSError."""
+    return get_data_dir() / "cache.sqlite"
 
 
 class InstrumentSettings(BaseSettings):

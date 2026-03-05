@@ -30,6 +30,7 @@ from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.utils.symbols import canonical
 
@@ -217,7 +218,7 @@ class InstrumentResolver:
         """
         LOGGER.debug("InstrumentResolver.warm() entered", extra={"event": "instrument_resolver_warm_enter"})
         
-        path_obj = Path(cache_path)
+        path_obj = get_data_dir() / Path(cache_path).name
         is_fresh = False
 
         # 1. Check Cache Freshness
@@ -299,10 +300,14 @@ class InstrumentResolver:
         try:
             # Get fieldnames from first valid row
             fieldnames = list(rows[0].keys())
-            with open(path_obj, mode='w', newline='', encoding='utf-8') as f:
+            tmp_file = path_obj.with_suffix(".tmp")
+            with open(tmp_file, mode='w', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(rows)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp_file.replace(path_obj)
             LOGGER.info("Saved instruments to %s", path_obj)
         except Exception as e:
             LOGGER.error("Failed to save CSV cache: %s", e)
