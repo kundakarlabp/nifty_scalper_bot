@@ -3374,7 +3374,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             resolver=instrument_resolver,
             default_symbols=list(poll_symbols or ["NSE:NIFTY 50"]),
             autostart=True,
-            monitor_interval_s=300.0,
+            monitor_interval_s=1.0,
             # Keep stream supervisor passive during breaker halts to avoid restart churn.
             risk_halt_getter=_risk_halt_active,
         )

@@ -80,6 +80,7 @@ class StreamSupervisor:
         self._started_at_mono: float | None = None
         self._last_tick_wall: float | None = None
         self._last_tick_mono: float | None = None
+        self._last_poll_heartbeat_mono: float = time.monotonic()
         self._consecutive_failures = 0
         self._start_count = 0
         self._last_error: str | None = None
@@ -359,6 +360,7 @@ class StreamSupervisor:
         with self._lock:
             self._last_tick_wall = now_wall
             self._last_tick_mono = now_mono
+            self._last_poll_heartbeat_mono = now_mono
             self._consecutive_failures = 0
 
     def get_health(self) -> StreamHealth:
@@ -471,7 +473,22 @@ class StreamSupervisor:
                 active_tokens = bool(self._tokens)
             if not active_tokens:
                 continue
-            if self.is_running():
+            running = self.is_running()
+            poll_heartbeat_age: float | None = None
+            last_poll_heartbeat_getter = getattr(self.streamer, "last_poll_heartbeat", None)
+            if callable(last_poll_heartbeat_getter):
+                try:
+                    poll_hb = float(last_poll_heartbeat_getter())
+                    poll_heartbeat_age = max(0.0, time.monotonic() - poll_hb)
+                except Exception as exc:  # noqa: BLE001 - defensive heartbeat read
+                    LOG.debug(
+                        "stream_supervisor_poll_heartbeat_read_failed",
+                        extra={
+                            "event": "stream_supervisor_poll_heartbeat_read_failed",
+                            "error": str(exc),
+                        },
+                    )
+            if running and (poll_heartbeat_age is None or poll_heartbeat_age <= 5.0):
                 with self._lock:
                     self._consecutive_failures = 0
                 with self._connection_lock:
@@ -479,6 +496,19 @@ class StreamSupervisor:
                     self._backoff_until_mono = 0.0
                 self._risk_halt_restart_logged = False
                 continue
+            if poll_heartbeat_age is not None and poll_heartbeat_age > 5.0:
+                LOG.warning(
+                    "polling_watchdog_restart",
+                    extra={
+                        "event": "polling_watchdog_restart",
+                        "heartbeat_age_s": poll_heartbeat_age,
+                    },
+                )
+                with suppress(Exception):
+                    self.streamer.stop()
+                with self._lock:
+                    self._started = False
+                    self._started_at_mono = None
             risk_halt_active = False
             if self._risk_halt_getter is not None:
                 try:

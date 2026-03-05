@@ -1712,6 +1712,10 @@ class StrategyManager(_BaseStrategyManager):
             "strategy_evaluation_start",
             extra={"event": "strategy_evaluation_start", "symbol": symbol},
         )
+        if self._data_hub is not None and not bool(
+            getattr(self._data_hub, "indicators_ready", False)
+        ):
+            return None
         def _log_reject(
             reason_code: str, context: dict[str, t.Any] | None = None
         ) -> None:

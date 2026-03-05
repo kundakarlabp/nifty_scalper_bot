@@ -1639,12 +1639,7 @@ class OrderManager:
             if self._positions.has_open_position(symbol):
                 self._logger.info("duplicate_entry_prevented")
                 return None
-            arbitration_payload = type(
-                "ArbitrationPayload",
-                (),
-                {"symbol": symbol, "action": side},
-            )()
-            if not self._signal_arbitrator.allow(arbitration_payload):
+            if not self._signal_arbitrator.allow(symbol, side):
                 self._logger.info(
                     "signal_arbitrator_blocked",
                     extra={"symbol": symbol, "side": side},
