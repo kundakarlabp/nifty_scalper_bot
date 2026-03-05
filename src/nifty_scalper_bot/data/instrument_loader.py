@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import io
 import sqlite3
 import zipfile
@@ -536,7 +537,8 @@ def write_instrument_rows_to_csv(
             field_names.insert(0, "instrument_token")
         target_path = Path(csv_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        with target_path.open("w", encoding="utf-8", newline="") as handle:
+        tmp_file = target_path.with_suffix(".tmp")
+        with tmp_file.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(
                 handle, fieldnames=field_names, extrasaction="ignore"
             )
@@ -548,6 +550,9 @@ def write_instrument_rows_to_csv(
                 ) not in {None, ""}:
                     row["instrument_token"] = row.get("instrumenttoken")
                 writer.writerow(row)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_file.replace(target_path)
         LOGGER.info(
             "Condition met: instrument_csv_write_success",
             extra={

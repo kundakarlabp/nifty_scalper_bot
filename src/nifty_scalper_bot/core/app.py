@@ -47,6 +47,7 @@ from nifty_scalper_bot.infra.watchdog import start_watchdog
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 SYNC_LOCK = threading.Lock()
+instrument_cache_ready = threading.Event()
 
 
 def _run_sync_locked(operation: Callable[[], Any]) -> Any:
@@ -62,6 +63,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.base import AppConfig
+from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
@@ -5332,11 +5334,12 @@ async def startup_sequence(ctx: BotContext) -> None:
     # Create Data Directory
     # =========================================================
     try:
-        os.makedirs("data", exist_ok=True)
+        get_data_dir()
     except Exception as e:
         LOGGER.critical(f"❌ Failed to create data directory: {e}")
 
     _validate_config(ctx.config)
+    instrument_cache_ready.clear()
     broker_ready = True
     guard = ctx.session_guard
 
@@ -5367,6 +5370,11 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info(f"Connected to broker: {profile.get('user_name') or 'User'}")
             if guard:
                 guard.mark_session_valid()
+            try:
+                await _reconcile_state(ctx)
+                LOGGER.info("startup_position_reconciliation_complete")
+            except Exception as reconcile_exc:
+                LOGGER.error("Failure in startup position reconciliation: %s", reconcile_exc)
     except Exception as e:
         LOGGER.error(f"Broker connection failed: {e}")
         broker_ready = False
@@ -5454,6 +5462,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.info(
                     f"✅ Synced {synced_count}/{total_items} NFO instruments to resolver"
                 )
+                if synced_count <= 0:
+                    raise RuntimeError("InstrumentResolver initialized with empty token cache")
+                instrument_cache_ready.set()
 
                 # ✅ FIX #3: Populate _option_contracts from broker NFO instruments
                 if hasattr(ctx.instrument_resolver, "sync_nfo_from_broker"):
@@ -5968,6 +5979,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.order_manager:
                     ctx.order_manager.start_monitoring()
                 if ctx.strategy_runner:
+                    instrument_cache_ready.wait()
                     if not _data_ready(ctx.market_data_manager):
                         LOGGER.info("waiting_for_live_ticks")
                     ctx.strategy_runner.start()

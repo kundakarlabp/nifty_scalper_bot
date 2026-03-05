@@ -625,8 +625,7 @@ class OrderManager:
         if not hasattr(self, "_logger"):
             self._logger = get_logger(__name__)
         self._broker_circuit = CircuitBreaker()
-        _data_dir = Path(os.getenv("DATA_DIR", "data"))
-        _data_dir.mkdir(parents=True, exist_ok=True)
+        _data_dir = get_data_dir()
         self._history_path = Path(history_path or _data_dir / "order_history.json")
         self._orders: dict[str, OrderDetails] = {}
         self._history: deque[OrderDetails] = deque(maxlen=1000)
@@ -1548,6 +1547,32 @@ class OrderManager:
             return 0.0
         return round(round(price / tick_size) * tick_size, 2)
 
+    def _validate_live_execution_safety(self) -> bool:
+        """Validate live execution preconditions. Args: none. Returns: bool. Raises: None."""
+        try:
+            enable_live = (os.getenv("ENABLE_LIVE", "false") or "false").strip().lower() == "true"
+            execution_mode = (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
+            if not enable_live or execution_mode != "LIVE":
+                self._logger.error("live_execution_guard_block", extra={"event": "live_execution_guard_block", "reason": "mode_or_flag"})
+                return False
+            broker_connected = True
+            if hasattr(self._broker, "is_connected") and callable(getattr(self._broker, "is_connected")):
+                broker_connected = bool(self._broker.is_connected())
+            if not broker_connected:
+                self._logger.error("live_execution_guard_block", extra={"event": "live_execution_guard_block", "reason": "broker_disconnected"})
+                return False
+            available_margin = None
+            margin_fn = getattr(self._margin_engine, "available_margin", None)
+            if callable(margin_fn):
+                available_margin = float(margin_fn() or 0.0)
+            if available_margin is not None and available_margin <= 0:
+                self._logger.error("live_execution_guard_block", extra={"event": "live_execution_guard_block", "reason": "insufficient_margin"})
+                return False
+            return True
+        except Exception as e:
+            self._logger.error("Failure in _validate_live_execution_safety: %s", e)
+            return False
+
     def place_order(
         self,
         symbol: str,
@@ -1582,6 +1607,10 @@ class OrderManager:
         # 🛡️ DETECT EXIT vs ENTRY (must be BEFORE any guard)
         normalized_tag = (tag or "").lower()
         is_system_exit = any(x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"])
+
+        if not is_system_exit and (os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"):
+            if not self._validate_live_execution_safety():
+                return None
 
         # 🛡️ CIRCUIT BREAKER CHECK — skipped for system exits
         if self._consecutive_failures >= self._max_failures:

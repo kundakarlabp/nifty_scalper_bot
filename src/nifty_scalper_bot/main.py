@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
 from dotenv import load_dotenv
+from nifty_scalper_bot.config.paths import get_data_dir
 
 # -------------------------------------------------------
 # BASIC PROCESS SETUP - PRODUCTION-GRADE ENV LOADING
@@ -65,32 +66,10 @@ def _load_env_file() -> None:
 
 
 def _ensure_data_directory() -> None:
-    """Ensure data directory exists and is writable.
-    
-    ✅ FIX: Prevents '[Errno 13] Permission denied: /app/data/trades.json'
-    """
-    data_dirs = [
-        Path("/app/data"),
-        Path.cwd() / "data",
-    ]
-    
-    for data_dir in data_dirs:
-        try:
-            data_dir.mkdir(parents=True, exist_ok=True)
-            test_file = data_dir / ".write_test"
-            test_file.write_text("test")
-            test_file.unlink()
-            os.environ["DATA_DIR"] = str(data_dir)
-            print(f"✅ DATA DIRECTORY: {data_dir} (writable)", flush=True)
-            return
-        except (PermissionError, OSError) as e:
-            print(f"⚠️ Cannot use {data_dir}: {e}", flush=True)
-            continue
-    
-    fallback = Path.cwd() / "data"
-    fallback.mkdir(parents=True, exist_ok=True)
-    os.environ["DATA_DIR"] = str(fallback)
-    print(f"⚠️ Using fallback data directory: {fallback}", flush=True)
+    """Ensure canonical DATA_DIR exists. Args: none. Returns: None. Raises: OSError."""
+    data_dir = get_data_dir()
+    os.environ["DATA_DIR"] = str(data_dir)
+    print(f"✅ DATA DIRECTORY: {data_dir}", flush=True)
 
 
 _load_env_file()
