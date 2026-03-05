@@ -34,6 +34,58 @@ OrderListener = Callable[[dict[str, Any]], None]
 TickListener = Callable[[dict[str, Any]], None]
 
 
+@dataclass(slots=True)
+class CandleBuilder:
+    """Build minute OHLCV candles from ticks. Args: none; Returns: none; Raises: none."""
+
+    current_minute: datetime | None = None
+    candle: dict[str, Any] | None = None
+
+    def update(self, tick: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Update builder state with a tick. Args: tick; Returns: closed candle|None; Raises: ValueError."""
+        timestamp_raw = tick.get("timestamp")
+        if not isinstance(timestamp_raw, datetime):
+            msg = "tick.timestamp must be datetime"
+            raise ValueError(msg)
+        timestamp = timestamp_raw
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        minute_ts = timestamp.replace(second=0, microsecond=0)
+
+        price = float(tick.get("price") or tick.get("ltp") or tick.get("last_price") or 0.0)
+        volume = float(tick.get("volume") or 0.0)
+
+        if self.current_minute != minute_ts:
+            closed = dict(self.candle) if self.candle else None
+            self.current_minute = minute_ts
+            self.candle = {
+                "timestamp": minute_ts,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": volume,
+            }
+            return closed
+
+        if self.candle is None:
+            self.candle = {
+                "timestamp": minute_ts,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": volume,
+            }
+            return None
+
+        self.candle["high"] = max(float(self.candle["high"]), price)
+        self.candle["low"] = min(float(self.candle["low"]), price)
+        self.candle["close"] = price
+        self.candle["volume"] = float(self.candle["volume"]) + volume
+        return None
+
+
 class EventBus:
     """Generic in-process event bus.
 
@@ -231,6 +283,8 @@ class DataHub:
             os.getenv("HISTORY_FRESHNESS_MAX_AGE_SECONDS", "120")
         )
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._candle_builders: dict[str, CandleBuilder] = {}
+        self.symbol_candles: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     # ----------------------------------------------------------------
     # Ingestion (Write Path)
@@ -258,6 +312,23 @@ class DataHub:
             raise RuntimeError(
                 f"Malformed canonical symbol in ingest_tick: {canonical_tick['symbol']}"
             )
+
+        try:
+            tick_dt = canonical_tick.get("timestamp")
+            if isinstance(tick_dt, (int, float)):
+                canonical_tick["timestamp"] = datetime.fromtimestamp(float(tick_dt), tz=timezone.utc)
+            elif isinstance(tick_dt, str):
+                canonical_tick["timestamp"] = datetime.fromisoformat(tick_dt.replace("Z", "+00:00"))
+            elif tick_dt is None:
+                canonical_tick["timestamp"] = datetime.now(timezone.utc)
+            if "price" not in canonical_tick:
+                canonical_tick["price"] = float(canonical_tick.get("ltp") or canonical_tick.get("last_price") or 0.0)
+            builder = self._candle_builders.setdefault(normalized_symbol, CandleBuilder())
+            closed_candle = builder.update(canonical_tick)
+            if closed_candle is not None:
+                self.symbol_candles[normalized_symbol].append(closed_candle)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("Failure in DataHub.ingest_tick candle_build: %s", exc, exc_info=exc)
 
         with self._lock:
             # 1. Update Cache

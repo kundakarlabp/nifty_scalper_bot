@@ -1220,17 +1220,17 @@ class IndicatorEngine:
         try:
             if not prices or not volumes or len(prices) != len(volumes):
                 return None
-            pv = 0.0
-            vol = 0.0
+            cum_pv = 0.0
+            cum_vol = 0.0
             for price, volume in zip(prices, volumes, strict=False):
                 v = float(volume)
                 if v <= 0:
-                    continue  # Skip zero/negative volume bars instead of crashing
-                pv += float(price) * v
-                vol += v
-            if vol <= 0:
-                return None  # All-zero volume window — return None, don't crash
-            result = pv / vol
+                    v = 1.0
+                cum_pv += float(price) * v
+                cum_vol += v
+            if cum_vol <= 0:
+                return None
+            result = cum_pv / cum_vol
             if not (result > 0):  # catches NaN and negative
                 return None
             return result

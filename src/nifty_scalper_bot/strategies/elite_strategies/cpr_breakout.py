@@ -63,7 +63,8 @@ class CPRBreakoutStrategy(EliteStrategy):
             "ltp",
             "volume",
             "average_volume",
-            "atr"
+            "atr",
+            "futures_vwap",
         }
 
     def _evaluate_signal(
@@ -96,9 +97,15 @@ class CPRBreakoutStrategy(EliteStrategy):
             vol = float(indicators.get("volume") or 0.0)
             avg_vol = float(indicators.get("average_volume") or 1.0)
             atr = float(indicators.get("atr") or 0.0)
+            futures_vwap = float(
+                indicators.get("futures_vwap")
+                or indicators.get("nifty_fut_vwap")
+                or indicators.get("nifty_index_vwap")
+                or 0.0
+            )
 
             # Sanity Check
-            if pivot == 0 or tc == 0 or bc == 0:
+            if pivot == 0 or tc == 0 or bc == 0 or futures_vwap <= 0:
                 return None
 
             # 2. Update Range History (For NR7)

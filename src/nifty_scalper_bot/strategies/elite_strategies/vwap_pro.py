@@ -94,6 +94,7 @@ class VWAPProStrategy(EliteStrategy):
         """Declare ALL indicators VWAPPro needs."""
         return {
             "vwap",
+            "futures_vwap",
             "atr",
             "volume",
             "avg_volume",
@@ -402,13 +403,13 @@ class VWAPProStrategy(EliteStrategy):
                 _emit_no_signal("cooldown_active")
                 return None
 
-            # 📊 ISSUE 1 FIX: Hard-block on missing Futures VWAP (No spot fallback)
-            # ✅ BONUS: Prefer exchange VWAP (full-session, from broker) over rolling VWAP
-            _exch_vwap = indicators.get("exchange_vwap")
-            _rolling_vwap = indicators.get("vwap")
+            # Use underlying futures VWAP for option decisions.
             vwap = float(
-                _exch_vwap or _rolling_vwap or 0.0
-            )  # ✅ Exchange > Rolling > 0
+                indicators.get("futures_vwap")
+                or indicators.get("nifty_fut_vwap")
+                or indicators.get("nifty_index_vwap")
+                or 0.0
+            )
 
             # ✅ FIX 1: Enforce minimum ATR floor.
             # Option 1-min bars produce micro-ATR (e.g. 0.24 for 828₹ option).

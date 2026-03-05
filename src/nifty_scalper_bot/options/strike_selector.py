@@ -688,7 +688,7 @@ class StrikeSelector:
             )
         step = int(getattr(self._selector_settings, "strike_step", 50) or 50)
         atm = _nearest_strike(underlying_price, step)
-        window = float(max(step, 1) * 2)
+        window = float(max(step, 1))
         active_contracts = [
             contract
             for contract in contracts
