@@ -4591,21 +4591,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     global _LATEST_CTX
     _LATEST_CTX = ctx
-    # Initialize Telegram Bot with all components wired
-    try:
-        _setup_telegram(ctx)
-        # ✅ FIX: Only log success if the bot object was actually created
-        if ctx.telegram_bot:
-            LOGGER.info(
-                "✅ Telegram Bot initialized", extra={"event": "telegram_ready"}
-            )
-        else:
-            # This explains why you might see "Initialized" but get no messages
-            LOGGER.warning("⚠️ Telegram Bot NOT initialized (Check Token/Chat ID)")
-    except Exception as telegram_exc:
-        LOGGER.error(
-            f"❌ Telegram initialization failed: {telegram_exc}", exc_info=True
-        )
+    # NOTE: Full TelegramBot initialization happens later in initialize_components()
+    # via the telegram_bot_instance block. The old _setup_telegram() helper was
+    # removed because it created a bot that was immediately reset to None, causing
+    # a duplicate-init conflict with the proper telegram_bot_instance path below.
 
     if _HTTP_APP is not None:
         try:
@@ -5024,9 +5013,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             )
 
             telegram_plain_flag = get_bool("TELEGRAM__PLAIN_TEXT", True)
+            # Default polling to True: Without it, _start_polling_if_needed() exits
+            # immediately, leaving the Application initialized but never receiving
+            # updates. Set TELEGRAM__POLLING_ENABLED=false to explicitly disable.
             polling_enabled_flag = coalesce_bool(
                 "TELEGRAM__POLLING_ENABLED",
-                default=bool(telegram_cfg.enable_polling_fallback),
+                default=True,
             )
 
             paper_mode_getters: dict[str, Callable[[], bool]] = {
@@ -5254,13 +5246,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     except Exception as exc:  # pragma: no cover
         LOGGER.warning("Telegram console disabled: %s", exc)
 
-    if (
-        settings.notifications.legacy_console_enabled
-        and telegram_bot_instance is not None
-        and telegram_chat_id is not None
-    ):
+    if telegram_bot_instance is not None and telegram_chat_id is not None:
         ctx.telegram_bot = telegram_bot_instance
-        LOGGER.info("Telegram enabled for chat_id=%s", telegram_chat_id)
+        LOGGER.info(
+            "✅ TelegramBot ready for chat_id=%s (polling will start on .start())",
+            telegram_chat_id,
+        )
 
     return ctx
 
@@ -6008,6 +5999,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.telegram_bot:
                     LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
                     await ctx.telegram_bot.start()
+                    LOGGER.info("✅ Telegram Bot polling active — commands now live.")
 
                 ctx.subsystems_started = True
                 LOGGER.info("✅ All subsystems started.")
@@ -6103,6 +6095,28 @@ async def startup_sequence(ctx: BotContext) -> None:
     await _notify(
         "BOT_STARTED", {"mode": "LIVE" if not ctx.shadow_mode_enabled else "SHADOW"}
     )
+    # Send rich HTML startup message via the full TelegramBot (if polling started)
+    if ctx.telegram_bot is not None and ctx.telegram_bot._app is not None:
+        try:
+            mode_icon = "🔴" if not ctx.shadow_mode_enabled else "🟡"
+            mode_text = "LIVE TRADING" if not ctx.shadow_mode_enabled else "PAPER / SHADOW"
+            from datetime import datetime as _dt
+            startup_html = (
+                f"<b>{mode_icon} Nifty Scalper Bot Online</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🕒 <b>Time:</b> <code>{_dt.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
+                f"⚙️ <b>Mode:</b> <code>{mode_text}</code>\n"
+                f"📡 <b>Commands:</b> <code>/help • /status • /positions</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Send /help for all 80+ commands.</i>"
+            )
+            await ctx.telegram_bot._app.bot.send_message(
+                chat_id=ctx.telegram_bot.deps.chat_id,
+                text=startup_html,
+                parse_mode="HTML",
+            )
+        except Exception as _tg_exc:
+            LOGGER.debug("Startup Telegram message failed: %s", _tg_exc)
 
     # ----------------------------------------------------------------
     # ✅ FIX: Enable Persistence & Background Services
