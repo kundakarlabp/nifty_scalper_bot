@@ -2487,11 +2487,14 @@ class StrategyRunner:
             self._last_tick_seen_ts = now_mono
             # ✅ FIX: Throttle stall warning to 30s — same-bar-skip causes expected
             # gaps between _last_global_eval_ts updates (one eval per bar ≈ 60s cycle).
-            if (self.ready and now_mono - self._last_global_eval_ts > 5.0
-                    and now_mono - self._last_stall_warn_ts > 30.0):
+            # ✅ FIX D: Raise stall threshold to 120s. Options tick once per ~13min;
+            # the 5s threshold fired constantly between normal tick batches.
+            # A genuine stall = no strategy evaluation for > 2 full minutes with active ticks.
+            if (self.ready and now_mono - self._last_global_eval_ts > 120.0
+                    and now_mono - self._last_stall_warn_ts > 120.0):
                 self._last_stall_warn_ts = now_mono
                 self._logger.warning(
-                    "Strategy evaluation stalled >5s (once per 30s)",
+                    "Strategy evaluation stalled >120s (once per 120s)",
                     extra={"event": "strategy_eval_stall",
                            "stall_sec": round(now_mono - self._last_global_eval_ts, 1)},
                 )
@@ -3920,8 +3923,24 @@ class StrategyRunner:
                             )
                             self._last_bar_ts[symbol] = now
                             return
-                        if last_bar_ts and state._last_eval_bar_ts:
-                            if last_bar_ts <= state._last_eval_bar_ts:
+                        # ✅ FIX K: Same-bar-skip for options with no live bars.
+                        # When _symbol_history is empty (no live bars ever completed),
+                        # _last_bar_ts[symbol] is the last HYDRATION bar timestamp —
+                        # a static value that never advances.  Using it for the same-bar-skip
+                        # comparison means after the FIRST evaluation, state._last_eval_bar_ts
+                        # equals last_bar_ts PERMANENTLY, blocking every subsequent evaluation.
+                        # Fix: when no live bars, use current-minute-bucket as the effective
+                        # bar_ts (mirrors the PHASE 7 same-bar-skip logic exactly).
+                        _has_live_bars_p9 = bool(self._symbol_history.get(symbol))
+                        _effective_last_bar_ts = last_bar_ts
+                        if not _has_live_bars_p9 and last_bar_ts is not None:
+                            _now_bucket = time_module.time()
+                            _bucket_ts = _now_bucket - (_now_bucket % 60)
+                            _effective_last_bar_ts = datetime.fromtimestamp(
+                                _bucket_ts, tz=timezone.utc
+                            )
+                        if _effective_last_bar_ts and state._last_eval_bar_ts:
+                            if _effective_last_bar_ts <= state._last_eval_bar_ts:
                                 logged_map = getattr(
                                     self, "_same_bar_skip_logged", None
                                 )
@@ -3931,10 +3950,10 @@ class StrategyRunner:
                                 extra_payload = {
                                     "event": "strategy_eval_skipped_same_bar",
                                     "symbol": symbol,
-                                    "bar_ts": last_bar_ts.isoformat(),
+                                    "bar_ts": _effective_last_bar_ts.isoformat(),
                                 }
-                                if logged_map.get(symbol) != last_bar_ts:
-                                    logged_map[symbol] = last_bar_ts
+                                if logged_map.get(symbol) != _effective_last_bar_ts:
+                                    logged_map[symbol] = _effective_last_bar_ts
                                     self._logger.debug(
                                         "Condition met: strategy_eval_skipped_same_bar",
                                         extra=extra_payload,
@@ -3942,18 +3961,21 @@ class StrategyRunner:
                                 return
                         if last_bar_ts:
                             bar_age = (now - last_bar_ts).total_seconds()
-                            # Only reject on stale bar when _symbol_history has live bars.
-                            # mark_ready() pre-initialises _last_bar_ts to datetime.now()
-                            # which means bar_age grows unboundedly until the first live
-                            # bar completes.  Without this guard, every tick for the first
-                            # ~15+ minutes hits bar_age > 120 and silently returns.
+                            # ✅ FIX E: Raise stale-bar threshold for options/futures.
+                            # Options tick once per ~13 min; bar_builder needs 2 different
+                            # minute-buckets to emit a completed bar, so options may have
+                            # live_bars but last_bar_ts is 13-26 min old. 120s threshold
+                            # fired on every tick for these symbols. Use per-type threshold:
+                            # 900s for NFO options/futures, 300s for index futures, 180s others.
                             has_live_bars = bool(self._symbol_history.get(symbol))
-                            if has_live_bars and bar_age > 120.0:
+                            _is_nfo = any(x in symbol for x in ("CE", "PE", "FUT"))
+                            _stale_bar_max = 900.0 if _is_nfo else 180.0
+                            if has_live_bars and bar_age > _stale_bar_max:
                                 log_throttled(
                                     self._logger,
                                     f"strategy_eval_stale_bar_{symbol}",
                                     "Condition met: strategy_eval_stale_bar",
-                                    interval_sec=60.0,
+                                    interval_sec=300.0,
                                     level=logging.WARNING,
                                     extra={
                                         "event": "strategy_eval_stale_bar",
@@ -3992,8 +4014,10 @@ class StrategyRunner:
                                 if cooldown_until and now_ts >= cooldown_until:
                                     cooldown_map.pop(cooldown_key, None)
                         state._last_strategy_eval = now
-                        if last_bar_ts:
-                            state._last_eval_bar_ts = last_bar_ts
+                        # ✅ FIX K (continued): store the effective bar_ts so the
+                        # same-bar-skip correctly advances each minute for options.
+                        if _effective_last_bar_ts:
+                            state._last_eval_bar_ts = _effective_last_bar_ts
                         should_evaluate = True
 
                 if should_evaluate:
@@ -4074,10 +4098,13 @@ class StrategyRunner:
                         mdm_last_tick = getattr(
                             self._market_data, "_last_tick_time", {}
                         ).get(symbol)
-                        # Use 30s threshold for options/futures (low-liquidity ticks
-                        # are normal for NFO). 3s was too tight and blocked evaluation.
+                        # ✅ FIX H: MDM stale-tick threshold for NFO options/futures
+                        # is raised to 900s.  Options legitimately have 13-min gaps
+                        # between ticks; the previous 30s threshold caused the MDM
+                        # check to fire on every single option evaluation, returning
+                        # before _last_global_eval_ts was updated → stall watchdog spam.
                         _is_option = any(x in symbol for x in ("CE", "PE", "FUT"))
-                        _stale_thresh = 30.0 if _is_option else 5.0
+                        _stale_thresh = 900.0 if _is_option else 10.0
                         if (
                             isinstance(mdm_last_tick, (int, float))
                             and time.time() - float(mdm_last_tick) > _stale_thresh
@@ -4087,7 +4114,7 @@ class StrategyRunner:
                                 f"stale_mdm_tick_{symbol}",
                                 f"⏰ Stale MDM tick — skipping: {symbol} "
                                 f"age={time.time()-float(mdm_last_tick):.1f}s",
-                                interval_sec=30.0,
+                                interval_sec=300.0,
                                 level=logging.WARNING,
                             )
                             return

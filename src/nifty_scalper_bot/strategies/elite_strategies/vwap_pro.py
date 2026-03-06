@@ -31,7 +31,7 @@ class VWAPProStrategy(EliteStrategy):
     COOLDOWN_SECONDS = 45    # ✅ FIX #5: Reduced from 60s → 45s; prevents overtrading while capturing fast NIFTY moves
     VWAP_ACCEPTANCE_BARS = 1  # ✅ FIX #5: Reduced from 2 → 1; index bias gate is already a strong 2-condition filter
     TELEMETRY_LOG_EVERY = 5
-    VOLUME_GRACE_SECONDS = 120.0
+    VOLUME_GRACE_SECONDS = 900.0  # ✅ FIX C: Extended from 120s → 900s (15 min). NFO options tick ≈once/13min between batches; 120s grace expired before next tick arrived → volume_below_threshold on every call.
 
     __slots__ = (
         "_vwap_config",
@@ -603,10 +603,17 @@ class VWAPProStrategy(EliteStrategy):
                 _emit_no_signal("premium_too_low")
                 return None
 
-            # ✅ FIX 3: Allow entry within 1 ATR below VWAP.
-            # Index bias already confirms direction. This only rejects collapsing premiums.
+            # ✅ FIX A: Collapsing-premium guard uses OPTION VWAP, not futures VWAP.
+            # Bug: `vwap` above = futures VWAP (~24,625).  Comparing option premium
+            # (₹100–400) against futures VWAP made the check ALWAYS True → 100% rejection.
+            # Fix: use the option's own session VWAP (exchange-provided or indicator-computed).
+            # Only reject when the option premium has collapsed well below its own VWAP.
+            # If the option VWAP is unavailable, skip the gate (index-bias already guards direction).
+            _option_vwap = float(
+                indicators.get("vwap") or indicators.get("exchange_vwap") or 0.0
+            )
             _vwap_slack = atr * 1.0
-            if current_price < (vwap - _vwap_slack):
+            if _option_vwap > 0 and current_price < (_option_vwap - _vwap_slack):
                 self._telemetry["skipped_vwap"] += 1
                 if (
                     self._telemetry["skipped_vwap"] <= 3
@@ -614,14 +621,14 @@ class VWAPProStrategy(EliteStrategy):
                 ):
                     LOGGER.info(
                         f"📏 OPT VWAP: {symbol} {direction} | "
-                        f"Price={current_price:.2f} VWAP={vwap:.2f}",
+                        f"Price={current_price:.2f} OptVWAP={_option_vwap:.2f}",
                         extra={"event": "vwap_pro_opt_vwap_reject", "symbol": symbol},
                     )
                 self._log_no_signal_reason(
                     "price_below_vwap",
                     symbol=symbol,
                     ltp=current_price,
-                    vwap=vwap,
+                    vwap=_option_vwap,
                 )
                 self._reset_acceptance(
                     acc_key, symbol=symbol, reason_code="price_below_vwap"
@@ -659,7 +666,20 @@ class VWAPProStrategy(EliteStrategy):
 
             # 🔊 ISSUE 4 FIX: Reset acceptance on Volume rejection
             vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("avg_volume") or 0.0)
+            avg_vol = float(indicators.get("avg_volume") or indicators.get("average_volume") or 0.0)
+            # ✅ FIX B: Seed last_valid_volume from hydration data on first call.
+            # Options with sparse ticks (≈1 per 13 min) never complete a 60-second live
+            # bar, so indicators["volume"] is always 0 for the current bar.  The grace-
+            # period fallback only helps if the cache was PREVIOUSLY seeded.  Without this
+            # seed, every option evaluation hits volume_below_threshold → 100% rejection.
+            # Hydration loads historical session bars with real volumes; use the last
+            # historical bar as the initial "valid" reading so grace-period kicks in.
+            if symbol not in self._last_valid_volume and avg_vol > 0:
+                # Use avg_volume itself as a proxy for the last valid bar volume.
+                # This is conservative: any bar whose vol ≥ avg*0.9 would pass anyway.
+                self._last_valid_volume[symbol] = avg_vol
+                self._last_valid_avg_volume[symbol] = avg_vol
+                self._last_valid_volume_ts[symbol] = now
             if vol > 0 and avg_vol > 0:
                 self._last_valid_volume[symbol] = vol
                 self._last_valid_avg_volume[symbol] = avg_vol

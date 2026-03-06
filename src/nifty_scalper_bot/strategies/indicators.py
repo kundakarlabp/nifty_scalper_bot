@@ -793,12 +793,17 @@ class IndicatorEngine:
                 )
                 return False
             gap_seconds = (curr - prev).total_seconds()
-            if gap_seconds > 120:
+            # ✅ FIX F: NFO options/futures tick once per ~13 min; a 2-min gap
+            # is normal.  The 120s threshold spammed the log on every option tick.
+            # Use 600s (10 min) for NFO symbols, 300s for spot index.
+            _is_nfo_sym = any(x in symbol for x in ("CE", "PE", "FUT", "NFO:"))
+            _gap_warn_thresh = 600.0 if _is_nfo_sym else 300.0
+            if gap_seconds > _gap_warn_thresh:
                 log_throttled(
                     LOGGER,
                     f"indicator_gap_{symbol}",
                     "Condition met: indicator_integrity_missing_candle",
-                    interval_sec=60.0,
+                    interval_sec=300.0,
                     level=logging.WARNING,
                     extra={
                         "event": "indicator_integrity_missing_candle",
