@@ -2588,15 +2588,19 @@ class StrategyRunner:
         total_bars = 0
 
         try:
-            # 1. Check Hydration Flag (Set by ingest_historical_bar)
-            is_hydrated = getattr(self, "_startup_hydrated", False)
+            # FIX 1: Verify actual indicator arrays are warmed up
+            is_fully_warmed_up = True
+            targets = tuple(self._active_symbols)
 
-            # Also check memory just in case
-            has_data = bool(self._last_bar_ts)
+            for symbol in targets:
+                bars = self._indicator_engine.get_history(symbol)
+                if not bars or len(bars) < self._required_candles:
+                    is_fully_warmed_up = False
+                    break
 
-            if is_hydrated or has_data:
+            if is_fully_warmed_up:
                 self._logger.info(
-                    "⏭️ Skipping StrategyRunner historical backfill (startup hydration already completed)"
+                    "⏭️ Skipping historical backfill (indicators fully warmed up)"
                 )
                 return
 
