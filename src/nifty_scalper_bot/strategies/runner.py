@@ -1077,8 +1077,27 @@ class StrategyRunner:
         self._startup_hydrated = True
 
         try:
-            # 1. Extract timestamps
+            # 1. Extract + normalise timestamp
             ts = data["timestamp"]
+
+            # BUG-ε FIX: defensive string → datetime conversion.
+            # If upstream parsing silently failed (bare except: pass) ts may
+            # still be a string.  ts + timedelta would then raise TypeError.
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            elif not isinstance(ts, datetime):
+                try:
+                    ts = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                except Exception as _ts_err:
+                    self._logger.error(
+                        f"❌ Hydration Ingest: unparseable timestamp for "
+                        f"{data.get('symbol')}: {ts!r} — {_ts_err}"
+                    )
+                    return
+
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
             end_ts = ts + timedelta(minutes=1)
 
             # 2. Construct EXACTLY matching the signature

@@ -2658,9 +2658,14 @@ class MarketDataManager:
                 canonical_symbol = enforce_canonical(normalize_symbol(str(symbol)))
                 token = self._token_by_symbol.get(canonical_symbol)
                 if not token:
-                    raise RuntimeError(
-                        f"WARMUP failed: missing token for {canonical_symbol}"
+                    # BUG-β FIX: Never raise — skip and warn so remaining
+                    # symbols are still warmed and callers don't abort.
+                    self._logger.warning(
+                        "WARMUP_SKIP: missing token for %s", canonical_symbol,
+                        extra={"event": "warmup_skip_missing_token",
+                               "symbol": canonical_symbol},
                     )
+                    continue
 
                 if asyncio.iscoroutinefunction(fetcher):
                     candles = await fetcher(
