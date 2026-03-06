@@ -1139,7 +1139,7 @@ class StrategyRunner:
                     self._last_bar_ts[normalized] = datetime.now(timezone.utc)
 
         # 5. THE KILL SWITCH: Prevents fallback backfill logic from running
-        self._startup_hydrated = True
+        self._startup_hydrated = False
         self._runner_state = RunnerState.EXECUTION_ENABLED
         self.ready = True
         self._logger.info("🚀 StrategyRunner execution enabled")
@@ -3597,14 +3597,14 @@ class StrategyRunner:
                 # the first live minute bar completed (up to 59 seconds after startup).
                 # Use indicator_engine.has_min_bars() which counts hydrated bars too.
                 min_bars_needed = self._required_candles or 20
+                # FIX 3: Hard gate to prevent evaluation before warmup is complete
                 if not self._indicator_engine.has_min_bars(symbol, min_bars_needed):
-                    _ind_count = len(self._indicator_engine.get_history(symbol) or [])
                     log_throttled(
                         self._logger,
-                        f"p7_bars_low_{symbol}",
-                        f"⏳ PHASE7 bars low: {symbol} need={min_bars_needed} has={_ind_count}",
+                        f"p7_warmup_{symbol}",
+                        f"⏳ Warmup active: {symbol} waiting for {min_bars_needed} bars",
                         interval_sec=60.0,
-                        level=logging.INFO,
+                        level=logging.DEBUG, # Changed to DEBUG to stop log flooding
                     )
                     return
 
