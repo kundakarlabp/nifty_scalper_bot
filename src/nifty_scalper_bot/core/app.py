@@ -5639,44 +5639,68 @@ async def startup_sequence(ctx: BotContext) -> None:
                         runner = ctx.strategy_runner
 
                         for c in records:
-                            # 2. Robust Parsing
-                            if isinstance(c, dict):
-                                ts = c.get("date")
-                                o, h, l, c_p, v = (
-                                    c.get("open"),
-                                    c.get("high"),
-                                    c.get("low"),
-                                    c.get("close"),
-                                    c.get("volume", 0),
-                                )
-                            elif isinstance(c, list):
-                                ts, o, h, l, c_p, v = c[0], c[1], c[2], c[3], c[4], c[5]
-                            else:
-                                continue
+                            # Per-candle guard: one bad candle must not abort
+                            # the remaining bars for this symbol.
+                            try:
+                                # --- Parse OHLCV --------------------------------
+                                if isinstance(c, dict):
+                                    # kiteconnect SDK format: dict with "date" key
+                                    ts = c.get("date") or c.get("timestamp")
+                                    o  = c.get("open")
+                                    h  = c.get("high")
+                                    l  = c.get("low")
+                                    c_p = c.get("close")
+                                    v  = c.get("volume", 0)
+                                elif isinstance(c, (list, tuple)) and len(c) >= 6:
+                                    # Raw REST format: [ts, O, H, L, C, V] or
+                                    # [ts, O, H, L, C, V, OI] — index-safe slice
+                                    ts, o, h, l, c_p, v = (
+                                        c[0], c[1], c[2], c[3], c[4], c[5]
+                                    )
+                                else:
+                                    continue  # unknown or incomplete row
 
-                            # 3. Timestamp Normalization
-                            if isinstance(ts, str):
-                                try:
+                                # --- Timestamp normalisation -------------------
+                                # Zerodha REST: string "2026-03-06 09:15:00+05:30"
+                                # KiteConnect SDK: datetime object
+                                if isinstance(ts, str):
                                     ts = datetime.fromisoformat(
                                         ts.replace("Z", "+00:00")
                                     )
-                                except:
-                                    pass
+                                elif not isinstance(ts, datetime):
+                                    # e.g. unix epoch float/int
+                                    try:
+                                        ts = datetime.fromtimestamp(
+                                            float(ts), tz=timezone.utc
+                                        )
+                                    except Exception:
+                                        continue  # unparseable timestamp
 
-                            # 4. Feed The Runner (The Missing Link)
-                            if runner and hasattr(runner, "ingest_historical_bar"):
-                                bar_data = {
-                                    "symbol": sym,
-                                    "open": float(o),
-                                    "high": float(h),
-                                    "low": float(l),
-                                    "close": float(c_p),
-                                    "volume": float(v),
-                                    "timestamp": ts,
-                                }
-                                runner.ingest_historical_bar(bar_data)
+                                if ts.tzinfo is None:
+                                    ts = ts.replace(tzinfo=timezone.utc)
 
-                            count += 1
+                                # --- Skip None/zero OHLC (bad rows) -----------
+                                if not all(x is not None for x in (o, h, l, c_p)):
+                                    continue
+
+                                # --- Feed runner indicator_engine --------------
+                                if runner and hasattr(runner, "ingest_historical_bar"):
+                                    bar_data = {
+                                        "symbol": sym,
+                                        "open":   float(o),
+                                        "high":   float(h),
+                                        "low":    float(l),
+                                        "close":  float(c_p),
+                                        "volume": int(v or 0),
+                                        "timestamp": ts,
+                                    }
+                                    runner.ingest_historical_bar(bar_data)
+
+                                count += 1
+                            except Exception as _candle_err:
+                                LOGGER.debug(
+                                    f"Skipping bad candle for {sym}: {_candle_err}"
+                                )
 
                         LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
                         hydrated_counts[sym] = count
@@ -5789,8 +5813,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                 tok = None
                 if ctx.instrument_resolver:
                     tok = ctx.instrument_resolver.resolve(sym)
-                    if tok is None and live_mode_enabled:
-                        raise RuntimeError(f"Live mode: Missing token for {sym}")
+                    # BUG-α FIX: Never raise here — a missing token for one symbol
+                    # must NOT abort streaming/subscription wiring for all others.
+                    # Unresolved symbols are tracked in unresolved_symbols and logged.
                     if tok:
                         if mdm:
                             mdm.register_symbol(sym, tok)
@@ -5800,27 +5825,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                         LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
                     else:
                         unresolved_symbols.append(sym)
-                        LOGGER.warning(f"⚠️ UNRESOLVED (no token): {sym}")
+                        LOGGER.warning(
+                            f"⚠️ UNRESOLVED (no token, skipping subscription): {sym}"
+                        )
 
                 ctx.strategy_runner.add_symbol(sym)
 
-            if mdm and active_symbols:
-                required_candles = int(
-                    getattr(ctx.strategy_runner, "_required_candles", 0)
-                )
-                lookback_minutes = 30
-                if (
-                    live_mode_enabled
-                    and required_candles > 0
-                    and lookback_minutes < required_candles
-                ):
-                    raise RuntimeError("Warmup lookback insufficient for indicators")
-                await mdm.warmup_history(
-                    symbols=active_symbols,
-                    lookback_minutes=lookback_minutes,
-                )
-                if ctx.strategy_runner and hasattr(ctx.strategy_runner, "mark_ready"):
-                    ctx.strategy_runner.mark_ready(active_symbols)
+            # BUG-β/γ/ζ FIX: mdm.warmup_history() removed.
+            # It raised RuntimeError on missing token → aborted streamer.subscribe below.
+            # It fed synthetic ticks via _handle_tick → MDM CandleBuilder, never feeding
+            # runner.indicator_engine.  Historical hydration is handled by the get_ohlc
+            # loop above (Path A) which calls runner.ingest_historical_bar directly.
+            # Newly-added option symbols are hydrated on first evaluation via
+            # runner._hydrate_missing_bars (per-symbol async fallback).
 
             LOGGER.info(
                 f"📊 Resolution summary: {resolved_count}/{len(targets)} resolved"
@@ -5905,8 +5922,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 if ctx.instrument_resolver
                                 else None
                             )
-                            if tok is None and live_mode_enabled:
-                                raise RuntimeError(f"Live mode: Missing token for {sym}")
+                            if tok is None:
+                                # Skip without raising — a missing token for one
+                                # new option must not crash the sync loop for all.
+                                LOGGER.warning(
+                                    f"⚠️ Universe sync: no token for {sym}, skipping"
+                                )
+                                continue
                             if tok and ctx.market_data_manager:
                                 ctx.market_data_manager.register_symbol(sym, tok)
                             if (
@@ -5971,10 +5993,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                     ctx.order_manager.start_monitoring()
 
                 instrument_cache_ready.wait()
-                warmup_targets = list(locals().get("targets", []) or [])
-                if ctx.data_hub and warmup_targets:
-                    for sym in warmup_targets:
-                        await ctx.data_hub.warmup_indicators(sym)
+                # BUG-δ FIX: data_hub.warmup_indicators removed — it always skips because
+                # ZerodhaKiteClient has no get_historical_candles method. Historical
+                # indicator warmup is handled by runner.ingest_historical_bar in section 3.
 
                 if not ctx.websocket_enabled and ctx.market_data_manager is not None:
                     ctx.market_data_manager._seed_completed = True
