@@ -1888,18 +1888,22 @@ class StrategyManager(_BaseStrategyManager):
         try:
             if vwap is None or float(vwap) <= 0.0:
                 invalid_reason = "vwap_zero_or_invalid"
-            elif volume is None or float(volume) <= 0.0:
-                invalid_reason = "volume_below_threshold"
             elif avg_volume is None or float(avg_volume) <= 0.0:
-                # ✅ FIX #2b: avg_volume=0 after grace period is transient; let individual strategies
-                # handle it (VWAPPro has its own 120s grace). Don't block the whole pipeline.
+                # ✅ FIX #2b: avg_volume=0 is transient (options with no live bars yet).
+                # Delegate to individual strategies which have their own grace periods.
                 log_throttled(
                     log,
                     key=f"avg_vol_zero_gate:{symbol}",
-                    msg=f"avg_volume=0 for {symbol} (past grace), delegating to strategies",
+                    msg=f"avg_volume=0 for {symbol}, delegating to strategies",
                     interval_sec=60.0,
                     extra={"event": "avg_volume_zero_delegated", "symbol": symbol},
                 )
+            # ✅ FIX I: Remove hard volume==0 block at strategy_manager level.
+            # NFO options have sparse ticks (once per 13+ min) and never complete
+            # a live 1-min bar, so indicators["volume"] is always 0.  Blocking here
+            # prevents ALL option signal evaluation.  Individual strategies (vwap_pro)
+            # already handle volume gracefully with their own cached-volume fallback.
+            # This pipeline-level gate is redundant and harmful for sparse instruments.
         except (TypeError, ValueError):
             invalid_reason = "data_invalid"
 
