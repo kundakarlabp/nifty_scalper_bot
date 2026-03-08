@@ -1124,7 +1124,7 @@ class IndicatorEngine:
         The Simple Moving Average is the arithmetic mean of the last ``period``
         closing prices::
 
-            SMA = (P_{t-period+1} + \ldots + P_t) / period
+            SMA = (P_{t-period+1} + ... + P_t) / period
         """
         closes = np.asarray(prices[-period:], dtype=float)
         return float(closes.mean())
@@ -1173,10 +1173,10 @@ class IndicatorEngine:
         standard deviations::
 
             Middle_t = SMA_t
-            Upper_t = Middle_t + k * \sigma_t
-            Lower_t = Middle_t - k * \sigma_t
+            Upper_t = Middle_t + k * sigma_t
+            Lower_t = Middle_t - k * sigma_t
 
-        where ``\sigma_t`` is the population standard deviation of the last
+        where ``sigma_t`` is the population standard deviation of the last
         ``period`` closes.
         """
         closes = np.asarray(prices[-period:], dtype=float)

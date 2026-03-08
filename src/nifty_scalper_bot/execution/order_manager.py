@@ -2006,7 +2006,10 @@ class OrderManager:
 
                     # ✅ WORLD-CLASS: Fast fill confirmation & bracket activation
                     # This replaces the old 0.5s sleep
-                    fill_confirmed = self._confirm_fill_fast(order_id, timeout_ms=2000)
+                    # BUG 5 FIX: 2000ms poll added 0-2s latency to every entry on the
+                    # broker submission thread. 300ms catches most sub-200ms MARKET fills
+                    # during market hours. Pre-activation below handles the rest.
+                    fill_confirmed = self._confirm_fill_fast(order_id, timeout_ms=300)
                     if fill_confirmed and self._bracket_manager:
                         bracket = self._bracket_manager.get_bracket(order_id)
                         if bracket and bracket.stop_order_id and bracket.trailing_spec:
@@ -2093,11 +2096,17 @@ class OrderManager:
         Atomic wrapper that guarantees: Entry Order + Virtual Bracket OR Nothing.
         Use THIS method from StrategyRunner, not place_order directly.
         """
-        # 1. Validation (Zerodha Lot Size)
-        # Adjust 65 to whatever the current Nifty Lot Size is dynamically if needed
-        if quantity % 65 != 0: 
-             self._logger.error(f"🛑 INVALID QTY: {quantity} is not a multiple of 65. Order aborted.")
-             return None
+        # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY changed to 75 on 31 Jan 2025.
+        # Use dynamic resolution with a safe fallback to reject mismatched quantities.
+        try:
+            _lot = self._lot_size_for_symbol(symbol)
+        except Exception:
+            _lot = 75  # current NIFTY lot size as safe fallback
+        if _lot > 0 and quantity % _lot != 0:
+            self._logger.error(
+                f"🛑 INVALID QTY: {quantity} is not a multiple of {_lot} (lot size for {symbol}). Order aborted."
+            )
+            return None
 
         # 2. Execute Entry (Passes Safety Guard because SL is provided)
         order_id = self.place_order(

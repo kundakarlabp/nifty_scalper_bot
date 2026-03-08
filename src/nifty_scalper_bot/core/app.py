@@ -5785,6 +5785,12 @@ async def startup_sequence(ctx: BotContext) -> None:
             # MARK INDICATORS AS WARM / READY
             # -------------------------------------------------
             ctx.market_regime_manager.indicators_ready = bool(ready_symbols)
+            # BUG 1 FIX: data_hub.indicators_ready was never set after BUG-δ removed
+            # warmup_indicators(). Both signal_generator.py:1205 and strategy_manager.py:1716
+            # check this flag as the FIRST gate in generate_signal() — if False, every call
+            # returns None silently. Must be set here in sync with market_regime_manager.
+            if ctx.data_hub is not None:
+                ctx.data_hub.indicators_ready = bool(ready_symbols)
             if ready_symbols:
                 LOGGER.info("🧠 Indicators fully hydrated and READY at startup")
             else:
