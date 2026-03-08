@@ -575,6 +575,17 @@ class StrategyRunner:
         self._last_spot_warn_ts = 0.0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
+        # BUG W1 FIX: track symbols that have received at least one LIVE (non-backfill)
+        # completed bar.  Used by the PHASE-9 stale-bar gate instead of
+        # _symbol_history, which is populated by hydration bars (hours old).
+        # Without this, has_live_bars=True from day 1 → bar_age=18h >> threshold
+        # → stale-bar gate fires on the FIRST tick → PHASE-7 same-bar-skip then
+        # blocks all subsequent ticks → zero strategy evaluations until first live
+        # bar closes (up to 60 s after startup).
+        self._live_bar_seen: set[str] = set()
+        # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
+        # for each symbol so Railway logs confirm the moment strategies become active.
+        self._warmup_complete_logged: set[str] = set()
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -603,13 +614,23 @@ class StrategyRunner:
                 RunnerState.BOOTING,
             ):
                 self._runner_state = RunnerState.HISTORICAL_READY
-            self._history_ready_by_symbol = {symbol: False for symbol in symbols}
             for symbol in symbols:
                 self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
             self._rate_limit_backoff_until_by_symbol = {}
-            self._vwap_state = {}
-            self._symbol_bar_count = {}
-            self._hydration_ready_streak = {}
+            # BUG W3 FIX: Do NOT wipe warmup accumulators when mark_ready() has
+            # already promoted runner state to EXECUTION_ENABLED.  The call order
+            # in startup_sequence is: hydrate → mark_ready() → start().  Wiping
+            # these dicts unconditionally discards the VWAP / streak / bar-count
+            # state computed during hydration.  The downgrade-protection in
+            # _set_symbol_hydration_state() saves symbol states from regressing,
+            # but _history_ready_by_symbol is wiped here explicitly and only
+            # recovered on the first tick — making the debug log misleading.
+            if self._runner_state != RunnerState.EXECUTION_ENABLED:
+                self._vwap_state = {}
+                self._symbol_bar_count = {}
+                self._hydration_ready_streak = {}
+                self._history_ready_by_symbol = {symbol: False for symbol in symbols}
+            # Always reset per-session rate limits (independent of warmup state).
 
         # Capture the loop if called from async context (optional safety)
         try:
@@ -1186,6 +1207,28 @@ class StrategyRunner:
 
         self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
 
+        # BUG W2 FIX: Log per-symbol bar-count summary at mark_ready() so Railway logs
+        # confirm exactly how many indicator bars each symbol has at the moment strategies
+        # are unlocked.  This bridges the gap between "Indicators hydrated" (app.py) and
+        # the per-symbol "WARMUP COMPLETE" log emitted on the first tick.
+        for _sym in symbols:
+            try:
+                _bc = len(self._indicator_engine.get_history(_sym) or [])
+                _ok = self._indicator_engine.has_min_bars(_sym, self._required_candles)
+            except Exception:
+                _bc, _ok = 0, False
+            self._logger.info(
+                f"📊 WARMUP SUMMARY: {_sym} | bars={_bc} | "
+                f"min_required={self._required_candles} | ready={_ok}",
+                extra={
+                    "event": "warmup_summary",
+                    "symbol": _sym,
+                    "bar_count": _bc,
+                    "required": self._required_candles,
+                    "ready": _ok,
+                },
+            )
+
     def _set_symbol_hydration_state(
         self,
         symbol: str,
@@ -1586,6 +1629,11 @@ class StrategyRunner:
 
             # 🔥 THE TRIGGER: Run Strategy Logic
             # [FIX] Removed .on_bar() call as StrategyManager is signal-driven (via ticks), not bar-driven.
+            # BUG W1 FIX: Mark symbol as having seen a live bar.  This flag is used by
+            # the PHASE-9 stale-bar gate instead of _symbol_history (which contains old
+            # hydration bars) so the gate only activates after the FIRST real minute bar
+            # completes — not immediately at startup.
+            self._live_bar_seen.add(symbol)
             return
 
         except Exception as exc:
@@ -3657,6 +3705,30 @@ class StrategyRunner:
                     )
                     return
 
+                # BUG W2 FIX: Emit a one-shot INFO log the first time each symbol
+                # passes the warmup gate so Railway logs clearly show the moment
+                # strategies become active.  Without this, logs only show
+                # "Indicators fully hydrated" (from app.py) but never confirm that
+                # per-symbol evaluation has actually been unblocked.
+                if symbol not in self._warmup_complete_logged:
+                    self._warmup_complete_logged.add(symbol)
+                    try:
+                        _wc_bars = len(
+                            self._indicator_engine.get_history(symbol) or []
+                        )
+                    except Exception:
+                        _wc_bars = min_bars_needed
+                    self._logger.info(
+                        f"✅ WARMUP COMPLETE: {symbol} | {_wc_bars} indicator bars "
+                        f"loaded | strategies now ACTIVE",
+                        extra={
+                            "event": "warmup_complete",
+                            "symbol": symbol,
+                            "bar_count": _wc_bars,
+                            "required": min_bars_needed,
+                        },
+                    )
+
                 # ── Same-bar-skip (per-minute evaluation throttle) ───────────────────
                 # Evaluate at most once per completed bar.  Use the current 60-second
                 # bucket timestamp so that every tick within the same minute shares the
@@ -3990,11 +4062,15 @@ class StrategyRunner:
                             bar_age = (now - last_bar_ts).total_seconds()
                             # ✅ FIX E: Raise stale-bar threshold for options/futures.
                             # Options tick once per ~13 min; bar_builder needs 2 different
-                            # minute-buckets to emit a completed bar, so options may have
-                            # live_bars but last_bar_ts is 13-26 min old. 120s threshold
-                            # fired on every tick for these symbols. Use per-type threshold:
-                            # 900s for NFO options/futures, 300s for index futures, 180s others.
-                            has_live_bars = bool(self._symbol_history.get(symbol))
+                            # BUG W1 FIX: Use _live_bar_seen (populated on first live
+                            # bar, never during backfill) instead of _symbol_history
+                            # (populated during hydration with OLD bars).  Before this
+                            # fix: _symbol_history always non-empty at startup →
+                            # has_live_bars=True → bar_age=(18h hydration age) >> threshold
+                            # → stale-bar gate fires on the VERY FIRST tick → PHASE-7
+                            # same-bar-skip (already set) locks all subsequent ticks →
+                            # zero strategy evaluations until first live bar closes.
+                            has_live_bars = symbol in self._live_bar_seen
                             _is_nfo = any(x in symbol for x in ("CE", "PE", "FUT"))
                             _stale_bar_max = 900.0 if _is_nfo else 180.0
                             if has_live_bars and bar_age > _stale_bar_max:
