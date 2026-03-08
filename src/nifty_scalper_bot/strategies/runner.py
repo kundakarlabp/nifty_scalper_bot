@@ -1157,8 +1157,11 @@ class StrategyRunner:
                 if normalized not in self._last_bar_ts:
                     self._last_bar_ts[normalized] = datetime.now(timezone.utc)
 
-        # 5. THE KILL SWITCH: Prevents fallback backfill logic from running
-        self._startup_hydrated = False
+        # 5. Keep _startup_hydrated=True so Phase 7 can promote HYDRATING→DEGRADED
+        # while _symbol_history is still empty (no live bars yet, first minute after
+        # startup). _backfill_history() checks indicator bar counts, NOT this flag,
+        # so setting it True here does not re-trigger backfill.
+        self._startup_hydrated = True
         self._runner_state = RunnerState.EXECUTION_ENABLED
         self.ready = True
         self._logger.info("🚀 StrategyRunner execution enabled")
@@ -3408,8 +3411,11 @@ class StrategyRunner:
                 )
                 skip_strategy = True
 
-            # Stale tick check (increased threshold for REST polling to prevent false positives)
-            stale_threshold = 30.0 if source in ("rest", "polling") else 10.0
+            # Stale tick: NFO options/futures carry the exchange last-trade timestamp
+            # (≈13-min gaps between trades). Use 900s for NFO; 30s for REST-polled
+            # index/equity; 10s for WebSocket ticks.
+            _is_nfo_tick = any(x in symbol for x in ("CE", "PE", "FUT"))
+            stale_threshold = 900.0 if _is_nfo_tick else (30.0 if source in ("rest", "polling") else 10.0)
 
             if tick_age > stale_threshold:
                 log_throttled(
@@ -3662,29 +3668,13 @@ class StrategyRunner:
                     if self._market_data
                     else None
                 )
-                if spot_tick is None and self._market_data is not None:
-                    try:
-                        spot_token = int(
-                            self._market_data.get_token("NSE:NIFTY 50") or 0
-                        )
-                        if spot_token > 0:
-                            loop = self._main_loop
-                            if loop is not None:
-                                fut = asyncio.run_coroutine_threadsafe(
-                                    self._market_data.wait_for_live_tick(
-                                        spot_token,
-                                        timeout=2,
-                                    ),
-                                    loop,
-                                )
-                                spot_tick = fut.result(timeout=2.5)
-                    except Exception as exc:
-                        self._logger.error(
-                            "Failure in StrategyRunner._on_tick wait_for_live_spot: %s",
-                            exc,
-                            exc_info=True,
-                        )
-                        return
+                if spot_tick is None:
+                    # BUG 4 FIX: Never block the tick dispatch thread waiting for spot.
+                    # get_latest_tick() returns None only before the first spot tick is
+                    # cached. Blocking 2.5s here stalls the entire tick pipeline and
+                    # triggers the stall watchdog when it times out. Mark spot_stale and
+                    # continue cautiously — evaluation still runs, just without spot data.
+                    spot_stale = True
                 spot_stale = False
                 if not spot_tick:
                     spot_stale = True
