@@ -99,6 +99,9 @@ class VWAPProStrategy(EliteStrategy):
             "volume",
             "avg_volume",
             "rsi",  # for potential future use
+            "bid",
+            "ask",
+            "spread_pct",  # execution-cost gate — injected from live quote in strategy_manager
         }
 
     def _extract_expiry(self, symbol: str) -> str:
@@ -601,6 +604,29 @@ class VWAPProStrategy(EliteStrategy):
                     context={"min_premium": _min_premium},
                 )
                 _emit_no_signal("premium_too_low")
+                return None
+
+            # 💹 BID-ASK SPREAD GATE — reject when execution cost is too high.
+            # Option spreads of 10-40% are common for lightly-traded strikes.
+            # Entering at ask+1% buffer with a 30-spread already puts the trade
+            # 15-25% underwater at fill. Max spread is env-configurable; default
+            # 30% rejects only truly illiquid options while allowing normal ATM trades.
+            _spread_pct = float(indicators.get("spread_pct") or 0.0)
+            _max_spread = float(os.getenv("VWAP_MAX_SPREAD_PCT", "30.0"))
+            if _spread_pct > 0 and _max_spread > 0 and _spread_pct > _max_spread:
+                self._telemetry.setdefault("skipped_spread", 0)
+                self._telemetry["skipped_spread"] += 1
+                if self._telemetry["skipped_spread"] <= 3 or self._telemetry["skipped_spread"] % self.TELEMETRY_LOG_EVERY == 0:
+                    LOGGER.info(
+                        f"💹 SPREAD REJECT: {symbol} | spread={_spread_pct:.1f}% > max={_max_spread:.0f}%",
+                        extra={"event": "vwap_pro_spread_reject", "symbol": symbol,
+                               "spread_pct": _spread_pct, "max_spread_pct": _max_spread},
+                    )
+                self._log_no_signal_reason(
+                    "spread_too_wide", symbol=symbol, ltp=current_price, vwap=vwap,
+                    context={"spread_pct": _spread_pct, "max_spread_pct": _max_spread},
+                )
+                _emit_no_signal("spread_too_wide")
                 return None
 
             # ✅ FIX A: Collapsing-premium guard uses OPTION VWAP, not futures VWAP.
