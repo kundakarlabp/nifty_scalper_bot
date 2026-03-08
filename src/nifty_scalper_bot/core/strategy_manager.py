@@ -1864,6 +1864,18 @@ class StrategyManager(_BaseStrategyManager):
                         indicators["exchange_vwap"] = _exch_vwap
                         if not indicators.get("vwap") or indicators["vwap"] is None:
                             indicators["vwap"] = _exch_vwap
+                    # Inject bid/ask spread so strategies can gate on execution cost.
+                    # Options can have spreads of 5-30%+ of premium — entering without
+                    # checking spread means the trade is already deeply underwater at fill.
+                    _bid = self._extract_float(opt_quote, ("bid", "best_bid", "buy_price"))
+                    _ask = self._extract_float(opt_quote, ("ask", "best_ask", "sell_price"))
+                    if _bid and _bid > 0:
+                        indicators["bid"] = _bid
+                    if _ask and _ask > 0:
+                        indicators["ask"] = _ask
+                    if _bid and _ask and _bid > 0 and _ask > _bid:
+                        _mid = (_bid + _ask) / 2.0
+                        indicators["spread_pct"] = float((_ask - _bid) / _mid * 100.0)
             except Exception:
                 pass
         invalid_reason: str | None = None

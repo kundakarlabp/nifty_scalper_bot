@@ -1385,7 +1385,10 @@ def _build_selector_settings() -> SelectorSettings:
 def _build_liquidity_settings() -> LiquiditySettings:
     return LiquiditySettings(
         min_oi=_env_float("LIQ__MIN_OI", default=0.0, minimum=0.0),
-        max_spread_pct=_env_float("LIQ__MAX_SPREAD_PCT", default=0.0, minimum=0.0),
+        # Default 30% rejects only truly illiquid strikes (deep OTM / far expiry).
+        # Normal ATM NIFTY options trade at 1-5% spread; 30% is a safe outer bound.
+        # Set LIQ__MAX_SPREAD_PCT=0 in env to disable, or lower to e.g. 15 for tighter filter.
+        max_spread_pct=_env_float("LIQ__MAX_SPREAD_PCT", default=30.0, minimum=0.0),
         min_trades=_env_float("LIQ__MIN_TRADES", default=0.0, minimum=0.0),
         min_top3_depth=_env_float("LIQ__MIN_TOP3_DEPTH", default=0.0, minimum=0.0),
     )
