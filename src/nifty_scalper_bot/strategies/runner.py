@@ -629,9 +629,19 @@ class StrategyRunner:
 
         self._logger.info("Strategy runner started with symbols: %s", symbols)
 
-        # ✅ FIX: Launch Backfill Task
+        # ✅ FIX: Launch Backfill Task (EMERGENCY FALLBACK ONLY)
+        # BUG W4 FIX: _backfill_history() was scheduled immediately in runner.start(),
+        # which races against app.py's primary hydration loop. If _backfill_history runs
+        # first (indicator_engine still empty), it triggers a duplicate API fetch consuming
+        # rate-limit budget. _backfill_history already checks indicator bar counts and skips
+        # if fully warmed up — but only AFTER at least one check cycle completes.
+        # Fix: delay the fallback task by 60s so app.py startup_sequence always finishes
+        # primary hydration first. The fallback remains for edge cases where app.py fails.
         if self._config.fetch_history_on_startup and self._main_loop:
-            self._main_loop.create_task(self._backfill_history())
+            async def _deferred_backfill() -> None:
+                await asyncio.sleep(60.0)  # wait for app.py primary hydration to finish
+                await self._backfill_history()
+            self._main_loop.create_task(_deferred_backfill())
 
     def stop(self) -> None:
         """Stop event processing and unsubscribe from market data."""
@@ -1166,23 +1176,13 @@ class StrategyRunner:
         self.ready = True
         self._logger.info("🚀 StrategyRunner execution enabled")
 
-        try:
-            if self._market_data is not None and self._main_loop is not None:
-                for wait_symbol in ("NSE:NIFTY 50", "NFO:NIFTY FUT"):
-                    token = int(self._market_data.get_token(wait_symbol) or 0)
-                    if token <= 0:
-                        continue
-                    fut = asyncio.run_coroutine_threadsafe(
-                        self._market_data.wait_for_live_tick(token, timeout=10),
-                        self._main_loop,
-                    )
-                    fut.result(timeout=10.5)
-        except Exception as exc:
-            self._logger.error(
-                "Failure in StrategyRunner.mark_ready live tick gate: %s",
-                exc,
-                exc_info=True,
-            )
+        # BUG W1 FIX: Removed deadlocking tick-wait that caused 21s startup delay.
+        # mark_ready() is called from startup_sequence() (event-loop thread).
+        # asyncio.run_coroutine_threadsafe(...).result(timeout=10.5) schedules a
+        # coroutine on the SAME loop that is currently blocked on .result() →
+        # wait_for_live_tick() can never yield → both calls always time out → bot
+        # spends 21 extra seconds blocked before becoming EXECUTION_ENABLED.
+        # Tick availability is already handled per-evaluation (spot_stale=True path).
 
         self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
 
@@ -1525,6 +1525,27 @@ class StrategyRunner:
             # 5. EXECUTION: Trigger Strategies
             # CRITICAL: Do NOT run strategies during backfill
             if is_backfill:
+                # BUG W3 FIX: state.vwap was never seeded during historical ingest because
+                # the full VWAP accumulator block below requires is_backfill=False. After
+                # warmup, _update_symbol_readiness read state.vwap=None → valid_vwap=False
+                # → symbol permanently DEGRADED with valid_vwap=False until 2+ live bars.
+                # In strategy_manager.generate_signal(), vwap=None from indicators +
+                # exchange_vwap=0 from a not-yet-traded option → invalid_reason="vwap_zero"
+                # → symbol suspended after 10 consecutive evaluations. Fix: after feeding
+                # the bar to indicator_engine, read the computed VWAP back and seed state.vwap
+                # once for the LAST historical bar so readiness check has a valid VWAP to use.
+                with self._lock:
+                    state = self._symbol_state.get(symbol)
+                    if state and state.vwap is None:
+                        # Use indicator_engine VWAP (computed over historical close*volume).
+                        # Falls back to bar.close if all historical bars had zero volume
+                        # (new weekly-expiry option with no prior-day trades).
+                        ie_vwap = None
+                        try:
+                            ie_vwap = self._indicator_engine.get_vwap(symbol)
+                        except Exception:
+                            pass
+                        state.vwap = ie_vwap if ie_vwap and ie_vwap > 0 else float(bar.close)
                 return
 
             with self._lock:
@@ -3668,17 +3689,14 @@ class StrategyRunner:
                     if self._market_data
                     else None
                 )
-                if spot_tick is None:
-                    # BUG 4 FIX: Never block the tick dispatch thread waiting for spot.
-                    # get_latest_tick() returns None only before the first spot tick is
-                    # cached. Blocking 2.5s here stalls the entire tick pipeline and
-                    # triggers the stall watchdog when it times out. Mark spot_stale and
-                    # continue cautiously — evaluation still runs, just without spot data.
-                    spot_stale = True
-                spot_stale = False
-                if not spot_tick:
-                    spot_stale = True
-                spot_ts = _extract_float(spot_tick, "timestamp", "ts", "ts_ms")
+                # BUG W2 FIX: Previous code had:
+                #   if spot_tick is None: spot_stale = True
+                #   spot_stale = False          ← unconditional overwrite — dead code
+                #   if not spot_tick: spot_stale = True
+                # The middle line always reset the flag, making the first branch useless.
+                # Correct logic: stale if tick absent OR if timestamp is too old.
+                spot_stale = not spot_tick  # True when None or empty dict
+                spot_ts = _extract_float(spot_tick, "timestamp", "ts", "ts_ms") if spot_tick else None
                 if spot_ts is not None and spot_ts > 1_000_000_000_000:
                     spot_ts = spot_ts / 1000.0
                 spot_age = (
