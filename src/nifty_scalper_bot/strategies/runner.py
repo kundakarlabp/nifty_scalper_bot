@@ -3223,10 +3223,13 @@ class StrategyRunner:
 
             # 1. Orphan Guard — adopt but DO NOT return (tick must still flow to bracket manager)
             # ✅ FIX (6 Feb 2026): Removed early `return` that blocked SL/TP execution for orphans
+            # ✅ FIX (9 Mar 2026): Use get_position() not get_active_contract() — ActiveContract
+            #    has NO 'strategy' field so strat always resolved to "unknown", triggering
+            #    adoption on EVERY tick causing the orphan-adoption storm in logs.
             if self._position_manager:
-                active_pos = self._position_manager.get_active_contract(symbol)
-                if active_pos:
-                    strat = getattr(active_pos, "strategy", "") or "unknown"
+                open_pos = self._position_manager.get_position(symbol)
+                if open_pos is not None:
+                    strat = getattr(open_pos, "strategy", "") or "unknown"
                     if "manual" in strat.lower() or "unknown" in strat.lower():
                         log_throttled(
                             self._logger,
