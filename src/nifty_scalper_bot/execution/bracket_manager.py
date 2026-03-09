@@ -330,7 +330,19 @@ class BracketManager:
                     LOGGER.critical('WATCHDOG EXIT TRIGGER: %s qty=%s', symbol, qty)
                     if self._exit_executor and qty > 0:
                         try:
-                            self._exit_executor(normalize_symbol(symbol), qty)
+                            result = self._exit_executor(normalize_symbol(symbol), qty)
+                            if result is None:
+                                # exit_executor returned None — order not placed.
+                                # Revert bracket so next watchdog cycle retries.
+                                LOGGER.error(
+                                    'WATCHDOG exit returned None for %s — reverting bracket',
+                                    symbol,
+                                )
+                                with self._lock:
+                                    bracket = self._brackets.get(entry_id)
+                                    if bracket is not None:
+                                        bracket.exit_executed = False
+                                        bracket.active = True
                         except Exception as e:
                             LOGGER.error('Failure in _watchdog_exit_loop: %s', e)
                             with self._lock:
@@ -1088,17 +1100,41 @@ class BracketManager:
 
                 LOGGER.warning('EXIT TRIGGERED: %s qty=%s reason=%s', symbol, qty, reason)
 
+                # ── FIX: track real success — exit_executor returns None on failure
+                # (no exception because place_order returns None, not raises).
+                # Previously we broke out of the loop on None-return (no exception)
+                # and then unconditionally set exit_executed=True → position bled.
+                _exit_ok = False
                 if self._exit_executor:
                     for attempt in range(3):
                         try:
-                            self._exit_executor(symbol, qty)
-                            break
+                            result = self._exit_executor(symbol, qty)
+                            if result is not None:
+                                _exit_ok = True
+                                break
+                            LOGGER.error(
+                                'Exit attempt %s returned None for %s — retrying',
+                                attempt + 1, symbol,
+                            )
                         except Exception as e:
                             LOGGER.error('Exit retry %s failed: %s', attempt + 1, e)
-                            time.sleep(0.5)
+                        time.sleep(0.5)
+                else:
+                    # No executor configured — nothing to call; treat as done.
+                    _exit_ok = True
 
-                bracket.exit_executed = True
-                bracket.active = False
+                if _exit_ok:
+                    bracket.exit_executed = True
+                    bracket.active = False
+                else:
+                    LOGGER.critical(
+                        '❌ ALL EXIT RETRIES FAILED for %s qty=%s'
+                        ' — bracket kept ACTIVE for next-tick retry',
+                        symbol, qty,
+                    )
+                    # Reset cooldown so the very next tick can retry immediately.
+                    with self._lock:
+                        self._exit_cooldowns.pop(bracket.entry_order_id, None)
             except Exception as e:
                 LOGGER.error('Exit execution failure: %s', e)
 
@@ -2217,7 +2253,12 @@ class BracketManager:
         symbol = normalize_symbol(symbol)
         if self._reconcile_lock.locked():
             return ""
-        oid = f"orphan_{int(time.time())}_{symbol}"
+        # ── FIX: use symbol-stable ID so repeated adoption attempts hit the
+        # dedup path in register_virtual_bracket (which updates triggers on an
+        # existing bracket) instead of creating a fresh bracket every second.
+        # Timestamp-based oids bypassed dedup and filled _symbol_map with dead
+        # brackets, causing is_symbol_managed() to always return False.
+        oid = f"orphan_{symbol}"
         now = time.time()
         last_attempt = self._orphan_retry_last_attempt.get(symbol)
         if last_attempt is not None and (now - last_attempt) < 10:

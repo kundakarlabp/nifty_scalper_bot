@@ -4511,22 +4511,34 @@ class OrderManager:
             # Assuming positive quantity means we HOLD Long, so we need to SELL
             # If quantity is passed as absolute, you might need to check self._positions
             exit_side = "SELL" # Default for Long Exit
-            
-            # Send Market Order to Zerodha
-            # NOTE: We use place_order so it handles all the time/risk guards automatically
+
+            # ── FIX: resolve LTP so risk-accounting stats work correctly.
+            # MARKET exits MUST always bypass the risk-manager's "Price must be
+            # positive" guard — passing price=None→0.0 previously caused every
+            # soft-exit to be blocked.  check_risk=False is always correct here:
+            # the bracket already made the exit decision; the risk-manager must
+            # not veto it.
+            _exit_ltp: float | None = None
+            try:
+                if self._market_data is not None:
+                    _exit_ltp = self._market_data.get_latest_price(symbol)
+            except Exception:
+                pass
+
             exit_id = self.place_order(
                 symbol=symbol,
-                side=exit_side, 
+                side=exit_side,
                 quantity=abs(quantity),
                 order_type=OrderType.MARKET,
+                price=_exit_ltp,   # supply live LTP for accounting; None is safe
                 tag=tag,
-                check_risk=not force
+                check_risk=False,  # exits MUST never be blocked by risk-manager
             )
-            
+
             if not exit_id:
                 self._logger.error(f"❌ Soft Exit Failed: place_order returned None")
                 return None
-                
+
         except Exception as e:
             self._logger.critical(f"❌ Soft Exit Failed: {e}", exc_info=True)
             return None
