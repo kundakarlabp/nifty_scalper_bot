@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+import pytest
+
+from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar
 from nifty_scalper_bot.strategies.runner import (
     SymbolState,
     StrategyRunner,
@@ -282,3 +285,69 @@ def test_ready_symbol_does_not_downgrade_without_session_reset() -> None:
     )
 
     assert state.name == "READY"
+
+
+def test_repair_candle_gap_creates_synthetic_when_history_missing() -> None:
+    runner = _runner()
+    symbol = 'NIFTY25JAN25000CE'
+    prev = OneMinuteBar(
+        open=100.0,
+        high=101.0,
+        low=99.5,
+        close=100.5,
+        volume=10,
+        start=datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc),
+        end=datetime(2026, 1, 1, 9, 15, 59, tzinfo=timezone.utc),
+    )
+    incoming = OneMinuteBar(
+        open=103.0,
+        high=104.0,
+        low=102.0,
+        close=103.5,
+        volume=8,
+        start=datetime(2026, 1, 1, 9, 18, tzinfo=timezone.utc),
+        end=datetime(2026, 1, 1, 9, 18, 59, tzinfo=timezone.utc),
+    )
+
+    repaired = runner._repair_candle_gap(symbol, prev, incoming)
+
+    assert len(repaired) == 2
+    assert repaired[0].start == prev.start + timedelta(minutes=1)
+    assert repaired[0].open == pytest.approx(prev.close)
+    assert repaired[0].volume == 0
+    assert repaired[1].start == prev.start + timedelta(minutes=2)
+
+
+def test_version_guard_blocks_stale_strategy_evaluation(monkeypatch) -> None:
+    runner = _runner()
+    symbol = 'NIFTY25JAN25000CE'
+    runner.add_symbol(symbol)
+    runner._running = True
+    runner._trading_paused = False
+    runner._runner_state = runner._runner_state.EXECUTION_ENABLED
+    runner._active_symbols = {symbol, 'NSE:NIFTY 50'}
+    runner._history_ready_by_symbol[symbol] = True
+    runner._required_candles = 1
+    runner._symbol_state[symbol].vwap = 100.0
+    runner._candle_versions[symbol] = 1
+    runner._last_strategy_versions[symbol] = 1
+    monkeypatch.setattr(runner, '_is_market_open', lambda _now: True)
+
+    runner._on_tick(symbol, {'ltp': 101.0, 'timestamp': 1_700_000_000})
+
+    assert runner._strategy_manager.generate_signal.call_count == 0
+
+
+def test_composite_reports_emit_aggregate_logs(caplog) -> None:
+    runner = _runner()
+    runner._last_system_heartbeat_log = 0.0
+    runner._last_strategy_status_log = 0.0
+    runner._strategy_window_symbols = {'A', 'B'}
+    runner._strategy_window_signals = 3
+
+    with caplog.at_level('INFO', logger=runner._logger.name):
+        runner._emit_composite_reports()
+
+    events = {getattr(record, 'event', '') for record in caplog.records}
+    assert 'system_heartbeat' in events
+    assert 'strategy_status_report' in events
