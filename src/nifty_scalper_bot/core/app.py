@@ -839,6 +839,8 @@ class TradingSessionGuard:
         self._session_validated_at: datetime | None = None
         self._last_status: TradingSessionStatus | None = None
         self._allow_out_of_hours = bool(allow_out_of_hours)
+        # Throttle: timestamp of last RISK BLOCK warning outside market hours
+        self._risk_block_last_warned: float = 0.0
 
     def mark_session_valid(self) -> None:
         self._session_validated_at = datetime.now(timezone.utc)
@@ -918,22 +920,59 @@ class TradingSessionGuard:
             try:
                 risk_ok = self._risk_manager.is_green()
                 if not risk_ok:
-                    snap = self._risk_manager.snapshot()
-                    if snap:
+                    # ── FIX: single snapshot() call — is_green() already calls
+                    # snapshot() internally.  Previously app.py called it 2 more
+                    # times (once for log, once for reason), each triggering
+                    # _refresh_realized_pnl() and potential broker API calls.
+                    risk_snapshot = self._risk_manager.snapshot()
+
+                    # ── FIX: show actual triggered condition via last_rejection
+                    # instead of always showing day_loss/max_day_loss which is
+                    # often NOT the check that fired (e.g. daily_realized limit
+                    # or consecutive_losses are frequently the real trigger).
+                    rejection = (
+                        risk_snapshot.last_rejection
+                        if risk_snapshot is not None
+                        else None
+                    ) or "unknown"
+                    snap_for_log = risk_snapshot
+
+                    # ── FIX: throttle post-market RISK BLOCK spam.
+                    # During market hours: log every occurrence (actionable).
+                    # Outside market hours: log at most once per hour (market is
+                    # closed — repeated identical warnings are pure noise).
+                    _now_ts = time_module.monotonic()
+                    _should_log = market_ok or (
+                        _now_ts - self._risk_block_last_warned >= 3600.0
+                    )
+                    if _should_log and snap_for_log is not None:
+                        self._risk_block_last_warned = _now_ts
                         LOGGER.warning(
-                            f"⛔ RISK BLOCK: Breaker={snap.breaker_tripped} | "
-                            f"Loss={snap.day_loss:.2f}/{snap.max_day_loss:.2f} | "
-                            f"Cooldown={snap.cooldown_remaining:.1f}s"
+                            "⛔ RISK BLOCK [%s]: Breaker=%s | "
+                            "DayLoss=%s/%s | Realized=%s/-%s | "
+                            "Streak=%s | Cooldown=%ss",
+                            rejection,
+                            snap_for_log.breaker_tripped,
+                            f"{snap_for_log.day_loss:.2f}",
+                            f"{snap_for_log.max_day_loss:.2f}",
+                            f"{snap_for_log.daily_realized:.2f}",
+                            f"{snap_for_log.daily_loss_limit:.2f}",
+                            snap_for_log.losses_in_row,
+                            f"{snap_for_log.cooldown_remaining:.1f}",
                         )
             except Exception:
                 risk_ok = False
                 reasons.append("Risk manager unavailable")
 
         if not risk_ok and "Risk manager unavailable" not in reasons:
-            try:
-                risk_snapshot = self._risk_manager.snapshot()
-            except Exception:  # pragma: no cover - defensive
-                risk_snapshot = None
+            # ── FIX: risk_snapshot already set in is_green() block above —
+            # no need for a third snapshot() call here.  Fall back to a fresh
+            # call only when is_green() raised an exception (risk_snapshot=None).
+            if risk_snapshot is None:
+                try:
+                    risk_snapshot = self._risk_manager.snapshot()
+                except Exception:  # pragma: no cover - defensive
+                    risk_snapshot = None
             if risk_snapshot is not None:
                 if risk_snapshot.breaker_tripped:
                     risk_fail_reason = "BREAKER"
