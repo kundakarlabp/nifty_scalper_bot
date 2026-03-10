@@ -191,10 +191,10 @@ class RiskManager:
         )
         self._last_log_time = 0.0
 
-        # [FIX] Just ensure day starts clean, but let _refresh_realized_pnl handle the sync
-        import os
-
+        # [FIX] Cache RISK__SOFT_OVERRIDE at startup; updated via reset_on_start()
+        # Avoids repeated os.getenv() on every tick inside hot-path methods.
         if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
+            self._soft_override = True
             self._switches.reset_day()
             self._breaker_tripped = False
             self._logger.info("⚠️ Risk Override Enabled: Waiting for PnL sync...")
@@ -628,10 +628,8 @@ class RiskManager:
 
     # [FIX] Enhanced can_trade with Override Support
     def can_trade(self, symbol: str) -> bool:
-        # 0. Check Override (The "God Mode" check)
-        import os
-
-        if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
+        # 0. Check Override (The "God Mode" check) — use cached field, not getenv on every tick
+        if self._soft_override or os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
             # If override is ON, we force trade (unless data is stale)
             # We still check risk_gate_should_trade() because trading on
             # stale data is technically impossible/dangerous, not just risky.
@@ -715,8 +713,6 @@ class RiskManager:
 
         ✅ PRODUCTION FIX: Added fallback stop_loss when None is provided.
         """
-        import os
-
         self._logger.debug(
             "Entered RiskManager.suggest_position_size",
             extra={"event": "risk_suggest_position_size_entered", "symbol": symbol},
@@ -947,14 +943,28 @@ class RiskManager:
         """Return ``True`` if no breakers/cooldowns are active."""
         snap = self.snapshot()
         if snap.breaker_tripped:
+            self._last_rejection = "BREAKER"
             return False
         if snap.cooldown_remaining > 0:
+            self._last_rejection = "COOLDOWN"
             return False
-        if snap.losses_in_row >= self.settings.max_consecutive_losses:
+        # ── FIX: guard > 0 so that max_consecutive_losses=0 (disabled) does NOT
+        # permanently block trading via `0 >= 0`.  Previously any bot configured
+        # with max_consecutive_losses=0 was stuck in a permanent RISK BLOCK.
+        if self.settings.max_consecutive_losses > 0 and snap.losses_in_row >= self.settings.max_consecutive_losses:
+            self._last_rejection = (
+                f"CONSECUTIVE_LOSSES:{snap.losses_in_row}/{self.settings.max_consecutive_losses}"
+            )
             return False
         if snap.max_day_loss > 0 and snap.day_loss >= snap.max_day_loss:
+            self._last_rejection = (
+                f"DAY_LOSS_LIMIT:{snap.day_loss:.2f}/{snap.max_day_loss:.2f}"
+            )
             return False
         if snap.daily_loss_limit > 0 and snap.daily_realized <= -snap.daily_loss_limit:
+            self._last_rejection = (
+                f"DAILY_REALIZED_LIMIT:{snap.daily_realized:.2f}/{-snap.daily_loss_limit:.2f}"
+            )
             return False
         max_trades = int(getattr(self.settings, "max_trades_per_day", 0) or 0)
         max_open = int(getattr(self.settings, "max_open_positions", 0) or 0)
@@ -962,10 +972,12 @@ class RiskManager:
         open_positions = len(getattr(self.position_manager, "get_open_positions", lambda: [])() or [])
         if max_trades > 0 and trades_today >= max_trades:
             self._trip_breaker(f"max_trades_per_day breached: {trades_today}/{max_trades}")
+            self._last_rejection = f"MAX_TRADES:{trades_today}/{max_trades}"
             self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_trades_per_day"})
             return False
         if max_open > 0 and open_positions > max_open:
             self._trip_breaker(f"max_open_positions breached: {open_positions}/{max_open}")
+            self._last_rejection = f"MAX_OPEN:{open_positions}/{max_open}"
             self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_open_positions"})
             return False
         return True
@@ -1064,9 +1076,7 @@ class RiskManager:
         # [FIX] Zombie Data Protection
         # If we see a massive drop AND we have the override enabled,
         # assume this is history loading and ignore the loss.
-        import os
-
-        is_override = os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true"
+        is_override = self._soft_override or os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true"
 
         # Threshold: If delta is negative and > 50% of daily limit (or just huge)
         # This catches the -11L restore event.
@@ -1103,10 +1113,9 @@ class RiskManager:
             self._trip_breaker(formatted)
 
     def _trip_breaker(self, reason: str) -> None:  # pragma: no cover
-        # [FIX] Nuclear Override: Physically prevent breaker activation
-        import os
-
-        if os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
+        # [FIX] Nuclear Override: use cached _soft_override field; fall back to env for
+        # cases where reset_on_start() was not yet called (e.g. early __post_init__).
+        if self._soft_override or os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true":
             if not getattr(self, "_override_log_sent", False):
                 self._logger.warning(
                     f"🛡️ BREAKER TRIED TO TRIP BUT WAS BLOCKED BY OVERRIDE. Reason: {reason}"
