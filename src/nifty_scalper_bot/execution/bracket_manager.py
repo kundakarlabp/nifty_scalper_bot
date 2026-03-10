@@ -145,6 +145,12 @@ class BracketState:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     exit_executed: bool = False
+    # Tracks the most recently submitted (but not yet confirmed filled) exit order.
+    # Set by _fire_exits_batch / _watchdog_exit_loop when the exit order is placed.
+    # Cleared to None once the exit is confirmed FILLED, or used by
+    # _handle_order_rejected / on_order_update(CANCELLED) to reactivate the bracket
+    # when Zerodha rejects/cancels the exit order.
+    pending_exit_order_id: str | None = None
     _atr_warning_logged: bool = False
 
     def __post_init__(self):
@@ -182,6 +188,7 @@ class BracketState:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "exit_executed": self.exit_executed,
+            "pending_exit_order_id": self.pending_exit_order_id,
             "atr_warning_logged": self._atr_warning_logged,
         }
 
@@ -343,6 +350,15 @@ class BracketManager:
                                     if bracket is not None:
                                         bracket.exit_executed = False
                                         bracket.active = True
+                            else:
+                                # Order submitted. Record it so rejected-exit recovery
+                                # can reactivate this bracket if Zerodha rejects/cancels.
+                                with self._lock:
+                                    bracket = self._brackets.get(entry_id)
+                                    if bracket is not None:
+                                        bracket.pending_exit_order_id = (
+                                            result if isinstance(result, str) else None
+                                        )
                         except Exception as e:
                             LOGGER.error('Failure in _watchdog_exit_loop: %s', e)
                             with self._lock:
@@ -1124,6 +1140,11 @@ class BracketManager:
                     _exit_ok = True
 
                 if _exit_ok:
+                    # Record the submitted exit order_id on the bracket.
+                    # If Zerodha later rejects/cancels it, _handle_order_rejected /
+                    # on_order_update(CANCELLED) will see pending_exit_order_id,
+                    # reactivate the bracket, and fire a new exit attempt.
+                    bracket.pending_exit_order_id = result if isinstance(result, str) else None
                     bracket.exit_executed = True
                     bracket.active = False
                 else:
@@ -1304,9 +1325,14 @@ class BracketManager:
         if new_sl is None:
             return
         
-        # Apply the new SL (only if it improves protection)
+        # Apply the new SL (only if it improves protection).
+        # FIX: re-read current_sl INSIDE the lock — the watchdog thread can modify
+        # sl_trigger_price between our stale read above and this write. Using the
+        # stale value could write a LOWER SL than what the watchdog already set,
+        # making protection WORSE on a trailing update.
         with self._lock:
             if bracket.side == "BUY":
+                current_sl = bracket.sl_trigger_price  # authoritative read under lock
                 if new_sl > current_sl:
                     old_sl = bracket.sl_trigger_price
                     bracket.sl_trigger_price = round(new_sl, 2)
@@ -1332,6 +1358,7 @@ class BracketManager:
                             },
                         )
             else:  # SELL
+                current_sl = bracket.sl_trigger_price  # authoritative read under lock
                 if new_sl < current_sl:
                     old_sl = bracket.sl_trigger_price
                     bracket.sl_trigger_price = round(new_sl, 2)
@@ -2448,6 +2475,55 @@ class BracketManager:
                     return bracket
             
             return None
+
+    def reactivate_bracket_after_rejected_exit(
+        self, symbol: str, rejected_order_id: str, reason: str
+    ) -> bool:
+        """Reactivate a bracket whose exit order was REJECTED or CANCELLED by the broker.
+
+        Called by OrderManager._handle_order_rejected / on_order_update(CANCELLED)
+        when Zerodha rejects or cancels an exit order.  Without this, the bracket
+        stays permanently dead and the open position has zero SL protection.
+
+        Args:
+            symbol: Normalised trading symbol.
+            rejected_order_id: The order_id that was rejected/cancelled.
+            reason: Human-readable rejection reason for logging.
+
+        Returns:
+            True if a bracket was found and reactivated; False otherwise.
+        """
+        sym = normalize_symbol(symbol)
+        with self._lock:
+            entry_ids = self._symbol_map.get(sym, [])
+            for entry_id in entry_ids:
+                bracket = self._brackets.get(entry_id)
+                if bracket is None:
+                    continue
+                if bracket.remaining_quantity <= 0:
+                    continue
+                # Match by pending_exit_order_id when possible; fall back to any
+                # bracket marked exit_executed that still has remaining quantity.
+                is_match = (
+                    bracket.pending_exit_order_id == rejected_order_id
+                    or (bracket.exit_executed and bracket.pending_exit_order_id is None)
+                )
+                if not is_match:
+                    continue
+
+                # Reactivate for retry on next tick / watchdog cycle.
+                bracket.exit_executed = False
+                bracket.active = True
+                bracket.pending_exit_order_id = None
+                # Clear exit cooldown so the very next tick can retry.
+                self._exit_cooldowns.pop(entry_id, None)
+                LOGGER.critical(
+                    "🔁 EXIT ORDER %s REJECTED/CANCELLED for %s (qty=%s, reason=%s) "
+                    "— bracket REACTIVATED for retry.",
+                    rejected_order_id, sym, bracket.remaining_quantity, reason,
+                )
+                return True
+        return False
 
     def get_all_brackets_for_symbol(self, symbol: str) -> List[BracketState]:
         """

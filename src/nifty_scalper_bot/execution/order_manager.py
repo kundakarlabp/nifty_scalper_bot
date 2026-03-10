@@ -1679,7 +1679,11 @@ class OrderManager:
         # ---------------------------------------------------------------------
         with self._lock:
             current_time = time.time()
-            # Check for any pending orders on this symbol same side
+            # Check for any pending orders on this symbol same side.
+            # FIX (BUG 4): system exits (tagged "exit"/"stop"/etc.) MUST bypass
+            # this dedup.  A stale PENDING exit order for the same symbol would
+            # otherwise silently block every retry of the SL exit, leaving the
+            # position open until EOD — exactly the scenario that caused the loss.
             pending_orders = [
                 o for o in self._orders.values()
                 if o.symbol == normalized_symbol 
@@ -1690,12 +1694,19 @@ class OrderManager:
                 and (current_time - o.timestamp.timestamp() < 45)
             ]
             
-            if pending_orders:
+            if pending_orders and not is_system_exit:
                 self._logger.warning(
                     f"🚫 BLOCKED: Fresh pending order exists for {normalized_symbol}. Ignored to prevent duplicate.",
                     extra={"event": "duplicate_block", "symbol": normalized_symbol}
                 )
                 return None
+            elif pending_orders and is_system_exit:
+                self._logger.warning(
+                    "⚠️ PENDING exit order already exists for %s — allowing new exit attempt "
+                    "(dedup bypassed for system exit to prevent position bleed).",
+                    normalized_symbol,
+                    extra={"event": "exit_dedup_bypass", "symbol": normalized_symbol},
+                )
 
         # ---------------------------------------------------------------------
         # 1. IDEMPOTENCY CHECK (The Fix for Duplicate Trades)
@@ -4209,6 +4220,41 @@ class OrderManager:
                     except Exception:
                         pass
 
+            # ── FIX (BUG 3): CANCELLED exit orders — reactivate bracket.
+            # _check_zombie_orders cancels stuck PENDING orders after 45s via
+            # cancel_order(). If that order was an exit, on_order_update(CANCELLED)
+            # is the only place to catch it and recover the bracket.
+            # Without this, the position stays open with no SL protection.
+            is_cancelled = (
+                status_raw in ("CANCELLED", "CANCELED")
+                and old_status not in (OrderStatus.CANCELLED, OrderStatus.FILLED)
+            )
+            if is_cancelled and self._bracket_manager is not None:
+                tag_str = (order.tag or "").lower()
+                is_exit_tag = any(x in tag_str for x in ["exit", "stop", "target", "square", "guard"])
+                if is_exit_tag:
+                    try:
+                        recovered = self._bracket_manager.reactivate_bracket_after_rejected_exit(
+                            symbol=order.symbol,
+                            rejected_order_id=order_id,
+                            reason="CANCELLED",
+                        )
+                        if recovered:
+                            self._logger.critical(
+                                "🔁 CANCELLED EXIT recovered for %s (order=%s) — bracket reactivated.",
+                                order.symbol, order_id,
+                                extra={
+                                    "event": "cancelled_exit_bracket_reactivated",
+                                    "symbol": order.symbol,
+                                    "order_id": order_id,
+                                },
+                            )
+                    except Exception as _can_exc:
+                        self._logger.error(
+                            "Bracket reactivation failed after cancelled exit for %s: %s",
+                            order.symbol, _can_exc,
+                        )
+
             # Final Persistence
             if hasattr(self, "save_orders"):
                 try: self.save_orders()
@@ -5523,6 +5569,49 @@ class OrderManager:
                     "order_id": order.order_id,
                 },
             )
+
+        # ── FIX (BUG 2): If this was an EXIT order that got rejected, reactivate
+        # the virtual bracket so the position gets SL protection back and the next
+        # tick / watchdog cycle fires a fresh exit attempt.
+        # Without this, the bracket stays permanently dead and the open position
+        # bleeds until EOD square-off — which is exactly what caused the capital loss.
+        tag = (order.tag or "").lower()
+        is_exit_order = any(x in tag for x in ["exit", "stop", "target", "square", "guard"])
+        if is_exit_order and self._bracket_manager is not None:
+            try:
+                recovered = self._bracket_manager.reactivate_bracket_after_rejected_exit(
+                    symbol=order.symbol,
+                    rejected_order_id=order.order_id,
+                    reason=reason,
+                )
+                if recovered:
+                    self._logger.critical(
+                        "🔁 REJECTED EXIT recovered for %s (order=%s) — bracket reactivated. "
+                        "Next tick will retry the exit.",
+                        order.symbol, order.order_id,
+                        extra={
+                            "event": "rejected_exit_bracket_reactivated",
+                            "symbol": order.symbol,
+                            "order_id": order.order_id,
+                            "reason": reason,
+                        },
+                    )
+                else:
+                    self._logger.error(
+                        "⚠️ REJECTED EXIT for %s (order=%s) — no matching bracket found to reactivate. "
+                        "MANUAL INTERVENTION REQUIRED.",
+                        order.symbol, order.order_id,
+                        extra={
+                            "event": "rejected_exit_no_bracket",
+                            "symbol": order.symbol,
+                            "order_id": order.order_id,
+                        },
+                    )
+            except Exception as _rec_exc:
+                self._logger.error(
+                    "Bracket reactivation failed after rejected exit for %s: %s",
+                    order.symbol, _rec_exc,
+                )
 
     # Internal helpers -------------------------------------------------
 
