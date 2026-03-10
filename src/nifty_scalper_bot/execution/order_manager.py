@@ -10099,6 +10099,11 @@ class OrderManager:
                         extra={"event": "ghost_cleared", "symbol": lsym}
                     )
                     self.cancel_orders_for_symbol(lsym)
+                    if self._bracket_manager is not None:
+                        try:
+                            self._bracket_manager.manual_override_close(lsym, reason='broker_position_closed')
+                        except Exception as e:
+                            self._logger.error('Failure in _reconcile_positions: %s', e)
                     self._generate_adjustment_order(lsym, -int(pos.quantity), 0.0)
 
                 # CASE B: Quantity Mismatch (Partial fills/Manual intervention)
