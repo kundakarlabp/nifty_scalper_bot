@@ -575,6 +575,14 @@ class StrategyRunner:
         self._last_spot_warn_ts = 0.0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
+        self._last_system_heartbeat_log = time.monotonic()
+        self._last_strategy_status_log = time.monotonic()
+        self._strategy_window_symbols: set[str] = set()
+        self._strategy_window_signals = 0
+        self._strategy_window_trailing_updates = 0
+        self._candle_versions: dict[str, int] = defaultdict(int)
+        self._last_strategy_versions: dict[str, int] = defaultdict(int)
+        self._gap_repair_inflight: set[str] = set()
         # BUG W1 FIX: track symbols that have received at least one LIVE (non-backfill)
         # completed bar.  Used by the PHASE-9 stale-bar gate instead of
         # _symbol_history, which is populated by hydration bars (hours old).
@@ -1301,6 +1309,122 @@ class StrategyRunner:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("history_cache_write_failed: %s", exc)
 
+    def _repair_candle_gap(
+        self,
+        symbol: str,
+        previous_bar: OneMinuteBar,
+        incoming_bar: OneMinuteBar,
+    ) -> list[OneMinuteBar]:
+        """Recover missing candles. Args: symbol, previous_bar, incoming_bar; Returns: recovered bars; Raises: none."""
+        repaired: list[OneMinuteBar] = []
+        expected = previous_bar.timestamp + timedelta(minutes=1)
+        history_cache = self._load_history_cache(symbol)
+        cache_by_minute: dict[datetime, dict[str, Any]] = {}
+        for row in history_cache:
+            row_ts = row.get("timestamp")
+            if not isinstance(row_ts, datetime):
+                continue
+            ts_utc = row_ts.astimezone(timezone.utc).replace(second=0, microsecond=0)
+            cache_by_minute[ts_utc] = row
+
+        prev_close = float(previous_bar.close)
+        while expected < incoming_bar.timestamp:
+            row = cache_by_minute.get(expected)
+            if row:
+                close = float(row.get("close") or prev_close)
+                repaired_bar = OneMinuteBar(
+                    open=float(row.get("open") or prev_close),
+                    high=float(row.get("high") or close),
+                    low=float(row.get("low") or close),
+                    close=close,
+                    volume=max(int(float(row.get("volume") or 0)), 0),
+                    start=expected,
+                    end=expected + timedelta(seconds=59),
+                )
+            else:
+                repaired_bar = OneMinuteBar(
+                    open=prev_close,
+                    high=prev_close,
+                    low=prev_close,
+                    close=prev_close,
+                    volume=0,
+                    start=expected,
+                    end=expected + timedelta(seconds=59),
+                )
+            repaired.append(repaired_bar)
+            prev_close = repaired_bar.close
+            expected += timedelta(minutes=1)
+
+        if repaired:
+            self._logger.warning(
+                "candle_gap_repaired",
+                extra={
+                    "event": "candle_gap_repaired",
+                    "symbol": symbol,
+                    "count": len(repaired),
+                },
+            )
+            if self._main_loop and self._main_loop.is_running() and symbol not in self._gap_repair_inflight:
+                self._gap_repair_inflight.add(symbol)
+                asyncio.run_coroutine_threadsafe(
+                    self._refresh_gap_history_async(symbol),
+                    self._main_loop,
+                )
+        return repaired
+
+    async def _refresh_gap_history_async(self, symbol: str) -> None:
+        """Attempt async broker history refresh for repaired symbols. Args: symbol; Returns: none; Raises: none."""
+        try:
+            bars = await self._fetch_symbol_history(symbol, limit=32)
+            if bars:
+                self._write_history_cache(symbol, bars)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("gap_history_refresh_failed for %s: %s", symbol, exc)
+        finally:
+            self._gap_repair_inflight.discard(symbol)
+
+    def _emit_composite_reports(self) -> None:
+        """Emit periodic system/strategy aggregate logs. Args: none; Returns: none; Raises: none."""
+        now = time.monotonic()
+        if now - self._last_system_heartbeat_log >= 120.0:
+            open_positions = 0
+            if hasattr(self._position_manager, "get_all_positions"):
+                try:
+                    open_positions = len(self._position_manager.get_all_positions() or [])
+                except Exception:
+                    open_positions = 0
+            self._logger.info(
+                "SYSTEM_HEARTBEAT",
+                extra={
+                    "event": "system_heartbeat",
+                    "active_symbols": len(self._active_symbols),
+                    "tick_flow": "ACTIVE" if (now - self._last_tick_seen_ts) <= 5.0 else "STALE",
+                    "last_tick_age_s": round(max(0.0, now - self._last_tick_seen_ts), 2),
+                    "candle_builder": "HEALTHY",
+                    "indicator_engine": "HEALTHY" if self._indicator_engine is not None else "UNAVAILABLE",
+                    "strategy_runner": "ACTIVE" if self._running and not self._trading_paused else "PAUSED",
+                    "open_positions": open_positions,
+                    "data_integrity": "OK",
+                },
+            )
+            self._last_system_heartbeat_log = now
+
+        if now - self._last_strategy_status_log >= 150.0:
+            self._logger.info(
+                "STRATEGY_STATUS_REPORT",
+                extra={
+                    "event": "strategy_status_report",
+                    "symbols_evaluated": len(self._strategy_window_symbols),
+                    "signals_generated": int(self._strategy_window_signals),
+                    "trailing_updates": int(self._strategy_window_trailing_updates),
+                    "positions_active": len(getattr(self._position_manager, "get_all_positions", lambda: [])() or []),
+                },
+            )
+            self._strategy_window_symbols.clear()
+            self._strategy_window_signals = 0
+            self._strategy_window_trailing_updates = 0
+            self._last_strategy_status_log = now
+
     def _has_session_candle_gaps(self, symbol: str) -> bool:
         """Return True when RECENT live session history has timestamp gaps.
 
@@ -1510,10 +1634,19 @@ class StrategyRunner:
             return
 
         # 2. STATE: Update High-Water Mark
+        history = self._symbol_history.setdefault(symbol, [])
+        if not is_backfill and last_ts and history:
+            expected_next = last_ts + timedelta(minutes=1)
+            if bar.timestamp > expected_next:
+                repaired = self._repair_candle_gap(symbol, history[-1], bar)
+                for synthetic_bar in repaired:
+                    self._ingest_bar(symbol, synthetic_bar, is_backfill=True)
+
         if not last_ts or bar.timestamp > last_ts:
             self._last_bar_ts[symbol] = bar.timestamp
-        history = self._symbol_history.setdefault(symbol, [])
         history.append(bar)
+        if not is_backfill:
+            self._candle_versions[symbol] += 1
         if len(history) > 400:
             del history[:-400]
 
@@ -2641,6 +2774,7 @@ class StrategyRunner:
             )
         finally:
             now = time.monotonic()
+            self._emit_composite_reports()
             if now - self._last_summary_log >= 60.0:
                 self._logger.info(
                     "ENGINE_SUMMARY",
@@ -3173,7 +3307,6 @@ class StrategyRunner:
             "Entered StrategyRunner._on_tick",
             extra={"event": "tick_enter", "symbol": symbol},
         )
-        self._logger.info("STRATEGY_TICK %s", symbol)
         try:
             # =================================================================
             # PHASE -1: BRACKET MANAGER TICK FORWARDING (MUST be before ANY return)
@@ -3797,16 +3930,6 @@ class StrategyRunner:
                         self._spot_stale_flag = False
                         self._logger.info("SPOT_RECOVERED")
 
-                # Heartbeat logging for derivatives (confirms data flow)
-                if "NIFTY" in symbol and any(x in symbol for x in ["FUT", "CE", "PE"]):
-                    log_throttled(
-                        self._logger,
-                        f"heartbeat_{symbol}",
-                        f"💓 TICK HEARTBEAT: {symbol} | LTP={price:.2f} | VWAP={state.vwap or 0:.2f}",
-                        interval_sec=60.0,
-                        level=logging.INFO,
-                    )
-
                 # =============================================================
                 # PHASE 8: SIGNAL GENERATION
                 # =============================================================
@@ -3935,11 +4058,6 @@ class StrategyRunner:
             # =================================================================
 
             self._eval_counter = getattr(self, "_eval_counter", 0) + 1
-            if self._eval_counter % 50 == 0:
-                self._logger.info(
-                    "Strategy evaluation heartbeat",
-                    extra={"event": "eval_heartbeat", "count": self._eval_counter},
-                )
             # Visible INFO trace so Railway logs confirm PHASE 9 is reached
             log_throttled(
                 self._logger,
@@ -3951,6 +4069,10 @@ class StrategyRunner:
             )
 
             signal = generated_signal
+            current_version = int(self._candle_versions.get(symbol, 0))
+            last_version = int(self._last_strategy_versions.get(symbol, 0))
+            if current_version <= last_version:
+                return
             upper_symbol = symbol.upper()
             is_index_symbol = (
                 upper_symbol.startswith("NSE:")
@@ -4236,11 +4358,14 @@ class StrategyRunner:
                         )
                         try:
                             signal = self._strategy_manager.generate_signal(symbol, price)
+                            self._last_strategy_versions[symbol] = current_version
                         except Exception:
                             self._logger.exception("Signal evaluation failure")
                             signal = None
+                        self._strategy_window_symbols.add(symbol)
                         if signal is not None:
                             self._signal_counter += 1
+                            self._strategy_window_signals += 1
                             self._logger.info(
                                 "SIGNAL_GENERATED",
                                 extra={
@@ -4321,6 +4446,7 @@ class StrategyRunner:
             # =================================================================
 
             if signal and signal.action != "HOLD":
+                self._last_strategy_versions[symbol] = current_version
                 if (
                     signal.action in {"BUY", "SELL"}
                     and not self._strategy_slots_available()

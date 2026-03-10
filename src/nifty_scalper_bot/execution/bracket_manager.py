@@ -1815,6 +1815,33 @@ class BracketManager:
             # ✅ FALLBACK: Try MARKET order as last resort
             return self._market_fallback_exit(bracket, qty, exit_side, reason)
 
+    def _verify_position_closed(self, symbol: str) -> bool:
+        """Verify broker position closure. Args: symbol; Returns: bool; Raises: none."""
+        try:
+            broker = getattr(self.order_manager, '_broker', None)
+            if broker is None:
+                return True
+            getter = getattr(broker, 'get_positions', None)
+            if not callable(getter):
+                return True
+            positions = getter() or []
+            normalized = normalize_symbol(symbol)
+            for pos in positions:
+                if not isinstance(pos, Mapping):
+                    continue
+                pos_symbol = normalize_symbol(str(pos.get('symbol') or pos.get('tradingsymbol') or ''))
+                if pos_symbol != normalized:
+                    continue
+                qty = pos.get('quantity')
+                if qty is None:
+                    qty = pos.get('net_quantity')
+                if abs(int(float(qty or 0))) > 0:
+                    return False
+            return True
+        except Exception as e:
+            LOGGER.error('Failure in _verify_position_closed: %s', e)
+            return False
+
     def _market_fallback_exit(self, bracket: BracketState, qty: int, exit_side: str, reason: str) -> bool:
         """Force market exit after retries. Args: bracket,qty,exit_side,reason; Returns: bool; Raises: None."""
         try:
@@ -1843,6 +1870,11 @@ class BracketManager:
                 if not filled:
                     LOGGER.critical('MARKET_FALLBACK_UNFILLED symbol=%s order_id=%s', bracket.symbol, order_id)
                     return False
+
+            position_closed = self._verify_position_closed(bracket.symbol)
+            if not position_closed:
+                LOGGER.critical('MARKET_FALLBACK_POSITION_OPEN symbol=%s order_id=%s', bracket.symbol, order_id)
+                return False
 
             LOGGER.info('MARKET_FALLBACK_EXECUTED symbol=%s order_id=%s', bracket.symbol, order_id)
             return True
