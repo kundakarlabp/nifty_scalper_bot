@@ -231,6 +231,10 @@ class MarketDataManager:
         self._tick_counter = 0
         self._last_tick_log_time = time.monotonic()
         self._last_tick_time: dict[str, float] = {}
+        self._last_emit_mono: dict[str, float] = {}
+        self._tick_emit_min_interval = self._parse_float_env(
+            "MDM_TICK_EMIT_MIN_INTERVAL_SEC", default=0.02, minimum=0.0
+        )
         self._tick_bus: Any | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._async_dispatch_drops = 0
@@ -2585,6 +2589,15 @@ class MarketDataManager:
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
+        now_emit = time.monotonic()
+        with self._lock:
+            last_emit = float(self._last_emit_mono.get(symbol, 0.0))
+            if (
+                self._tick_emit_min_interval > 0
+                and (now_emit - last_emit) < self._tick_emit_min_interval
+            ):
+                return
+            self._last_emit_mono[symbol] = now_emit
         self._store_tick(symbol, tick)
         if source == "warmup":
             return

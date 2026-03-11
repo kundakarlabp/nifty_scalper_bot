@@ -5,6 +5,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+import time as time_module
 from typing import Any, Deque, Literal, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
@@ -61,6 +62,7 @@ class RiskManager:
         self._circuit_breaker_timestamp: datetime | None = None
         self._broker_error_timestamps: Deque[datetime] = deque()
         self._last_reset_date = self._now().date()
+        self._pause_until_epoch: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -101,6 +103,9 @@ class RiskManager:
         if symbol_positions >= self.risk_config.max_positions_per_symbol:
             return False, "Maximum positions for symbol reached"
 
+        if any(self._underlying_of(pos.symbol) == self._underlying_of(symbol) for pos in open_positions):
+            return False, "Only one active position per underlying is allowed"
+
         notional = quantity * entry_price
         max_position_notional = (
             self._account_balance * self.risk_config.max_position_size_pct / 100.0
@@ -123,6 +128,10 @@ class RiskManager:
         )
         if risk_value <= 0:
             return False, "Invalid stop loss distance"
+
+        risk_per_trade = (risk_value * quantity) / max(self._account_balance, 1e-6)
+        if risk_per_trade > 0.01:
+            return False, "Risk per trade exceeds 1% of capital"
 
         if reward_value <= 0:
             return False, "Invalid take profit distance"
@@ -167,7 +176,7 @@ class RiskManager:
             self._consecutive_losses = 0
 
         if self._consecutive_losses >= 3:
-            self.trip_circuit_breaker("Three consecutive losing trades")
+            self._pause_until_epoch = time_module.time() + (30 * 60)
 
         drawdown_ok, drawdown_pct = self.check_drawdown()
         if not drawdown_ok:
@@ -227,6 +236,8 @@ class RiskManager:
 
         if self._circuit_breaker_tripped:
             return False, self._circuit_breaker_reason or "Circuit breaker active"
+        if time_module.time() < self._pause_until_epoch:
+            return False, "Consecutive loss cooldown active"
 
         if not self.is_market_open():
             return False, "Market is closed"
@@ -442,6 +453,19 @@ class RiskManager:
         if side == "LONG":
             return take_profit - entry_price
         return entry_price - take_profit
+
+    @staticmethod
+    def _underlying_of(symbol: str) -> str:
+        """Extract underlying key. Args: symbol; Returns: underlying token; Raises: none."""
+
+        token = (symbol or '').upper()
+        if ':' in token:
+            token = token.split(':', 1)[1]
+        for suffix in ('CE', 'PE'):
+            idx = token.find(suffix)
+            if idx > 0:
+                return token[:idx]
+        return token
 
     def _now(self) -> datetime:
         return datetime.now(IST)

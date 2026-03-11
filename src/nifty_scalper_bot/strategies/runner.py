@@ -45,6 +45,10 @@ from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSe
 from nifty_scalper_bot.risk import RiskManager
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+from nifty_scalper_bot.strategies.market_regime_engine import (
+    MarketRegime,
+    MarketRegimeEngine,
+)
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
@@ -77,6 +81,7 @@ RELAX_REGIME_FILTER = (
 )  # default True: regime starts with no snapshot
 _THROTTLE_CACHE: Dict[str, float] = {}
 _THROTTLE_LOCK = threading.Lock()
+MIN_EVAL_INTERVAL_SECONDS = 5.0
 
 
 def log_throttled(
@@ -507,6 +512,7 @@ class StrategyRunner:
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
         self._orders_in_flight: dict[str, float] = {}  # symbol -> timestamp
+        self._orders_in_flight_lock = threading.RLock()
         self._order_in_flight_timeout: float = 30.0  # seconds
         self._recently_closed: dict[str, float] = (
             {}
@@ -604,6 +610,9 @@ class StrategyRunner:
             os.getenv("MIN_TRADE_INTERVAL_SECONDS", "180")
         )
         self._trade_counter_by_symbol_candle: dict[tuple[str, datetime], int] = {}
+        self._trade_counter_lock = threading.RLock()
+        self._market_regime_engine = MarketRegimeEngine()
+        self._last_regime_by_symbol: dict[str, MarketRegime] = {}
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -1331,6 +1340,15 @@ class StrategyRunner:
     ) -> list[OneMinuteBar]:
         """Recover missing candles. Args: symbol, previous_bar, incoming_bar; Returns: recovered bars; Raises: none."""
         repaired: list[OneMinuteBar] = []
+        gap_seconds = max(
+            0.0,
+            (incoming_bar.timestamp - previous_bar.timestamp).total_seconds(),
+        )
+        if gap_seconds <= 180.0:
+            return repaired
+        upper_symbol = symbol.upper()
+        if ("CE" in upper_symbol or "PE" in upper_symbol) and gap_seconds < 180.0:
+            return repaired
         expected = previous_bar.timestamp + timedelta(minutes=1)
         history_cache = self._load_history_cache(symbol)
         cache_by_minute: dict[datetime, dict[str, Any]] = {}
@@ -1407,6 +1425,23 @@ class StrategyRunner:
         """Emit periodic system/strategy aggregate logs. Args: none; Returns: none; Raises: none."""
         now = time.monotonic()
         if now - self._last_system_heartbeat_log >= 120.0:
+            try:
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
+                stale_symbols = [k for k in self._symbol_history if not self._symbol_history.get(k)]
+                for key in stale_symbols:
+                    self._symbol_history.pop(key, None)
+                with self._orders_in_flight_lock:
+                    stale_inflight = [k for k, ts in self._orders_in_flight.items() if (time.time() - ts) > 3600.0]
+                    for key in stale_inflight:
+                        self._orders_in_flight.pop(key, None)
+                with self._trade_counter_lock:
+                    stale_candles = [
+                        key for key in self._trade_counter_by_symbol_candle if key[1] < cutoff
+                    ]
+                    for key in stale_candles:
+                        self._trade_counter_by_symbol_candle.pop(key, None)
+            except Exception as exc:
+                self._logger.error('Failure in StrategyRunner._emit_composite_reports: %s', exc)
             open_positions = 0
             if hasattr(self._position_manager, "get_all_positions"):
                 try:
@@ -2389,15 +2424,66 @@ class StrategyRunner:
                 raise RuntimeError("Execution blocked due to spread sanity guard")
 
         try:
-            order_id = self._order_manager.place_order(
-                symbol=symbol,
-                side=side,
-                quantity=normalized_qty,
-                order_type=OrderType.MARKET,
-                price=price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
+            quote = tick or {}
+            bid_price = float(
+                quote.get("best_bid")
+                or quote.get("bid")
+                or quote.get("best_bid_price")
+                or 0.0
             )
+            ask_price = float(
+                quote.get("best_ask")
+                or quote.get("ask")
+                or quote.get("best_ask_price")
+                or 0.0
+            )
+            bid_qty = int(float(quote.get("bid_quantity") or quote.get("bid_qty") or 0))
+            ask_qty = int(float(quote.get("ask_quantity") or quote.get("ask_qty") or 0))
+            if bid_price > 0 and ask_price > 0:
+                spread = max(0.0, ask_price - bid_price)
+                spread_pct = (spread / max(price, 1e-6)) * 100.0
+                if spread_pct > 1.5:
+                    raise RuntimeError("Execution blocked due to option spread guard")
+            if (bid_qty + ask_qty) < 300:
+                raise RuntimeError("Execution blocked due to liquidity guard")
+            tick_size = 0.05
+            order_price = price
+            if side == "BUY" and ask_price > 0:
+                order_price = ask_price + tick_size
+            elif side == "SELL" and bid_price > 0:
+                order_price = max(tick_size, bid_price - tick_size)
+            order_id = ""
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    order_id = self._order_manager.place_order(
+                        symbol=symbol,
+                        side=side,
+                        quantity=normalized_qty,
+                        order_type=OrderType.LIMIT,
+                        price=order_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                    )
+                    break
+                except Exception as exc:
+                    if attempt >= (max_attempts - 1):
+                        raise
+                    adjust = tick_size * float(attempt + 1)
+                    order_price = (
+                        order_price + adjust if side == "BUY" else max(tick_size, order_price - adjust)
+                    )
+                    self._logger.warning(
+                        "order_retry_adjusted",
+                        extra={
+                            "event": "order_retry_adjusted",
+                            "symbol": symbol,
+                            "side": side,
+                            "attempt": attempt + 2,
+                            "error": str(exc),
+                            "adjusted_price": order_price,
+                        },
+                    )
 
             if adjusted:
                 self._logger.debug(
@@ -2531,7 +2617,7 @@ class StrategyRunner:
             True if an order is in flight, False otherwise.
         """
         now = time.time()
-        with self._lock:
+        with self._orders_in_flight_lock:
             # Clean stale entries (orders older than timeout)
             stale_symbols = [
                 s
@@ -2570,7 +2656,7 @@ class StrategyRunner:
             underlying: The base underlying (e.g., NIFTY)
         """
         now = time.time()
-        with self._lock:
+        with self._orders_in_flight_lock:
             self._orders_in_flight[symbol] = now
             if underlying and underlying != symbol:
                 self._orders_in_flight[underlying] = now
@@ -2586,7 +2672,7 @@ class StrategyRunner:
 
         Should be called from order update callback or verification routine.
         """
-        with self._lock:
+        with self._orders_in_flight_lock:
             if symbol in self._orders_in_flight:
                 self._orders_in_flight.pop(symbol, None)
                 self._logger.debug(f"✅ CLEARED IN-FLIGHT: {symbol}")
@@ -3094,13 +3180,53 @@ class StrategyRunner:
         snapshot = getattr(regime_manager, "get_latest_snapshot", lambda: None)()
         return snapshot is not None
 
+    def _compute_regime_snapshot(self, symbol: str) -> MarketRegime:
+        """Compute market regime for symbol. Args: symbol; Returns: MarketRegime; Raises: none."""
+        try:
+            indicators = self._indicator_engine.get_indicators(symbol)
+            history = self._indicator_engine.get_history(symbol)
+            atr_avg = 0.0
+            if history:
+                tail = history[-20:]
+                mean_price = sum(float(v) for v in tail) / max(len(tail), 1)
+                atr_avg = mean_price * 0.002
+            latest = self._indicator_engine.get_latest(symbol)
+            volume = float((latest or {}).get('volume') or 0.0)
+            avg_volume = float((latest or {}).get('avg_volume') or 0.0)
+            volume_expansion = (volume / avg_volume) if avg_volume > 0 else 1.0
+            current_vwap = float(indicators.get('vwap') or 0.0)
+            history_tail = history[-3:] if history else []
+            reference = sum(float(v) for v in history_tail) / max(len(history_tail), 1)
+            vwap_slope = (current_vwap - reference) if reference > 0 else 0.0
+            snapshot = self._market_regime_engine.classify(
+                {
+                    'adx': indicators.get('adx'),
+                    'atr': indicators.get('atr'),
+                    'atr_average': atr_avg,
+                    'vwap_slope': vwap_slope,
+                    'volume_expansion': volume_expansion,
+                }
+            )
+            self._last_regime_by_symbol[symbol] = snapshot.regime
+            return snapshot.regime
+        except Exception as exc:
+            self._logger.error('Failure in StrategyRunner._compute_regime_snapshot: %s', exc)
+            return self._last_regime_by_symbol.get(symbol, MarketRegime.LOW_ACTIVITY)
+
+    def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
+        """Validate regime gate for strategy. Args: strategy, regime; Returns: bool; Raises: none."""
+        normalized = strategy.strip().lower()
+        if normalized in {'vwap_pro', 'vwappro'}:
+            return regime == MarketRegime.TREND
+        return True
+
     def _strategy_slots_available(self) -> bool:
         """Return True when active strategy slots are available for new entries."""
         try:
             active_positions = len(self._position_manager.get_open_positions())
         except Exception:
             active_positions = 0
-        with self._lock:
+        with self._orders_in_flight_lock:
             inflight = len(self._orders_in_flight)
         return (active_positions + inflight) < self._strategy_slot_limit
 
@@ -3927,32 +4053,12 @@ class StrategyRunner:
                         },
                     )
 
-                # ── Same-bar-skip (per-minute evaluation throttle) ───────────────────
-                # Evaluate at most once per completed bar.  Use the current 60-second
-                # bucket timestamp so that every tick within the same minute shares the
-                # same key, and we only call generate_signal once per minute per symbol.
-                # Fallback to _last_bar_ts when _symbol_history has no live bars yet.
-                history = self._symbol_history.get(symbol)
-                if history:
-                    raw_bar_ts = getattr(history[-1], "timestamp", None)
-                    bar_ts = (
-                        float(raw_bar_ts.timestamp())
-                        if raw_bar_ts and hasattr(raw_bar_ts, "timestamp")
-                        else float(raw_bar_ts or 0.0)
-                    )
-                else:
-                    # No completed live bar yet — use current minute bucket so we still
-                    # evaluate once per minute even before the first bar closes.
-                    _now_ts = time.time()
-                    bar_ts = _now_ts - (_now_ts % 60)  # floor to current minute
-
-                if bar_ts <= 0:
-                    return
-
+                # Time-based evaluation throttle prevents stalls while limiting CPU.
+                now_eval = time.monotonic()
                 last_eval_ts = self._last_candle_eval.get(symbol, 0.0)
-                if last_eval_ts == bar_ts:
+                if (now_eval - last_eval_ts) < MIN_EVAL_INTERVAL_SECONDS:
                     return
-                self._last_candle_eval[symbol] = bar_ts
+                self._last_candle_eval[symbol] = now_eval
 
                 spot_tick = (
                     self._market_data.get_latest_tick("NSE:NIFTY 50")
@@ -4511,6 +4617,20 @@ class StrategyRunner:
 
             if signal and signal.action != "HOLD":
                 self._last_strategy_versions[symbol] = current_version
+                signal_strategy = str((signal.metadata or {}).get("strategy") or "")
+                current_regime = self._compute_regime_snapshot(symbol)
+                if not self._strategy_allowed_for_regime(signal_strategy, current_regime):
+                    self._regime_block_counter += 1
+                    self._logger.info(
+                        "Strategy skipped due to detected market regime",
+                        extra={
+                            "event": "regime_skip",
+                            "symbol": symbol,
+                            "strategy": signal_strategy or "unknown",
+                            "regime": current_regime.value,
+                        },
+                    )
+                    return
                 if (
                     signal.action in {"BUY", "SELL"}
                     and not self._strategy_slots_available()
@@ -5099,10 +5219,9 @@ class StrategyRunner:
 
             candle_minute = timestamp.replace(second=0, microsecond=0)
             candle_key = (base_symbol, candle_minute)
-            if (
-                self._trade_counter_by_symbol_candle.get(candle_key, 0)
-                >= self._max_trades_per_symbol_per_candle
-            ):
+            with self._trade_counter_lock:
+                candle_trade_count = self._trade_counter_by_symbol_candle.get(candle_key, 0)
+            if candle_trade_count >= self._max_trades_per_symbol_per_candle:
                 self._logger.info(
                     "Condition met: max_trades_per_symbol_per_candle_guard",
                     extra={
@@ -6212,9 +6331,10 @@ class StrategyRunner:
             state.last_trade_at = timestamp
             state.last_trade_candle_at = timestamp.replace(second=0, microsecond=0)
             candle_key = (symbol, state.last_trade_candle_at)
-            self._trade_counter_by_symbol_candle[candle_key] = (
-                self._trade_counter_by_symbol_candle.get(candle_key, 0) + 1
-            )
+            with self._trade_counter_lock:
+                self._trade_counter_by_symbol_candle[candle_key] = (
+                    self._trade_counter_by_symbol_candle.get(candle_key, 0) + 1
+                )
             state.cooldown_until = (
                 timestamp + timedelta(seconds=cooldown) if cooldown > 0 else None
             )
