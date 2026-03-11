@@ -22,6 +22,7 @@ class OneMinuteBar:
     volume: int
     start: datetime
     end: datetime
+    synthetic: bool = False
 
     @property
     def timestamp(self) -> datetime:
@@ -49,6 +50,7 @@ class OneMinuteBar:
             "volume": self.volume,
             "start": self.start,
             "end": self.end,
+            "synthetic": self.synthetic,
         }
 
 

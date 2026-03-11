@@ -424,33 +424,51 @@ async def test_warmup_history_primes_cache_without_emitting_callbacks(
     broker: DummyBroker, ws: DummyWebSocket
 ) -> None:
     manager = MarketDataManager(broker, ws)
-    manager.register_symbol('NSE:NIFTY23', 123)
+    manager.register_symbol("NSE:NIFTY23", 123)
 
     events: list[dict[str, Any]] = []
-    manager.subscribe('NSE:NIFTY23', events.append)
+    manager.subscribe("NSE:NIFTY23", events.append)
 
     class RestStub:
         async def get_historical_data(self, **kwargs: Any) -> list[dict[str, Any]]:
             return [
                 {
-                    'date': datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
-                    'close': 101.0,
-                    'volume': 50,
+                    "date": datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
+                    "close": 101.0,
+                    "volume": 50,
                 },
                 {
-                    'date': datetime(2024, 1, 1, 10, 1, tzinfo=timezone.utc),
-                    'close': 102.0,
-                    'volume': 80,
+                    "date": datetime(2024, 1, 1, 10, 1, tzinfo=timezone.utc),
+                    "close": 102.0,
+                    "volume": 80,
                 },
             ]
 
     manager._rest_client = RestStub()
 
-    await manager.warmup_history(['NSE:NIFTY23'], lookback_minutes=30)
+    await manager.warmup_history(["NSE:NIFTY23"], lookback_minutes=30)
 
     assert events == []
-    latest = manager.get_latest_tick('NSE:NIFTY23')
+    latest = manager.get_latest_tick("NSE:NIFTY23")
     assert latest is not None
-    assert latest['ltp'] == pytest.approx(102.0)
-    bars = manager.get_ohlc_bars('NSE:NIFTY23')
+    assert latest["ltp"] == pytest.approx(102.0)
+    bars = manager.get_ohlc_bars("NSE:NIFTY23")
     assert bars
+
+
+def test_out_of_order_tick_is_discarded(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    monkeypatch.setenv("TICK_STALE_MS", "0")
+    manager = MarketDataManager(broker, ws)
+    events: list[dict[str, Any]] = []
+    manager.subscribe("NIFTY23", events.append)
+    assert ws.on_tick is not None
+
+    ws.on_tick({"instrument_token": 123, "last_price": 100.0, "timestamp": 1000.0})
+    ws.on_tick({"instrument_token": 123, "last_price": 101.0, "timestamp": 999.0})
+
+    assert len(events) == 1
+    latest = manager.get_latest_tick("NIFTY23")
+    assert latest is not None
+    assert latest["ltp"] == 100.0
