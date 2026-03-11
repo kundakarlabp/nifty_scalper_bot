@@ -2481,6 +2481,20 @@ class MarketDataManager:
         if not normalized_tick:
             return
 
+        with self._lock:
+            last_seen = self._latest_ticks.get(symbol)
+        if isinstance(last_seen, Mapping):
+            last_ts = float(last_seen.get("timestamp") or 0.0)
+            current_ts = float(normalized_tick.get("timestamp") or 0.0)
+            if current_ts <= last_ts:
+                self._logger.debug(
+                    "Dropping out-of-order tick for %s ts=%.3f last=%.3f",
+                    symbol,
+                    current_ts,
+                    last_ts,
+                )
+                return
+
         if self._is_duplicate(symbol, normalized_tick):
             return
 
@@ -2661,9 +2675,12 @@ class MarketDataManager:
                     # BUG-β FIX: Never raise — skip and warn so remaining
                     # symbols are still warmed and callers don't abort.
                     self._logger.warning(
-                        "WARMUP_SKIP: missing token for %s", canonical_symbol,
-                        extra={"event": "warmup_skip_missing_token",
-                               "symbol": canonical_symbol},
+                        "WARMUP_SKIP: missing token for %s",
+                        canonical_symbol,
+                        extra={
+                            "event": "warmup_skip_missing_token",
+                            "symbol": canonical_symbol,
+                        },
                     )
                     continue
 

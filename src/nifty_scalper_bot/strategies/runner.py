@@ -72,7 +72,9 @@ if TYPE_CHECKING:
     )
 
 LOGGER = get_logger(__name__)
-RELAX_REGIME_FILTER = os.getenv("RELAX_REGIME_FILTER", "true").lower() != "false"  # default True: regime starts with no snapshot
+RELAX_REGIME_FILTER = (
+    os.getenv("RELAX_REGIME_FILTER", "true").lower() != "false"
+)  # default True: regime starts with no snapshot
 _THROTTLE_CACHE: Dict[str, float] = {}
 _THROTTLE_LOCK = threading.Lock()
 
@@ -265,6 +267,7 @@ class SymbolRuntimeState:
     session_vwap_turnover: float = 0.0
     _last_strategy_eval: datetime | None = None  # [FIX] For Throttling strategy calls
     _last_eval_bar_ts: datetime | None = None
+    last_trade_candle_at: datetime | None = None
     trade_history: Deque[TradeRecord] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -594,6 +597,13 @@ class StrategyRunner:
         # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
         # for each symbol so Railway logs confirm the moment strategies become active.
         self._warmup_complete_logged: set[str] = set()
+        self._max_trades_per_symbol_per_candle = int(
+            os.getenv("MAX_TRADES_PER_SYMBOL_PER_CANDLE", "1")
+        )
+        self._min_trade_interval_seconds = float(
+            os.getenv("MIN_TRADE_INTERVAL_SECONDS", "180")
+        )
+        self._trade_counter_by_symbol_candle: dict[tuple[str, datetime], int] = {}
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -607,7 +617,9 @@ class StrategyRunner:
             if not isinstance(self._active_symbols, set):
                 raise RuntimeError("Invalid active symbols container type")
             if len(self._active_symbols) == 0:
-                raise RuntimeError("StrategyRunner start requires at least one active symbol")
+                raise RuntimeError(
+                    "StrategyRunner start requires at least one active symbol"
+                )
             symbols = list(self._active_symbols)
             self._frozen_universe = set(symbols)
             self._universe_controller.update(symbols)
@@ -667,9 +679,11 @@ class StrategyRunner:
         # Fix: delay the fallback task by 60s so app.py startup_sequence always finishes
         # primary hydration first. The fallback remains for edge cases where app.py fails.
         if self._config.fetch_history_on_startup and self._main_loop:
+
             async def _deferred_backfill() -> None:
                 await asyncio.sleep(60.0)  # wait for app.py primary hydration to finish
                 await self._backfill_history()
+
             self._main_loop.create_task(_deferred_backfill())
 
     def stop(self) -> None:
@@ -1340,6 +1354,7 @@ class StrategyRunner:
                     volume=max(int(float(row.get("volume") or 0)), 0),
                     start=expected,
                     end=expected + timedelta(seconds=59),
+                    synthetic=False,
                 )
             else:
                 repaired_bar = OneMinuteBar(
@@ -1350,6 +1365,7 @@ class StrategyRunner:
                     volume=0,
                     start=expected,
                     end=expected + timedelta(seconds=59),
+                    synthetic=True,
                 )
             repaired.append(repaired_bar)
             prev_close = repaired_bar.close
@@ -1364,7 +1380,11 @@ class StrategyRunner:
                     "count": len(repaired),
                 },
             )
-            if self._main_loop and self._main_loop.is_running() and symbol not in self._gap_repair_inflight:
+            if (
+                self._main_loop
+                and self._main_loop.is_running()
+                and symbol not in self._gap_repair_inflight
+            ):
                 self._gap_repair_inflight.add(symbol)
                 asyncio.run_coroutine_threadsafe(
                     self._refresh_gap_history_async(symbol),
@@ -1390,7 +1410,9 @@ class StrategyRunner:
             open_positions = 0
             if hasattr(self._position_manager, "get_all_positions"):
                 try:
-                    open_positions = len(self._position_manager.get_all_positions() or [])
+                    open_positions = len(
+                        self._position_manager.get_all_positions() or []
+                    )
                 except Exception:
                     open_positions = 0
             self._logger.info(
@@ -1398,11 +1420,23 @@ class StrategyRunner:
                 extra={
                     "event": "system_heartbeat",
                     "active_symbols": len(self._active_symbols),
-                    "tick_flow": "ACTIVE" if (now - self._last_tick_seen_ts) <= 5.0 else "STALE",
-                    "last_tick_age_s": round(max(0.0, now - self._last_tick_seen_ts), 2),
+                    "tick_flow": (
+                        "ACTIVE" if (now - self._last_tick_seen_ts) <= 5.0 else "STALE"
+                    ),
+                    "last_tick_age_s": round(
+                        max(0.0, now - self._last_tick_seen_ts), 2
+                    ),
                     "candle_builder": "HEALTHY",
-                    "indicator_engine": "HEALTHY" if self._indicator_engine is not None else "UNAVAILABLE",
-                    "strategy_runner": "ACTIVE" if self._running and not self._trading_paused else "PAUSED",
+                    "indicator_engine": (
+                        "HEALTHY"
+                        if self._indicator_engine is not None
+                        else "UNAVAILABLE"
+                    ),
+                    "strategy_runner": (
+                        "ACTIVE"
+                        if self._running and not self._trading_paused
+                        else "PAUSED"
+                    ),
                     "open_positions": open_positions,
                     "data_integrity": "OK",
                 },
@@ -1417,7 +1451,12 @@ class StrategyRunner:
                     "symbols_evaluated": len(self._strategy_window_symbols),
                     "signals_generated": int(self._strategy_window_signals),
                     "trailing_updates": int(self._strategy_window_trailing_updates),
-                    "positions_active": len(getattr(self._position_manager, "get_all_positions", lambda: [])() or []),
+                    "positions_active": len(
+                        getattr(
+                            self._position_manager, "get_all_positions", lambda: []
+                        )()
+                        or []
+                    ),
                 },
             )
             self._strategy_window_symbols.clear()
@@ -1447,7 +1486,8 @@ class StrategyRunner:
         cutoff = now_utc - timedelta(minutes=90)
         # Only inspect today's bars that fall within the 90-minute window.
         session_bars = [
-            bar for bar in history
+            bar
+            for bar in history
             if bar.timestamp.date() == session_date and bar.timestamp >= cutoff
         ]
         if len(session_bars) < 2:
@@ -1497,7 +1537,7 @@ class StrategyRunner:
         if not bars:
             vwap_state = self._vwap_state.get(symbol, {})
             cum_vol = float(vwap_state.get("cum_vol", 0.0))
-            cum_pv  = float(vwap_state.get("cum_pv",  0.0))
+            cum_pv = float(vwap_state.get("cum_pv", 0.0))
             vol_sum = cum_vol
             if vwap_val == 0.0 and cum_vol > 0.0:
                 vwap_val = cum_pv / cum_vol
@@ -1658,10 +1698,11 @@ class StrategyRunner:
                 self._indicator_engine.update_bar(symbol, bar)
             else:
                 # Fallback to update_price (Standard API seen in app.py)
+                indicator_volume = 0 if getattr(bar, "synthetic", False) else bar.volume
                 self._indicator_engine.update_price(
                     symbol,
                     bar.as_mapping(),
-                    volume=bar.volume,
+                    volume=indicator_volume,
                     timestamp=bar.timestamp,
                     is_complete=True,
                     is_provisional=False,
@@ -1721,7 +1762,9 @@ class StrategyRunner:
                             ie_vwap = self._indicator_engine.get_vwap(symbol)
                         except Exception:
                             pass
-                        state.vwap = ie_vwap if ie_vwap and ie_vwap > 0 else float(bar.close)
+                        state.vwap = (
+                            ie_vwap if ie_vwap and ie_vwap > 0 else float(bar.close)
+                        )
                 return
 
             with self._lock:
@@ -2074,8 +2117,10 @@ class StrategyRunner:
                     active_directions = actions & directional
                     # Opposing pairs that cannot be reconciled:
                     is_true_conflict = (
-                        ("BUY" in active_directions and "SELL" in active_directions)
-                        or ("CLOSE_LONG" in active_directions and "CLOSE_SHORT" in active_directions)
+                        "BUY" in active_directions and "SELL" in active_directions
+                    ) or (
+                        "CLOSE_LONG" in active_directions
+                        and "CLOSE_SHORT" in active_directions
                     )
                     if is_true_conflict:
                         self._logger.error(
@@ -2500,9 +2545,7 @@ class StrategyRunner:
             # Check if symbol or underlying has pending order
             if symbol in self._orders_in_flight:
                 elapsed = now - self._orders_in_flight[symbol]
-                self._logger.debug(
-                    f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s"
-                )
+                self._logger.debug(f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s")
                 return True
 
             if (
@@ -2714,13 +2757,18 @@ class StrategyRunner:
             # ✅ FIX D: Raise stall threshold to 120s. Options tick once per ~13min;
             # the 5s threshold fired constantly between normal tick batches.
             # A genuine stall = no strategy evaluation for > 2 full minutes with active ticks.
-            if (self.ready and now_mono - self._last_global_eval_ts > 120.0
-                    and now_mono - self._last_stall_warn_ts > 120.0):
+            if (
+                self.ready
+                and now_mono - self._last_global_eval_ts > 120.0
+                and now_mono - self._last_stall_warn_ts > 120.0
+            ):
                 self._last_stall_warn_ts = now_mono
                 self._logger.warning(
                     "Strategy evaluation stalled >120s (once per 120s)",
-                    extra={"event": "strategy_eval_stall",
-                           "stall_sec": round(now_mono - self._last_global_eval_ts, 1)},
+                    extra={
+                        "event": "strategy_eval_stall",
+                        "stall_sec": round(now_mono - self._last_global_eval_ts, 1),
+                    },
                 )
             self._health_watchdog()
             self._logger.debug(
@@ -2803,8 +2851,10 @@ class StrategyRunner:
         if self.ready and tick_flowing and eval_stalled and genuine_stall:
             self._logger.warning(
                 "Strategy eval genuinely stalled while ticks flowing (>90s)",
-                extra={"event": "strategy_eval_stall",
-                       "stall_sec": round(now - self._last_global_eval_ts, 1)},
+                extra={
+                    "event": "strategy_eval_stall",
+                    "stall_sec": round(now - self._last_global_eval_ts, 1),
+                },
             )
 
     # ✅ FIX: New Method to Prime Indicators
@@ -3278,15 +3328,21 @@ class StrategyRunner:
             if hasattr(rm, "risk_gate_should_trade"):
                 result = rm.risk_gate_should_trade()
                 allowed = bool(result[0] if isinstance(result, tuple) else result)
-                reason = str(result[1]) if isinstance(result, tuple) and len(result) > 1 else (
-                    "risk_gate_allowed" if allowed else "risk_gate_blocked"
+                reason = (
+                    str(result[1])
+                    if isinstance(result, tuple) and len(result) > 1
+                    else ("risk_gate_allowed" if allowed else "risk_gate_blocked")
                 )
                 return allowed, reason
             if hasattr(rm, "can_trade_now"):
                 result = rm.can_trade_now()
                 allowed = bool(result[0] if isinstance(result, tuple) else result)
-                reason = str(result[1]) if isinstance(result, tuple) and len(result) > 1 else (
-                    "can_trade_now_allowed" if allowed else "can_trade_now_blocked"
+                reason = (
+                    str(result[1])
+                    if isinstance(result, tuple) and len(result) > 1
+                    else (
+                        "can_trade_now_allowed" if allowed else "can_trade_now_blocked"
+                    )
                 )
                 return allowed, reason
         except Exception as exc:  # noqa: BLE001
@@ -3620,7 +3676,11 @@ class StrategyRunner:
             # (≈13-min gaps between trades). Use 900s for NFO; 30s for REST-polled
             # index/equity; 10s for WebSocket ticks.
             _is_nfo_tick = any(x in symbol for x in ("CE", "PE", "FUT"))
-            stale_threshold = 900.0 if _is_nfo_tick else (30.0 if source in ("rest", "polling") else 10.0)
+            stale_threshold = (
+                900.0
+                if _is_nfo_tick
+                else (30.0 if source in ("rest", "polling") else 10.0)
+            )
 
             if tick_age > stale_threshold:
                 log_throttled(
@@ -3724,7 +3784,9 @@ class StrategyRunner:
                     extra={"event": "risk_block"},
                 )
                 manager = getattr(self, "_strategy_manager", None)
-                if manager is not None and hasattr(manager, "increment_observability_counter"):
+                if manager is not None and hasattr(
+                    manager, "increment_observability_counter"
+                ):
                     manager.increment_observability_counter("signals_blocked_by_risk")
                 return
             if self._runner_state != RunnerState.EXECUTION_ENABLED:
@@ -3806,7 +3868,9 @@ class StrategyRunner:
                     hydration_state == SymbolState.HYDRATING
                     and getattr(self, "_startup_hydrated", False)
                     and self._indicator_engine is not None
-                    and self._indicator_engine.has_min_bars(symbol, self._required_candles)
+                    and self._indicator_engine.has_min_bars(
+                        symbol, self._required_candles
+                    )
                 ):
                     effective_hydration = SymbolState.DEGRADED
 
@@ -3837,7 +3901,7 @@ class StrategyRunner:
                         f"p7_warmup_{symbol}",
                         f"⏳ Warmup active: {symbol} waiting for {min_bars_needed} bars",
                         interval_sec=60.0,
-                        level=logging.DEBUG, # Changed to DEBUG to stop log flooding
+                        level=logging.DEBUG,  # Changed to DEBUG to stop log flooding
                     )
                     return
 
@@ -3849,9 +3913,7 @@ class StrategyRunner:
                 if symbol not in self._warmup_complete_logged:
                     self._warmup_complete_logged.add(symbol)
                     try:
-                        _wc_bars = len(
-                            self._indicator_engine.get_history(symbol) or []
-                        )
+                        _wc_bars = len(self._indicator_engine.get_history(symbol) or [])
                     except Exception:
                         _wc_bars = min_bars_needed
                     self._logger.info(
@@ -3904,15 +3966,15 @@ class StrategyRunner:
                 # The middle line always reset the flag, making the first branch useless.
                 # Correct logic: stale if tick absent OR if timestamp is too old.
                 spot_stale = not spot_tick  # True when None or empty dict
-                spot_ts = _extract_float(spot_tick, "timestamp", "ts", "ts_ms") if spot_tick else None
+                spot_ts = (
+                    _extract_float(spot_tick, "timestamp", "ts", "ts_ms")
+                    if spot_tick
+                    else None
+                )
                 if spot_ts is not None and spot_ts > 1_000_000_000_000:
                     spot_ts = spot_ts / 1000.0
-                spot_age = (
-                    time.time() - float(spot_ts) if spot_ts is not None else None
-                )
-                spot_max_age = float(
-                    os.environ.get("SPOT_STALENESS_SEC", "30.0")
-                )
+                spot_age = time.time() - float(spot_ts) if spot_ts is not None else None
+                spot_max_age = float(os.environ.get("SPOT_STALENESS_SEC", "30.0"))
                 if spot_age is not None and spot_age > spot_max_age:
                     spot_stale = True
 
@@ -4357,7 +4419,9 @@ class StrategyRunner:
                             },
                         )
                         try:
-                            signal = self._strategy_manager.generate_signal(symbol, price)
+                            signal = self._strategy_manager.generate_signal(
+                                symbol, price
+                            )
                             self._last_strategy_versions[symbol] = current_version
                         except Exception:
                             self._logger.exception("Signal evaluation failure")
@@ -4593,7 +4657,10 @@ class StrategyRunner:
             if now - last_logged > 60:
                 self._logger.info(
                     "Condition met: after_market_signal_allowed_execution_blocked",
-                    extra={"event": "after_market_signal_allowed_execution_blocked", "symbol": signal.symbol},
+                    extra={
+                        "event": "after_market_signal_allowed_execution_blocked",
+                        "symbol": signal.symbol,
+                    },
                 )
                 self._time_block_logged[cache_key] = now
             return
@@ -4747,7 +4814,9 @@ class StrategyRunner:
                         pass  # Position might be frozen/immutable
 
                 except Exception:
-                    self._orphan_retry_count[symbol] = self._orphan_retry_count.get(symbol, 0) + 1
+                    self._orphan_retry_count[symbol] = (
+                        self._orphan_retry_count.get(symbol, 0) + 1
+                    )
                     self._orphan_retry_last_attempt[symbol] = now
                     self._logger.exception("Failed orphan adoption")
                 finally:
@@ -4882,6 +4951,29 @@ class StrategyRunner:
             )
             return None
 
+    def _passes_spot_trend_filter(self, base_symbol: str, trade_symbol: str) -> bool:
+        """Validate option direction against spot VWAP trend. Args: base_symbol, trade_symbol; Returns: bool; Raises: none."""
+        with self._lock:
+            state = self._symbol_state.get(base_symbol)
+        if (
+            state is None
+            or state.last_tick is None
+            or state.vwap is None
+            or state.vwap <= 0
+        ):
+            return True
+        spot_price = float(
+            state.last_tick.get("price") or state.last_tick.get("ltp") or 0.0
+        )
+        if spot_price <= 0:
+            return True
+        upper_symbol = trade_symbol.upper()
+        if "CE" in upper_symbol:
+            return spot_price > float(state.vwap)
+        if "PE" in upper_symbol:
+            return spot_price < float(state.vwap)
+        return True
+
     def _handle_entry_signal(
         self,
         signal: Signal,
@@ -4988,6 +5080,45 @@ class StrategyRunner:
                     f"Exited {_time_mod.time() - _last_exit_time:.0f}s ago | "
                     f"Wait {_remaining:.0f}s more",
                     extra={"event": "signal_reentry_cooldown", "symbol": base_symbol},
+                )
+                return
+
+            with self._lock:
+                state = self._symbol_state.get(base_symbol)
+            if state and state.last_trade_at:
+                elapsed = (timestamp - state.last_trade_at).total_seconds()
+                if elapsed < self._min_trade_interval_seconds:
+                    self._logger.info(
+                        "Condition met: min_trade_interval_guard",
+                        extra={
+                            "event": "min_trade_interval_guard",
+                            "symbol": base_symbol,
+                        },
+                    )
+                    return
+
+            candle_minute = timestamp.replace(second=0, microsecond=0)
+            candle_key = (base_symbol, candle_minute)
+            if (
+                self._trade_counter_by_symbol_candle.get(candle_key, 0)
+                >= self._max_trades_per_symbol_per_candle
+            ):
+                self._logger.info(
+                    "Condition met: max_trades_per_symbol_per_candle_guard",
+                    extra={
+                        "event": "max_trades_per_symbol_per_candle_guard",
+                        "symbol": base_symbol,
+                    },
+                )
+                return
+
+            if not self._passes_spot_trend_filter(base_symbol, trade_symbol):
+                self._logger.info(
+                    "Condition met: spot_vwap_trend_filter_block",
+                    extra={
+                        "event": "spot_vwap_trend_filter_block",
+                        "symbol": base_symbol,
+                    },
                 )
                 return
 
@@ -5366,7 +5497,9 @@ class StrategyRunner:
                 lot_size = 65
                 if hasattr(self._risk_manager, "_resolve_lot_size"):
                     try:
-                        lot_size = int(self._risk_manager._resolve_lot_size(trade_symbol))
+                        lot_size = int(
+                            self._risk_manager._resolve_lot_size(trade_symbol)
+                        )
                     except Exception:
                         lot_size = 65
                 required_margin = float(trade_price) * float(lot_size)
@@ -5605,7 +5738,9 @@ class StrategyRunner:
             if order_id:
                 self._mark_order_in_flight(trade_symbol, base_symbol)
                 manager = getattr(self, "_strategy_manager", None)
-                if manager is not None and hasattr(manager, "increment_observability_counter"):
+                if manager is not None and hasattr(
+                    manager, "increment_observability_counter"
+                ):
                     manager.increment_observability_counter("orders_submitted")
 
             # ✅ Update State Timers (Debounce)
@@ -6075,6 +6210,11 @@ class StrategyRunner:
                 return
 
             state.last_trade_at = timestamp
+            state.last_trade_candle_at = timestamp.replace(second=0, microsecond=0)
+            candle_key = (symbol, state.last_trade_candle_at)
+            self._trade_counter_by_symbol_candle[candle_key] = (
+                self._trade_counter_by_symbol_candle.get(candle_key, 0) + 1
+            )
             state.cooldown_until = (
                 timestamp + timedelta(seconds=cooldown) if cooldown > 0 else None
             )

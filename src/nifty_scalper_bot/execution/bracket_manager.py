@@ -331,14 +331,14 @@ class BracketManager:
                             or ltp <= 0
                         ):
                             continue
-                        if bracket.side == 'BUY' and ltp <= bracket.sl_trigger_price:
+                        if bracket.side == 'BUY' and self._sl_crossed(bracket, ltp):
                             pending.append((bracket, {
                                 'type': 'SL',
                                 'price': ltp,
                                 'qty': bracket.remaining_quantity,
                                 'reason': 'WATCHDOG_HARD_SL',
                             }))
-                        elif bracket.side == 'SELL' and ltp >= bracket.sl_trigger_price:
+                        elif bracket.side == 'SELL' and self._sl_crossed(bracket, ltp):
                             pending.append((bracket, {
                                 'type': 'SL',
                                 'price': ltp,
@@ -971,11 +971,9 @@ class BracketManager:
                 if not bracket or not bracket.active:
                     continue
 
-                if bracket.side == "BUY" and ltp <= bracket.sl_trigger_price:
-                    LOGGER.warning('SL_TRIGGERED symbol=%s', bracket.symbol)
-                    self._force_exit(bracket)
-
-                elif bracket.side == "SELL" and ltp >= bracket.sl_trigger_price:
+                bracket.previous_ltp = float(bracket.last_ltp or ltp)
+                bracket.last_ltp = ltp
+                if self._sl_crossed(bracket, ltp):
                     LOGGER.warning('SL_TRIGGERED symbol=%s', bracket.symbol)
                     self._force_exit(bracket)
         except Exception as e:
@@ -1000,6 +998,13 @@ class BracketManager:
                 )
             ]
         )
+
+    def _sl_crossed(self, bracket: BracketState, ltp: float) -> bool:
+        """Return True when a tick crosses stop-loss. Args: bracket, ltp; Returns: bool; Raises: none."""
+        prev_ltp = float(bracket.previous_ltp or bracket.last_ltp or ltp)
+        if bracket.side == 'BUY':
+            return prev_ltp > bracket.sl_trigger_price and ltp <= bracket.sl_trigger_price
+        return prev_ltp < bracket.sl_trigger_price and ltp >= bracket.sl_trigger_price
 
     def _evaluate_exit_fast(self, bracket: BracketState, ltp: float) -> dict | None:
         """
@@ -1049,13 +1054,9 @@ class BracketManager:
             prev_ltp = float(bracket.previous_ltp or ltp)
             triggered = False
             if bracket.side == "BUY":
-                triggered = (prev_ltp > bracket.sl_trigger_price and ltp <= bracket.sl_trigger_price) or (
-                    ltp <= bracket.sl_trigger_price
-                )
+                triggered = prev_ltp > bracket.sl_trigger_price and ltp <= bracket.sl_trigger_price
             elif bracket.side == "SELL":
-                triggered = (prev_ltp < bracket.sl_trigger_price and ltp >= bracket.sl_trigger_price) or (
-                    ltp >= bracket.sl_trigger_price
-                )
+                triggered = prev_ltp < bracket.sl_trigger_price and ltp >= bracket.sl_trigger_price
 
             if triggered:
                 return {
