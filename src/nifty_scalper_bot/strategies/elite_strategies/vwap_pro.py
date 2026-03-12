@@ -755,6 +755,13 @@ class VWAPProStrategy(EliteStrategy):
             avg_vol = float(
                 indicators.get("avg_volume") or indicators.get("average_volume") or 0.0
             )
+            # FIX S10-3: Index symbols (NSE:NIFTY 50 etc.) report vol=0 by exchange design.
+            # Bypass all volume validation for them — substituting dummy 1.0 so downstream
+            # vol/avg_vol gates don't reject the tick and inflate skipped_data telemetry.
+            _is_tradeable = any(x in symbol.upper() for x in ("CE", "PE", "FUT"))
+            if not _is_tradeable:
+                vol = 1.0
+                avg_vol = 1.0
             # ✅ FIX B: Seed last_valid_volume from hydration data on first call.
             # Options with sparse ticks (≈1 per 13 min) never complete a 60-second live
             # bar, so indicators["volume"] is always 0 for the current bar.  The grace-

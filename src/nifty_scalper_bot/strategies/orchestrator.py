@@ -206,7 +206,7 @@ class StrategyOrchestrator:
                 if _sym_upper.endswith("CE")
                 else ("PE" if _sym_upper.endswith("PE") else None)
             )
-            _dir_cooldown = float(os.getenv("DIRECTION_LOCK_SECONDS", "60"))
+            _dir_cooldown = float(os.getenv("DIRECTION_LOCK_SECONDS", "20"))
 
             if _direction and self._active_direction:
                 _time_since_lock = _t.time() - self._direction_lock_time
