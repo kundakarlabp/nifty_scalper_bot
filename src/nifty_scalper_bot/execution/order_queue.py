@@ -24,7 +24,7 @@ _PRIORITY_MAP: dict[OrderIntent, int] = {
     "ENTRY": 3,
 }
 
-_EMERGENCY_EXIT_INTENTS: set[OrderIntent] = {"EXIT_SL"}
+_EMERGENCY_EXIT_INTENTS: set[OrderIntent] = {"EXIT_SL", "EXIT_TP1", "EXIT_TP2"}
 
 _COUNTER = itertools.count()
 
@@ -153,7 +153,7 @@ class OrderQueue:
                     intent=request.intent, symbol=request.symbol
                 ).inc()
                 QUEUE_DEPTH.set(self._queue.qsize())
-            LOGGER.info(
+            LOGGER.debug(
                 "order_queue_submitted",
                 extra={
                     "event": "order_queue_submitted",
@@ -214,7 +214,7 @@ class OrderQueue:
         dedup_key = (request.symbol.upper(), request.side.upper(), request.intent)
         with self._lock:
             self._dedup.discard(dedup_key)
-        LOGGER.info(
+        LOGGER.debug(
             "order_queue_dequeued",
             extra={
                 "event": "order_queue_dequeued",
