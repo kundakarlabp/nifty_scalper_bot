@@ -179,7 +179,7 @@ class IndicatorEngine:
         self._cache: Dict[str, Dict[str, tuple[Any, datetime]]] = {}
         self._last_valid_vwap: Dict[str, float] = {}
         self._lock = threading.RLock()
-        self._logger = LOGGER  # FIX S10-1: compute_atr/get_latest/slope_calc use self._logger → AttributeError without this
+        self._logger = get_logger(__name__)
 
     def update_price(
         self,

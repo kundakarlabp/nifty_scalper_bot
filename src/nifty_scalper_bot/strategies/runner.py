@@ -618,7 +618,9 @@ class StrategyRunner:
         if self._bracket_manager is not None and hasattr(
             self._bracket_manager, "attach_on_exit_complete"
         ):
-            self._bracket_manager.attach_on_exit_complete(self._on_bracket_exit_complete)
+            self._bracket_manager.attach_on_exit_complete(
+                self._on_bracket_exit_complete
+            )
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -1350,10 +1352,11 @@ class StrategyRunner:
             0.0,
             (incoming_bar.timestamp - previous_bar.timestamp).total_seconds(),
         )
-        if gap_seconds <= 180.0:
-            return repaired
         upper_symbol = symbol.upper()
+        # Sparse option contracts can legitimately pause for a few minutes between prints.
         if ("CE" in upper_symbol or "PE" in upper_symbol) and gap_seconds < 180.0:
+            return repaired
+        if gap_seconds <= 180.0:
             return repaired
         expected = previous_bar.timestamp + timedelta(minutes=1)
         history_cache = self._load_history_cache(symbol)
@@ -1433,21 +1436,31 @@ class StrategyRunner:
         if now - self._last_system_heartbeat_log >= 120.0:
             try:
                 cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
-                stale_symbols = [k for k in self._symbol_history if not self._symbol_history.get(k)]
+                stale_symbols = [
+                    k for k in self._symbol_history if not self._symbol_history.get(k)
+                ]
                 for key in stale_symbols:
                     self._symbol_history.pop(key, None)
                 with self._orders_in_flight_lock:
-                    stale_inflight = [k for k, ts in self._orders_in_flight.items() if (time.time() - ts) > 3600.0]
+                    stale_inflight = [
+                        k
+                        for k, ts in self._orders_in_flight.items()
+                        if (time.time() - ts) > 3600.0
+                    ]
                     for key in stale_inflight:
                         self._orders_in_flight.pop(key, None)
                 with self._trade_counter_lock:
                     stale_candles = [
-                        key for key in self._trade_counter_by_symbol_candle if key[1] < cutoff
+                        key
+                        for key in self._trade_counter_by_symbol_candle
+                        if key[1] < cutoff
                     ]
                     for key in stale_candles:
                         self._trade_counter_by_symbol_candle.pop(key, None)
             except Exception as exc:
-                self._logger.error('Failure in StrategyRunner._emit_composite_reports: %s', exc)
+                self._logger.error(
+                    "Failure in StrategyRunner._emit_composite_reports: %s", exc
+                )
             open_positions = 0
             if hasattr(self._position_manager, "get_all_positions"):
                 try:
@@ -2477,7 +2490,9 @@ class StrategyRunner:
                         raise
                     adjust = tick_size * float(attempt + 1)
                     order_price = (
-                        order_price + adjust if side == "BUY" else max(tick_size, order_price - adjust)
+                        order_price + adjust
+                        if side == "BUY"
+                        else max(tick_size, order_price - adjust)
                     )
                     self._logger.warning(
                         "order_retry_adjusted",
@@ -3205,32 +3220,56 @@ class StrategyRunner:
                 mean_price = sum(float(v) for v in tail) / max(len(tail), 1)
                 atr_avg = mean_price * 0.002
             latest = self._indicator_engine.get_latest(symbol)
-            volume = float((latest or {}).get('volume') or 0.0)
-            avg_volume = float((latest or {}).get('avg_volume') or 0.0)
+            volume = float((latest or {}).get("volume") or 0.0)
+            avg_volume = float((latest or {}).get("avg_volume") or 0.0)
             volume_expansion = (volume / avg_volume) if avg_volume > 0 else 1.0
-            current_vwap = float(indicators.get('vwap') or 0.0)
+            current_vwap = float(indicators.get("vwap") or 0.0)
             history_tail = history[-3:] if history else []
             reference = sum(float(v) for v in history_tail) / max(len(history_tail), 1)
             vwap_slope = (current_vwap - reference) if reference > 0 else 0.0
             snapshot = self._market_regime_engine.classify(
                 {
-                    'adx': indicators.get('adx'),
-                    'atr': indicators.get('atr'),
-                    'atr_average': atr_avg,
-                    'vwap_slope': vwap_slope,
-                    'volume_expansion': volume_expansion,
+                    "adx": indicators.get("adx"),
+                    "atr": indicators.get("atr"),
+                    "atr_average": atr_avg,
+                    "vwap_slope": vwap_slope,
+                    "volume_expansion": volume_expansion,
                 }
             )
             self._last_regime_by_symbol[symbol] = snapshot.regime
             return snapshot.regime
         except Exception as exc:
-            self._logger.error('Failure in StrategyRunner._compute_regime_snapshot: %s', exc)
+            self._logger.error(
+                "Failure in StrategyRunner._compute_regime_snapshot: %s", exc
+            )
             return self._last_regime_by_symbol.get(symbol, MarketRegime.LOW_ACTIVITY)
+
+    def detect_market_regime(self, symbol: str) -> str:
+        """Args: symbol. Returns: coarse regime label. Raises: None."""
+        try:
+            atr_raw = (
+                self._indicator_engine.get_atr(symbol)
+                if self._indicator_engine
+                else None
+            )
+            atr = float(atr_raw) if atr_raw is not None else None
+            if atr is None:
+                return "unknown"
+            if atr < 10.0:
+                return "low_volatility"
+            if atr > 40.0:
+                return "high_volatility"
+            return "normal"
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in StrategyRunner.detect_market_regime: %s", exc
+            )
+            return "unknown"
 
     def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
         """Validate regime gate for strategy. Args: strategy, regime; Returns: bool; Raises: none."""
         normalized = strategy.strip().lower()
-        if normalized in {'vwap_pro', 'vwappro'}:
+        if normalized in {"vwap_pro", "vwappro"}:
             return regime == MarketRegime.TREND
         return True
 
@@ -4633,7 +4672,9 @@ class StrategyRunner:
                 self._last_strategy_versions[symbol] = current_version
                 signal_strategy = str((signal.metadata or {}).get("strategy") or "")
                 current_regime = self._compute_regime_snapshot(symbol)
-                if not self._strategy_allowed_for_regime(signal_strategy, current_regime):
+                if not self._strategy_allowed_for_regime(
+                    signal_strategy, current_regime
+                ):
                     self._regime_block_counter += 1
                     self._logger.info(
                         "Strategy skipped due to detected market regime",
@@ -4643,6 +4684,17 @@ class StrategyRunner:
                             "strategy": signal_strategy or "unknown",
                             "regime": current_regime.value,
                         },
+                    )
+                    return
+                coarse_regime = self.detect_market_regime(symbol)
+                if coarse_regime == "low_volatility":
+                    log_throttled(
+                        self._logger,
+                        f"regime_low_vol_{symbol}",
+                        "Condition met: low_volatility_regime_skip",
+                        interval_sec=60.0,
+                        level=logging.INFO,
+                        extra={"event": "low_volatility_regime_skip", "symbol": symbol},
                     )
                     return
                 if (
@@ -5234,7 +5286,9 @@ class StrategyRunner:
             candle_minute = timestamp.replace(second=0, microsecond=0)
             candle_key = (base_symbol, candle_minute)
             with self._trade_counter_lock:
-                candle_trade_count = self._trade_counter_by_symbol_candle.get(candle_key, 0)
+                candle_trade_count = self._trade_counter_by_symbol_candle.get(
+                    candle_key, 0
+                )
             if candle_trade_count >= self._max_trades_per_symbol_per_candle:
                 self._logger.info(
                     "Condition met: max_trades_per_symbol_per_candle_guard",
@@ -5408,6 +5462,17 @@ class StrategyRunner:
 
         # Only block if Strategy did NOT opt-out
         if should_check_vwap and current_vwap and current_vwap > 0:
+            distance = abs(trade_price - current_vwap) / current_vwap
+            if distance > 0.25:
+                self._logger.info(
+                    "signal_vwap_distance_reject",
+                    extra={
+                        "event": "signal_vwap_distance_reject",
+                        "symbol": base_symbol,
+                        "distance": distance,
+                    },
+                )
+                return
             vwap_dist = ((trade_price - current_vwap) / current_vwap) * 100
 
             # SCALP RULE: For BUY (Long), Price must be ABOVE VWAP
