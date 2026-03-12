@@ -1,5 +1,6 @@
 """Async message bus for decoupled component communication."""
 import asyncio
+from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,9 +39,14 @@ class MessageBus:
     """
     
     def __init__(self, max_queue_size: int = 5000):
+        """Initialize message queues and overflow accounting."""
+        if max_queue_size <= 0:
+            raise ValueError("max_queue_size must be > 0")
+        self._max_queue_size = int(max_queue_size)
+        self._soft_drop_threshold = max(int(self._max_queue_size * 0.8), 1)
         # Separate queue per message type
         self.queues: dict[MessageType, asyncio.Queue] = {
-            msg_type: asyncio.Queue(maxsize=max_queue_size)
+            msg_type: asyncio.Queue(maxsize=self._max_queue_size)
             for msg_type in MessageType
         }
         # Subscribers store (message_type -> list of handler functions)
@@ -49,7 +55,8 @@ class MessageBus:
         }
         self._running = False
         self._tasks: list[asyncio.Task] = []
-        LOGGER.info("MessageBus initialized with max_queue_size=%s", max_queue_size)
+        self._dropped_counts: dict[MessageType, int] = defaultdict(int)
+        LOGGER.info("MessageBus initialized with max_queue_size=%s", self._max_queue_size)
 
     async def publish(self, message: Message) -> None:
         """Publish a message, with pre-start buffering for TICK messages."""
@@ -113,19 +120,40 @@ class MessageBus:
         # Normal publish (bus is running)
         try:
             queue = self.queues[message.type]
-            if queue.qsize() > 4000:
-                with suppress(asyncio.QueueEmpty):
-                    queue.get_nowait()
-                    queue.task_done()
-            await queue.put(message)
+            if queue.qsize() >= self._soft_drop_threshold:
+                if message.type is MessageType.TICK:
+                    with suppress(asyncio.QueueEmpty):
+                        queue.get_nowait()
+                        queue.task_done()
+                    self._dropped_counts[message.type] += 1
+                    log_throttled(
+                        LOGGER,
+                        "message_bus_tick_backpressure_drop",
+                        (
+                            "Dropping oldest tick under backpressure "
+                            f"(depth={queue.qsize()}, dropped={self._dropped_counts[message.type]})"
+                        ),
+                        level=logging.WARNING,
+                        interval_sec=15.0,
+                        extra={"event": "message_bus_backpressure_drop", "type": message.type.value},
+                    )
+                else:
+                    await queue.put(message)
+                    return
+            queue.put_nowait(message)
         except asyncio.QueueFull:
+            self._dropped_counts[message.type] += 1
             log_throttled(
                 LOGGER,
                 f"message_bus_queue_full_{message.type.value}",
                 f"Queue full for {message.type.value} - dropping message.",
                 level=logging.ERROR,
                 interval_sec=15.0,
-                extra={"event": "message_drop", "type": message.type.value},
+                extra={
+                    "event": "message_drop",
+                    "type": message.type.value,
+                    "dropped": self._dropped_counts[message.type],
+                },
             )
         except KeyError:
             LOGGER.error(
@@ -153,6 +181,17 @@ class MessageBus:
             raise TypeError(f"Handler for {message_type.value} must be an async function.")
         self.subscribers[message_type].append(handler)
         LOGGER.info("Component subscribed to %s", message_type.value)
+
+
+    def queue_diagnostics(self) -> dict[str, dict[str, int]]:
+        """Return queue depth and drop counters per message type."""
+        return {
+            msg_type.value: {
+                "depth": self.queues[msg_type].qsize(),
+                "dropped": int(self._dropped_counts.get(msg_type, 0)),
+            }
+            for msg_type in MessageType
+        }
 
     async def _dispatch_loop(self, message_type: MessageType) -> None:
         """Dispatch messages from a queue to its subscribers."""

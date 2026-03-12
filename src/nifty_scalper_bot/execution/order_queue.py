@@ -18,8 +18,8 @@ OrderIntent = Literal["ENTRY", "EXIT_SL", "EXIT_TP1", "EXIT_TP2", "ADJUST_TRAIL"
 
 _PRIORITY_MAP: dict[OrderIntent, int] = {
     "EXIT_SL": 20,
-    "EXIT_TP1": 8,
-    "EXIT_TP2": 8,
+    "EXIT_TP1": 20,
+    "EXIT_TP2": 20,
     "ADJUST_TRAIL": 5,
     "ENTRY": 3,
 }
