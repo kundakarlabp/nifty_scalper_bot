@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Awaitable, cast, Iterable
-# 💡 FIX 1: Import json for safe serialization of complex objects in logging
+from typing import Any, Awaitable, Iterable, Mapping, cast
 import json
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -86,7 +85,9 @@ class PostFillMonitor:
             )
             return
         # BEST PRACTICE: Name the task for debugging
-        self._task = loop.create_task(self._reconciliation_loop(), name="reconciliation-monitor")
+        self._task = loop.create_task(
+            self._reconciliation_loop(), name="reconciliation-monitor"
+        )
 
     async def stop(self) -> None:
         """Stop the background reconciliation loop.
@@ -254,7 +255,7 @@ class PostFillMonitor:
                         exc_info=exc,
                     )
         except asyncio.CancelledError:
-            self._logger.info(
+            self._logger.debug(
                 "Reconciliation loop cancelled",
                 extra={"event": "post_fill_monitor_loop_cancelled"},
             )
@@ -302,7 +303,11 @@ class PostFillMonitor:
         try:
             payload: Any
             if hasattr(self._broker, "get_positions"):
-                payload = await self._broker.get_positions()
+                response = self._broker.get_positions()
+                if asyncio.iscoroutine(response):
+                    payload = await response
+                else:
+                    payload = response
             else:
                 self._logger.error(
                     "CRITICAL: Broker client missing 'get_positions'. Cannot reconcile.",
@@ -312,11 +317,12 @@ class PostFillMonitor:
                 
             # 💡 FIX: Safely log the fetched payload as a JSON string
             if payload:
-                payload_str = json.dumps(payload, indent=2, default=str)
                 self._logger.debug(
-                    "Broker positions fetched: %s",
-                    payload_str,
-                    extra={"event": "broker_positions_fetched", "payload_sample": payload},
+                    "Condition met: broker positions fetched",
+                    extra={
+                        "event": "broker_positions_fetched",
+                        "count": len(payload),
+                    },
                 )
             
         except Exception as exc:  # noqa: BLE001

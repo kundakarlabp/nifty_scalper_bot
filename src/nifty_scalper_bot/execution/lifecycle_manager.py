@@ -11,6 +11,8 @@ from datetime import time as dtime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol, cast
 
+from nifty_scalper_bot.data.option_chain import _round_to_tick
+
 import yaml  # type: ignore[import]
 
 from nifty_scalper_bot.execution.metrics import LIFECYCLE_EXITS
@@ -61,6 +63,7 @@ class LifecyclePosition:
     highest_price: float = 0.0
     entry_iv: float | None = None
     expiry: datetime | None = None
+    tick_size: float = 0.05
 
 
 class StateTrackerProtocol(Protocol):
@@ -460,18 +463,26 @@ class LifecycleManager:
             extra={"event": "lifecycle_on_fill", "symbol": symbol},
         )
         try:
-            stop_loss = entry_price - atr * self._config.trail_atr_mult
-            tp1 = entry_price + atr * self._config.tp1_r
+            tick_size = self._resolve_tick_size(symbol)
+            normalised_entry = self._normalise_price(entry_price, tick_size)
+            stop_loss = self._normalise_price(
+                normalised_entry - atr * self._config.trail_atr_mult,
+                tick_size,
+            )
+            tp1 = self._normalise_price(
+                normalised_entry + atr * self._config.tp1_r,
+                tick_size,
+            )
             tp2_r = (
                 self._config.tp2_r_trend
                 if regime.upper() == "TREND"
                 else self._config.tp2_r_range
             )
-            tp2 = entry_price + atr * tp2_r
+            tp2 = self._normalise_price(normalised_entry + atr * tp2_r, tick_size)
             expiry = self._infer_expiry(symbol)
             position = LifecyclePosition(
                 symbol=symbol,
-                entry_price=entry_price,
+                entry_price=normalised_entry,
                 quantity=quantity,
                 atr=atr,
                 regime=regime.upper(),
@@ -484,6 +495,7 @@ class LifecycleManager:
                 highest_price=entry_price,
                 entry_iv=iv,
                 expiry=expiry,
+                tick_size=tick_size,
             )
             if self._should_apply_gamma_mode(position):
                 LOGGER.warning(
@@ -494,12 +506,18 @@ class LifecycleManager:
                         "symbol": symbol,
                     },
                 )
-                position.tp2 = min(
-                    position.tp2,
-                    position.entry_price + position.atr * self._config.gamma_tp2_r_cap,
+                position.tp2 = self._normalise_price(
+                    min(
+                        position.tp2,
+                        position.entry_price
+                        + position.atr * self._config.gamma_tp2_r_cap,
+                    ),
+                    position.tick_size,
                 )
-                position.sl = position.entry_price - (
-                    position.atr * self._config.gamma_trail_atr_mult
+                position.sl = self._normalise_price(
+                    position.entry_price
+                    - (position.atr * self._config.gamma_trail_atr_mult),
+                    position.tick_size,
                 )
                 self._record_event(
                     symbol,
@@ -559,7 +577,7 @@ class LifecycleManager:
                 trail_mult = self._config.trail_atr_mult
                 if self._is_gamma_active(current_time):
                     trail_mult = self._config.gamma_trail_atr_mult
-                trail_candidate = highest - atr * trail_mult
+                trail_candidate = self._normalise_price(highest - atr * trail_mult, position.tick_size)
                 if position.trail_stop is None:
                     position.trail_stop = trail_candidate
                 else:
@@ -571,7 +589,7 @@ class LifecycleManager:
                     and greeks_iv < position.entry_iv * 0.8
                 ):
                     adjustment = position.tp2 - position.entry_price
-                    position.tp2 = position.entry_price + adjustment * 0.9
+                    position.tp2 = self._normalise_price(position.entry_price + adjustment * 0.9, position.tick_size)
                     self._record_event(
                         symbol,
                         "TP2_ADJUSTED_IV",
@@ -580,7 +598,7 @@ class LifecycleManager:
                 if position.expiry is not None:
                     if position.expiry - current_time <= timedelta(days=1):
                         cap = self._config.gamma_tp2_r_cap
-                        position.tp2 = position.entry_price + position.atr * cap
+                        position.tp2 = self._normalise_price(position.entry_price + position.atr * cap, position.tick_size)
                         self._record_event(
                             symbol,
                             "TP2_ADJUSTED_EXPIRY",
@@ -589,12 +607,14 @@ class LifecycleManager:
                                 "new_tp2": position.tp2,
                             },
                         )
+                if position.trail_stop is not None:
+                    position.sl = max(position.sl, position.trail_stop)
                 self._record_event(
                     symbol,
                     "TRAIL_UPDATED",
                     {
                         "event_type": "TRAIL_UPDATED",
-                        "new_sl": position.trail_stop,
+                        "new_sl": position.sl,
                         "atr": position.atr,
                     },
                 )
@@ -732,16 +752,18 @@ class LifecycleManager:
         price = self._extract_price(tick)
         if price is None:
             return
-        position.highest_price = max(position.highest_price, price)
-        if price <= position.sl:
+        normalised_price = self._normalise_price(price, position.tick_size)
+        epsilon = position.tick_size / 2.0
+        position.highest_price = max(position.highest_price, normalised_price)
+        if normalised_price <= position.sl + epsilon:
             self.exit_at_market(symbol, "STOP_LOSS")
             return
-        if price >= position.tp2:
+        if normalised_price >= position.tp2 - epsilon:
             self.exit_at_market(symbol, "TAKE_PROFIT_2")
             return
-        if price >= position.tp1 and not position.tp1_taken:
+        if normalised_price >= position.tp1 - epsilon and not position.tp1_taken:
             self.partial_exit(symbol, position)
-        if position.trail_stop is not None and price <= position.trail_stop:
+        if position.trail_stop is not None and normalised_price <= position.trail_stop + epsilon:
             self.exit_at_market(symbol, "TRAIL_STOP")
 
     def partial_exit(self, symbol: str, position: LifecyclePosition) -> None:
@@ -774,6 +796,7 @@ class LifecycleManager:
             )
             self._order_queue.submit_order_request(request)
             position.tp1_taken = True
+            position.quantity = max(position.quantity - partial_qty, 0)
             position.sl = position.entry_price
             position.lifecycle_stage = "TP1_TAKEN_RUNNING_TO_TP2"
             self._record_event(
@@ -881,6 +904,32 @@ class LifecycleManager:
                 extra={"event": "lifecycle_state_record_error", "symbol": symbol},
                 exc_info=exc,
             )
+
+    def _normalise_price(self, price: float, tick_size: float) -> float:
+        """Return price rounded to instrument tick-size. Args: price, tick_size. Returns: float. Raises: None."""
+
+        return float(_round_to_tick(price, tick_size=tick_size))
+
+    def _resolve_tick_size(self, symbol: str) -> float:
+        """Resolve symbol tick-size from data hub metadata. Args: symbol. Returns: float. Raises: None."""
+
+        try:
+            if self._data_hub is not None:
+                resolver = getattr(self._data_hub, "resolve_symbol", None)
+                if callable(resolver):
+                    payload = resolver(symbol)
+                    if isinstance(payload, Mapping):
+                        tick = _safe_float(payload.get("tick_size"), 0.05)
+                        if tick > 0:
+                            return tick
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "Failure in LifecycleManager._resolve_tick_size: %s",
+                exc,
+                extra={"event": "lifecycle_tick_size_error", "symbol": symbol},
+                exc_info=exc,
+            )
+        return 0.05
 
     def _fetch_recent_candles(self, symbol: str) -> Iterable[Mapping[str, Any]] | None:
         """Return last 15 candles when the data hub exposes the API.
