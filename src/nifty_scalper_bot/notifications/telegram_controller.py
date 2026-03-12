@@ -496,6 +496,8 @@ class TelegramRuntimeMetrics:
 
 
 class TelegramBot:
+    _poller_guard = threading.Lock()
+    _active_poller_instance: int | None = None
     _CHECK_ORDER: tuple[str, ...] = (
         "broker",
         "ws",
@@ -574,6 +576,7 @@ class TelegramBot:
         self._um: t.Any | None = None
         self._message_debug_handler_registered = False
         self._running = False
+        self._polling_conflict_count = 0
 
     # =========================================================================
     # ✅ CORRECTED STARTUP LOGIC (Single Source of Truth)
@@ -636,8 +639,18 @@ class TelegramBot:
     def _start_manual_polling_loop(self) -> None:
         """Start async update polling loop. Args: none. Returns: None. Raises: None."""
 
-        if self._polling_task is not None and not self._polling_task.done():
-            return
+        with self._poller_guard:
+            active = self._active_poller_instance
+            my_id = id(self)
+            if active is not None and active != my_id:
+                log.warning(
+                    "Telegram duplicate poller detected; skipping new poller.",
+                    extra={"event": "telegram_poller_duplicate", "active": active},
+                )
+                return
+            if self._polling_task is not None and not self._polling_task.done():
+                return
+            self._active_poller_instance = my_id
         self._mark_polling_started()
         self._polling_task = asyncio.create_task(
             self._polling_loop(),
@@ -3883,6 +3896,18 @@ class TelegramBot:
                     await asyncio.sleep(self.deps.polling_interval_seconds)
                 except Exception as exc:  # pragma: no cover - defensive logging
                     self._metrics.polling_errors += 1
+                    err_text = str(exc)
+                    if "terminated by other getUpdates request" in err_text:
+                        self._polling_conflict_count += 1
+                        log.warning(
+                            "Telegram polling conflict detected; recovering.",
+                            extra={
+                                "event": "telegram_polling_conflict",
+                                "count": self._polling_conflict_count,
+                            },
+                        )
+                        await asyncio.sleep(max(self.deps.polling_interval_seconds, 1.0))
+                        continue
                     log.error("Telegram polling error: %s", exc)
                     await asyncio.sleep(2)
         except asyncio.CancelledError:
@@ -3891,6 +3916,9 @@ class TelegramBot:
             self._mark_polling_stopped()
             if task is not None and self._polling_task is task:
                 self._polling_task = None
+            with self._poller_guard:
+                if self._active_poller_instance == id(self):
+                    self._active_poller_instance = None
             log.info("Telegram polling fallback loop exiting.")
 
     async def run(self) -> None:
@@ -3983,6 +4011,7 @@ class TelegramBot:
             await self._app.shutdown()
         self._app = None
         self._running = False
+        self._polling_conflict_count = 0
         self._fallback_active = False
         self._loop = None
         log.info(

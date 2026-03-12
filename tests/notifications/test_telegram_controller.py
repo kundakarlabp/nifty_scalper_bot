@@ -1495,3 +1495,73 @@ async def test_cmd_test_flow_executes_smoke(monkeypatch: pytest.MonkeyPatch) -> 
     message = chat.sent[-1]
     assert "test-order" in message
     assert "positions" in message
+
+
+def test_start_manual_polling_loop_blocks_duplicate_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps = TelegramDeps(token='x', chat_id=1, app_version='test')
+    first = TelegramBot(deps)
+    second = TelegramBot(deps)
+
+    created: list[tuple[str, Any]] = []
+
+    class _Task:
+        def done(self) -> bool:
+            return False
+
+    def _fake_create_task(coro: Any, *, name: str) -> _Task:
+        created.append((name, coro))
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return _Task()
+
+    monkeypatch.setattr(telegram_module.asyncio, 'create_task', _fake_create_task)
+    TelegramBot._active_poller_instance = None
+
+    first._start_manual_polling_loop()
+    second._start_manual_polling_loop()
+
+    assert len(created) == 1
+    assert created[0][0] == 'telegram-manual-polling'
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_recovers_from_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps = TelegramDeps(token='x', chat_id=1, app_version='test')
+    bot = TelegramBot(deps)
+    bot._shutdown_event = asyncio.Event()
+
+    class _FakeAppBot:
+        def __init__(self, owner: TelegramBot) -> None:
+            self._owner = owner
+            self.calls = 0
+
+        async def get_updates(self, **_: Any) -> list[Any]:
+            self.calls += 1
+            if self.calls == 1:
+                raise Exception('Conflict: terminated by other getUpdates request')
+            self._owner._shutdown_event.set()
+            return []
+
+    class _FakeApp:
+        def __init__(self, owner: TelegramBot) -> None:
+            self.bot = _FakeAppBot(owner)
+
+        async def process_update(self, _update: Any) -> None:
+            return None
+
+    bot._app = _FakeApp(bot)
+
+    async def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(telegram_module.asyncio, 'sleep', _noop_sleep)
+    await bot._polling_loop()
+
+    assert bot._polling_conflict_count == 1
+    assert bot._metrics.polling_errors == 1
