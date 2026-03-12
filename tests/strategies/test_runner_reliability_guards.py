@@ -33,7 +33,7 @@ def _runner(indicator: DummyIndicatorEngine | None = None) -> StrategyRunner:
     )
 
 
-def test_repair_candle_gap_marks_synthetic_bars() -> None:
+def test_repair_candle_gap_skips_sparse_option_ticks() -> None:
     runner = _runner()
     symbol = "NFO:NIFTYTESTCE"
     previous = OneMinuteBar(
@@ -57,10 +57,7 @@ def test_repair_candle_gap_marks_synthetic_bars() -> None:
 
     repaired = runner._repair_candle_gap(symbol, previous, incoming)
 
-    assert len(repaired) == 1
-    assert repaired[0].synthetic is True
-    assert repaired[0].volume == 0
-    assert repaired[0].open == previous.close
+    assert repaired == []
 
 
 def test_ingest_bar_ignores_synthetic_volume_for_indicators() -> None:
@@ -110,3 +107,10 @@ def test_set_trade_cooldown_tracks_per_candle_count() -> None:
 
     candle = ts.replace(second=0, microsecond=0)
     assert runner._trade_counter_by_symbol_candle[(symbol, candle)] == 2
+
+
+def test_detect_market_regime_low_volatility() -> None:
+    runner = _runner()
+    runner._indicator_engine.get_atr = lambda _s: 8.0
+
+    assert runner.detect_market_regime("NSE:NIFTY 50") == "low_volatility"

@@ -573,6 +573,7 @@ class TelegramBot:
         self._started_at: datetime = datetime.now(timezone.utc)
         self._um: t.Any | None = None
         self._message_debug_handler_registered = False
+        self._running = False
 
     # =========================================================================
     # ✅ CORRECTED STARTUP LOGIC (Single Source of Truth)
@@ -583,6 +584,8 @@ class TelegramBot:
         Unified startup for Telegram Bot.
         Handles Initialization -> Start -> Polling in one safe flow.
         """
+        if self._running:
+            return
         if self._app is not None and self._app.running:
             log.warning("TelegramBot start requested but already running. Ignoring.")
             return
@@ -608,12 +611,14 @@ class TelegramBot:
 
             await self._app.initialize()
             await self._app.start()
+            self._running = True
             await self._app.bot.delete_webhook(drop_pending_updates=True)
             self._start_manual_polling_loop()
             log.info("Telegram polling loop starting")
             self._ensure_alert_worker()
 
         except Exception as exc:  # noqa: BLE001
+            self._running = False
             log.error("Telegram polling failed: %s", exc, exc_info=True)
 
     async def _start_polling_if_needed(self) -> None:
@@ -3977,6 +3982,7 @@ class TelegramBot:
         with suppress(Exception):
             await self._app.shutdown()
         self._app = None
+        self._running = False
         self._fallback_active = False
         self._loop = None
         log.info(
