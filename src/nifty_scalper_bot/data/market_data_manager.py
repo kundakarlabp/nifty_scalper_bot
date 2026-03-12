@@ -235,6 +235,13 @@ class MarketDataManager:
         self._tick_emit_min_interval = self._parse_float_env(
             "MDM_TICK_EMIT_MIN_INTERVAL_SEC", default=0.02, minimum=0.0
         )
+        self._tick_burst_window_sec = self._parse_float_env(
+            "MDM_TICK_BURST_WINDOW_SEC", default=1.0, minimum=0.1
+        )
+        self._tick_burst_limit = self._parse_int_env(
+            "MDM_TICK_BURST_LIMIT", default=200, minimum=1
+        )
+        self._tick_burst_tracker: dict[str, tuple[float, int]] = {}
         self._tick_bus: Any | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._async_dispatch_drops = 0
@@ -2471,6 +2478,9 @@ class MarketDataManager:
         if symbol not in self._tracked_symbols:
             self._tracked_symbols.add(symbol)
 
+        if not self._allow_tick_for_symbol(symbol):
+            return
+
         with self._lock:
             previous = self._latest_ticks.get(symbol)
 
@@ -2523,6 +2533,44 @@ class MarketDataManager:
             self._last_tick_stats_log = now
         tick_source = str(tick.get("source", "ws") or "ws").lower()
         self._emit_tick(symbol, normalized_tick, source=tick_source)
+
+    def _allow_tick_for_symbol(self, symbol: str) -> bool:
+        """Args: symbol; Returns: burst-gate decision; Raises: none."""
+
+        try:
+            now = time.monotonic()
+            with self._lock:
+                window_start, count = self._tick_burst_tracker.get(symbol, (now, 0))
+                if now - window_start >= self._tick_burst_window_sec:
+                    window_start = now
+                    count = 0
+                count += 1
+                self._tick_burst_tracker[symbol] = (window_start, count)
+            if count <= self._tick_burst_limit:
+                return True
+            log_throttled(
+                self._logger,
+                f"mdm_tick_burst_drop_{symbol}",
+                "Dropping burst tick flood for %s count=%d window=%.2fs"
+                % (symbol, count, self._tick_burst_window_sec),
+                interval_sec=5.0,
+                level=logging.WARNING,
+                extra={
+                    "event": "mdm_tick_burst_drop",
+                    "symbol": symbol,
+                    "count": count,
+                    "window_sec": self._tick_burst_window_sec,
+                },
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in MarketDataManager._allow_tick_for_symbol: %s",
+                exc,
+                extra={"event": "mdm_tick_burst_error", "symbol": symbol},
+                exc_info=exc,
+            )
+            return True
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:

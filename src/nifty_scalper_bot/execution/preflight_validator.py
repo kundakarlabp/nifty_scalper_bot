@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import dataclass
 import logging
 import math
 import time
-from collections import deque
-from dataclasses import dataclass
 from typing import Any, Deque, Mapping
 
 from pydantic import AliasChoices, Field
@@ -33,6 +33,7 @@ class PreFlightValidatorSettings(BaseSettings):
 
     quote_max_age_ms: int = Field(default=2000, ge=0)
     spread_max_pct: float = Field(default=1.5, ge=0.0)
+    min_depth_qty: int = Field(default=300, ge=0)
     risk_max_drawdown_pct_day: float = Field(
         default=7.0,
         ge=0.0,
@@ -235,6 +236,7 @@ class PreFlightValidator:
             ("market_hours", self._check_market_hours, "HARD"),
             ("quote_staleness", self._check_quote_staleness, "HARD"),
             ("spread_check", self._check_spread, "HARD"),
+            ("liquidity_depth", self._check_liquidity_depth, "HARD"),
             ("daily_loss_limit", self._check_daily_loss_limit, "HARD"),
             ("consecutive_losses", self._check_consecutive_losses, "HARD"),
             ("position_limit", self._check_position_limit, "SOFT"),
@@ -635,6 +637,99 @@ class PreFlightValidator:
                 "limit": self._settings.spread_max_pct,
             }
 
+    def _check_liquidity_depth(
+        self,
+        symbol: str,
+        now: float,
+        context: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Validate combined bid/ask top quantity. Args: symbol, now, context; Returns: reason or None; Raises: none."""
+
+        self._logger.debug(
+            "Entered PreFlightValidator._check_liquidity_depth",
+            extra={"event": "preflight_gate_liquidity_depth", "symbol": symbol},
+        )
+        try:
+            _ = now
+            if self._settings.min_depth_qty <= 0:
+                return None
+            tick = dict(context.get("tick") or {})
+            if not tick:
+                fetch = getattr(self._datahub, "getlatesttick", None)
+                if fetch is None:
+                    fetch = getattr(self._datahub, "get_latest_tick", None)
+                tick = (fetch(symbol) if callable(fetch) else None) or {}
+            if not tick:
+                return {
+                    "detail": "Missing quote for liquidity check",
+                    "current_value": None,
+                    "limit": self._settings.min_depth_qty,
+                }
+            bid_qty = _first_float(
+                tick,
+                "best_bid_qty",
+                "bid_qty",
+                "total_buy_qty",
+                "buy_quantity",
+            )
+            ask_qty = _first_float(
+                tick,
+                "best_ask_qty",
+                "ask_qty",
+                "total_sell_qty",
+                "sell_quantity",
+            )
+            depth_payload = tick.get("depth") if isinstance(tick, Mapping) else None
+            if isinstance(depth_payload, Mapping):
+                bid_qty = bid_qty or self._depth_qty(depth_payload.get("buy"))
+                ask_qty = ask_qty or self._depth_qty(depth_payload.get("sell"))
+            total_qty = float(bid_qty or 0.0) + float(ask_qty or 0.0)
+            if total_qty >= float(self._settings.min_depth_qty):
+                return None
+            return {
+                "detail": "Insufficient top-of-book liquidity",
+                "current_value": total_qty,
+                "limit": self._settings.min_depth_qty,
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in PreFlightValidator._check_liquidity_depth: %s",
+                exc,
+                extra={
+                    "event": "preflight_gate_liquidity_depth_error",
+                    "symbol": symbol,
+                },
+                exc_info=exc,
+            )
+            return {
+                "detail": "Liquidity depth validation error",
+                "current_value": None,
+                "limit": self._settings.min_depth_qty,
+            }
+
+    @staticmethod
+    def _depth_qty(payload: Any) -> float | None:
+        """Summarise top-level depth quantity. Args: payload; Returns: qty or None; Raises: none."""
+
+        if not isinstance(payload, list):
+            return None
+        total = 0.0
+        found = False
+        for row in payload:
+            if not isinstance(row, Mapping):
+                continue
+            value = row.get("quantity") or row.get("qty") or row.get("orders")
+            try:
+                qty = float(value)
+            except (TypeError, ValueError):
+                continue
+            if qty > 0:
+                total += qty
+                found = True
+        if not found:
+            return None
+        return total
+
     def _check_daily_loss_limit(
         self,
         symbol: str,
@@ -943,7 +1038,7 @@ class PreFlightValidator:
                     confidence = float(self._regime_manager.get_regime_confidence())
                 except (TypeError, ValueError):
                     confidence = 0.0
-            
+
             # Regime data unavailable (startup warmup or detector not yet run).
             # Do NOT block trading — regime is advisory, not a hard gate.
             if regime is None:
@@ -1096,3 +1191,17 @@ __all__ = [
     "PreFlightValidatorSettings",
     "ValidationResult",
 ]
+
+
+def _first_float(payload: Mapping[str, Any], *keys: str) -> float | None:
+    """Read first numeric field from payload. Args: payload, keys; Returns: value or None; Raises: none."""
+
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
