@@ -273,6 +273,8 @@ class BracketManager:
         self._orphan_retry_last_attempt: Dict[str, float] = {}
         self._exit_executor: Callable[[str, int], Any] | None = None
         self._trailing_controller_factory: Callable[[BracketState], Any] | None = None
+        # FIX S10-2: hook fired when bracket fully closes — lets runner clear orchestrator direction lock
+        self._on_exit_complete_hook: Callable[[str], None] | None = None
     
         # Real-time Data Cache (Legacy Fallback)
         self._current_atr: Dict[str, float] = {}
@@ -306,6 +308,10 @@ class BracketManager:
     def attach_exit_executor(self, executor: Callable[[str, int], Any] | None) -> None:
         """Attach an external market-exit executor. Args: executor; Returns: None; Raises: None."""
         self._exit_executor = executor
+
+    def attach_on_exit_complete(self, hook: Callable[[str], None] | None) -> None:
+        """Attach callback fired with symbol when bracket fully closes. Lets runner clear orchestrator direction lock."""
+        self._on_exit_complete_hook = hook
 
 
     def attach_trailing_controller_factory(
@@ -1140,6 +1146,13 @@ class BracketManager:
 
                 if confirmed:
                     LOGGER.info('EXIT_EXECUTED symbol=%s qty=%s', symbol, qty)
+                    # FIX S10-2: notify runner so orchestrator direction lock clears immediately
+                    hook = self._on_exit_complete_hook
+                    if hook is not None:
+                        try:
+                            hook(symbol)
+                        except Exception:
+                            pass
                 else:
                     LOGGER.critical('EXIT_FAILED_AFTER_FALLBACK symbol=%s qty=%s', symbol, qty)
             except Exception as e:

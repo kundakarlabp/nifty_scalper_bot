@@ -614,6 +614,12 @@ class StrategyRunner:
         self._market_regime_engine = MarketRegimeEngine()
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
 
+        # FIX S10-2: wire bracket-exit callback so direction lock clears on SL/TP
+        if self._bracket_manager is not None and hasattr(
+            self._bracket_manager, "attach_on_exit_complete"
+        ):
+            self._bracket_manager.attach_on_exit_complete(self._on_bracket_exit_complete)
+
     # ==================== LIFECYCLE MANAGEMENT ====================
 
     def start(self) -> None:
@@ -2605,7 +2611,15 @@ class StrategyRunner:
                 extra={"event": "orchestrator_notify_exit_failed", "error": str(exc)},
             )
 
-    def _is_order_in_flight(self, symbol: str, underlying: str) -> bool:
+    def _on_bracket_exit_complete(self, symbol: str) -> None:
+        """Fired by BracketManager when a bracket fully closes (SL/TP/watchdog).
+        Immediately clears orchestrator direction lock so opposite-leg trades are
+        not blocked for the full DIRECTION_LOCK_SECONDS cooldown period."""
+        try:
+            base = self._normalize_symbol(symbol)
+        except Exception:
+            base = symbol
+        self._notify_orchestrator_exit(base)
         """
         Check if an order is currently pending for this symbol or underlying.
 
