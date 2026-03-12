@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+import time
 from types import MethodType, SimpleNamespace
 from typing import Any
 
@@ -93,6 +93,8 @@ class DummyDataHub:
             "timestamp": FIXED_TIME,
             "best_bid": 100.0,
             "best_ask": 100.5,
+            "best_bid_qty": 250,
+            "best_ask_qty": 250,
         }
 
     def set_tick(self, payload: dict[str, Any] | None) -> None:
@@ -242,3 +244,25 @@ def test_preflight_rate_limit_blocks_after_threshold(
     gates = {reason["gate"] for reason in outcome.reasons}
     assert "rate_limit" in gates
     assert outcome.blocking_level == "HARD"
+
+
+def test_preflight_blocks_low_liquidity_depth(
+    validator_components: dict[str, Any],
+) -> None:
+    validator_components["datahub"].set_tick(
+        {
+            "timestamp": FIXED_TIME,
+            "best_bid": 100.0,
+            "best_ask": 100.3,
+            "best_bid_qty": 100,
+            "best_ask_qty": 120,
+        }
+    )
+    validator = _build_validator(validator_components)
+    outcome = validator.validate(
+        "NIFTY",
+        context={"order_cost": 100.0, "margin_available": 5_000.0},
+    )
+    assert outcome.allowed is False
+    gates = {reason["gate"] for reason in outcome.reasons}
+    assert "liquidity_depth" in gates

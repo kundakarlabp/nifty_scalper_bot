@@ -28,7 +28,7 @@ class VWAPProStrategy(EliteStrategy):
     """
 
     MIN_BARS_REQUIRED = 10
-    COOLDOWN_SECONDS = 45    # ✅ FIX #5: Reduced from 60s → 45s; prevents overtrading while capturing fast NIFTY moves
+    COOLDOWN_SECONDS = 45  # ✅ FIX #5: Reduced from 60s → 45s; prevents overtrading while capturing fast NIFTY moves
     VWAP_ACCEPTANCE_BARS = 1  # ✅ FIX #5: Reduced from 2 → 1; index bias gate is already a strong 2-condition filter
     TELEMETRY_LOG_EVERY = 5
     VOLUME_GRACE_SECONDS = 900.0  # ✅ FIX C: Extended from 120s → 900s (15 min). NFO options tick ≈once/13min between batches; 120s grace expired before next tick arrived → volume_below_threshold on every call.
@@ -45,7 +45,7 @@ class VWAPProStrategy(EliteStrategy):
         "_last_valid_volume_ts",
         "_reject_reason_counts",
         "_index_bias_degraded_logged",
-        "_index_bias_missing_logged",   # ✅ FIX #5b: Was missing from __slots__ but set in __init__ and read in _evaluate_signal
+        "_index_bias_missing_logged",  # ✅ FIX #5b: Was missing from __slots__ but set in __init__ and read in _evaluate_signal
         "_last_valid_index_vwap",
         "_bias_failover_logged_bar",
     )
@@ -271,7 +271,7 @@ class VWAPProStrategy(EliteStrategy):
             extra={"event": "vwap_pro_signal_enter", "symbol": symbol},
         )
         try:
-            vwap = 0.0   # prevent closure error
+            vwap = 0.0  # prevent closure error
 
             def _emit_no_signal(reason_code: str) -> None:
                 """Args: reason_code. Returns: None. Raises: Exception."""
@@ -533,7 +533,9 @@ class VWAPProStrategy(EliteStrategy):
             # CE direction for minutes. 0.5% requires a deliberate directional move
             # (~125 pts on 25000 NIFTY) before blocking the opposite option type.
             # Configurable via VWAP_BIAS_TOLERANCE env var (e.g. "0.003" = 0.3%).
-            _bias_tolerance = index_vwap * float(os.getenv("VWAP_BIAS_TOLERANCE", "0.005"))
+            _bias_tolerance = index_vwap * float(
+                os.getenv("VWAP_BIAS_TOLERANCE", "0.005")
+            )
             if (is_ce and index_ltp < (index_vwap - _bias_tolerance)) or (
                 not is_ce and index_ltp > (index_vwap + _bias_tolerance)
             ):
@@ -591,10 +593,17 @@ class VWAPProStrategy(EliteStrategy):
             _min_premium = float(os.getenv("VWAP_MIN_PREMIUM", "10"))
             if current_price < _min_premium:
                 self._telemetry["skipped_data"] += 1
-                if self._telemetry["skipped_data"] <= 5 or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY == 0:
+                if (
+                    self._telemetry["skipped_data"] <= 5
+                    or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY == 0
+                ):
                     LOGGER.info(
                         f"💰 MIN PREMIUM: {symbol} | price={current_price:.2f} < min={_min_premium:.0f} — skipping illiquid option",
-                        extra={"event": "vwap_pro_min_premium_reject", "symbol": symbol, "price": current_price},
+                        extra={
+                            "event": "vwap_pro_min_premium_reject",
+                            "symbol": symbol,
+                            "price": current_price,
+                        },
                     )
                 self._log_no_signal_reason(
                     "premium_too_low",
@@ -616,14 +625,24 @@ class VWAPProStrategy(EliteStrategy):
             if _spread_pct > 0 and _max_spread > 0 and _spread_pct > _max_spread:
                 self._telemetry.setdefault("skipped_spread", 0)
                 self._telemetry["skipped_spread"] += 1
-                if self._telemetry["skipped_spread"] <= 3 or self._telemetry["skipped_spread"] % self.TELEMETRY_LOG_EVERY == 0:
+                if (
+                    self._telemetry["skipped_spread"] <= 3
+                    or self._telemetry["skipped_spread"] % self.TELEMETRY_LOG_EVERY == 0
+                ):
                     LOGGER.info(
                         f"💹 SPREAD REJECT: {symbol} | spread={_spread_pct:.1f}% > max={_max_spread:.0f}%",
-                        extra={"event": "vwap_pro_spread_reject", "symbol": symbol,
-                               "spread_pct": _spread_pct, "max_spread_pct": _max_spread},
+                        extra={
+                            "event": "vwap_pro_spread_reject",
+                            "symbol": symbol,
+                            "spread_pct": _spread_pct,
+                            "max_spread_pct": _max_spread,
+                        },
                     )
                 self._log_no_signal_reason(
-                    "spread_too_wide", symbol=symbol, ltp=current_price, vwap=vwap,
+                    "spread_too_wide",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=vwap,
                     context={"spread_pct": _spread_pct, "max_spread_pct": _max_spread},
                 )
                 _emit_no_signal("spread_too_wide")
@@ -662,6 +681,47 @@ class VWAPProStrategy(EliteStrategy):
                 _emit_no_signal("price_below_vwap")
                 return None
 
+            distance = 0.0
+            if _option_vwap > 0:
+                distance = abs(current_price - _option_vwap) / _option_vwap
+                if distance > 0.08:
+                    self._log_no_signal_reason(
+                        "vwap_distance_extension",
+                        symbol=symbol,
+                        ltp=current_price,
+                        vwap=_option_vwap,
+                        context={"distance": distance, "max_distance": 0.08},
+                    )
+                    self._reset_acceptance(
+                        acc_key,
+                        symbol=symbol,
+                        reason_code="vwap_distance_extension",
+                    )
+                    _emit_no_signal("vwap_distance_extension")
+                    return None
+
+            pullback_ok = True
+            if _option_vwap > 0:
+                pullback_ok = abs(current_price - _option_vwap) <= max(atr * 0.6, 1.0)
+            momentum_confirmation = bool(
+                indicators.get("momentum_confirmation")
+                or indicators.get("confirmation_candle")
+                or indicators.get("trend_momentum_confirm")
+            )
+            if not pullback_ok or not momentum_confirmation:
+                self._log_no_signal_reason(
+                    "vwap_pullback_not_confirmed",
+                    symbol=symbol,
+                    ltp=current_price,
+                    vwap=_option_vwap or vwap,
+                    context={
+                        "pullback_ok": pullback_ok,
+                        "momentum_confirmation": momentum_confirmation,
+                    },
+                )
+                _emit_no_signal("vwap_pullback_not_confirmed")
+                return None
+
             # 📏 Over-extension filter
             vwap_std = float(indicators.get("vwap_std") or 0.0)
             if vwap_std > 0:
@@ -692,7 +752,9 @@ class VWAPProStrategy(EliteStrategy):
 
             # 🔊 ISSUE 4 FIX: Reset acceptance on Volume rejection
             vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("avg_volume") or indicators.get("average_volume") or 0.0)
+            avg_vol = float(
+                indicators.get("avg_volume") or indicators.get("average_volume") or 0.0
+            )
             # ✅ FIX B: Seed last_valid_volume from hydration data on first call.
             # Options with sparse ticks (≈1 per 13 min) never complete a 60-second live
             # bar, so indicators["volume"] is always 0 for the current bar.  The grace-

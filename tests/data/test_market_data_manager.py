@@ -472,3 +472,23 @@ def test_out_of_order_tick_is_discarded(
     latest = manager.get_latest_tick("NIFTY23")
     assert latest is not None
     assert latest["ltp"] == 100.0
+
+
+def test_tick_burst_protection_drops_excess_ticks(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    monkeypatch.setenv("MDM_TICK_BURST_LIMIT", "2")
+    monkeypatch.setenv("MDM_TICK_BURST_WINDOW_SEC", "10")
+    manager = MarketDataManager(broker, ws)
+    events: list[dict[str, Any]] = []
+    manager.subscribe("NIFTY23", events.append)
+    assert ws.on_tick is not None
+
+    ws.on_tick({"instrument_token": 123, "last_price": 100.0, "timestamp": 1000.0})
+    ws.on_tick({"instrument_token": 123, "last_price": 101.0, "timestamp": 1001.0})
+    ws.on_tick({"instrument_token": 123, "last_price": 102.0, "timestamp": 1002.0})
+
+    assert len(events) == 2
+    latest = manager.get_latest_tick("NIFTY23")
+    assert latest is not None
+    assert latest["ltp"] == pytest.approx(101.0)
