@@ -17,12 +17,14 @@ LOGGER = get_logger(__name__)
 OrderIntent = Literal["ENTRY", "EXIT_SL", "EXIT_TP1", "EXIT_TP2", "ADJUST_TRAIL"]
 
 _PRIORITY_MAP: dict[OrderIntent, int] = {
-    "EXIT_SL": 10,
+    "EXIT_SL": 20,
     "EXIT_TP1": 8,
     "EXIT_TP2": 8,
     "ADJUST_TRAIL": 5,
     "ENTRY": 3,
 }
+
+_EMERGENCY_EXIT_INTENTS: set[OrderIntent] = {"EXIT_SL"}
 
 _COUNTER = itertools.count()
 
@@ -130,7 +132,7 @@ class OrderQueue:
                     request.side.upper(),
                     request.intent,
                 )
-                if dedup_key in self._dedup:
+                if dedup_key in self._dedup and request.intent not in _EMERGENCY_EXIT_INTENTS:
                     LOGGER.warning(
                         "order_queue_duplicate_rejected",
                         extra={

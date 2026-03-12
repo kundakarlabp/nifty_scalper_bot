@@ -73,6 +73,7 @@ class PostFillMonitor:
         if self._task is not None and not self._task.done():
             return
         self._stop_event.clear()
+        await self.reconcile()
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:  # noqa: BLE001
@@ -127,9 +128,6 @@ class PostFillMonitor:
         Raises:
             None. Exceptions are logged for diagnostics.
         """
-        if time.time() - self._startup_time < 30.0:
-            return
-
         self._logger.debug(
             "Entered PostFillMonitor.reconcile",
             extra={"event": "post_fill_monitor_reconcile"},

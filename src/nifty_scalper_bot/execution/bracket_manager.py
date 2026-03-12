@@ -62,6 +62,13 @@ METRICS = None
 
 LOGGER = get_logger(__name__)
 
+
+def _round_to_tick(price: float, tick_size: float = 0.05) -> float:
+    """Round *price* to broker-compatible tick precision."""
+    if tick_size <= 0:
+        return round(price, 2)
+    return round(round(float(price) / tick_size) * tick_size, 2)
+
 def _normalize_bracket_side(side: str) -> str:
     """Normalize side to 'BUY'/'SELL' for consistent bracket comparisons.
 
@@ -329,8 +336,7 @@ class BracketManager:
                     for bracket in self._brackets.values():
                         ltp = float(bracket.last_ltp or 0.0)
                         if (
-                            not bracket.active
-                            or bracket.exit_executed
+                            bracket.exit_executed
                             or bracket.exit_in_progress
                             or bracket.remaining_quantity <= 0
                             or bracket.sl_trigger_price <= 0
@@ -965,23 +971,10 @@ class BracketManager:
 
 
     def process_exit_checks(self, symbol: str, ltp: float) -> None:
-        """Process immediate SL checks on tick ingestion. Args: symbol, ltp; Returns: None; Raises: None."""
+        """Route tick to the single on-tick exit authority. Args: symbol, ltp; Returns: None; Raises: None."""
         LOGGER.debug('Entered process_exit_checks')
         try:
-            brackets = self._symbol_map.get(symbol, [])
-
-            for entry_id in brackets:
-
-                bracket = self._brackets.get(entry_id)
-
-                if not bracket or not bracket.active:
-                    continue
-
-                bracket.previous_ltp = float(bracket.last_ltp or ltp)
-                bracket.last_ltp = ltp
-                if self._sl_crossed(bracket, ltp):
-                    LOGGER.warning('SL_TRIGGERED symbol=%s', bracket.symbol)
-                    self._force_exit(bracket)
+            self.on_tick(symbol, ltp)
         except Exception as e:
             LOGGER.error('Failure in process_exit_checks: %s', e)
 
@@ -1083,7 +1076,9 @@ class BracketManager:
             for bracket, action in exits:
                 if bracket.exit_executed or bracket.exit_in_progress:
                     continue
-                if not bracket.active or bracket.remaining_quantity <= 0:
+                action_type = str(action.get('type', '')).upper()
+                is_protective_exit = action_type in {'SL', 'FINAL_TP', 'PARTIAL_TP'}
+                if (not bracket.active and not is_protective_exit) or bracket.remaining_quantity <= 0:
                     continue
                 last_attempt = self._exit_cooldowns.get(bracket.entry_order_id, 0.0)
                 if now - last_attempt < 0.5:
@@ -1340,7 +1335,7 @@ class BracketManager:
                 current_sl = bracket.sl_trigger_price  # authoritative read under lock
                 if new_sl > current_sl:
                     old_sl = bracket.sl_trigger_price
-                    bracket.sl_trigger_price = round(new_sl, 2)
+                    bracket.sl_trigger_price = _round_to_tick(new_sl)
                     bracket.updated_at = time.time()
                     
                     LOGGER.debug(
@@ -1366,7 +1361,7 @@ class BracketManager:
                 current_sl = bracket.sl_trigger_price  # authoritative read under lock
                 if new_sl < current_sl:
                     old_sl = bracket.sl_trigger_price
-                    bracket.sl_trigger_price = round(new_sl, 2)
+                    bracket.sl_trigger_price = _round_to_tick(new_sl)
                     bracket.updated_at = time.time()
                     
                     LOGGER.debug(
@@ -1954,6 +1949,7 @@ class BracketManager:
 
     def update_trailing_sl(self, symbol: str, new_sl: float) -> None:
         """Update SL monotonically for all active brackets on a symbol. Args: symbol,new_sl; Returns: None; Raises: None."""
+        rounded_sl = _round_to_tick(new_sl)
         with self._lock:
             relevant_ids = self._symbol_map.get(symbol, [])
             if not relevant_ids:
@@ -1966,9 +1962,9 @@ class BracketManager:
 
                 old_sl = bracket.sl_trigger_price
                 if bracket.side == 'BUY':
-                    bracket.sl_trigger_price = max(old_sl, new_sl)
+                    bracket.sl_trigger_price = max(old_sl, rounded_sl)
                 else:
-                    bracket.sl_trigger_price = min(old_sl, new_sl)
+                    bracket.sl_trigger_price = min(old_sl, rounded_sl)
 
                 if bracket.sl_trigger_price != old_sl:
                     bracket.updated_at = time.time()

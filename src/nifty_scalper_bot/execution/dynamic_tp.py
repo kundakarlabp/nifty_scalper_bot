@@ -32,7 +32,7 @@ class DynamicTPController:
         self._check_interval = 2.0  # Check every 2 seconds
         self._min_expansion = 5.0   # Minimum points to move TP
         
-        LOGGER.info(
+        LOGGER.debug(
             f"🚀 Dynamic TP Controller started for {symbol} (Order: {tp_order_id})",
             extra={"symbol": symbol, "initial_tp": initial_price}
         )
@@ -79,7 +79,7 @@ class DynamicTPController:
             new_price = self._calculate_new_price(self.current_tp_price, expansion_amount)
             
             # Log the intent
-            LOGGER.info(
+            LOGGER.debug(
                 f"🔥 Momentum Detected (RSI={rsi:.1f}). Expanding TP.",
                 extra={
                     "symbol": self.symbol,
