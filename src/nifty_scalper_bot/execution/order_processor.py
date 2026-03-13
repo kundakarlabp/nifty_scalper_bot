@@ -96,8 +96,11 @@ class OrderProcessor:
         """Stop the order processor. Args: None. Returns: None. Raises: None."""
         LOGGER.info("OrderProcessor: Stopping...")
         self._running = False
+
         try:
-            self.executor.stop_monitoring()
+            if hasattr(self.executor, "stop_monitoring"):
+                self.executor.stop_monitoring()
+
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "Failure in OrderProcessor.stop: %s",
