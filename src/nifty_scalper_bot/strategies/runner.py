@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import calendar
-import json
-import logging
-import os
-import threading
-import time
-import time as time_module
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+import json
+import logging
+import os
 from pathlib import Path
+import threading
+import time
+import time as time_module
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -31,6 +31,7 @@ from typing import (
 )
 
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.core.event_bus import EventBus
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
@@ -39,6 +40,10 @@ from nifty_scalper_bot.core.universe_controller import UniverseController
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.execution.circuit_breaker import ExecutionCircuitBreaker
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
+from nifty_scalper_bot.execution.order_state_machine import (
+    ExecutionState,
+    OrderStateMachine,
+)
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
@@ -512,6 +517,9 @@ class StrategyRunner:
         self._orders_lock = threading.RLock()
         self._order_timeout_sec = 10
         self._symbol_last_signal_ts: dict[str, float] = {}
+        self._execution_state_lock = threading.RLock()
+        self._execution_state_by_symbol: dict[str, OrderStateMachine] = {}
+        self._event_bus = EventBus()
         self._recently_closed: dict[str, float] = (
             {}
         )  # ✅ FIX: Track recently exited symbols
@@ -678,6 +686,8 @@ class StrategyRunner:
             pass
 
         self._market_data.start()
+        worker = threading.Thread(target=self._strategy_worker, daemon=True)
+        worker.start()
 
         if self._data_hub is not None:
             reset = getattr(self._data_hub, "reset_warmup", None)
@@ -1120,7 +1130,12 @@ class StrategyRunner:
         if callback is None:
 
             def _callback(tick: Mapping[str, Any], sym: str = symbol) -> None:
-                self._on_tick(sym, tick)
+                try:
+                    self._event_bus.publish({**dict(tick), "symbol": sym})
+                except Exception as e:
+                    self._logger.error(
+                        "Failure in StrategyRunner._subscribe_symbol callback: %s", e
+                    )
 
             callback = _callback
             self._callbacks[symbol] = callback
@@ -2636,6 +2651,7 @@ class StrategyRunner:
             base = symbol
         self._notify_orchestrator_exit(base)
         self._clear_order_in_flight(symbol)
+        self._reset_execution_state(base)
 
     def _is_order_in_flight(self, trade_symbol: str, base_symbol: str) -> bool:
         """Return whether a fresh order is currently in flight for the symbol group."""
@@ -2671,6 +2687,25 @@ class StrategyRunner:
                     self._orders_in_flight.pop(underlying, None)
             except Exception:
                 pass
+
+    def _get_execution_state_machine(self, symbol: str) -> OrderStateMachine:
+        """Return symbol state machine. Args: symbol. Returns: OrderStateMachine. Raises: none."""
+        with self._execution_state_lock:
+            if symbol not in self._execution_state_by_symbol:
+                self._execution_state_by_symbol[symbol] = OrderStateMachine()
+            return self._execution_state_by_symbol[symbol]
+
+    def _transition_execution_state(
+        self, symbol: str, new_state: ExecutionState
+    ) -> bool:
+        """Apply state transition. Args: symbol, new_state. Returns: bool. Raises: none."""
+        machine = self._get_execution_state_machine(symbol)
+        return machine.transition(new_state)
+
+    def _reset_execution_state(self, symbol: str) -> None:
+        """Reset execution state to IDLE. Args: symbol. Returns: none. Raises: none."""
+        machine = self._get_execution_state_machine(symbol)
+        machine.force_idle()
 
     def _set_post_exit_cooldown(self, base_symbol: str, timestamp: datetime) -> None:
         """
@@ -2764,6 +2799,16 @@ class StrategyRunner:
             await asyncio.to_thread(self._on_tick_safe, tick)
         except Exception as exc:
             LOGGER.error(f"Error in async tick processing: {exc}", exc_info=True)
+
+    def _strategy_worker(self) -> None:
+        """Consume events and run tick evaluation. Args: none. Returns: none. Raises: none."""
+        for event in self._event_bus.consume():
+            if not self._running:
+                continue
+            try:
+                self._on_tick_safe(cast(Mapping[str, Any], event))
+            except Exception as e:
+                self._logger.error("Failure in StrategyRunner._strategy_worker: %s", e)
 
     def _is_market_open(self, now: datetime) -> bool:
         """Return True only when market state is OPEN."""
@@ -3812,6 +3857,20 @@ class StrategyRunner:
                 )
                 skip_strategy = True
 
+            tick_latency_ms = tick_age * 1000.0
+            if tick_latency_ms > 250.0:
+                log_throttled(
+                    self._logger,
+                    f"tick_latency_guard_{symbol}",
+                    (
+                        f"Condition met: tick_latency_guard_reject symbol={symbol} "
+                        f"latency_ms={tick_latency_ms:.1f}"
+                    ),
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
+                skip_strategy = True
+
             # Stale tick: NFO options/futures carry the exchange last-trade timestamp
             # (≈13-min gaps between trades). Use 900s for NFO; 30s for REST-polled
             # index/equity; 10s for WebSocket ticks.
@@ -4823,6 +4882,9 @@ class StrategyRunner:
         try:
             action = signal.action
             base_symbol = self._normalize_symbol(signal.symbol)
+            _ = self._transition_execution_state(
+                base_symbol, ExecutionState.EXIT_PENDING
+            )
             trade_symbol = base_symbol
             trade_price = price
 
@@ -5187,6 +5249,22 @@ class StrategyRunner:
                     },
                 )
                 return
+
+            state_machine = self._get_execution_state_machine(base_symbol)
+            if not state_machine.can_accept_signal():
+                self._logger.info(
+                    "Condition met: execution_state_reject",
+                    extra={
+                        "event": "execution_state_reject",
+                        "symbol": base_symbol,
+                        "state": state_machine.state.value,
+                    },
+                )
+                return
+            _ = self._transition_execution_state(
+                base_symbol,
+                ExecutionState.SIGNAL_RECEIVED,
+            )
 
             # ═══════════════════════════════════════════════════════════════
             # 🛡️ GUARD 0.5: ORDER IN-FLIGHT CHECK
@@ -5854,6 +5932,10 @@ class StrategyRunner:
 
             order_id = None
             self._mark_order_in_flight(trade_symbol, base_symbol)
+            _ = self._transition_execution_state(
+                base_symbol,
+                ExecutionState.ORDER_PENDING,
+            )
             if use_virtual_bracket:
                 self._logger.info(
                     "ORDER_ATTEMPT",
@@ -5973,6 +6055,7 @@ class StrategyRunner:
                 self._set_trade_cooldown(base_symbol, timestamp)
             else:
                 self._clear_order_in_flight(trade_symbol)
+                self._reset_execution_state(base_symbol)
                 if self._execution_circuit_breaker.record_failure():
                     self._logger.error(
                         "Condition met: execution_circuit_breaker_opened",
@@ -6011,6 +6094,7 @@ class StrategyRunner:
                 # ═══════════════════════════════════════════════════════
                 if status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED", "EXPIRED"]:
                     self._clear_order_in_flight(symbol)
+                    self._reset_execution_state(symbol)
 
                 # 🛡️ ACTIVE CHASE LOGIC
                 # If Limit Order is ignored by market (OPEN) after 3s, we must act.
