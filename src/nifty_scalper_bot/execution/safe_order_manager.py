@@ -48,6 +48,8 @@ class SafeOrderManager:
     _m_rejections: Any = field(init=False, repr=False)
     _m_active: Any = field(init=False, repr=False)
     _last_order_at: float = field(init=False, repr=False, default=0.0)
+    _monitor_running: bool = field(init=False, repr=False, default=False)
+    _monitor_thread: threading.Thread | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
