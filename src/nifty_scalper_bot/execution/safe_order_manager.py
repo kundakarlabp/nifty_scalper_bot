@@ -71,6 +71,9 @@ class SafeOrderManager:
         )
         self._update_live_gauge()
         self._last_order_at = 0.0
+        # --- order monitoring lifecycle ---
+        self._monitor_running = False
+        self._monitor_thread = None
 
     # ------------------------------------------------------------------
     def _propagate_skip_reason(self, reason: str) -> None:
@@ -207,6 +210,48 @@ class SafeOrderManager:
             },
         )
         return side
+
+    def start_monitoring(self) -> None:
+        """Start background order monitoring."""
+
+        if self._monitor_running:
+            return
+
+        self._monitor_running = True
+
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            daemon=True,
+        )
+
+        self._monitor_thread.start()
+
+    def _monitor_loop(self) -> None:
+
+        while self._monitor_running:
+            try:
+
+                # If underlying manager has monitoring
+                monitor = getattr(self.order_manager, "monitor_orders", None)
+
+                if callable(monitor):
+                    monitor()
+
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "safe_order_monitor_loop_failure",
+                    extra={"event": "safe_order_monitor_error", "error": str(exc)},
+                )
+
+            time.sleep(0.25)
+
+    def stop_monitoring(self) -> None:
+        """Stop background monitoring thread."""
+
+        self._monitor_running = False
+
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=2)
 
     def set_live_enabled(self, enabled: bool) -> None:
         """Update live trading toggle and metric."""
