@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import calendar
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from enum import Enum
 import json
 import logging
 import os
-from pathlib import Path
 import threading
 import time
 import time as time_module
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -36,11 +36,10 @@ from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
-from nifty_scalper_bot.data.constants import OPTION_ALIAS_SUFFIX
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.execution.circuit_breaker import ExecutionCircuitBreaker
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
-from nifty_scalper_bot.indicators.atr_provider import ATRSnapshot
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
@@ -56,11 +55,9 @@ from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     get_market_state,
-    get_time_status,
     is_market_hours_cached,
 )
 from nifty_scalper_bot.utils.metrics import Counter
-from nifty_scalper_bot.utils.reasons import canonical as canonical_reason
 from nifty_scalper_bot.utils.symbols import (
     canonical,
     enforce_canonical,
@@ -511,13 +508,18 @@ class StrategyRunner:
         self._hydration_log_bar_cache: dict[str, datetime] = {}
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
-        self._orders_in_flight: dict[str, float] = {}  # symbol -> timestamp
-        self._orders_in_flight_lock = threading.RLock()
-        self._order_in_flight_timeout: float = 30.0  # seconds
+        self._orders_in_flight: dict[str, float] = {}
+        self._orders_lock = threading.RLock()
+        self._order_timeout_sec = 10
+        self._symbol_last_signal_ts: dict[str, float] = {}
         self._recently_closed: dict[str, float] = (
             {}
         )  # ✅ FIX: Track recently exited symbols
         self._entry_lock = threading.Lock()  # Atomic entry lock
+        self._execution_circuit_breaker = ExecutionCircuitBreaker(
+            max_failures=3,
+            cooldown_seconds=60.0,
+        )
         self._last_cumulative_volume: dict[str, int] = {}
         self._last_valid_price: dict[str, float] = {}
         self._last_valid_price_ts: dict[str, datetime] = {}
@@ -1441,7 +1443,7 @@ class StrategyRunner:
                 ]
                 for key in stale_symbols:
                     self._symbol_history.pop(key, None)
-                with self._orders_in_flight_lock:
+                with self._orders_lock:
                     stale_inflight = [
                         k
                         for k, ts in self._orders_in_flight.items()
@@ -2627,86 +2629,42 @@ class StrategyRunner:
             )
 
     def _on_bracket_exit_complete(self, symbol: str) -> None:
-        """Fired by BracketManager when a bracket fully closes (SL/TP/watchdog).
-        Immediately clears orchestrator direction lock so opposite-leg trades are
-        not blocked for the full DIRECTION_LOCK_SECONDS cooldown period."""
+        """Clear orchestrator lock and in-flight guard after bracket exit completion."""
         try:
             base = self._normalize_symbol(symbol)
         except Exception:
             base = symbol
         self._notify_orchestrator_exit(base)
-        """
-        Check if an order is currently pending for this symbol or underlying.
+        self._clear_order_in_flight(symbol)
 
-        This prevents duplicate order submissions when:
-        - Order is submitted but not yet filled
-        - Multiple ticks arrive before order confirmation
-
-        Returns:
-            True if an order is in flight, False otherwise.
-        """
+    def _is_order_in_flight(self, trade_symbol: str, base_symbol: str) -> bool:
+        """Return whether a fresh order is currently in flight for the symbol group."""
+        key = trade_symbol or base_symbol
         now = time.time()
-        with self._orders_in_flight_lock:
-            # Clean stale entries (orders older than timeout)
-            stale_symbols = [
-                s
-                for s, t in self._orders_in_flight.items()
-                if now - t > self._order_in_flight_timeout
-            ]
-            for s in stale_symbols:
-                self._orders_in_flight.pop(s, None)
-                self._logger.debug(f"🧹 Cleared stale in-flight: {s}")
 
-            # Check if symbol or underlying has pending order
-            if symbol in self._orders_in_flight:
-                elapsed = now - self._orders_in_flight[symbol]
-                self._logger.debug(f"🛡️ ORDER IN FLIGHT: {symbol} | Age: {elapsed:.1f}s")
+        with self._orders_lock:
+            for symbol in (key, base_symbol):
+                ts = self._orders_in_flight.get(symbol)
+                if ts is None:
+                    continue
+                if now - ts > self._order_timeout_sec:
+                    del self._orders_in_flight[symbol]
+                    continue
                 return True
-
-            if (
-                underlying
-                and underlying != symbol
-                and underlying in self._orders_in_flight
-            ):
-                elapsed = now - self._orders_in_flight[underlying]
-                self._logger.debug(
-                    f"🛡️ UNDERLYING IN FLIGHT: {underlying} | Age: {elapsed:.1f}s"
-                )
-                return True
-
-            return False
+        return False
 
     def _mark_order_in_flight(self, symbol: str, underlying: str | None = None) -> None:
-        """
-        Mark that an order has been submitted for this symbol.
-
-        Args:
-            symbol: The actual trading symbol (option contract)
-            underlying: The base underlying (e.g., NIFTY)
-        """
+        """Record a fresh in-flight order timestamp for symbol and optional underlying."""
         now = time.time()
-        with self._orders_in_flight_lock:
+        with self._orders_lock:
             self._orders_in_flight[symbol] = now
             if underlying and underlying != symbol:
                 self._orders_in_flight[underlying] = now
 
-            self._logger.info(
-                f"📌 MARKED IN-FLIGHT: {symbol}"
-                + (f" (underlying: {underlying})" if underlying else "")
-            )
-
     def _clear_order_in_flight(self, symbol: str) -> None:
-        """
-        Clear the in-flight status when order is filled/cancelled/rejected.
-
-        Should be called from order update callback or verification routine.
-        """
-        with self._orders_in_flight_lock:
-            if symbol in self._orders_in_flight:
-                self._orders_in_flight.pop(symbol, None)
-                self._logger.debug(f"✅ CLEARED IN-FLIGHT: {symbol}")
-
-            # Also try to clear underlying
+        """Clear order in-flight marker for symbol and derived underlying key."""
+        with self._orders_lock:
+            self._orders_in_flight.pop(symbol, None)
             try:
                 underlying = self._normalize_symbol(symbol)
                 if underlying and underlying != symbol:
@@ -2812,6 +2770,9 @@ class StrategyRunner:
         try:
             _ = now
             settings = get_settings()
+            env_name = str(getattr(settings, "environment", "")).lower()
+            if env_name == "production":
+                return get_market_state() == MarketState.OPEN
             if bool(getattr(settings, "allow_offmarket_trading", False)):
                 return True
             return get_market_state() == MarketState.OPEN
@@ -3279,7 +3240,7 @@ class StrategyRunner:
             active_positions = len(self._position_manager.get_open_positions())
         except Exception:
             active_positions = 0
-        with self._orders_in_flight_lock:
+        with self._orders_lock:
             inflight = len(self._orders_in_flight)
         return (active_positions + inflight) < self._strategy_slot_limit
 
@@ -4712,10 +4673,13 @@ class StrategyRunner:
                 with self._lock:
                     state = self._symbol_state.get(symbol)
                     if state:
-                        if state.last_signal_at:
-                            elapsed = (now - state.last_signal_at).total_seconds()
-                            if elapsed < self._config.signal_cooldown_seconds:
-                                return
+                        symbol_now = time.time()
+                        last_signal_ts = self._symbol_last_signal_ts.get(symbol, 0.0)
+                        if (
+                            symbol_now - last_signal_ts
+                            < self._config.signal_cooldown_seconds
+                        ):
+                            return
 
                         state.strategy_data["last_signal"] = {
                             "action": signal.action,
@@ -4829,7 +4793,6 @@ class StrategyRunner:
         # ═══════════════════════════════════════════════════════════
         # 🛡️ FIX: EARLY TIME GUARD (Check BEFORE any processing)
         # ═══════════════════════════════════════════════════════════
-        from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
 
         exchange_open = is_market_hours_cached()
         allow_signal_generation = True
@@ -5214,6 +5177,17 @@ class StrategyRunner:
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
             )
 
+            if self._execution_circuit_breaker.is_open():
+                self._logger.warning(
+                    "Condition met: execution_circuit_breaker_active",
+                    extra={
+                        "event": "execution_circuit_breaker_active",
+                        "symbol": base_symbol,
+                        "remaining_seconds": self._execution_circuit_breaker.remaining_seconds(),
+                    },
+                )
+                return
+
             # ═══════════════════════════════════════════════════════════════
             # 🛡️ GUARD 0.5: ORDER IN-FLIGHT CHECK
             # Prevents duplicate submissions before order fills
@@ -5230,10 +5204,12 @@ class StrategyRunner:
             # -----------------------------------------------------------
             with self._lock:
                 state = self._symbol_state.get(base_symbol)
-                if state and state.last_signal_at:
-                    delta = (timestamp - state.last_signal_at).total_seconds()
+                if state:
+                    symbol_now = time.time()
+                    last_signal_ts = self._symbol_last_signal_ts.get(base_symbol, 0.0)
                     debounce_limit = self._risk_manager.settings.signal_debounce_seconds
 
+                    delta = symbol_now - last_signal_ts
                     if delta < debounce_limit:
                         self._logger.info(
                             f"⏳ DEBOUNCE REJECT: {base_symbol} | "
@@ -5877,6 +5853,7 @@ class StrategyRunner:
                     use_virtual_bracket = False
 
             order_id = None
+            self._mark_order_in_flight(trade_symbol, base_symbol)
             if use_virtual_bracket:
                 self._logger.info(
                     "ORDER_ATTEMPT",
@@ -5934,7 +5911,7 @@ class StrategyRunner:
                     tag=unique_tag,
                 )
             if order_id:
-                self._mark_order_in_flight(trade_symbol, base_symbol)
+                self._execution_circuit_breaker.record_success()
                 manager = getattr(self, "_strategy_manager", None)
                 if manager is not None and hasattr(
                     manager, "increment_observability_counter"
@@ -5946,8 +5923,10 @@ class StrategyRunner:
                 state = self._symbol_state.get(base_symbol)
                 if state:
                     state.last_signal_at = timestamp
+                    self._symbol_last_signal_ts[base_symbol] = time.time()
                     # Also debounce the specific option symbol
                     if trade_symbol != base_symbol:
+                        self._symbol_last_signal_ts[trade_symbol] = time.time()
                         opt_state = self._symbol_state.get(trade_symbol)
                         if opt_state:
                             opt_state.last_signal_at = timestamp
@@ -5993,9 +5972,21 @@ class StrategyRunner:
                 # Set longer cooldown on success
                 self._set_trade_cooldown(base_symbol, timestamp)
             else:
+                self._clear_order_in_flight(trade_symbol)
+                if self._execution_circuit_breaker.record_failure():
+                    self._logger.error(
+                        "Condition met: execution_circuit_breaker_opened",
+                        extra={
+                            "event": "execution_circuit_breaker_opened",
+                            "symbol": trade_symbol,
+                            "cooldown_seconds": 60.0,
+                        },
+                    )
                 self._logger.error(f"🔴 Order Execution Failed for {trade_symbol}")
 
         except Exception as exc:
+            self._clear_order_in_flight(trade_symbol)
+            self._execution_circuit_breaker.record_failure()
             self._logger.error(f"🔴 ENTRY LOGIC CRASH: {exc}", exc_info=True)
             # Ensure cooldown even on crash
             self._set_signal_cooldown(base_symbol, timestamp)
@@ -6417,6 +6408,7 @@ class StrategyRunner:
             state.cooldown_until = (
                 timestamp + timedelta(seconds=cooldown) if cooldown > 0 else None
             )
+            self._symbol_last_signal_ts[symbol] = time.time()
 
     def _set_signal_cooldown(self, symbol: str, timestamp: datetime) -> None:
         """Set signal-level cooldown after signal processing."""
@@ -6429,6 +6421,7 @@ class StrategyRunner:
             state.cooldown_until = (
                 timestamp + timedelta(seconds=cooldown) if cooldown > 0 else None
             )
+            self._symbol_last_signal_ts[symbol] = time.time()
 
     def _record_trade(self, symbol: str, record: TradeRecord) -> None:
         """Record a trade for auditing and persistence."""

@@ -1434,7 +1434,16 @@ class IndicatorEngine:
 
             # 2. Fetch ATR (Already implemented)
             atr_snap = self.compute_atr(symbol)
-            atr_val = atr_snap.current_atr if atr_snap else None
+            if atr_snap is None:
+                atr_val = None
+            else:
+                atr_val = getattr(
+                    atr_snap, "current_atr", getattr(atr_snap, "value", atr_snap)
+                )
+                try:
+                    atr_val = float(atr_val)
+                except (TypeError, ValueError):
+                    atr_val = None
 
             return {
                 "rsi": rsi_val,
