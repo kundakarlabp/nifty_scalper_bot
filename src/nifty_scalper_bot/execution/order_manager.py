@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import json
-import math
-import os
-import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import json
+import math
+import os
 from pathlib import Path
 from threading import Event, RLock, Thread
-from nifty_scalper_bot.config.paths import get_data_dir
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -27,20 +26,21 @@ from typing import (
 )
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.config.paths import get_data_dir
 import nifty_scalper_bot.config.settings as app_settings
-from nifty_scalper_bot.core.trading_switch import TradingSwitchState, trading_switch
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
-from nifty_scalper_bot.data.data_hub import DataHub
-from nifty_scalper_bot.data.trade_store import TradeStore, TradeIntent
+from nifty_scalper_bot.core.trading_switch import TradingSwitchState, trading_switch
 from nifty_scalper_bot.data.bracket_store import BracketStore
+from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.persistent_state import (
     BracketDict,
     PersistentStateManager,
 )
+from nifty_scalper_bot.data.trade_store import TradeIntent, TradeStore
 from nifty_scalper_bot.execution import exceptions as execution_exceptions
+from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController
 from nifty_scalper_bot.execution.broker_rejects import BrokerReject
 from nifty_scalper_bot.execution.execution_policy import ExecutionPolicy
-from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController
 from nifty_scalper_bot.execution.exit_router import plan_and_send_exit
 from nifty_scalper_bot.execution.margin_engine import (
     MarginDecision,
@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from nifty_scalper_bot.notifications.telegram_enhanced import (
         TelegramEnhancedNotifier,
     )
-    from nifty_scalper_bot.risk.risk_manager import RiskManager, OrderSignal
+    from nifty_scalper_bot.risk.risk_manager import OrderSignal, RiskManager
 else:  # pragma: no cover - typing only
     MarketDataManager = Any
     BaseBrokerClient = Any
@@ -154,13 +154,13 @@ class OrderDetails:
     # ------------------------------------------------------------
     order_id: str
     symbol: str
-    side: str        
+    side: str
     quantity: int
     order_type: OrderType
     status: OrderStatus
     price: Optional[float] = None
-    stop_loss: Optional[float] = None    
-    take_profit: Optional[float] = None  
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
     trigger_price: Optional[float] = None
     average_price: float = 0.0
     fill_price: float | None = None
@@ -173,6 +173,7 @@ class OrderDetails:
     child_order_ids: list[str] = field(default_factory=list)
     client_order_id: str | None = None
     rejection_reason: str | None = None
+
 
 @dataclass(slots=True)
 class ExitIntent:
@@ -608,19 +609,25 @@ class OrderManager:
 
         self._broker = broker_client
         execution_mode = (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
-        enable_live = (os.getenv("ENABLE_LIVE", "false") or "false").strip().lower() == "true"
+        enable_live = (
+            os.getenv("ENABLE_LIVE", "false") or "false"
+        ).strip().lower() == "true"
         if execution_mode == "LIVE" and enable_live is False:
             raise RuntimeError("LIVE mode requires ENABLE_LIVE=true")
         if execution_mode == "SIMULATION":
             try:
-                from nifty_scalper_bot.testing.simulated_broker import SimulatedZerodhaBroker
+                from nifty_scalper_bot.testing.simulated_broker import (
+                    SimulatedZerodhaBroker,
+                )
 
                 self._broker = SimulatedZerodhaBroker()
                 self._logger = get_logger(__name__)
                 self._logger.info("Condition met: using simulated broker backend")
             except Exception as exc:  # noqa: BLE001
                 self._logger = get_logger(__name__)
-                self._logger.error("Failure in OrderManager.__init__ simulated broker swap: %s", exc)
+                self._logger.error(
+                    "Failure in OrderManager.__init__ simulated broker swap: %s", exc
+                )
         self._positions = position_manager
         self._limiter = rate_limiter
         self.trade_store = TradeStore()
@@ -695,10 +702,10 @@ class OrderManager:
         # Clean Initialization
         if override := os.getenv("NSB__BRACKET_ENTRY_TIMEOUT_SEC"):
             with suppress(ValueError):
-                 # Safely parse float, ensure min 0.5s
-                 sanitized = max(float(override), 0.5)
-                 self.BRACKET_ENTRY_TIMEOUT_SEC = sanitized
-                 self._logger.info(
+                # Safely parse float, ensure min 0.5s
+                sanitized = max(float(override), 0.5)
+                self.BRACKET_ENTRY_TIMEOUT_SEC = sanitized
+                self._logger.info(
                     "Condition met: override bracket entry timeout",
                     extra={
                         "event": "order_config_override",
@@ -714,15 +721,16 @@ class OrderManager:
         )
         self._brackets: dict[str, BracketState] = {}
         self._bracket_index: dict[str, str] = {}
-        self._bracket_store = BracketStore() # Initialize SQLite Store
-        self._load_orders()                  # Restore Physical Orders
-        self._restore_virtual_brackets()     # Restore Virtual Brackets (New)
-        
+        self._bracket_store = BracketStore()  # Initialize SQLite Store
+        self._load_orders()  # Restore Physical Orders
+        self._restore_virtual_brackets()  # Restore Virtual Brackets (New)
+
         # ---------------------------------------------------------
         # 🛡️ CIRCUIT BREAKER STATE (Kill Switch)
         # ---------------------------------------------------------
         self._consecutive_failures: int = 0
         self._max_failures: int = 5  # Stop trading after 5 back-to-back errors
+        self._missing_counts: dict[str, int] = {}
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
@@ -850,19 +858,19 @@ class OrderManager:
         """Cancel ALL orders first, then exit positions."""
         # 1. Fast Cancel (prevents new fills while we exit)
         self.cancel_pending_orders()
-    
+
         # 2. Dump Positions (Market Orders)
         for pos in self._positions.get_open_positions():
             # Detect product from position to ensure NRML/MIS compatibility
             product_code = getattr(pos, "product", "MIS")
-            
+
             # Use 'exit' logic to ensure side is correct
             self._place_exit_order(
                 symbol=pos.symbol,
                 side="SELL" if pos.quantity > 0 else "BUY",
                 quantity=abs(pos.quantity),
                 product=product_code,
-                tag="PANIC_BUTTON"
+                tag="PANIC_BUTTON",
             )
 
     def set_bracket_manager(self, bracket_manager: BracketManager | None) -> None:
@@ -886,23 +894,23 @@ class OrderManager:
             self._bracket_manager = bracket_manager
             if bracket_manager is None:
                 self._logger.info(
-                    'Condition met: bracket manager dependency cleared',
-                    extra={'event': 'order_manager.bracket_manager_cleared'},
+                    "Condition met: bracket manager dependency cleared",
+                    extra={"event": "order_manager.bracket_manager_cleared"},
                 )
             else:
-                if hasattr(bracket_manager, 'set_notifier'):
+                if hasattr(bracket_manager, "set_notifier"):
                     bracket_manager.set_notifier(self._notify_bracket_event)
-                if hasattr(bracket_manager, 'attach_exit_executor'):
+                if hasattr(bracket_manager, "attach_exit_executor"):
                     bracket_manager.attach_exit_executor(self.exit_position)
                 self._logger.info(
-                    'Bracket manager attached to order manager',
-                    extra={'event': 'order_manager.bracket_manager_attached'},
+                    "Bracket manager attached to order manager",
+                    extra={"event": "order_manager.bracket_manager_attached"},
                 )
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
-                'Failure in set_bracket_manager: %s',
+                "Failure in set_bracket_manager: %s",
                 exc,
-                extra={'event': 'order_manager.bracket_manager_set_failed'},
+                extra={"event": "order_manager.bracket_manager_set_failed"},
                 exc_info=exc,
             )
             raise
@@ -1142,16 +1150,16 @@ class OrderManager:
                 get_indicators=lambda s: self._indicator_engine.get_latest(s),
                 modify_order=_modify,
             )
-            
+
             # Store controller (using a new dict similar to _trailing)
             if not hasattr(self, "_tp_controllers"):
                 self._tp_controllers = {}
             self._tp_controllers[tp_order_id] = controller
-            
+
             # Subscribe to ticks
             self._market_data.subscribe(symbol, controller.on_tick)
             self._logger.info(f"🚀 Dynamic TP attached to {tp_order_id}")
-            
+
         except Exception as e:
             self._logger.error(f"Failed to attach Dynamic TP: {e}")
 
@@ -1159,7 +1167,7 @@ class OrderManager:
         """Stop and remove a dynamic TP controller."""
         if not hasattr(self, "_tp_controllers"):
             return
-            
+
         controller = self._tp_controllers.pop(tp_order_id, None)
         if controller:
             self._market_data.unsubscribe(controller.symbol, controller.on_tick)
@@ -1511,7 +1519,7 @@ class OrderManager:
         # 1. Try to parse from symbol prefix (Fastest)
         if ":" in symbol:
             return symbol.split(":")[0]
-            
+
         # 2. Try the instrument resolver if available
         if self._resolver:
             try:
@@ -1520,7 +1528,7 @@ class OrderManager:
                     return info["exchange"]
             except Exception:
                 pass
-        
+
         # 3. Default fallback for this bot (mostly trades Options)
         return "NFO"
 
@@ -1529,7 +1537,7 @@ class OrderManager:
         # 1. Parse from string if colon present (Fastest)
         if ":" in symbol:
             return symbol.split(":")[1]
-            
+
         # 2. Try the instrument resolver if available
         if self._resolver:
             try:
@@ -1538,7 +1546,7 @@ class OrderManager:
                     return info["tradingsymbol"]
             except Exception:
                 pass
-        
+
         # 3. Fallback: Return as is (assuming it's already a tradingsymbol)
         return symbol
 
@@ -1546,30 +1554,52 @@ class OrderManager:
         """
         ✅ Round price to nearest valid tick size.
         """
-        if price is None or price <= 0: 
+        if price is None or price <= 0:
             return 0.0
         return round(round(price / tick_size) * tick_size, 2)
 
     def _validate_live_execution_safety(self) -> bool:
         """Validate live execution preconditions. Args: none. Returns: bool. Raises: None."""
         try:
-            enable_live = (os.getenv("ENABLE_LIVE", "false") or "false").strip().lower() == "true"
+            enable_live = (
+                os.getenv("ENABLE_LIVE", "false") or "false"
+            ).strip().lower() == "true"
             execution_mode = (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
             if not enable_live or execution_mode != "LIVE":
-                self._logger.error("live_execution_guard_block", extra={"event": "live_execution_guard_block", "reason": "mode_or_flag"})
+                self._logger.error(
+                    "live_execution_guard_block",
+                    extra={
+                        "event": "live_execution_guard_block",
+                        "reason": "mode_or_flag",
+                    },
+                )
                 return False
             broker_connected = True
-            if hasattr(self._broker, "is_connected") and callable(getattr(self._broker, "is_connected")):
+            if hasattr(self._broker, "is_connected") and callable(
+                getattr(self._broker, "is_connected")
+            ):
                 broker_connected = bool(self._broker.is_connected())
             if not broker_connected:
-                self._logger.error("live_execution_guard_block", extra={"event": "live_execution_guard_block", "reason": "broker_disconnected"})
+                self._logger.error(
+                    "live_execution_guard_block",
+                    extra={
+                        "event": "live_execution_guard_block",
+                        "reason": "broker_disconnected",
+                    },
+                )
                 return False
             available_margin = None
             margin_fn = getattr(self._margin_engine, "available_margin", None)
             if callable(margin_fn):
                 available_margin = float(margin_fn() or 0.0)
             if available_margin is not None and available_margin <= 0:
-                self._logger.error("live_execution_guard_block", extra={"event": "live_execution_guard_block", "reason": "insufficient_margin"})
+                self._logger.error(
+                    "live_execution_guard_block",
+                    extra={
+                        "event": "live_execution_guard_block",
+                        "reason": "insufficient_margin",
+                    },
+                )
                 return False
             return True
         except Exception as e:
@@ -1609,9 +1639,13 @@ class OrderManager:
         # ---------------------------------------------------------
         # 🛡️ DETECT EXIT vs ENTRY (must be BEFORE any guard)
         normalized_tag = (tag or "").lower()
-        is_system_exit = any(x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"])
+        is_system_exit = any(
+            x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
+        )
 
-        if not is_system_exit and (os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"):
+        if not is_system_exit and (
+            os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
+        ):
             if not self._validate_live_execution_safety():
                 return None
 
@@ -1620,7 +1654,7 @@ class OrderManager:
             if is_system_exit:
                 self._logger.warning(
                     f"⚠️ Circuit breaker active but ALLOWING system exit for {symbol}",
-                    extra={"event": "circuit_breaker_exit_bypass", "symbol": symbol}
+                    extra={"event": "circuit_breaker_exit_bypass", "symbol": symbol},
                 )
             else:
                 self._logger.critical(
@@ -1633,7 +1667,7 @@ class OrderManager:
 
         # 2. Identify Intraday Context
         current_product = (product or "MIS").upper()
-        is_intraday = (current_product == "MIS")
+        is_intraday = current_product == "MIS"
 
         if not is_system_exit:
             if self._positions.has_open_position(symbol):
@@ -1655,19 +1689,21 @@ class OrderManager:
                     f"\nReason: Intraday Buy Orders MUST have a Stop Loss to attach a Virtual Bracket."
                     f"\nData: Qty={quantity}, SL={stop_loss}, Tag={tag}"
                 )
-                return None # ❌ STOP HERE. DO NOT CALL BROKER.
+                return None  # ❌ STOP HERE. DO NOT CALL BROKER.
 
         # =========================================================
-        import time
+        from datetime import datetime, time as dtime, timezone
         import hashlib
-        from datetime import datetime, timezone, time as dtime
+        import time
         from zoneinfo import ZoneInfo
+
         from nifty_scalper_bot.core.trading_switch import trading_switch
         from nifty_scalper_bot.risk import OrderSignal
-        
+
         # Lazy load TradeStore to avoid circular imports during init
         if not hasattr(self, "trade_store"):
             from nifty_scalper_bot.data.trade_store import TradeStore
+
             self.trade_store = TradeStore()
         from nifty_scalper_bot.data.trade_store import TradeIntent
 
@@ -1685,19 +1721,20 @@ class OrderManager:
             # otherwise silently block every retry of the SL exit, leaving the
             # position open until EOD — exactly the scenario that caused the loss.
             pending_orders = [
-                o for o in self._orders.values()
-                if o.symbol == normalized_symbol 
+                o
+                for o in self._orders.values()
+                if o.symbol == normalized_symbol
                 and o.side == side
                 and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
                 # TIMEOUT SAFETY: Only block if order is fresh (< 45 seconds old)
                 # This prevents getting stuck forever if an order is lost in limbo
                 and (current_time - o.timestamp.timestamp() < 45)
             ]
-            
+
             if pending_orders and not is_system_exit:
                 self._logger.warning(
                     f"🚫 BLOCKED: Fresh pending order exists for {normalized_symbol}. Ignored to prevent duplicate.",
-                    extra={"event": "duplicate_block", "symbol": normalized_symbol}
+                    extra={"event": "duplicate_block", "symbol": normalized_symbol},
                 )
                 return None
             elif pending_orders and is_system_exit:
@@ -1714,7 +1751,7 @@ class OrderManager:
         if signal_id and self.trade_store.exists_by_signal(signal_id):
             self._logger.warning(
                 f"🛑 DUPLICATE BLOCKED: Signal {signal_id} already traded.",
-                extra={"symbol": normalized_symbol, "event": "duplicate_block"}
+                extra={"symbol": normalized_symbol, "event": "duplicate_block"},
             )
             return None
 
@@ -1723,18 +1760,26 @@ class OrderManager:
             if side == "BUY":
                 # For a Long, TP must be above Entry, SL must be below Entry
                 if take_profit and take_profit <= price:
-                    self._logger.error(f"🛑 REJECTED: BUY TP ({take_profit}) is below entry ({price})")
+                    self._logger.error(
+                        f"🛑 REJECTED: BUY TP ({take_profit}) is below entry ({price})"
+                    )
                     return None
                 if stop_loss and stop_loss >= price:
-                    self._logger.error(f"🛑 REJECTED: BUY SL ({stop_loss}) is above entry ({price})")
+                    self._logger.error(
+                        f"🛑 REJECTED: BUY SL ({stop_loss}) is above entry ({price})"
+                    )
                     return None
             elif side == "SELL":
                 # For a Short/Exit, TP must be below Entry, SL must be above Entry
                 if take_profit and take_profit >= price:
-                    self._logger.error(f"🛑 REJECTED: SELL TP ({take_profit}) is above entry ({price})")
+                    self._logger.error(
+                        f"🛑 REJECTED: SELL TP ({take_profit}) is above entry ({price})"
+                    )
                     return None
                 if stop_loss and stop_loss <= price:
-                    self._logger.error(f"🛑 REJECTED: SELL SL ({stop_loss}) is below entry ({price})")
+                    self._logger.error(
+                        f"🛑 REJECTED: SELL SL ({stop_loss}) is below entry ({price})"
+                    )
                     return None
 
         # ---------------------------------------------------------------------
@@ -1755,24 +1800,38 @@ class OrderManager:
                         reason = f"Opening Volatility Buffer (Wait until {safe_start.strftime('%H:%M')})"
                     elif safe_end < now <= market_close:
                         reason = f"EOD Safety Cutoff (No trades after {safe_end.strftime('%H:%M')})"
-                    
+
                     self._logger.warning(
                         f"🛑 Order Blocked: {reason}. Current Time: {now.strftime('%H:%M:%S')}",
-                        extra={"symbol": normalized_symbol, "event": "time_guard_block"}
+                        extra={
+                            "symbol": normalized_symbol,
+                            "event": "time_guard_block",
+                        },
                     )
                     return None
             except Exception as e:
-                self._logger.error(f"Time Guard Check Failed: {e}. Proceeding with caution.")
+                self._logger.error(
+                    f"Time Guard Check Failed: {e}. Proceeding with caution."
+                )
 
         # ---------------------------------------------------------------------
         # 3. TRADING SWITCH GUARD
         # ---------------------------------------------------------------------
         if not is_system_exit:
-            switch_instance = trading_switch() if callable(trading_switch) else trading_switch
-            checker = getattr(switch_instance, "can_trade", getattr(switch_instance, "can_trade_new", None))
-            
+            switch_instance = (
+                trading_switch() if callable(trading_switch) else trading_switch
+            )
+            checker = getattr(
+                switch_instance,
+                "can_trade",
+                getattr(switch_instance, "can_trade_new", None),
+            )
+
             if callable(checker) and not checker():
-                self._logger.warning("Order blocked: Trading Switch is OFF", extra={"symbol": normalized_symbol})
+                self._logger.warning(
+                    "Order blocked: Trading Switch is OFF",
+                    extra={"symbol": normalized_symbol},
+                )
                 return None
 
         # ---------------------------------------------------------------------
@@ -1780,18 +1839,27 @@ class OrderManager:
         # ---------------------------------------------------------------------
         if check_risk and self._risk_manager:
             signal = OrderSignal(
-                symbol=normalized_symbol, side=side, quantity=quantity,
-                price=price or 0.0, stop_loss=stop_loss, take_profit=take_profit
+                symbol=normalized_symbol,
+                side=side,
+                quantity=quantity,
+                price=price or 0.0,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
             )
             is_live = False
             if hasattr(self, "_enable_live_getter") and self._enable_live_getter:
                 is_live = self._enable_live_getter()
             elif hasattr(self, "_resolve_enable_live"):
                 is_live = self._resolve_enable_live()
-            
-            allowed, reason = self._risk_manager.check_order(signal, live_enabled=is_live)
+
+            allowed, reason = self._risk_manager.check_order(
+                signal, live_enabled=is_live
+            )
             if not allowed:
-                self._logger.warning(f"Risk Block: {reason}", extra={"symbol": normalized_symbol, "event": "risk_block"})
+                self._logger.warning(
+                    f"Risk Block: {reason}",
+                    extra={"symbol": normalized_symbol, "event": "risk_block"},
+                )
                 return None
 
         # ---------------------------------------------------------------------
@@ -1802,9 +1870,9 @@ class OrderManager:
             raw_sig = f"{normalized_symbol}:{side}:{quantity}:{int(time.time())}"
             sig_hash = hashlib.md5(raw_sig.encode()).hexdigest()[:12]
             signal_id = f"manual_{sig_hash}"
-            
+
         trade_id = f"TRD_{signal_id}"
-        unique_client_id = f"bot_{signal_id[-12:]}" # Max 20 chars usually
+        unique_client_id = f"bot_{signal_id[-12:]}"  # Max 20 chars usually
 
         # Persist Intent to Disk
         intent = TradeIntent(
@@ -1815,14 +1883,14 @@ class OrderManager:
             side=side,
             qty=quantity,
             timestamp=time.time(),
-            status="SUBMITTED"
+            status="SUBMITTED",
         )
         self.trade_store.add_trade(intent)
 
         # ---------------------------------------------------------------------
         # 6. PAYLOAD OPTIMIZATION (SL-M Fix) - CORRECTED
         # ---------------------------------------------------------------------
-        
+
         # ✅ HELPER: Normalize OrderType to Zerodha string BEFORE any broker call
         def _normalize_order_type(ot: Any) -> str:
             """Convert OrderType Enum to Zerodha-compatible string."""
@@ -1831,7 +1899,7 @@ class OrderManager:
                 ot_upper = ot.strip().upper()
                 if ot_upper in {"MARKET", "LIMIT", "SL", "SL-M"}:
                     return ot_upper
-            
+
             # Enum path: Extract name
             if isinstance(ot, OrderType):
                 ot_name = ot.name.upper()
@@ -1841,7 +1909,7 @@ class OrderManager:
                 ot_name = str(ot.value).upper()
             else:
                 ot_name = str(ot).upper()
-            
+
             # Map to Zerodha format
             zerodha_map = {
                 "MARKET": "MARKET",
@@ -1853,7 +1921,7 @@ class OrderManager:
                 "SL-M": "SL-M",
                 "SL": "SL",
                 "STOP_LOSS_LIMIT": "SL",
-                "STOPLOSSLIMIT": "SL"
+                "STOPLOSSLIMIT": "SL",
             }
             return zerodha_map.get(ot_name, "MARKET")
 
@@ -1868,14 +1936,14 @@ class OrderManager:
                     return "BUY"
                 if s_upper == "SHORT":
                     return "SELL"
-            
+
             if hasattr(s, "name"):
                 s_name = str(s.name).upper()
             elif hasattr(s, "value"):
                 s_name = str(s.value).upper()
             else:
                 s_name = str(s).upper()
-            
+
             side_map = {"BUY": "BUY", "SELL": "SELL", "LONG": "BUY", "SHORT": "SELL"}
             return side_map.get(s_name, "BUY")
 
@@ -1884,22 +1952,34 @@ class OrderManager:
         normalized_side = _normalize_side(side)
 
         # [FIX] Zerodha blocks SL-M for Options -> Convert to SL with limit price
-        if final_order_type in {"SL", "SL-M"} and (price is None or price <= 0.0) and trigger_price:
+        if (
+            final_order_type in {"SL", "SL-M"}
+            and (price is None or price <= 0.0)
+            and trigger_price
+        ):
             buffer_pct = 0.03  # 3% Buffer
             if normalized_side == "BUY":  # Short Exit -> Buy higher
                 price = round(trigger_price * (1 + buffer_pct), 2)
             else:  # Long Exit -> Sell lower
                 price = round(trigger_price * (1 - buffer_pct), 2)
-            
+
             self._logger.info(
                 f"🛡️ Converted SL-M to SL Limit. Trigger: {trigger_price}, Limit: {price}",
-                extra={"event": "order.slm_to_sl_conversion", "trigger": trigger_price, "limit": price}
+                extra={
+                    "event": "order.slm_to_sl_conversion",
+                    "trigger": trigger_price,
+                    "limit": price,
+                },
             )
             final_order_type = "SL"  # Force SL (not SL-M)
 
         self._logger.info(
             f"🚀 Sending Order: {normalized_side} {quantity} {normalized_symbol} ({final_order_type})",
-            extra={"event": "order_sending", "symbol": normalized_symbol, "signal_id": signal_id}
+            extra={
+                "event": "order_sending",
+                "symbol": normalized_symbol,
+                "signal_id": signal_id,
+            },
         )
         self._logger.info(
             "ORDER_SENT symbol=%s side=%s qty=%s",
@@ -1930,7 +2010,7 @@ class OrderManager:
             "trigger_price": trigger_price,
             "tag": tag,
             "variety": variety,
-            "client_order_id": unique_client_id
+            "client_order_id": unique_client_id,
         }
 
         for attempt in range(1, 4):
@@ -1941,54 +2021,77 @@ class OrderManager:
             # -----------------------------------------------------------------
             if isinstance(call_args["order_type"], str):
                 ot_str = call_args["order_type"]
-                if ot_str == "MARKET": call_args["order_type"] = OrderType.MARKET
-                elif ot_str == "LIMIT": call_args["order_type"] = OrderType.LIMIT
-                elif ot_str == "SL": call_args["order_type"] = OrderType.STOP_LOSS
-                elif ot_str == "SL-M": call_args["order_type"] = OrderType.STOP_LOSS_MARKET
+                if ot_str == "MARKET":
+                    call_args["order_type"] = OrderType.MARKET
+                elif ot_str == "LIMIT":
+                    call_args["order_type"] = OrderType.LIMIT
+                elif ot_str == "SL":
+                    call_args["order_type"] = OrderType.STOP_LOSS
+                elif ot_str == "SL-M":
+                    call_args["order_type"] = OrderType.STOP_LOSS_MARKET
             try:
                 # ✅ Run in thread with 3s timeout to prevent hanging
                 result_holder = {"resp": None}
-                
+
                 def target():
                     result_holder["resp"] = _broker_call(call_args)
 
                 # We use the 'Thread' class already imported at top of file
                 t = Thread(target=target, name=f"ord_{unique_client_id}", daemon=True)
                 t.start()
-                t.join(timeout=3.0) # Strict 3s timeout
+                t.join(timeout=3.0)  # Strict 3s timeout
 
                 if t.is_alive():
-                    self._logger.critical(f"🚨 Broker API hung on attempt {attempt}! Timeout forced.")
+                    self._logger.critical(
+                        f"🚨 Broker API hung on attempt {attempt}! Timeout forced."
+                    )
                     raise TimeoutError("Broker API call timed out (3s)")
 
                 response = result_holder["resp"]
-                
+
                 # Re-raise exceptions captured in thread
                 if isinstance(response, Exception):
                     raise response
 
                 # --- Success Logic ---
-                order_id = response.get("order_id") if isinstance(response, dict) else str(response)
-                
+                order_id = (
+                    response.get("order_id")
+                    if isinstance(response, dict)
+                    else str(response)
+                )
+
                 if order_id:
                     # ✅ RESET Kill Switch on success
                     self._consecutive_failures = 0
-                    self._logger.info("ORDER_FILLED order_id=%s symbol=%s", order_id, normalized_symbol)
-                    
+                    self._logger.info(
+                        "ORDER_FILLED order_id=%s symbol=%s",
+                        order_id,
+                        normalized_symbol,
+                    )
+
                     # [FIX] Non-Blocking DB Update
                     # If this fails, we MUST NOT retry the order placement!
                     try:
                         self.trade_store.update_status(trade_id, "FILLED", order_id)
                     except Exception as db_err:
-                        self._logger.error(f"⚠️ TradeStore update failed (Non-Critical): {db_err}")
+                        self._logger.error(
+                            f"⚠️ TradeStore update failed (Non-Critical): {db_err}"
+                        )
 
                     # B. Register Order Locally
                     details = OrderDetails(
-                        order_id=order_id, symbol=normalized_symbol, side=side,
-                        order_type=order_type, quantity=quantity, price=float(price or 0.0),
-                        status=OrderStatus.PENDING, timestamp=datetime.now(timezone.utc),
-                        stop_loss=stop_loss, take_profit=take_profit, tag=tag,
-                        average_price=0.0
+                        order_id=order_id,
+                        symbol=normalized_symbol,
+                        side=side,
+                        order_type=order_type,
+                        quantity=quantity,
+                        price=float(price or 0.0),
+                        status=OrderStatus.PENDING,
+                        timestamp=datetime.now(timezone.utc),
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        tag=tag,
+                        average_price=0.0,
                     )
                     self._register_order(details)
 
@@ -1996,11 +2099,17 @@ class OrderManager:
                     # SKIP if caller will register separately (e.g. place_bracket_order)
                     # Detect via tag or explicit flag — place_bracket_order always calls
                     # register_virtual_bracket itself with tp1/trailing params.
-                    _caller_manages_bracket = any(
-                        x in normalized_tag for x in ["virtual_bracket"]
-                    ) if normalized_tag else False
-                    
-                    if self._bracket_manager and (stop_loss or take_profit) and not _caller_manages_bracket:
+                    _caller_manages_bracket = (
+                        any(x in normalized_tag for x in ["virtual_bracket"])
+                        if normalized_tag
+                        else False
+                    )
+
+                    if (
+                        self._bracket_manager
+                        and (stop_loss or take_profit)
+                        and not _caller_manages_bracket
+                    ):
                         self._bracket_manager.register_virtual_bracket(
                             order_id=order_id,
                             symbol=normalized_symbol,
@@ -2010,10 +2119,14 @@ class OrderManager:
                             sl=float(stop_loss) if stop_loss else 0.0,
                             tp=float(take_profit) if take_profit else 0.0,
                             tag=tag or "auto",
-                            activate_immediately=False
+                            activate_immediately=False,
                         )
                         self._logger.info(f"🛡️ Auto-bracket registered for {order_id}")
-                        self._logger.info("BRACKET_CREATED order_id=%s symbol=%s", order_id, normalized_symbol)
+                        self._logger.info(
+                            "BRACKET_CREATED order_id=%s symbol=%s",
+                            order_id,
+                            normalized_symbol,
+                        )
 
                     # ✅ WORLD-CLASS: Fast fill confirmation & bracket activation
                     # This replaces the old 0.5s sleep
@@ -2041,11 +2154,14 @@ class OrderManager:
                                     f"Trailing attach failed for {order_id}: {exc}"
                                 )
 
-                    
                     if fill_confirmed:
-                        self._logger.info(f"🟢 ORDER FILLED & BRACKET ACTIVE: {order_id}")
+                        self._logger.info(
+                            f"🟢 ORDER FILLED & BRACKET ACTIVE: {order_id}"
+                        )
                     else:
-                        self._logger.info(f"🟡 ORDER SUBMITTED (fill pending): {order_id}")
+                        self._logger.info(
+                            f"🟡 ORDER SUBMITTED (fill pending): {order_id}"
+                        )
                         # ✅ FIX: Force-activate bracket even without fill confirmation
                         # This ensures protection starts immediately
                         # confirm_entry_fill will update entry price when fill comes through
@@ -2056,52 +2172,72 @@ class OrderManager:
                                 if activation_price <= 0:
                                     # Fallback: Try to get fresh quote
                                     if self._market_data:
-                                        q = self._market_data.get_quote(normalized_symbol)
+                                        q = self._market_data.get_quote(
+                                            normalized_symbol
+                                        )
                                         if q:
                                             activation_price = float(
-                                                q.get("ltp") or q.get("last_price") or 0.0
+                                                q.get("ltp")
+                                                or q.get("last_price")
+                                                or 0.0
                                             )
-                                
+
                                 if activation_price > 0:
-                                    self._bracket_manager.confirm_entry_fill(order_id, activation_price)
+                                    self._bracket_manager.confirm_entry_fill(
+                                        order_id, activation_price
+                                    )
                                     self._logger.info(
                                         f"🛡️ Bracket PRE-ACTIVATED: {order_id} @ {activation_price:.2f} "
                                         "(Will update on actual fill)"
                                     )
                             except Exception as exc:
                                 # Don't fail the order just because pre-activation had issues
-                                self._logger.debug(f"Pre-activation note (non-critical): {exc}")
+                                self._logger.debug(
+                                    f"Pre-activation note (non-critical): {exc}"
+                                )
 
                     if not is_system_exit:
                         self._signal_arbitrator.register(normalized_symbol, side)
                     return order_id
-                    
+
             except Exception as e:
                 # ✅ ADD THIS: Count the failure
                 self._consecutive_failures += 1
-                
+
                 msg = str(e).lower()
                 # Fail Fast logic
-                if any(x in msg for x in ["400", "invalid", "market closed", "bad request", "insufficient funds"]):
-                    self._logger.critical(f"🛑 FATAL Payload Error: {e}", extra={"event": "fatal_order_error"})
+                if any(
+                    x in msg
+                    for x in [
+                        "400",
+                        "invalid",
+                        "market closed",
+                        "bad request",
+                        "insufficient funds",
+                    ]
+                ):
+                    self._logger.critical(
+                        f"🛑 FATAL Payload Error: {e}",
+                        extra={"event": "fatal_order_error"},
+                    )
                     self.trade_store.update_status(trade_id, "REJECTED_FATAL")
                     return None
-                
+
                 self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
                 time.sleep(0.5 * attempt)
-                
+
         self._logger.error("❌ Order placement failed after retries.")
         return None
 
     def place_managed_order(
-        self, 
-        symbol: str, 
-        side: Literal["BUY", "SELL"], 
-        quantity: int, 
-        stop_loss: float, 
-        take_profit: float, 
-        signal_id: str, 
-        tag: str = "strategy"
+        self,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        quantity: int,
+        stop_loss: float,
+        take_profit: float,
+        signal_id: str,
+        tag: str = "strategy",
     ) -> str | None:
         """
         Atomic wrapper that guarantees: Entry Order + Virtual Bracket OR Nothing.
@@ -2124,25 +2260,27 @@ class OrderManager:
             symbol=symbol,
             side=side,
             quantity=quantity,
-            stop_loss=stop_loss, # ✅ Critical: Passing this satisfies the Safety Guard
+            stop_loss=stop_loss,  # ✅ Critical: Passing this satisfies the Safety Guard
             take_profit=take_profit,
             signal_id=signal_id,
             tag=tag,
-            product="MIS"
+            product="MIS",
         )
 
         # 3. Immediate Bracket Registration (The "Virtual" Part)
-        # Note: place_order ALREADY calls register_virtual_bracket internally 
-        # in the success block, so we don't strictly need to duplicate it here 
+        # Note: place_order ALREADY calls register_virtual_bracket internally
+        # in the success block, so we don't strictly need to duplicate it here
         # IF your place_order logic remains as seen in previous logs.
         # However, checking it here adds a layer of debug certainty.
-        
+
         if order_id:
-            self._logger.info(f"✅ Managed Order {order_id} placed successfully with Virtual Bracket.")
+            self._logger.info(
+                f"✅ Managed Order {order_id} placed successfully with Virtual Bracket."
+            )
             return order_id
-            
+
         return None
-    
+
     def guard_existing_position(
         self,
         *,
@@ -2293,7 +2431,7 @@ class OrderManager:
             created_at=datetime.now(timezone.utc),
         )
         self._register_guard_pair(pair)
-        
+
         # ================= FIX-4: ATTACH VIRTUAL BRACKET =================
         if self._bracket_manager:
             try:
@@ -2521,7 +2659,9 @@ class OrderManager:
         )
         if abs(delta) > tick_size:
             stop_loss = float(stop_loss) + delta
-            take_profit = float(take_profit) + delta  # anchor bracket to actual execution.
+            take_profit = (
+                float(take_profit) + delta
+            )  # anchor bracket to actual execution.
         if side == "BUY":
             if not (stop_loss < effective_entry_price < take_profit):
                 atr = max(abs(float(take_profit) - float(stop_loss)) / 2.0, 1.0)
@@ -2567,10 +2707,10 @@ class OrderManager:
         fraction = float(partial_profit_fraction or 0.0)
         # [FIX] Lot-Aware Sizing
         lot_size = self._lot_size_for_symbol(symbol)
-        
+
         tp_primary_qty = filled_quantity
         tp_secondary_qty = 0
-        
+
         if 0 < fraction < 1:
             # [FIX] Lot-aware sizing to prevent broker rejection
             raw_target = int(filled_quantity * fraction)
@@ -2579,18 +2719,18 @@ class OrderManager:
                 lot_size = self._lot_size_for_symbol(symbol)
             except Exception:
                 lot_size = 1
-            
+
             # Snap calculation to floor lot chunks (e.g. 37 -> 25 if lot is 25)
             lots_count = raw_target // lot_size
-                        
+
             if lots_count == 0:
-            # If fraction results in < 1 lot, force full exit at TP2
+                # If fraction results in < 1 lot, force full exit at TP2
                 tp_primary_qty = 0
             else:
                 tp_primary_qty = lots_count * lot_size
-                            
+
             tp_secondary_qty = filled_quantity - tp_primary_qty
-                      
+
             # Failsafe: if primary became 0, move everything to secondary
             if tp_primary_qty == 0:
                 tp_primary_qty = filled_quantity
@@ -2728,13 +2868,13 @@ class OrderManager:
         """
         self._logger.info(
             f"🚀 Initiating Virtual Bracket: {symbol} {side} {quantity}",
-            extra={"event": "virtual_bracket_init", "symbol": symbol}
+            extra={"event": "virtual_bracket_init", "symbol": symbol},
         )
 
         # 1. Place the Entry Order (Physical)
         # Logic: If price > 0 use LIMIT, else MARKET
         order_type = OrderType.LIMIT if entry_price > 0 else OrderType.MARKET
-        
+
         entry_id = self.place_order(
             symbol=symbol,
             side=side,
@@ -2745,7 +2885,7 @@ class OrderManager:
             take_profit=take_profit,
             product=product or "MIS",
             tag=f"virtual_bracket_{tag}" if tag else "virtual_bracket",
-            check_risk=True
+            check_risk=True,
         )
 
         if not entry_id:
@@ -2767,11 +2907,13 @@ class OrderManager:
                 tp1_price=tp1_price,
                 tp1_qty=tp1_qty,
                 trailing_atr_mult=trailing_atr_mult,
-                activate_immediately=False # Wait for actual fill!
+                activate_immediately=False,  # Wait for actual fill!
             )
-            self._logger.info(f"🛡️ Virtual Bracket Registered (Pending Fill) for {entry_id}")
+            self._logger.info(
+                f"🛡️ Virtual Bracket Registered (Pending Fill) for {entry_id}"
+            )
         else:
-             self._logger.warning("⚠️ BracketManager not attached! Trade is naked.")
+            self._logger.warning("⚠️ BracketManager not attached! Trade is naked.")
 
         # Return Entry ID (Stop/TP IDs are empty because they are virtual/dynamic)
         return entry_id
@@ -2910,12 +3052,12 @@ class OrderManager:
         """
 
         self._logger.debug(
-            'Entered OrderManager.set_notifier',
-            extra={'event': 'order_manager_set_notifier'},
+            "Entered OrderManager.set_notifier",
+            extra={"event": "order_manager_set_notifier"},
         )
         self._notifier = notifier
         bracket_manager = self._bracket_manager
-        if bracket_manager is not None and hasattr(bracket_manager, 'set_notifier'):
+        if bracket_manager is not None and hasattr(bracket_manager, "set_notifier"):
             bracket_manager.set_notifier(self._notify_bracket_event)
 
     def _notify_bracket_event(
@@ -2934,8 +3076,8 @@ class OrderManager:
             None.
         """
         self._logger.debug(
-            'Entered _notify_bracket_event',
-            extra={'event': 'order_manager_bracket_notify_enter', 'label': event},
+            "Entered _notify_bracket_event",
+            extra={"event": "order_manager_bracket_notify_enter", "label": event},
         )
         if self._notifier is None:
             return
@@ -2946,17 +3088,17 @@ class OrderManager:
                     if value is None:
                         continue
                     if isinstance(value, float):
-                        parts.append(f'{key}={value:.2f}')
+                        parts.append(f"{key}={value:.2f}")
                     else:
-                        parts.append(f'{key}={value}')
-            detail = ' | '.join(parts)
-            message = f'[{event}] {detail}' if detail else f'[{event}]'
+                        parts.append(f"{key}={value}")
+            detail = " | ".join(parts)
+            message = f"[{event}] {detail}" if detail else f"[{event}]"
             self._notifier.send_alert(message)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
-                'Failure in _notify_bracket_event: %s',
+                "Failure in _notify_bracket_event: %s",
                 exc,
-                extra={'event': 'order_manager_bracket_notify_failed', 'label': event},
+                extra={"event": "order_manager_bracket_notify_failed", "label": event},
                 exc_info=exc,
             )
 
@@ -2976,26 +3118,26 @@ class OrderManager:
             None.
         """
         self._logger.debug(
-            'Entered _register_virtual_bracket_for_fill',
+            "Entered _register_virtual_bracket_for_fill",
             extra={
-                'event': 'order_manager_register_virtual_bracket',
-                'order_id': order.order_id,
-                'source': source,
+                "event": "order_manager_register_virtual_bracket",
+                "order_id": order.order_id,
+                "source": source,
             },
         )
         if self._bracket_manager is None:
             self._logger.warning(
-                'Bracket manager missing for filled order',
+                "Bracket manager missing for filled order",
                 extra={
-                    'event': 'order_manager_bracket_missing',
-                    'order_id': order.order_id,
-                    'symbol': order.symbol,
-                    'source': source,
+                    "event": "order_manager_bracket_missing",
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "source": source,
                 },
             )
             self._notify_bracket_event(
-                'BRACKET_MANAGER_MISSING',
-                {'symbol': order.symbol, 'order_id': order.order_id, 'source': source},
+                "BRACKET_MANAGER_MISSING",
+                {"symbol": order.symbol, "order_id": order.order_id, "source": source},
             )
             return
         try:
@@ -3005,13 +3147,13 @@ class OrderManager:
             qty = int(order.filled_quantity or order.quantity or 0)
             if entry_price <= 0 or qty <= 0:
                 self._logger.warning(
-                    'Skipping bracket registration due to invalid fill data',
+                    "Skipping bracket registration due to invalid fill data",
                     extra={
-                        'event': 'order_manager_bracket_invalid_fill',
-                        'order_id': order.order_id,
-                        'symbol': order.symbol,
-                        'entry_price': entry_price,
-                        'qty': qty,
+                        "event": "order_manager_bracket_invalid_fill",
+                        "order_id": order.order_id,
+                        "symbol": order.symbol,
+                        "entry_price": entry_price,
+                        "qty": qty,
                     },
                 )
                 return
@@ -3020,10 +3162,20 @@ class OrderManager:
             tp_price = float(order.take_profit or 0.0)
             side = str(order.side).upper()
             if sl_price <= 0:
-                sl_price = round(entry_price * (0.90 if side == 'BUY' else 1.10), 1)
+                sl_price = round(entry_price * (0.90 if side == "BUY" else 1.10), 1)
             if tp_price <= 0:
-                tp_price = round(entry_price * (1.20 if side == 'BUY' else 0.80), 1)
+                tp_price = round(entry_price * (1.20 if side == "BUY" else 0.80), 1)
 
+            if self._bracket_manager.has_active_bracket(order.symbol):
+                self._logger.debug(
+                    "Condition met: skip_duplicate_bracket_registration",
+                    extra={
+                        "event": "order_manager_bracket_duplicate_skip",
+                        "symbol": order.symbol,
+                        "order_id": order.order_id,
+                    },
+                )
+                return
             bracket_exists = self._bracket_manager.get_bracket(order.order_id)
             if bracket_exists is None:
                 self._bracket_manager.register_virtual_bracket(
@@ -3038,23 +3190,23 @@ class OrderManager:
                 )
             self._bracket_manager.confirm_entry_fill(order.order_id, entry_price)
             self._logger.info(
-                'Condition met: virtual bracket active for filled order',
+                "Condition met: virtual bracket active for filled order",
                 extra={
-                    'event': 'order_manager_bracket_activated',
-                    'order_id': order.order_id,
-                    'symbol': order.symbol,
-                    'source': source,
+                    "event": "order_manager_bracket_activated",
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "source": source,
                 },
             )
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
-                'Failure in _register_virtual_bracket_for_fill: %s',
+                "Failure in _register_virtual_bracket_for_fill: %s",
                 exc,
                 extra={
-                    'event': 'order_manager_bracket_register_failed',
-                    'order_id': order.order_id,
-                    'symbol': order.symbol,
-                    'source': source,
+                    "event": "order_manager_bracket_register_failed",
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "source": source,
                 },
                 exc_info=exc,
             )
@@ -3478,7 +3630,7 @@ class OrderManager:
             except Exception as exc:
                 self._logger.warning(
                     f"Stop replacement attempt {attempt+1} failed: {exc}",
-                    extra={"entry_id": state.entry_id}
+                    extra={"entry_id": state.entry_id},
                 )
                 time.sleep(0.5)
         if not replacement:
@@ -3486,7 +3638,7 @@ class OrderManager:
             # ACTION: Trigger Emergency Exit immediately.
             self._logger.critical(
                 "CRITICAL: Failed to replace Stop Loss. Executing EMERGENCY EXIT.",
-                extra={"event": "resize_stop_fatal_error", "entry_id": state.entry_id}
+                extra={"event": "resize_stop_fatal_error", "entry_id": state.entry_id},
             )
             try:
                 self._place_exit_order(
@@ -3494,12 +3646,12 @@ class OrderManager:
                     side=state.exit_side,
                     quantity=new_quantity,
                     product=state.product,
-                    tag="emergency_no_stop"
+                    tag="emergency_no_stop",
                 )
             except Exception as exit_exc:
                 self._logger.critical(f"EMERGENCY EXIT FAILED: {exit_exc}")
-            return          
-                
+            return
+
         # ... (Rest of the function continues with `replacement` guaranteed) ...
         state.stop_order_id = replacement.order_id
         self._bracket_index[replacement.order_id] = state.entry_id
@@ -3509,7 +3661,7 @@ class OrderManager:
             and replacement.price > 0
         ):
             state.stop_price = replacement.price
-                
+
         if state.trailing_spec is not None:
             self.stop_trailing(state.entry_id)
             try:
@@ -3523,11 +3675,14 @@ class OrderManager:
                 )
             except Exception as exc:
                 # [ADD THIS LINE]
-                state.trailing_spec = None # Mark as no longer trailing
+                state.trailing_spec = None  # Mark as no longer trailing
                 self._logger.error(
                     "Failure in _resize_stop_order trailing: %s. Stop is now STATIC.",
                     exc,
-                    extra={"event": "resize_stop_trailing_failed", "entry_id": state.entry_id}
+                    extra={
+                        "event": "resize_stop_trailing_failed",
+                        "entry_id": state.entry_id,
+                    },
                 )
 
     def _resize_target_order(
@@ -3803,14 +3958,18 @@ class OrderManager:
             entry_id = order.order_id
 
         # If this is a filled entry with SL/TP intent but no bracket orders yet
-        if not entry_id and order.status == OrderStatus.FILLED and (order.stop_loss or order.take_profit):
+        if (
+            not entry_id
+            and order.status == OrderStatus.FILLED
+            and (order.stop_loss or order.take_profit)
+        ):
             self._logger.info(
                 f"🛡️ Auto-initializing bracket for simple order {order.order_id}",
-                extra={"event": "auto_bracket_init", "order_id": order.order_id}
+                extra={"event": "auto_bracket_init", "order_id": order.order_id},
             )
-            
+
             exit_side: Literal["BUY", "SELL"] = "SELL" if order.side == "BUY" else "BUY"
-            
+
             state = BracketState(
                 entry_id=order.order_id,
                 symbol=order.symbol,
@@ -3823,69 +3982,91 @@ class OrderManager:
                 stop_order_id="",
                 stop_price=float(order.stop_loss) if order.stop_loss else 0.0,
                 stop_order_type=OrderType.STOP_LOSS_MARKET,
-                tp_primary_price=float(order.take_profit) if order.take_profit else None,
-                tp_primary_qty=order.filled_quantity if order.take_profit else 0
+                tp_primary_price=(
+                    float(order.take_profit) if order.take_profit else None
+                ),
+                tp_primary_qty=order.filled_quantity if order.take_profit else 0,
             )
-            
+
             self._register_bracket_state(state)
             entry_id = order.order_id
-            
+
             # --- A. Place Stop Loss (Critical Safety Check) ---
             sl_successful = False  # Track success to gate TP placement
-            
+
             if state.stop_price > 0:
                 try:
                     stop = self._place_single_order(
-                        symbol=state.symbol, side=state.exit_side, quantity=state.total_quantity,
-                        order_type=OrderType.STOP_LOSS_MARKET, price=state.stop_price,
-                        product=state.product, tag="auto-stop", parent_order_id=entry_id
+                        symbol=state.symbol,
+                        side=state.exit_side,
+                        quantity=state.total_quantity,
+                        order_type=OrderType.STOP_LOSS_MARKET,
+                        price=state.stop_price,
+                        product=state.product,
+                        tag="auto-stop",
+                        parent_order_id=entry_id,
                     )
                     state.stop_order_id = stop.order_id
                     self._bracket_index[stop.order_id] = entry_id
                     self._update_entry_children(entry_id, add=[stop.order_id])
-                    
-                    sl_successful = True # ✅ Mark as successful
-                    
+
+                    sl_successful = True  # ✅ Mark as successful
+
                     # [UPGRADE] Attach Adaptive Trailing to Auto-Stop
                     if self._indicator_engine:
                         self.attach_trailing_stop(
-                            entry_order_id=entry_id, sl_order_id=stop.order_id,
-                            symbol=state.symbol, side=state.side,
+                            entry_order_id=entry_id,
+                            sl_order_id=stop.order_id,
+                            symbol=state.symbol,
+                            side=state.side,
                             entry_price=state.entry_price,
-                            spec=TrailingSpec(trail_by=10.0, step=2.0)
+                            spec=TrailingSpec(trail_by=10.0, step=2.0),
                         )
                 except Exception as e:
                     self._logger.critical(
-                        "CRITICAL: Failed to place STOP LOSS: %s. Aborting TP placement to prevent naked trade.", 
-                        e, extra={"event": "auto_bracket_stop_failed_critical", "entry_id": entry_id}
+                        "CRITICAL: Failed to place STOP LOSS: %s. Aborting TP placement to prevent naked trade.",
+                        e,
+                        extra={
+                            "event": "auto_bracket_stop_failed_critical",
+                            "entry_id": entry_id,
+                        },
                     )
             else:
                 # If no stop price requested, we proceed (user intentional)
-                sl_successful = True 
+                sl_successful = True
 
             # --- B. Place Take Profit (ONLY IF SL WAS SUCCESSFUL) ---
             if sl_successful and state.tp_primary_price and state.tp_primary_price > 0:
                 try:
                     tp = self._place_single_order(
-                        symbol=state.symbol, side=state.exit_side, quantity=state.total_quantity,
-                        order_type=OrderType.LIMIT, price=state.tp_primary_price,
-                        product=state.product, tag="auto-target", parent_order_id=entry_id
+                        symbol=state.symbol,
+                        side=state.exit_side,
+                        quantity=state.total_quantity,
+                        order_type=OrderType.LIMIT,
+                        price=state.tp_primary_price,
+                        product=state.product,
+                        tag="auto-target",
+                        parent_order_id=entry_id,
                     )
                     state.tp_primary_id = tp.order_id
                     self._bracket_index[tp.order_id] = entry_id
                     self._update_entry_children(entry_id, add=[tp.order_id])
-                    
+
                     # [UPGRADE] Attach Dynamic TP Expansion
                     self.attach_dynamic_tp(
-                        tp_order_id=tp.order_id, symbol=state.symbol, side=state.exit_side,
-                        initial_price=state.tp_primary_price, parent_order_id=entry_id
+                        tp_order_id=tp.order_id,
+                        symbol=state.symbol,
+                        side=state.exit_side,
+                        initial_price=state.tp_primary_price,
+                        parent_order_id=entry_id,
                     )
                 except Exception as e:
                     self._logger.error(
-                        "Failed to place auto-target: %s", e,
-                        extra={"event": "auto_bracket_tp_failed", "entry_id": entry_id}
+                        "Failed to place auto-target: %s",
+                        e,
+                        extra={"event": "auto_bracket_tp_failed", "entry_id": entry_id},
                     )
-            
+
             self._persist_bracket_state(state)
             return
 
@@ -3898,9 +4079,11 @@ class OrderManager:
         if state is None:
             self._bracket_index.pop(order.order_id, None)
             return
-            
+
         # ✅ FIX: Safe Status Access (Handle String vs Enum)
-        status_val = order.status.value if hasattr(order.status, "value") else str(order.status)
+        status_val = (
+            order.status.value if hasattr(order.status, "value") else str(order.status)
+        )
 
         self._logger.debug(
             "Entered _handle_bracket_update",
@@ -3911,21 +4094,24 @@ class OrderManager:
                 "status": status_val,
             },
         )
-        
+
         # -----------------------------------------------------------------------
         # ✅ NEW: Register with Virtual Sniper (Replaces handle_bracket_update)
         # -----------------------------------------------------------------------
-        if self._bracket_manager is not None and order.status in (OrderStatus.FILLED, OrderStatus.COMPLETE):
+        if self._bracket_manager is not None and order.status in (
+            OrderStatus.FILLED,
+            OrderStatus.COMPLETE,
+        ):
             try:
                 # 1. Get Entry Price & Quantity
                 entry_price = float(order.average_price or order.price or 0.0)
                 qty = int(order.filled_quantity or order.quantity)
-                
+
                 if entry_price > 0 and qty > 0:
                     # 2. Determine SL/TP (Use provided args or Auto-Calculate Defaults)
                     sl_price = float(order.stop_loss or 0.0)
                     tp_price = float(order.take_profit or 0.0)
-                    
+
                     # Default Safety Net: 10% Stop, 20% Target if not specified
                     if sl_price <= 0:
                         if order.side == "BUY":
@@ -3948,15 +4134,20 @@ class OrderManager:
                         price=entry_price,
                         sl=sl_price,
                         tp=tp_price,
-                        tag=order.tag
+                        tag=order.tag,
                     )
                     self._logger.info(
                         f"✅ Handed off {order.symbol} to Virtual Sniper (SL: {sl_price}, TP: {tp_price})",
-                        extra={"event": "virtual_bracket_registered", "order_id": order.order_id}
+                        extra={
+                            "event": "virtual_bracket_registered",
+                            "order_id": order.order_id,
+                        },
                     )
 
             except AttributeError as e:
-                self._logger.warning(f"⚠️ Virtual bracket registration unavailable: {e}")
+                self._logger.warning(
+                    f"⚠️ Virtual bracket registration unavailable: {e}"
+                )
             except Exception as exc:
                 self._logger.error(
                     "Failure in virtual bracket registration: %s",
@@ -3986,8 +4177,10 @@ class OrderManager:
                     )
                     self._cancel_bracket_targets(state)
                     # [FIX] Clean up dynamic controllers
-                    if state.tp_primary_id: self.stop_dynamic_tp(state.tp_primary_id)
-                    if state.tp_secondary_id: self.stop_dynamic_tp(state.tp_secondary_id)
+                    if state.tp_primary_id:
+                        self.stop_dynamic_tp(state.tp_primary_id)
+                    if state.tp_secondary_id:
+                        self.stop_dynamic_tp(state.tp_secondary_id)
                     self._cleanup_bracket_state(entry_id)
                 elif order.status == OrderStatus.PARTIALLY_FILLED:
                     self._logger.info(
@@ -4017,12 +4210,12 @@ class OrderManager:
                     )
                     # [FIX] Stop Dynamic TP for this leg
                     self.stop_dynamic_tp(order.order_id)
-                    
+
                     self._bracket_index.pop(order.order_id, None)
                     self._update_entry_children(state.entry_id, remove=[order.order_id])
                     state.tp_primary_id = None
                     state.tp_primary_qty = order.filled_quantity
-                    
+
                     if remaining <= 0:
                         self._cancel_stop_order(state)
                         self._cleanup_bracket_state(entry_id)
@@ -4058,7 +4251,7 @@ class OrderManager:
                     )
                     # [FIX] Stop Dynamic TP for this leg
                     self.stop_dynamic_tp(order.order_id)
-                    
+
                     self._cancel_stop_order(state)
                     self._bracket_index.pop(order.order_id, None)
                     self._update_entry_children(state.entry_id, remove=[order.order_id])
@@ -4085,7 +4278,7 @@ class OrderManager:
                 "Failure in _handle_bracket_update: %s",
                 exc,
                 extra={"event": "handle_bracket_update_failed", "entry_id": entry_id},
-            )  
+            )
 
     def on_order_update(self, order_update: dict) -> None:
         """Handle broker order updates and follow-up workflows.
@@ -4100,8 +4293,8 @@ class OrderManager:
             None.
         """
         self._logger.debug(
-            'Entered on_order_update',
-            extra={'event': 'order_update_enter'},
+            "Entered on_order_update",
+            extra={"event": "order_update_enter"},
         )
         order_id = order_update.get("order_id")
         if not order_id:
@@ -4120,7 +4313,7 @@ class OrderManager:
             # -----------------------------------------------------
             if not order:
                 # A. STOP THE SPAM: Ignore Dead Orders
-                # If a manual/ghost order is already finished (Rejected/Cancelled), 
+                # If a manual/ghost order is already finished (Rejected/Cancelled),
                 # we don't need to track it. Just return silently.
                 if status_raw in ["REJECTED", "CANCELLED", "CANCELED"]:
                     return
@@ -4131,30 +4324,37 @@ class OrderManager:
                     qty = int(float(order_update.get("quantity", 0)))
                     if qty == 0:
                         qty = int(float(order_update.get("filled_quantity", 0)))
-                    
+
                     # Create the order object so we track it from now on
                     order = OrderDetails(
                         order_id=order_id,
-                        symbol=order_update.get("tradingsymbol") or order_update.get("symbol", "UNKNOWN"),
+                        symbol=order_update.get("tradingsymbol")
+                        or order_update.get("symbol", "UNKNOWN"),
                         side=order_update.get("transaction_type", "BUY"),
-                        quantity=max(qty, 1), # Ensure we never adopt a 0-qty order
-                        order_type=OrderType.MARKET, # Assume Market for manual entries
+                        quantity=max(qty, 1),  # Ensure we never adopt a 0-qty order
+                        order_type=OrderType.MARKET,  # Assume Market for manual entries
                         price=float(order_update.get("price", 0.0) or 0.0),
-                        trigger_price=float(order_update.get("trigger_price", 0.0) or 0.0),
-                        average_price=float(order_update.get("average_price", 0.0) or 0.0),
-                        filled_quantity=int(float(order_update.get("filled_quantity", 0))),
+                        trigger_price=float(
+                            order_update.get("trigger_price", 0.0) or 0.0
+                        ),
+                        average_price=float(
+                            order_update.get("average_price", 0.0) or 0.0
+                        ),
+                        filled_quantity=int(
+                            float(order_update.get("filled_quantity", 0))
+                        ),
                         status=self._parse_status(status_raw),
                         timestamp=datetime.now(timezone.utc),
-                        tag="adopted_manual_trade"
+                        tag="adopted_manual_trade",
                     )
-                    
+
                     # 1. Save to Memory (Stop "Unknown Order" warnings for future updates)
                     self._orders[order_id] = order
                     adopted = True
-                    
+
                     # [FIX] CRITICAL: Sync with PositionManager immediately
                     # This ensures the PositionManager knows this ID exists before we try to update it
-                    if hasattr(self._positions, 'add_pending_order'):
+                    if hasattr(self._positions, "add_pending_order"):
                         self._positions.add_pending_order(
                             order_id=order.order_id,
                             symbol=order.symbol,
@@ -4163,18 +4363,20 @@ class OrderManager:
                             price=order.price,
                             order_type=order.order_type,
                         )
-                    
-                    self._logger.info(f"🆕 ADOPTED UNKNOWN ORDER: {order_id} [{order.symbol}]")
+
+                    self._logger.info(
+                        f"🆕 ADOPTED UNKNOWN ORDER: {order_id} [{order.symbol}]"
+                    )
                     self._notify_bracket_event(
-                        'ORDER_ADOPTED',
+                        "ORDER_ADOPTED",
                         {
-                            'symbol': order.symbol,
-                            'order_id': order_id,
-                            'status': status_raw,
-                            'source': 'manual_adoption',
+                            "symbol": order.symbol,
+                            "order_id": order_id,
+                            "status": status_raw,
+                            "source": "manual_adoption",
                         },
                     )
-                    
+
                     # 2. Persist to Disk Immediately (Survive Restarts)
                     if hasattr(self, "save_orders"):
                         self.save_orders()
@@ -4189,7 +4391,7 @@ class OrderManager:
             # -----------------------------------------------------
             old_status = order.status
             new_status = self._parse_status(status_raw)
-            
+
             order.status = new_status
             order.filled_quantity = int(float(order_update.get("filled_quantity", 0)))
 
@@ -4204,13 +4406,15 @@ class OrderManager:
             # ✅ FILL PROCESSING (Trigger Stop Loss / Target)
             # -----------------------------------------------------
             is_filled = status_raw in ["COMPLETE", "FILLED"]
-            
+
             if is_filled and (old_status != OrderStatus.FILLED or adopted):
-                self._logger.info(f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}")
+                self._logger.info(
+                    f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}"
+                )
 
                 # Update Bracket (Stop Loss / Target)
                 self._register_virtual_bracket_for_fill(
-                    order, source='manual_adoption' if adopted else 'order_update'
+                    order, source="manual_adoption" if adopted else "order_update"
                 )
 
                 # Update Positions (Critical for Dashboard accuracy)
@@ -4225,13 +4429,15 @@ class OrderManager:
             # cancel_order(). If that order was an exit, on_order_update(CANCELLED)
             # is the only place to catch it and recover the bracket.
             # Without this, the position stays open with no SL protection.
-            is_cancelled = (
-                status_raw in ("CANCELLED", "CANCELED")
-                and old_status not in (OrderStatus.CANCELLED, OrderStatus.FILLED)
-            )
+            is_cancelled = status_raw in (
+                "CANCELLED",
+                "CANCELED",
+            ) and old_status not in (OrderStatus.CANCELLED, OrderStatus.FILLED)
             if is_cancelled and self._bracket_manager is not None:
                 tag_str = (order.tag or "").lower()
-                is_exit_tag = any(x in tag_str for x in ["exit", "stop", "target", "square", "guard"])
+                is_exit_tag = any(
+                    x in tag_str for x in ["exit", "stop", "target", "square", "guard"]
+                )
                 if is_exit_tag:
                     try:
                         recovered = self._bracket_manager.reactivate_bracket_after_rejected_exit(
@@ -4242,7 +4448,8 @@ class OrderManager:
                         if recovered:
                             self._logger.critical(
                                 "🔁 CANCELLED EXIT recovered for %s (order=%s) — bracket reactivated.",
-                                order.symbol, order_id,
+                                order.symbol,
+                                order_id,
                                 extra={
                                     "event": "cancelled_exit_bracket_reactivated",
                                     "symbol": order.symbol,
@@ -4252,14 +4459,17 @@ class OrderManager:
                     except Exception as _can_exc:
                         self._logger.error(
                             "Bracket reactivation failed after cancelled exit for %s: %s",
-                            order.symbol, _can_exc,
+                            order.symbol,
+                            _can_exc,
                         )
 
             # Final Persistence
             if hasattr(self, "save_orders"):
-                try: self.save_orders()
-                except Exception: pass
-    
+                try:
+                    self.save_orders()
+                except Exception:
+                    pass
+
     def place_atomic_entry(
         self,
         legs: Sequence[AtomicLeg | Mapping[str, Any]],
@@ -4364,7 +4574,7 @@ class OrderManager:
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an order. Intercepts Virtual Brackets for clean shutdown."""
-        
+
         # 1. Intercept Virtual Bracket Cancellation
         if self._bracket_manager:
             # If strategy tries to cancel the Entry ID, it implies "Abort Trade"
@@ -4377,15 +4587,21 @@ class OrderManager:
         # ✅ OPTIMIZATION: Don't cancel if already finished
         with self._lock:
             order = self._orders.get(order_id)
-            if order and order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED]:
-                self._logger.info(f"⏭️ Skipping cancel for {order_id}: Already {order.status.name}")
+            if order and order.status in [
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+            ]:
+                self._logger.info(
+                    f"⏭️ Skipping cancel for {order_id}: Already {order.status.name}"
+                )
                 return True
-                
+
         # 2. Standard Broker Cancel
         cancel = getattr(self._broker, "cancel_order", None)
         if cancel is None:
             raise NotImplementedError("Broker does not support order cancellation")
-            
+
         try:
             response = self._call_broker(cancel, order_id)
             success = bool(response)
@@ -4476,7 +4692,7 @@ class OrderManager:
             return
         if response is None:
             return
-        
+
         raw_orders: list[Mapping[str, Any]] = []
         if isinstance(response, Mapping):
             raw_orders = [cast(Mapping[str, Any], response)]
@@ -4488,15 +4704,15 @@ class OrderManager:
             ]
         else:
             return
-            
+
         reconciled: list[str] = []
         for raw in raw_orders:
             details = self._coerce_broker_open_order(raw)
             if details is None:
                 continue
-            
+
             self._register_order(details)
-            
+
             # [FIX] CRITICAL: Sync with PositionManager
             # We must pass the Enum object directly. Converting to string causes
             # "AttributeError: 'str' object has no attribute 'value'" inside the manager.
@@ -4507,56 +4723,54 @@ class OrderManager:
                     side=details.side,
                     qty=details.quantity,
                     price=details.price,
-                    order_type=details.order_type  # ✅ CORRECT: Pass Enum Object
+                    order_type=details.order_type,  # ✅ CORRECT: Pass Enum Object
                 )
-            
+
             try:
                 # Safe Enum Access for Status updates (Status is usually a string in PM)
                 status_val = details.status
-                status_str = status_val.name if hasattr(status_val, "name") else str(status_val)
-                
+                status_str = (
+                    status_val.name if hasattr(status_val, "name") else str(status_val)
+                )
+
                 self._positions.update_order_status(
                     details.order_id, status_str, details.fill_price
                 )
             except Exception:  # pragma: no cover - defensive
                 self._logger.debug("position_status_update_failed", exc_info=True)
-            
+
             if details.client_order_id and details.status in self.FINAL_STATUSES:
                 self._client_order_index.pop(details.client_order_id, None)
-            
+
             reconciled.append(details.order_id)
-            
+
         if reconciled:
             self._sync_positions_to_hub()
             self._logger.info(
                 "order_reconcile_complete",
                 extra={"event": "order_reconcile", "orders": reconciled},
             )
-            
+
     def exit_position(
-        self, 
-        symbol: str, 
-        quantity: int, 
-        tag: str = "exit", 
-        force: bool = False
+        self, symbol: str, quantity: int, tag: str = "exit", force: bool = False
     ) -> str | None:
         """
         Executes the 'Soft Exit' (Market Order) and cleans up the 'Hard' Safety Net.
         This completes the Hybrid Approach.
         """
         symbol = symbol.strip().upper()
-        
+
         # 1. EXECUTE MARKET EXIT (The "Soft" Trigger)
         self._logger.info(
             f"⚡ Hybrid Exit Triggered for {symbol} (Qty: {quantity})",
-            extra={"event": "hybrid_exit_trigger", "symbol": symbol}
+            extra={"event": "hybrid_exit_trigger", "symbol": symbol},
         )
-        
+
         try:
             # Determine exit side based on quantity direction or passed arg
             # Assuming positive quantity means we HOLD Long, so we need to SELL
             # If quantity is passed as absolute, you might need to check self._positions
-            exit_side = "SELL" # Default for Long Exit
+            exit_side = "SELL"  # Default for Long Exit
 
             # ── FIX: resolve LTP so risk-accounting stats work correctly.
             # MARKET exits MUST always bypass the risk-manager's "Price must be
@@ -4576,7 +4790,7 @@ class OrderManager:
                 side=exit_side,
                 quantity=abs(quantity),
                 order_type=OrderType.MARKET,
-                price=_exit_ltp,   # supply live LTP for accounting; None is safe
+                price=_exit_ltp,  # supply live LTP for accounting; None is safe
                 tag=tag,
                 check_risk=False,  # exits MUST never be blocked by risk-manager
             )
@@ -4595,42 +4809,58 @@ class OrderManager:
             with self._lock:
                 if symbol in self._brackets:
                     bracket = self._brackets[symbol]
-                    
+
                     # Cancel Hard SL
                     if bracket.stop_order_id:
-                        self._logger.info(f"🗑️ Cancelling Safety SL: {bracket.stop_order_id}")
+                        self._logger.info(
+                            f"🗑️ Cancelling Safety SL: {bracket.stop_order_id}"
+                        )
                         try:
                             self.cancel_order(bracket.stop_order_id)
                         except Exception as e:
-                            self._logger.warning(f"Failed to cancel SL {bracket.stop_order_id}: {e}")
-                    
+                            self._logger.warning(
+                                f"Failed to cancel SL {bracket.stop_order_id}: {e}"
+                            )
+
                     # Cancel Wide TP
                     if bracket.tp_primary_id:
-                        self._logger.info(f"🗑️ Cancelling Safety TP: {bracket.tp_primary_id}")
+                        self._logger.info(
+                            f"🗑️ Cancelling Safety TP: {bracket.tp_primary_id}"
+                        )
                         try:
                             self.cancel_order(bracket.tp_primary_id)
                         except Exception as e:
-                            self._logger.warning(f"Failed to cancel TP {bracket.tp_primary_id}: {e}")
-                    
+                            self._logger.warning(
+                                f"Failed to cancel TP {bracket.tp_primary_id}: {e}"
+                            )
+
                     # Remove local bracket state so we don't track dead orders
                     del self._brackets[symbol]
-                    
+
         except Exception as e:
             self._logger.error(f"⚠️ Safety Net Cleanup Failed (Non-Critical): {e}")
 
         self._signal_arbitrator.release(symbol)
         return exit_id
 
-    def modify_order(self, order_id: str, price: float = 0.0, trigger_price: float = 0.0, quantity: int = 0) -> bool:
+    def modify_order(
+        self,
+        order_id: str,
+        price: float = 0.0,
+        trigger_price: float = 0.0,
+        quantity: int = 0,
+    ) -> bool:
         """
         Modify an existing order.
         SMART FIX: If modifying a 'Fake SL-M' (SL-Limit), auto-adjust the limit price.
         """
         try:
             # ✅ FIX: Round Price/Trigger to 0.05 tick size
-            if price: price = self._round_to_tick(price)
-            if trigger_price: trigger_price = self._round_to_tick(trigger_price)
-                
+            if price:
+                price = self._round_to_tick(price)
+            if trigger_price:
+                trigger_price = self._round_to_tick(trigger_price)
+
             # 1. Fetch Order Context
             order = self.get_order(order_id)
             if not order:
@@ -4640,13 +4870,19 @@ class OrderManager:
             # 2. Smart Limit Adjustment for SL Orders
             # If user is only updating trigger_price, we must also update limit price
             # to maintain the "Market Buffer".
-            if order.order_type == OrderType.STOP_LOSS and trigger_price > 0 and (price is None or price == 0):
-                buffer = 0.05 # 5%
-                if order.side == "SELL": # Long SL
+            if (
+                order.order_type == OrderType.STOP_LOSS
+                and trigger_price > 0
+                and (price is None or price == 0)
+            ):
+                buffer = 0.05  # 5%
+                if order.side == "SELL":  # Long SL
                     price = round(trigger_price * (1 - buffer), 1)
-                else: # Short SL
+                else:  # Short SL
                     price = round(trigger_price * (1 + buffer), 1)
-                self._logger.info(f"🔄 Auto-adjusting Limit Price to {price} for Trigger {trigger_price}")
+                self._logger.info(
+                    f"🔄 Auto-adjusting Limit Price to {price} for Trigger {trigger_price}"
+                )
 
             # 3. Execute Modification
             self._broker.modify_order(
@@ -4654,7 +4890,7 @@ class OrderManager:
                 price=price,
                 trigger_price=trigger_price,
                 quantity=quantity,
-                variety="regular" # Zerodha default
+                variety="regular",  # Zerodha default
             )
             return True
         except Exception as e:
@@ -4667,7 +4903,7 @@ class OrderManager:
         deadline = time.time() + float(timeout_sec)
         # Use a tighter poll interval for execution workflows (max 0.2s)
         poll_interval = min(0.2, self.POLL_INTERVAL_SEC)
-        
+
         while time.time() < deadline:
             status = self.get_order_status(order_id)
             if status == OrderStatus.FILLED:
@@ -4711,7 +4947,11 @@ class OrderManager:
                 "order_id": order.order_id,
                 "symbol": order.symbol,
                 "side": order.side,
-                "status": order.status.value if hasattr(order.status, "value") else str(order.status),
+                "status": (
+                    order.status.value
+                    if hasattr(order.status, "value")
+                    else str(order.status)
+                ),
                 "quantity": order.quantity,
                 "filled_quantity": order.filled_quantity,
                 "price": order.price,
@@ -4732,28 +4972,28 @@ class OrderManager:
     def _confirm_fill_fast(self, order_id: str, timeout_ms: int = 2000) -> bool:
         """
         Fast fill confirmation with exponential backoff.
-        
+
         ✅ WORLD-CLASS: Sub-500ms fill detection when possible
-        
+
         Args:
             order_id: The broker order ID to confirm
             timeout_ms: Maximum time to wait (default 2 seconds)
-            
+
         Returns:
             True if fill confirmed, False if timeout/rejected
         """
         import time
-        
+
         start = time.monotonic()
         backoff_ms = 50  # Start checking every 50ms
         max_backoff_ms = 300  # Don't wait more than 300ms between checks
         attempts = 0
-        
+
         self._logger.debug(f"⏱️ Fast fill check started for {order_id}")
-        
+
         while (time.monotonic() - start) * 1000 < timeout_ms:
             attempts += 1
-            
+
             try:
                 # Check order status
                 status = None
@@ -4764,27 +5004,27 @@ class OrderManager:
                     history = self._broker.order_history(order_id)
                     if history and isinstance(history, list):
                         status = history[-1] if history else None
-                
+
                 if not status:
                     time.sleep(backoff_ms / 1000)
                     backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
                     continue
-                
+
                 status_str = str(status.get("status", "")).upper()
-                
+
                 # ✅ FILL DETECTED - Immediately process
                 if status_str in {"COMPLETE", "FILLED"}:
                     elapsed = (time.monotonic() - start) * 1000
                     self._logger.info(
                         f"✅ FILL CONFIRMED in {elapsed:.0f}ms (attempts: {attempts}): {order_id}"
                     )
-                    
+
                     # CRITICAL: Trigger immediate order update processing
                     # This activates the bracket instantly
                     self.on_order_update(status)
-                    
+
                     return True
-                
+
                 # ❌ REJECTED/CANCELLED - Stop waiting
                 if status_str in {"REJECTED", "CANCELLED", "CANCELED"}:
                     self._logger.warning(
@@ -4792,19 +5032,19 @@ class OrderManager:
                     )
                     self.on_order_update(status)
                     return False
-                
+
                 # PENDING/SUBMITTED - Continue waiting with backoff
                 if status_str in {"PENDING", "SUBMITTED", "OPEN", "TRIGGER PENDING"}:
                     time.sleep(backoff_ms / 1000)
                     backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
                     continue
-                
+
             except Exception as e:
                 self._logger.debug(f"Fill check error (attempt {attempts}): {e}")
-            
+
             time.sleep(backoff_ms / 1000)
             backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
-        
+
         # Timeout - rely on periodic reconcile
         elapsed = (time.monotonic() - start) * 1000
         self._logger.warning(
@@ -4848,28 +5088,30 @@ class OrderManager:
             if state_cache is None:
                 state_cache = {}
                 self._last_status_report_state = state_cache
-            
+
             total_unrealized_pnl = 0.0
-            
+
             for pos in positions:
                 symbol = pos.symbol
                 qty = pos.quantity
                 entry = float(pos.entry_price or 0.0)
                 side = pos.side  # "LONG" or "SHORT"
                 tag = getattr(pos, "tag", "Manual/Unknown")
-                
+
                 # Get Live Market Data
                 ltp = 0.0
                 if self._market_data:
                     ltp = self._market_data.get_latest_price(symbol) or 0.0
-                
+
                 # Calculate P&L
                 raw_pnl = 0.0
                 if ltp > 0 and entry > 0:
-                    raw_pnl = (ltp - entry) * qty if side == "LONG" else (entry - ltp) * qty
-                    
+                    raw_pnl = (
+                        (ltp - entry) * qty if side == "LONG" else (entry - ltp) * qty
+                    )
+
                 status_icon = "✅" if raw_pnl > 0 else "🔻"
-                
+
                 # ═══════════════════════════════════════════════════════════════
                 # ✅ FIX: Query BracketManager (source of truth for virtual brackets)
                 # Fixed: Feb 3, 2026 - SITREP was looking in wrong dict
@@ -4878,47 +5120,55 @@ class OrderManager:
                 tp_info = "Open"
                 insight = "Monitoring..."
                 bracket = None
-                
+
                 if self._bracket_manager:
                     # Check if symbol is managed by BracketManager
                     if self._bracket_manager.is_symbol_managed(symbol):
                         # Get bracket via symbol lookup
                         try:
-                            if hasattr(self._bracket_manager, 'get_bracket_by_symbol'):
-                                bracket = self._bracket_manager.get_bracket_by_symbol(symbol)
+                            if hasattr(self._bracket_manager, "get_bracket_by_symbol"):
+                                bracket = self._bracket_manager.get_bracket_by_symbol(
+                                    symbol
+                                )
                             else:
                                 # Fallback: Manual lookup via _symbol_map
                                 with self._bracket_manager._lock:
-                                    entry_ids = self._bracket_manager._symbol_map.get(symbol, [])
+                                    entry_ids = self._bracket_manager._symbol_map.get(
+                                        symbol, []
+                                    )
                                     for entry_id in entry_ids:
-                                        b = self._bracket_manager._brackets.get(entry_id)
+                                        b = self._bracket_manager._brackets.get(
+                                            entry_id
+                                        )
                                         if b and b.remaining_quantity > 0:
                                             bracket = b
                                             break
                         except Exception as e:
                             self._logger.debug(f"Bracket lookup for {symbol}: {e}")
-                        
+
                         if bracket:
                             # ✅ Use correct BracketState attribute names
-                            sl_val = getattr(bracket, 'sl_trigger_price', 0) or 0
-                            tp_val = getattr(bracket, 'tp_trigger_price', 0) or 0
-                            
+                            sl_val = getattr(bracket, "sl_trigger_price", 0) or 0
+                            tp_val = getattr(bracket, "tp_trigger_price", 0) or 0
+
                             sl_info = f"{sl_val:.2f}" if sl_val > 0 else "NONE ⚠️"
                             tp_info = f"{tp_val:.2f}" if tp_val > 0 else "Open"
-                            
+
                             # Generate insights
-                            is_active = getattr(bracket, 'active', False)
-                            highest = getattr(bracket, 'highest_ltp', 0)
-                            
+                            is_active = getattr(bracket, "active", False)
+                            highest = getattr(bracket, "highest_ltp", 0)
+
                             if ltp > 0 and sl_val > 0:
                                 dist_to_sl = abs(ltp - sl_val)
                                 risk_gap = abs(entry - sl_val) if entry > 0 else 1
-                                
+
                                 if raw_pnl > 0:
                                     if tp_val > 0 and abs(tp_val - ltp) < (ltp * 0.01):
                                         insight = "🎯 Sniper Mode: Near Target!"
                                     elif is_active:
-                                        insight = f"🚀 Trailing Active | High: {highest:.2f}"
+                                        insight = (
+                                            f"🚀 Trailing Active | High: {highest:.2f}"
+                                        )
                                     else:
                                         insight = "🚀 Cruising: Holding for TP"
                                 else:
@@ -4936,7 +5186,7 @@ class OrderManager:
                     # Legacy fallback
                     with self._lock:
                         for b in self._brackets.values():
-                            if getattr(b, 'symbol', None) == symbol:
+                            if getattr(b, "symbol", None) == symbol:
                                 sl_info = f"{getattr(b, 'stop_price', 0):.2f}"
                                 tp_info = f"{getattr(b, 'tp_primary_price', 0):.2f}"
                                 insight = "✅ Legacy bracket"
@@ -4998,10 +5248,11 @@ class OrderManager:
         # where the list of orders might change while we are fetching from the broker.
         with self._lock:
             pending_ids = {
-                oid for oid, o in self._orders.items() 
+                oid
+                for oid, o in self._orders.items()
                 if o.status == OrderStatus.PENDING
             }
-        
+
         # Optimization: If nothing is pending, don't waste network calls
         if not pending_ids:
             return
@@ -5014,8 +5265,8 @@ class OrderManager:
             elif hasattr(self._broker, "get_orders"):
                 all_orders = self._broker.get_orders()
             else:
-                return # Broker doesn't support bulk fetch
-            
+                return  # Broker doesn't support bulk fetch
+
             if not all_orders:
                 return
 
@@ -5023,32 +5274,37 @@ class OrderManager:
             # Iterate through broker result and update ONLY orders we are tracking
             for remote in all_orders:
                 oid = str(remote.get("order_id") or "")
-                
+
                 # OPTIMIZATION: Only process orders that were pending in our snapshot
                 # This skips the hundreds of old/closed orders in the broker's book
                 if oid in pending_ids:
                     # Normalize status
                     status = str(remote.get("status", "")).upper()
-                    
+
                     # Check against significant status updates
                     if status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED"]:
-                         self._logger.info(
-                             f"⚡ Bulk Update: {oid} -> {status}",
-                             extra={"event": "bulk_poll_update", "order_id": oid, "status": status}
-                         )
-                         # Call the central update handler (Handles its own locking safely)
-                         self.on_order_update(remote)
+                        self._logger.info(
+                            f"⚡ Bulk Update: {oid} -> {status}",
+                            extra={
+                                "event": "bulk_poll_update",
+                                "order_id": oid,
+                                "status": status,
+                            },
+                        )
+                        # Call the central update handler (Handles its own locking safely)
+                        self.on_order_update(remote)
 
         except Exception as e:
             self._logger.debug(f"Bulk poll failed: {e}")
+
     def _check_zombie_orders(self) -> None:
         """
         🛡️ SAFETY: Auto-cancel orders stuck in PENDING for too long (> 45s).
         Prevents margin blockage and 'ghost' fills.
         """
         now = time.time()
-        ZOMBIE_TIMEOUT = 45.0 # Seconds
-        
+        ZOMBIE_TIMEOUT = 45.0  # Seconds
+
         zombies = []
         with self._lock:
             for oid, order in self._orders.items():
@@ -5057,15 +5313,15 @@ class OrderManager:
                     age = now - order.timestamp.timestamp()
                     if age > ZOMBIE_TIMEOUT:
                         zombies.append(oid)
-        
+
         if not zombies:
             return
 
         self._logger.warning(
             f"🧟 Found {len(zombies)} ZOMBIE orders (> {ZOMBIE_TIMEOUT}s). Killing...",
-            extra={"event": "zombie_cleanup", "orders": zombies}
+            extra={"event": "zombie_cleanup", "orders": zombies},
         )
-        
+
         for oid in zombies:
             try:
                 self.cancel_order(oid)
@@ -5077,12 +5333,12 @@ class OrderManager:
     # ----------------------------------------------------------------
     def save_orders(self) -> None:
         """Persist active orders to disk (Thread-Safe & Crash-Proof).
-        
+
         ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback for Railway.
         """
-        import uuid
         import os
-        
+        import uuid
+
         try:
             data = {}
             with self._lock:
@@ -5096,25 +5352,25 @@ class OrderManager:
 
                     # 2. SAFE ENUM SERIALIZATION
                     if hasattr(order.status, "name"):
-                        record['status'] = order.status.name
+                        record["status"] = order.status.name
                     elif hasattr(order.status, "value"):
-                        record['status'] = order.status.value
+                        record["status"] = order.status.value
                     else:
-                        record['status'] = str(order.status).upper()
+                        record["status"] = str(order.status).upper()
 
                     if hasattr(order.order_type, "name"):
-                        record['order_type'] = order.order_type.name
+                        record["order_type"] = order.order_type.name
                     elif hasattr(order.order_type, "value"):
-                        record['order_type'] = order.order_type.value
+                        record["order_type"] = order.order_type.value
                     else:
-                        record['order_type'] = str(order.order_type).upper()
+                        record["order_type"] = str(order.order_type).upper()
 
                     data[oid] = record
 
             # ✅ FIX: Use DATA_DIR environment variable with /tmp fallback
             data_dir = os.getenv("DATA_DIR", "data")
             path = Path(data_dir) / "orders.json"
-            
+
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 # Test write permission
@@ -5126,15 +5382,15 @@ class OrderManager:
                 path = Path(os.getenv("DATA_DIR", "data")) / "orders.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 self._logger.warning(f"⚠️ Using /tmp fallback: {path}")
-            
+
             # [FIX] Unique Temp File prevents Thread Collision
             tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
-            
+
             with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2, default=str)
                 f.flush()
                 os.fsync(f.fileno())  # Force write to physical disk
-            
+
             # Atomic replacement
             os.replace(tmp_path, path)
             self._logger.debug(f"✅ Orders saved to {path}")
@@ -5142,7 +5398,6 @@ class OrderManager:
         except Exception as e:
             self._logger.error(f"❌ Failed to save orders: {e}")
 
-    
     def _restore_virtual_brackets(self) -> None:
         """Hydrate brackets from SQLite and reconcile against live broker positions."""
         try:
@@ -5152,18 +5407,18 @@ class OrderManager:
                 for b_data in saved_brackets:
                     try:
                         self._bracket_manager.restore_bracket(
-                            order_id=b_data['order_id'],
-                            symbol=b_data['symbol'],
-                            side=b_data['side'],
-                            qty=b_data['qty'],
-                            entry_price=b_data['entry_price'],
-                            sl=b_data['current_sl'],
-                            tp=b_data.get('tp1'),
-                            trailing_enabled=b_data.get('trailing_active', False),
-                            highest_ltp=b_data.get('highest_ltp', 0.0),
-                            tag=b_data.get('tag'),
+                            order_id=b_data["order_id"],
+                            symbol=b_data["symbol"],
+                            side=b_data["side"],
+                            qty=b_data["qty"],
+                            entry_price=b_data["entry_price"],
+                            sl=b_data["current_sl"],
+                            tp=b_data.get("tp1"),
+                            trailing_enabled=b_data.get("trailing_active", False),
+                            highest_ltp=b_data.get("highest_ltp", 0.0),
+                            tag=b_data.get("tag"),
                         )
-                        restored_symbols.add(str(b_data.get('symbol', '')).upper())
+                        restored_symbols.add(str(b_data.get("symbol", "")).upper())
                     except Exception as e:
                         self._logger.warning(
                             f"Skipped restoring bracket {b_data.get('order_id')}: {e}"
@@ -5171,21 +5426,31 @@ class OrderManager:
 
             broker_positions: list[dict[str, Any]] = []
             try:
-                if hasattr(self._broker, 'get_positions'):
+                if hasattr(self._broker, "get_positions"):
                     raw_positions = self._broker.get_positions()
                     if isinstance(raw_positions, list):
-                        broker_positions = [p for p in raw_positions if isinstance(p, dict)]
+                        broker_positions = [
+                            p for p in raw_positions if isinstance(p, dict)
+                        ]
                     elif isinstance(raw_positions, dict):
-                        net = raw_positions.get('net', raw_positions)
+                        net = raw_positions.get("net", raw_positions)
                         if isinstance(net, list):
                             broker_positions = [p for p in net if isinstance(p, dict)]
             except Exception as exc:
-                self._logger.error('Failed broker position fetch during bracket recovery: %s', exc)
+                self._logger.error(
+                    "Failed broker position fetch during bracket recovery: %s", exc
+                )
 
             live_symbols: set[str] = set()
             for payload in broker_positions:
-                symbol = str(payload.get('tradingsymbol') or payload.get('symbol') or '').upper()
-                qty_raw = payload.get('net_qty') or payload.get('quantity') or payload.get('net_quantity')
+                symbol = str(
+                    payload.get("tradingsymbol") or payload.get("symbol") or ""
+                ).upper()
+                qty_raw = (
+                    payload.get("net_qty")
+                    or payload.get("quantity")
+                    or payload.get("net_quantity")
+                )
                 try:
                     qty = int(float(qty_raw or 0))
                 except (TypeError, ValueError):
@@ -5194,9 +5459,13 @@ class OrderManager:
                     live_symbols.add(symbol)
                     if self._bracket_manager and symbol not in restored_symbols:
                         # Reconstruct missing brackets for broker-live positions.
-                        if hasattr(self._bracket_manager, 'attach_orphan_position'):
-                            side = 'LONG' if qty > 0 else 'SHORT'
-                            entry = float(payload.get('average_price') or payload.get('avg_price') or 0.0)
+                        if hasattr(self._bracket_manager, "attach_orphan_position"):
+                            side = "LONG" if qty > 0 else "SHORT"
+                            entry = float(
+                                payload.get("average_price")
+                                or payload.get("avg_price")
+                                or 0.0
+                            )
                             if entry > 0:
                                 try:
                                     self._bracket_manager.attach_orphan_position(
@@ -5205,22 +5474,32 @@ class OrderManager:
                                         qty=abs(qty),
                                         entry_price=entry,
                                     )
-                                    self._logger.info('Recovered missing bracket for %s', symbol)
+                                    self._logger.info(
+                                        "Recovered missing bracket for %s", symbol
+                                    )
                                 except Exception as exc:
-                                    self._logger.error('Failed to recover orphan bracket %s: %s', symbol, exc)
+                                    self._logger.error(
+                                        "Failed to recover orphan bracket %s: %s",
+                                        symbol,
+                                        exc,
+                                    )
 
             # Purge stale persisted brackets when broker no longer has matching position.
             for b_data in saved_brackets:
-                symbol = str(b_data.get('symbol', '')).upper()
+                symbol = str(b_data.get("symbol", "")).upper()
                 if symbol and symbol not in live_symbols:
                     try:
-                        self._bracket_store.delete_bracket(str(b_data.get('order_id', '')))
+                        self._bracket_store.delete_bracket(
+                            str(b_data.get("order_id", ""))
+                        )
                     except Exception as exc:
-                        self._logger.error('Failed stale bracket purge for %s: %s', symbol, exc)
+                        self._logger.error(
+                            "Failed stale bracket purge for %s: %s", symbol, exc
+                        )
 
             if saved_brackets:
                 self._logger.info(
-                    'Bracket recovery complete persisted=%d live_positions=%d',
+                    "Bracket recovery complete persisted=%d live_positions=%d",
                     len(saved_brackets),
                     len(live_symbols),
                 )
@@ -5230,15 +5509,15 @@ class OrderManager:
 
     def _load_orders(self) -> None:
         """Restore orders from disk on startup.
-        
+
         ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback.
         """
         import os
-        
+
         # ✅ FIX: Use DATA_DIR environment variable
         data_dir = os.getenv("DATA_DIR", "data")
         path = Path(data_dir) / "orders.json"
-        
+
         if not path.exists():
             # Try /tmp fallback location
             fallback = Path(os.getenv("DATA_DIR", "data")) / "orders.json"
@@ -5248,56 +5527,54 @@ class OrderManager:
             else:
                 self._logger.debug("No saved orders found")
                 return
-        
+
         try:
             with open(path, "r") as f:
                 data = json.load(f)
-            
+
             restored_count = 0
             for oid, record in data.items():
                 try:
                     # Reconstruct OrderStatus enum
-                    status_str = record.get('status', 'PENDING')
+                    status_str = record.get("status", "PENDING")
                     if hasattr(OrderStatus, status_str):
                         status = getattr(OrderStatus, status_str)
                     else:
                         status = OrderStatus.PENDING
-                    
+
                     # Reconstruct OrderType enum
-                    order_type_str = record.get('order_type', 'LIMIT')
+                    order_type_str = record.get("order_type", "LIMIT")
                     if hasattr(OrderType, order_type_str):
                         order_type = getattr(OrderType, order_type_str)
                     else:
                         order_type = OrderType.LIMIT
-                    
+
                     # Create Order object (adjust based on your Order dataclass)
                     order = Order(
-                        order_id=record.get('order_id', oid),
-                        symbol=record.get('symbol', ''),
-                        side=record.get('side', 'BUY'),
-                        quantity=int(record.get('quantity', 0)),
-                        price=float(record.get('price', 0)),
+                        order_id=record.get("order_id", oid),
+                        symbol=record.get("symbol", ""),
+                        side=record.get("side", "BUY"),
+                        quantity=int(record.get("quantity", 0)),
+                        price=float(record.get("price", 0)),
                         order_type=order_type,
                         status=status,
                         # Add other fields as needed
                     )
-                    
+
                     with self._lock:
                         self._orders[oid] = order
                     restored_count += 1
-                    
+
                 except Exception as e:
                     self._logger.warning(f"⚠️ Skipped restoring order {oid}: {e}")
-            
+
             if restored_count > 0:
                 self._logger.info(f"✅ Restored {restored_count} orders from {path}")
-                
+
         except json.JSONDecodeError as e:
             self._logger.error(f"❌ Invalid JSON in orders file: {e}")
         except Exception as e:
             self._logger.error(f"❌ Failed to load orders: {e}")
-
-    
 
     def _verify_restored_orders(self) -> None:
         """
@@ -5307,14 +5584,23 @@ class OrderManager:
         # 1. Identify what needs verification (Non-Final states)
         with self._lock:
             to_verify = [
-                oid for oid, o in self._orders.items()
-                if o.status not in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED]
+                oid
+                for oid, o in self._orders.items()
+                if o.status
+                not in [
+                    OrderStatus.FILLED,
+                    OrderStatus.CANCELLED,
+                    OrderStatus.REJECTED,
+                    OrderStatus.EXPIRED,
+                ]
             ]
 
         if not to_verify:
             return
 
-        self._logger.info(f"🔍 Verifying {len(to_verify)} restored orders with broker...")
+        self._logger.info(
+            f"🔍 Verifying {len(to_verify)} restored orders with broker..."
+        )
 
         try:
             # 2. BULK FETCH (One API Call) - Safe & Fast
@@ -5333,7 +5619,7 @@ class OrderManager:
                 pass
 
             # Map remote orders for O(1) lookup
-            remote_map = {str(o.get('order_id')): o for o in all_remote}
+            remote_map = {str(o.get("order_id")): o for o in all_remote}
 
             # 3. Reconcile
             verified_count = 0
@@ -5349,10 +5635,14 @@ class OrderManager:
                     with self._lock:
                         if oid in self._orders:
                             self._orders[oid].status = OrderStatus.CANCELLED
-                            self._orders[oid].rejection_reason = "Stale/Phantom Order cleaned on startup"
+                            self._orders[oid].rejection_reason = (
+                                "Stale/Phantom Order cleaned on startup"
+                            )
                     stale_count += 1
 
-            self._logger.info(f"✅ Verification Complete: {verified_count} synced, {stale_count} phantoms cleaned.")
+            self._logger.info(
+                f"✅ Verification Complete: {verified_count} synced, {stale_count} phantoms cleaned."
+            )
             # Save the cleaned state immediately
             self.save_orders()
 
@@ -5366,14 +5656,14 @@ class OrderManager:
         2. Detects fills and triggers bracket activation
         """
         self._logger.info("🚀 Order monitoring thread started (POLLING MODE)")
-        
+
         last_report_time = 0.0
         last_poll_time = 0.0
-        
+
         while not self._stop_event.wait(0.5):  # Wake up every 500ms
             try:
                 now = time.time()
-                
+
                 # CRITICAL: Fast Poll for Fills (Every 2 seconds)
                 if now - last_poll_time >= 2.0:
                     self._poll_pending_orders()
@@ -5383,12 +5673,12 @@ class OrderManager:
 
                 # intent: central stop-loss monitoring independent of strategy cadence
                 self._check_force_stop_losses()
-                
+
                 # Slow Status Report (Every 60 seconds)
                 if now - last_report_time >= 60.0:
                     self._log_status_report()
                     last_report_time = now
-                
+
             except Exception as exc:
                 self._logger.error(f"Monitor loop error: {exc}", exc_info=True)
                 time.sleep(1.0)
@@ -5424,9 +5714,9 @@ class OrderManager:
                 if ltp_val <= 0:
                     continue
                 stop_val = float(stop_loss)
-                sl_hit = (
-                    side == "LONG" and ltp_val <= stop_val
-                ) or (side == "SHORT" and ltp_val >= stop_val)
+                sl_hit = (side == "LONG" and ltp_val <= stop_val) or (
+                    side == "SHORT" and ltp_val >= stop_val
+                )
                 if not sl_hit:
                     continue
                 pos.state = "force_closed_by_sl"
@@ -5576,19 +5866,24 @@ class OrderManager:
         # Without this, the bracket stays permanently dead and the open position
         # bleeds until EOD square-off — which is exactly what caused the capital loss.
         tag = (order.tag or "").lower()
-        is_exit_order = any(x in tag for x in ["exit", "stop", "target", "square", "guard"])
+        is_exit_order = any(
+            x in tag for x in ["exit", "stop", "target", "square", "guard"]
+        )
         if is_exit_order and self._bracket_manager is not None:
             try:
-                recovered = self._bracket_manager.reactivate_bracket_after_rejected_exit(
-                    symbol=order.symbol,
-                    rejected_order_id=order.order_id,
-                    reason=reason,
+                recovered = (
+                    self._bracket_manager.reactivate_bracket_after_rejected_exit(
+                        symbol=order.symbol,
+                        rejected_order_id=order.order_id,
+                        reason=reason,
+                    )
                 )
                 if recovered:
                     self._logger.critical(
                         "🔁 REJECTED EXIT recovered for %s (order=%s) — bracket reactivated. "
                         "Next tick will retry the exit.",
-                        order.symbol, order.order_id,
+                        order.symbol,
+                        order.order_id,
                         extra={
                             "event": "rejected_exit_bracket_reactivated",
                             "symbol": order.symbol,
@@ -5600,7 +5895,8 @@ class OrderManager:
                     self._logger.error(
                         "⚠️ REJECTED EXIT for %s (order=%s) — no matching bracket found to reactivate. "
                         "MANUAL INTERVENTION REQUIRED.",
-                        order.symbol, order.order_id,
+                        order.symbol,
+                        order.order_id,
                         extra={
                             "event": "rejected_exit_no_bracket",
                             "symbol": order.symbol,
@@ -5610,7 +5906,8 @@ class OrderManager:
             except Exception as _rec_exc:
                 self._logger.error(
                     "Bracket reactivation failed after rejected exit for %s: %s",
-                    order.symbol, _rec_exc,
+                    order.symbol,
+                    _rec_exc,
                 )
 
     # Internal helpers -------------------------------------------------
@@ -7794,13 +8091,13 @@ class OrderManager:
             "Entered OrderManager._build_order_payload",
             extra={"event": "order_manager.build_order_payload", "symbol": symbol},
         )
-        
+
         # 1. Resolve Instrument Metadata
         resolver_metadata = self._resolve_order_metadata(symbol)
         tradingsymbol_hint = str(resolver_metadata.get("tradingsymbol") or "").strip()
         exchange_hint = resolver_metadata.get("exchange")
         instrument_token = resolver_metadata.get("instrument_token")
-        
+
         # 2. Basic Payload Construction
         payload: dict[str, Any] = {
             "symbol": symbol,
@@ -7813,65 +8110,80 @@ class OrderManager:
         # 3. Handle Symbol/Exchange Mapping
         if ":" in symbol:
             parts = symbol.split(":", maxsplit=1)
-            if not exchange_hint: exchange_hint = parts[0]
-            if not tradingsymbol_hint: tradingsymbol_hint = parts[1]
+            if not exchange_hint:
+                exchange_hint = parts[0]
+            if not tradingsymbol_hint:
+                tradingsymbol_hint = parts[1]
         else:
-            if not tradingsymbol_hint and str(symbol).upper().endswith(("FUT", "CE", "PE")):
+            if not tradingsymbol_hint and str(symbol).upper().endswith(
+                ("FUT", "CE", "PE")
+            ):
                 tradingsymbol_hint = symbol
 
-        if tradingsymbol_hint: payload["tradingsymbol"] = tradingsymbol_hint
-        if exchange_hint: payload["exchange"] = exchange_hint
-        
+        if tradingsymbol_hint:
+            payload["tradingsymbol"] = tradingsymbol_hint
+        if exchange_hint:
+            payload["exchange"] = exchange_hint
+
         # Override exchange if env var set
         env_exch = os.getenv("INSTRUMENTS__TRADE_EXCHANGE")
-        if env_exch: payload["exchange"] = env_exch
+        if env_exch:
+            payload["exchange"] = env_exch
 
         # 4. CRITICAL FIX: Order Type Mapping & SL-M Interception
-        raw_type = (order_type.value if hasattr(order_type, "value") else str(order_type)).upper()
-        
+        raw_type = (
+            order_type.value if hasattr(order_type, "value") else str(order_type)
+        ).upper()
+
         # Zerodha Type Map
         zerodha_map = {
-            "STOP_LOSS_MARKET": "SL-M", "SL-M": "SL-M",
-            "STOP_LOSS_LIMIT": "SL", "STOP_LOSS": "SL",
-            "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL"
+            "STOP_LOSS_MARKET": "SL-M",
+            "SL-M": "SL-M",
+            "STOP_LOSS_LIMIT": "SL",
+            "STOP_LOSS": "SL",
+            "MARKET": "MARKET",
+            "LIMIT": "LIMIT",
+            "SL": "SL",
         }
-        kite_type = zerodha_map.get(raw_type, "MARKET") # Default to MARKET if unknown
+        kite_type = zerodha_map.get(raw_type, "MARKET")  # Default to MARKET if unknown
 
         # 🚀 AUTO-CONVERT SL-M to SL-LIMIT (Fixes 400 Bad Request)
         final_price = float(price) if price is not None else 0.0
         trigger_price = 0.0
-        
+
         # If user passed price as trigger for SL-M, extract it
         if kite_type == "SL-M":
             # SL-M usually passes trigger in 'price' or has separate trigger
-            trigger_price = final_price 
+            trigger_price = final_price
             if trigger_price <= 0:
                 # Try to extract from 'trigger_price' arg if passed in price field wasn't it
                 # (Logic handled by caller usually, but we ensure safety here)
                 pass
 
-            self._logger.info(f"🛡️ Intercepting SL-M for {symbol}. Converting to SL-Limit.")
-            kite_type = "SL" # Force Limit
-            
+            self._logger.info(
+                f"🛡️ Intercepting SL-M for {symbol}. Converting to SL-Limit."
+            )
+            kite_type = "SL"  # Force Limit
+
             # Calculate Safe Limit Buffer (5%)
             # BUY SL (Exit Short): Trigger 100 -> Limit 105 (Guarantees fill)
             # SELL SL (Exit Long): Trigger 100 -> Limit 95 (Guarantees fill)
-            buffer = 0.05 
+            buffer = 0.05
             if side == "BUY":
                 final_price = round(trigger_price * (1 + buffer), 1)
             else:
                 final_price = max(0.05, round(trigger_price * (1 - buffer), 1))
-        
+
         elif kite_type == "SL":
             # Standard SL: ensure trigger and price are set
-            trigger_price = final_price # Assume price arg is trigger if ambiguous
-            # Caller usually sets price=limit, trigger=trigger. 
+            trigger_price = final_price  # Assume price arg is trigger if ambiguous
+            # Caller usually sets price=limit, trigger=trigger.
             # We trust the passed 'price' if it looks like a limit price
             pass
 
         # 5. Finalize Payload Fields
         payload["order_type"] = kite_type
-        
+
         if kite_type == "MARKET":
             payload.pop("price", None)
             payload.pop("trigger_price", None)
@@ -7890,18 +8202,30 @@ class OrderManager:
                 payload["trigger_price"] = final_price
 
         # 6. Optional Fields
-        if tag: payload["tag"] = tag
-        if parent_order_id: payload["parent_order_id"] = parent_order_id
-        if client_order_id: payload["client_order_id"] = client_order_id
-        
+        if tag:
+            payload["tag"] = tag
+        if parent_order_id:
+            payload["parent_order_id"] = parent_order_id
+        if client_order_id:
+            payload["client_order_id"] = client_order_id
+
         # Token Handling (Optional but recommended)
         if instrument_token is not None:
             # Check feature flag
             try:
-                if bool(getattr(app_settings.get_settings(), "feature_order_without_token", True)) is False:
-                     payload["instrument_token"] = int(instrument_token)
+                if (
+                    bool(
+                        getattr(
+                            app_settings.get_settings(),
+                            "feature_order_without_token",
+                            True,
+                        )
+                    )
+                    is False
+                ):
+                    payload["instrument_token"] = int(instrument_token)
             except Exception:
-                pass # Default to not sending if settings fail
+                pass  # Default to not sending if settings fail
 
         return payload
 
@@ -8420,8 +8744,11 @@ class OrderManager:
         with self._lock:
             previous_status = order.status
             status = self._parse_status(payload.get("status"))
-            filled_qty = self._coerce_int(payload.get("filled_quantity")) or order.filled_quantity
-            
+            filled_qty = (
+                self._coerce_int(payload.get("filled_quantity"))
+                or order.filled_quantity
+            )
+
             average_price = payload.get("average_price") or payload.get("averagePrice")
             message = payload.get("status_message") or payload.get("message")
 
@@ -9016,11 +9343,19 @@ class OrderManager:
             "symbol": order.symbol,
             "side": order.side,
             # [FIX] Convert Enum to value (string)
-            "order_type": order.order_type.value if hasattr(order.order_type, "value") else str(order.order_type),
+            "order_type": (
+                order.order_type.value
+                if hasattr(order.order_type, "value")
+                else str(order.order_type)
+            ),
             "quantity": order.quantity,
             "price": order.price,
             # [FIX] Convert Status Enum to value
-            "status": order.status.value if hasattr(order.status, "value") else str(order.status),
+            "status": (
+                order.status.value
+                if hasattr(order.status, "value")
+                else str(order.status)
+            ),
             "timestamp": order.timestamp.isoformat(),
             "filled_quantity": order.filled_quantity,
             "fill_price": order.fill_price,
@@ -9059,7 +9394,11 @@ class OrderManager:
             "entry_price": state.entry_price,
             "product": state.product,
             "tag": state.tag,
-            "stop_order_type": state.stop_order_type.value if hasattr(state.stop_order_type, "value") else str(state.stop_order_type),
+            "stop_order_type": (
+                state.stop_order_type.value
+                if hasattr(state.stop_order_type, "value")
+                else str(state.stop_order_type)
+            ),
             "stop_price": state.stop_price,
             "stop_order_type": state.stop_order_type.value,
             "stop_filled": state.stop_filled,
@@ -9089,15 +9428,19 @@ class OrderManager:
             side = str(payload["side"]).upper()
             quantity = int(payload.get("quantity", 0))
             price = float(payload.get("price", 0.0) or 0.0)
-            
+
             # Enums with Fallback
             try:
-                order_type = OrderType(payload.get("order_type", OrderType.MARKET.value))
-            except: order_type = OrderType.MARKET
+                order_type = OrderType(
+                    payload.get("order_type", OrderType.MARKET.value)
+                )
+            except:
+                order_type = OrderType.MARKET
 
             try:
                 status = OrderStatus(payload.get("status", OrderStatus.SUBMITTED.value))
-            except: status = OrderStatus.SUBMITTED
+            except:
+                status = OrderStatus.SUBMITTED
 
             # Robust Timestamp
             ts_raw = payload.get("timestamp")
@@ -9110,7 +9453,9 @@ class OrderManager:
                         timestamp = datetime.fromisoformat(str(ts_raw))
 
             # CRITICAL FIX: Map 'fill_price' to 'average_price'
-            avg_price = float(payload.get("average_price") or payload.get("fill_price") or 0.0)
+            avg_price = float(
+                payload.get("average_price") or payload.get("fill_price") or 0.0
+            )
 
             return OrderDetails(
                 order_id=order_id,
@@ -9122,16 +9467,15 @@ class OrderManager:
                 status=status,
                 timestamp=timestamp,
                 filled_quantity=int(payload.get("filled_quantity", 0)),
-                average_price=avg_price, # Mapped correctly
+                average_price=avg_price,  # Mapped correctly
                 tag=payload.get("tag"),
                 client_order_id=payload.get("client_order_id"),
-                rejection_reason=payload.get("rejection_reason")
+                rejection_reason=payload.get("rejection_reason"),
             )
         except Exception as e:
             self._logger.error(f"Failed to restore order: {e}")
             raise ValueError("Invalid order payload") from e
 
-    
     def _bracket_from_dict(self, payload: Mapping[str, Any]) -> BracketState:
         """Convert persistent *payload* into :class:`BracketState`.
 
@@ -9363,14 +9707,15 @@ class OrderManager:
 
     def reconcile_open_orders_with_broker(self) -> None:
         """Sync local order state with broker and trigger brackets on fill."""
-        
+
         # 1. Identify local orders that need checking to minimize work
         with self._lock:
             pending_ids = {
-                oid for oid, order in self._orders.items() 
+                oid
+                for oid, order in self._orders.items()
                 if order.status not in self.FINAL_STATUSES
             }
-        
+
         # Optimization: Don't spam API if we have nothing to track
         if not pending_ids:
             return
@@ -9379,7 +9724,7 @@ class OrderManager:
             # 2. RESOLVE FETCHER (Fixes the 'no attribute orders' crash)
             # Dynamically find the correct method (get_orders, list_orders, etc.)
             fetcher = self._resolve_open_orders_fetcher()
-            
+
             # Fallback: some clients might expose 'orders' property/method directly
             if not fetcher:
                 candidate = getattr(self._broker, "orders", None)
@@ -9388,7 +9733,7 @@ class OrderManager:
 
             if not fetcher:
                 # Log once per minute to avoid flooding logs if broker is incompatible
-                if time.time() % 60 < 2: 
+                if time.time() % 60 < 2:
                     self._logger.error("No order fetch method found on broker client")
                 return
 
@@ -9401,14 +9746,16 @@ class OrderManager:
             broker_orders = []
             if isinstance(response, Mapping):
                 broker_orders = [response]
-            elif isinstance(response, Iterable) and not isinstance(response, (str, bytes)):
+            elif isinstance(response, Iterable) and not isinstance(
+                response, (str, bytes)
+            ):
                 broker_orders = list(response)
 
             # Map broker order_id -> payload for O(1) lookup
             broker_map = {}
             for item in broker_orders:
                 if isinstance(item, Mapping):
-                    oid = str(item.get('order_id') or item.get('id') or '')
+                    oid = str(item.get("order_id") or item.get("id") or "")
                     if oid:
                         broker_map[oid] = item
 
@@ -9418,58 +9765,66 @@ class OrderManager:
                     local_order = self._orders.get(order_id)
                     if not local_order:
                         continue
-                        
+
                     remote = broker_map.get(order_id)
-                    # If remote missing, order might be closed/archived. 
+                    # If remote missing, order might be closed/archived.
                     # We can't assume anything yet unless we trust the broker returns ALL orders.
                     if not remote:
                         continue
 
                     # Capture old status to detect transitions
                     old_status = local_order.status
-                    
+
                     # Update Local State safely
-                    raw_status = str(remote.get('status', '')).upper()
+                    raw_status = str(remote.get("status", "")).upper()
                     local_order.status = self._parse_status(raw_status)
-                    
-                    filled = self._coerce_int(remote.get('filled_quantity'))
+
+                    filled = self._coerce_int(remote.get("filled_quantity"))
                     if filled is not None:
                         local_order.filled_quantity = filled
-                        
-                    avg_price_raw = remote.get('average_price') or remote.get('averagePrice')
+
+                    avg_price_raw = remote.get("average_price") or remote.get(
+                        "averagePrice"
+                    )
                     avg_price = self._coerce_float(avg_price_raw)
                     if avg_price is not None:
                         local_order.average_price = avg_price
                         # ✅ FIX: Sync fill_price so Position Manager sees the price
                         local_order.fill_price = avg_price
-                        
-                    msg = remote.get('status_message') or remote.get('message')
+
+                    msg = remote.get("status_message") or remote.get("message")
                     if msg:
                         local_order.message = str(msg)
 
                     # 5. TRIGGER LOGIC (The Brain)
                     # If order JUST finished, trigger the Bracket Handler
-                    if local_order.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}:
+                    if local_order.status in {
+                        OrderStatus.FILLED,
+                        OrderStatus.PARTIALLY_FILLED,
+                    }:
                         # Log significant state changes
                         if old_status != local_order.status:
                             self._logger.info(
                                 f"✅ Order {order_id} update: {local_order.status.name} "
                                 f"({local_order.filled_quantity} qty @ {local_order.average_price})"
                             )
-                        
+
                         # CRITICAL: This call triggers the auto-SL/TP placement
                         # We pass the 'remote' payload so the handler has full context
                         self._handle_bracket_update(local_order, old_status, remote)
 
                     # If Rejected, handle it
-                    if local_order.status == OrderStatus.REJECTED and old_status != OrderStatus.REJECTED:
+                    if (
+                        local_order.status == OrderStatus.REJECTED
+                        and old_status != OrderStatus.REJECTED
+                    ):
                         self._handle_order_rejected(local_order)
 
         except Exception as e:
             self._logger.error(f"Reconcile failed: {e}", exc_info=True)
         # [Existing code]
         self._reconcile_positions()
-        
+
         # [NEW] Add this line:
         self._resurrect_trailing_stops()
 
@@ -9482,8 +9837,10 @@ class OrderManager:
         if not order.stop_loss and not order.take_profit:
             return
 
-        self._logger.info(f"🛡️ Placing Bracket for {order.symbol} (Qty: {order.filled_quantity})")
-        
+        self._logger.info(
+            f"🛡️ Placing Bracket for {order.symbol} (Qty: {order.filled_quantity})"
+        )
+
         try:
             # Delegate to Bracket Manager
             self._bracket_manager.place_bracket(
@@ -9493,7 +9850,7 @@ class OrderManager:
                 entry_price=order.average_price,
                 stop_loss_price=order.stop_loss,
                 take_profit_price=order.take_profit,
-                parent_order_id=order.order_id
+                parent_order_id=order.order_id,
             )
         except Exception as e:
             self._logger.error(f"Failed to place bracket: {e}")
@@ -9751,7 +10108,7 @@ class OrderManager:
 
     def _lot_lookup(self) -> Callable[[str], int] | None:
         resolver = self._resolver
-        if not resolver: 
+        if not resolver:
             return None
         if resolver is None:
             market_data = self._market_data
@@ -9923,20 +10280,22 @@ class OrderManager:
         Without this, TSL becomes a static SL after any reboot.
         """
         self._logger.info("♻️ Resurrecting Trailing Stops...")
-        
+
         with self._lock:
             # Iterate all active brackets
             for entry_id, state in self._brackets.items():
                 # Skip if already running or closed
                 if entry_id in self._trailing or state.remaining_position() <= 0:
                     continue
-                
+
                 # Check if this bracket HAD a trailing spec
                 if not state.trailing_spec:
                     continue
 
-                self._logger.info(f"⚡ Re-attaching TSL for {state.symbol} (Order {entry_id})")
-                
+                self._logger.info(
+                    f"⚡ Re-attaching TSL for {state.symbol} (Order {entry_id})"
+                )
+
                 try:
                     self.attach_trailing_stop(
                         entry_order_id=state.entry_id,
@@ -9944,7 +10303,7 @@ class OrderManager:
                         symbol=state.symbol,
                         side=state.side,
                         entry_price=state.entry_price,
-                        spec=state.trailing_spec
+                        spec=state.trailing_spec,
                     )
                 except Exception as e:
                     self._logger.error(f"Failed to resurrect TSL for {entry_id}: {e}")
@@ -9962,9 +10321,9 @@ class OrderManager:
                 if not lock_acquired:
                     return
             # 1. FETCH TRUTH (Broker State)
-            if not hasattr(self._broker, "get_positions"): 
+            if not hasattr(self._broker, "get_positions"):
                 return
-            
+
             # Fetch net positions (standard for most brokers)
             try:
                 broker_pos_payload = self._broker.get_positions()
@@ -9972,18 +10331,21 @@ class OrderManager:
                 self._logger.error(f"Failed to fetch broker positions: {e}")
                 return
 
-            broker_pos_list = broker_pos_payload if isinstance(broker_pos_payload, list) else []
-            
+            broker_pos_list = (
+                broker_pos_payload if isinstance(broker_pos_payload, list) else []
+            )
+
             # Map: Normalized Symbol -> Position Data
             broker_map = {}
             for p in broker_pos_list:
                 # Handle different broker key names safely
                 qty = int(p.get("quantity") or p.get("net_quantity") or 0)
-                if qty == 0: continue # Skip closed positions
+                if qty == 0:
+                    continue  # Skip closed positions
 
                 raw_sym = str(p.get("tradingsymbol") or p.get("symbol") or "")
                 exch = str(p.get("exchange") or "NFO")
-                
+
                 # NORMALIZE: Ensure strictly "EXCHANGE:SYMBOL" format (e.g., NFO:NIFTY...)
                 # Zerodha sometimes returns "NIFTY..." without NFO:
                 if ":" in raw_sym:
@@ -9992,10 +10354,10 @@ class OrderManager:
                     clean_sym = normalize_symbol(f"{exch}:{raw_sym}")
 
                 broker_map[clean_sym] = {
-                    "qty": qty, 
+                    "qty": qty,
                     "price": float(p.get("average_price") or p.get("buy_price") or 0.0),
                     "product": p.get("product"),
-                    "raw_payload": p
+                    "raw_payload": p,
                 }
 
             # 2. HANDLE ORPHANS (Broker Exists, Local Missing) -> Adopt & Protect
@@ -10013,7 +10375,7 @@ class OrderManager:
             for broker_sym, data in broker_positions.items():
                 # Broker is authoritative: adopt any position missing locally.
                 # ✅ FIX: Ignore positions that are already closed (Qty 0)
-                if data['qty'] == 0:
+                if data["qty"] == 0:
                     continue
 
                 if broker_sym not in local_positions:
@@ -10023,19 +10385,22 @@ class OrderManager:
                     recently_handled.add(broker_sym)
                     self._recent_orphans = recently_handled
 
-                    if self._bracket_manager and self._bracket_manager.has_active_bracket(
-                        broker_sym
+                    if (
+                        self._bracket_manager
+                        and self._bracket_manager.has_active_bracket(broker_sym)
                     ):
                         continue
-                    
-                    # [FIX 1] RACE CONDITION GUARD: 
+
+                    # [FIX 1] RACE CONDITION GUARD:
                     # Check if we have touched this symbol recently (Pending Orders or Recent Fills).
                     # This stops the "Infinite Rescue Loop".
                     is_active_locally = False
                     with self._lock:
                         for order in self._orders.values():
                             # Normalize symbol check
-                            if DataHub.normalize(order.symbol) == DataHub.normalize(broker_sym):
+                            if DataHub.normalize(order.symbol) == DataHub.normalize(
+                                broker_sym
+                            ):
                                 # 1. If we are currently working on an order -> SKIP
                                 if order.status not in self.FINAL_STATUSES:
                                     is_active_locally = True
@@ -10043,13 +10408,17 @@ class OrderManager:
                                 # 2. If we finished an order < 15s ago -> SKIP (Give time to sync)
                                 if (
                                     order.timestamp
-                                    and hasattr(order.timestamp, 'timestamp')
+                                    and hasattr(order.timestamp, "timestamp")
                                     and time.time() - order.timestamp.timestamp() < 20
                                 ):
                                     is_active_locally = True
                                     break
                                 if order.timestamp:
-                                    ts = order.timestamp.timestamp() if hasattr(order.timestamp, 'timestamp') else time.time()
+                                    ts = (
+                                        order.timestamp.timestamp()
+                                        if hasattr(order.timestamp, "timestamp")
+                                        else time.time()
+                                    )
                                     if time.time() - ts < 15.0:
                                         is_active_locally = True
                                         break
@@ -10061,7 +10430,7 @@ class OrderManager:
                                 ):
                                     is_active_locally = True
                                     break
-                    
+
                     if is_active_locally:
                         # self._logger.debug(f"⏳ Skipping Orphan Check for {broker_sym} (Busy)")
                         continue
@@ -10069,54 +10438,81 @@ class OrderManager:
                     # If we get here, it is a TRUE Orphan (Manual/Old trade)
                     self._logger.warning(
                         f"⚠️ Orphan Position Found: {broker_sym} Qty: {data['qty']}. Adopting...",
-                        extra={"event": "orphan_adopted", "symbol": broker_sym}
+                        extra={"event": "orphan_adopted", "symbol": broker_sym},
                     )
-                    
+
                     # [UPGRADE] Use Smart Guard (Adopt + Virtual Bracket + Persistence)
                     try:
-                        success = self.guard_orphan_position(broker_sym, data['qty'], data['price'])
-                        
+                        success = self.guard_orphan_position(
+                            broker_sym, data["qty"], data["price"]
+                        )
+
                         if success:
-                            self._logger.info(f"✅ Orphan {broker_sym} successfully guarded & persisted.")
+                            self._logger.info(
+                                f"✅ Orphan {broker_sym} successfully guarded & persisted."
+                            )
                         else:
                             # Fallback: If smart guard fails (e.g. BracketManager missing),
                             # we MUST ensure a Hard Broker SL exists.
-                            self._logger.warning(f"⚠️ Smart Guard failed for {broker_sym}. Checking Hard SL...")
-                            self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
-                            
+                            self._logger.warning(
+                                f"⚠️ Smart Guard failed for {broker_sym}. Checking Hard SL..."
+                            )
+                            self._ensure_safety_bracket(
+                                broker_sym, data["qty"], data["price"]
+                            )
+
                     except Exception as e:
                         self._logger.error(f"Orphan Handling Error: {e}")
                         # Final Safety Net
-                        self._ensure_safety_bracket(broker_sym, data['qty'], data['price'])
+                        self._ensure_safety_bracket(
+                            broker_sym, data["qty"], data["price"]
+                        )
 
             # 3. HANDLE GHOSTS & NAKED POSITIONS
             # ------------------------------------------------------
             for lsym, pos in local_positions.items():
                 # CASE A: Ghost (We think we have it, Broker says no)
+                self._missing_counts.setdefault(lsym, 0)
                 if lsym not in broker_positions:
+                    self._missing_counts[lsym] += 1
+                    if self._missing_counts[lsym] < 3:
+                        self._logger.debug(
+                            "Condition met: broker_position_temporarily_missing",
+                            extra={
+                                "event": "broker_position_temporarily_missing",
+                                "symbol": lsym,
+                                "missing_count": self._missing_counts[lsym],
+                            },
+                        )
+                        continue
                     self._logger.warning(
                         f"👻 Ghost Position Found: {lsym}. Clearing local state.",
-                        extra={"event": "ghost_cleared", "symbol": lsym}
+                        extra={"event": "ghost_cleared", "symbol": lsym},
                     )
                     self.cancel_orders_for_symbol(lsym)
                     if self._bracket_manager is not None:
                         try:
-                            self._bracket_manager.manual_override_close(lsym, reason='broker_position_closed')
+                            self._bracket_manager.manual_override_close(
+                                lsym, reason="broker_position_closed"
+                            )
                         except Exception as e:
-                            self._logger.error('Failure in _reconcile_positions: %s', e)
+                            self._logger.error("Failure in _reconcile_positions: %s", e)
                     self._generate_adjustment_order(lsym, -int(pos.quantity), 0.0)
+                    self._missing_counts.pop(lsym, None)
 
                 # CASE B: Quantity Mismatch (Partial fills/Manual intervention)
                 elif broker_positions[lsym]["qty"] != pos.quantity:
+                    self._missing_counts[lsym] = 0
                     diff = broker_positions[lsym]["qty"] - pos.quantity
                     self._logger.info(
                         f"⚖️ Syncing Qty for {lsym}: Local {pos.quantity} -> Broker {broker_positions[lsym]['qty']}",
-                        extra={"event": "qty_sync", "symbol": lsym}
+                        extra={"event": "qty_sync", "symbol": lsym},
                     )
                     self._generate_adjustment_order(lsym, diff, 0.0)
-                
+
                 # CASE C: Perfect Match... BUT IS IT SAFE? (The Missing Link)
                 elif broker_positions[lsym]["qty"] == pos.quantity:
+                    self._missing_counts[lsym] = 0
                     # 1. Check if a bracket is actually managing this symbol
                     is_managed = False
                     if self._bracket_manager:
@@ -10127,19 +10523,19 @@ class OrderManager:
                                 if b.symbol == lsym and b.active:
                                     is_managed = True
                                     break
-                    
+
                     # 2. If not managed, WE MUST ADOPT IT NOW
                     if not is_managed:
                         self._logger.warning(
                             f"🛡️ Naked Position Detected (Qty Match): {lsym}. Forcing Guard...",
-                            extra={"event": "naked_guard_trigger", "symbol": lsym}
+                            extra={"event": "naked_guard_trigger", "symbol": lsym},
                         )
                         # We pass consume_existing=True because accounting is already correct!
                         self.guard_orphan_position(
-                            lsym, 
-                            int(pos.quantity), 
-                            float(pos.entry_price or 0.0), 
-                            consume_existing=True
+                            lsym,
+                            int(pos.quantity),
+                            float(pos.entry_price or 0.0),
+                            consume_existing=True,
                         )
 
         except Exception as e:
@@ -10151,19 +10547,19 @@ class OrderManager:
     def _adopt_orphan_position(self, symbol: str, data: dict) -> None:
         """
         Creates a synthetic filled order to register the position locally.
-        
-        Fixes 'str object has no attribute value' by passing the Enum object 
+
+        Fixes 'str object has no attribute value' by passing the Enum object
         directly to PositionManager, ensuring type safety.
         """
-        import time
         from datetime import datetime, timezone
+        import time
 
         symbol = normalize_symbol(symbol)
 
         # 1. Safe Quantity Extraction
         try:
-            qty = int(float(data.get('qty', 0)))
-            price = float(data.get('price', 0.0))
+            qty = int(float(data.get("qty", 0)))
+            price = float(data.get("price", 0.0))
         except (ValueError, TypeError):
             self._logger.error(f"Cannot adopt orphan {symbol}: Invalid data {data}")
             return
@@ -10172,11 +10568,11 @@ class OrderManager:
             return
 
         side = "BUY" if qty > 0 else "SELL"
-        
+
         # 2. Unique ID (Use simplified timestamp to avoid colons/special chars)
         safe_sym = symbol.replace(":", "_")
         order_id = f"sync_{int(time.time())}_{safe_sym}"
-        
+
         # 3. Resolve OrderType (Handle Enum vs String definition)
         # CRITICAL: Ensure 'otype' is the ENUM object, not a string.
         # PositionManager expects an object it can access .value on.
@@ -10188,25 +10584,25 @@ class OrderManager:
             symbol=symbol,
             side=side,
             quantity=abs(qty),
-            order_type=otype, # Pass the Enum/Object here
+            order_type=otype,  # Pass the Enum/Object here
             status=OrderStatus.FILLED,
             timestamp=datetime.now(timezone.utc),
             price=price,
             average_price=price,
             fill_price=price,
             filled_quantity=abs(qty),
-            tag="orphan_adoption"
+            tag="orphan_adoption",
         )
-        
+
         # 5. Register in OrderManager
         self._register_order(details)
-        
+
         # 6. Register in PositionManager (CRITICAL FIX)
         pm = self._positions
-        
+
         try:
             if hasattr(pm, "add_pending_order"):
-                # [FIX] Pass 'otype' (Enum) directly. 
+                # [FIX] Pass 'otype' (Enum) directly.
                 # Do NOT convert to string, as PM likely calls .value on it.
                 pm.add_pending_order(
                     order_id=order_id,
@@ -10214,9 +10610,9 @@ class OrderManager:
                     side=side,
                     qty=abs(qty),
                     price=price,
-                    order_type=otype 
+                    order_type=otype,
                 )
-                
+
                 # Immediately confirm fill since it's an orphan
                 if hasattr(pm, "update_order_status"):
                     pm.update_order_status(order_id, "FILLED", price)
@@ -10230,7 +10626,7 @@ class OrderManager:
                     qty=details.quantity,
                     price=details.average_price,
                     side=details.side,
-                    product="MIS" 
+                    product="MIS",
                 )
             else:
                 self._logger.error("PositionManager missing standard update methods.")
@@ -10239,19 +10635,18 @@ class OrderManager:
             # Catch specific attribute errors to prevent crash loop
             self._logger.error(f"Orphan adoption failed for {symbol}: {e}")
 
-    
     def guard_orphan_position(
-        self, 
-        symbol: str, 
-        quantity: int, 
-        average_price: float, 
+        self,
+        symbol: str,
+        quantity: int,
+        average_price: float,
         position_side: str = None,
-        consume_existing: bool = False
+        consume_existing: bool = False,
     ) -> bool:
         """
         Master method to Adopt AND Protect a naked position.
-        
-        Fixes: 
+
+        Fixes:
         1. Cold Start Race Condition (Subscribes BEFORE price check)
         2. Zero Price / Negative SL crashes
         3. DB Persistence errors
@@ -10268,31 +10663,35 @@ class OrderManager:
             side = "BUY" if quantity > 0 else "SELL"
 
         # --- STEP 0: ENSURE DATA FLOW (CRITICAL FIX) ---
-        # We must subscribe immediately. If we fail price check later, 
+        # We must subscribe immediately. If we fail price check later,
         # at least the NEXT loop will have data.
         try:
             if self._market_data:
-                if not hasattr(self, '_bracket_tick_subscriptions'):
+                if not hasattr(self, "_bracket_tick_subscriptions"):
                     self._bracket_tick_subscriptions = set()
-                
+
                 if symbol not in self._bracket_tick_subscriptions:
+
                     def bracket_tick_handler(tick_data: dict) -> None:
                         try:
-                            ltp = (tick_data.get('ltp') or tick_data.get('last_price') or tick_data.get('price'))
+                            ltp = (
+                                tick_data.get("ltp")
+                                or tick_data.get("last_price")
+                                or tick_data.get("price")
+                            )
                             if ltp and float(ltp) > 0:
                                 self._bracket_manager.on_tick(symbol, float(ltp))
                         except Exception:
-                            pass 
+                            pass
 
                     if self._market_data:
                         self._market_data.ensure_tracking(symbol, seed=True)
 
-                        if hasattr(self._market_data, 'subscribe'):
+                        if hasattr(self._market_data, "subscribe"):
                             self._market_data.subscribe(symbol, bracket_tick_handler)
 
                         self._bracket_tick_subscriptions.add(symbol)
 
-                    
                         self._logger.info(f"📡 Subscribed to {symbol} for guarding.")
         except Exception as e:
             self._logger.warning(f"Subscription attempt warning: {e}")
@@ -10314,7 +10713,9 @@ class OrderManager:
         if not base_price or base_price <= 0:
             if current_ltp > 0:
                 base_price = current_ltp
-                self._logger.warning(f"⚠️ Using LTP {base_price} for guard (Broker avg_price was 0)")
+                self._logger.warning(
+                    f"⚠️ Using LTP {base_price} for guard (Broker avg_price was 0)"
+                )
             if not base_price:
                 try:
                     raise ValueError("Cannot determine entry price")
@@ -10325,18 +10726,22 @@ class OrderManager:
         # --- STEP 2: Fix Accounting ---
         if not consume_existing:
             try:
-                self._adopt_orphan_position(symbol, {'qty': quantity, 'price': base_price})
-            except Exception: pass
+                self._adopt_orphan_position(
+                    symbol, {"qty": quantity, "price": base_price}
+                )
+            except Exception:
+                pass
 
         # --- STEP 3: Fix Protection ---
         try:
+
             def round_tick(price: float) -> float:
                 return round(price * 20) / 20
 
-            import time
             from datetime import datetime, timezone
-            
-            safe_symbol = symbol.replace(':', '_')
+            import time
+
+            safe_symbol = symbol.replace(":", "_")
             synthetic_id = f"guard_{int(time.time())}_{safe_symbol}"
             side = "BUY" if quantity > 0 else "SELL"
             abs_qty = abs(quantity)
@@ -10347,11 +10752,18 @@ class OrderManager:
                 otype = OrderType.MARKET if hasattr(OrderType, "MARKET") else "MARKET"
 
                 details = OrderDetails(
-                    order_id=synthetic_id, symbol=symbol, side=side, quantity=abs_qty,
-                    order_type=otype, status=OrderStatus.FILLED,
-                    timestamp=datetime.now(timezone.utc), price=base_price,
-                    average_price=base_price, fill_price=base_price,
-                    filled_quantity=abs_qty, tag="auto_guard_synthetic"
+                    order_id=synthetic_id,
+                    symbol=symbol,
+                    side=side,
+                    quantity=abs_qty,
+                    order_type=otype,
+                    status=OrderStatus.FILLED,
+                    timestamp=datetime.now(timezone.utc),
+                    price=base_price,
+                    average_price=base_price,
+                    fill_price=base_price,
+                    filled_quantity=abs_qty,
+                    tag="auto_guard_synthetic",
                 )
                 self._register_order(details)
 
@@ -10360,7 +10772,7 @@ class OrderManager:
             # ... (Insert your ATR logic here if desired) ...
 
             # Default to Fixed % if ATR missing
-            sl_dist = base_price * 0.10 
+            sl_dist = base_price * 0.10
             tp_dist = base_price * 0.20
             strategy_tag = "auto_guard_fixed"
 
@@ -10368,12 +10780,12 @@ class OrderManager:
                 sl_price = round_tick(base_price - sl_dist)
                 tp_price = round_tick(base_price + tp_dist)
                 # Emergency: If LTP < SL, lower SL slightly below LTP to avoid instant stop-out
-                if current_ltp > 0 and current_ltp < sl_price: 
+                if current_ltp > 0 and current_ltp < sl_price:
                     sl_price = round_tick(current_ltp * 0.99)
             else:
                 sl_price = round_tick(base_price + sl_dist)
                 tp_price = round_tick(base_price - tp_dist)
-                if current_ltp > 0 and current_ltp > sl_price: 
+                if current_ltp > 0 and current_ltp > sl_price:
                     sl_price = round_tick(current_ltp * 1.01)
 
             # Force Positive Prices
@@ -10383,16 +10795,22 @@ class OrderManager:
             self._logger.info(
                 f"🛡️ GUARDING ORPHAN: {symbol} | {side} {abs_qty} | "
                 f"Base: {base_price} | SL: {sl_price} | TP: {tp_price}",
-                extra={"event": "orphan_guarding", "symbol": symbol}
+                extra={"event": "orphan_guarding", "symbol": symbol},
             )
 
             # Register
             self._bracket_manager.register_virtual_bracket(
-                order_id=synthetic_id, symbol=symbol, side=side, qty=abs_qty,
-                price=base_price, sl=sl_price, tp=tp_price, tag=strategy_tag,
-                activate_immediately=True
+                order_id=synthetic_id,
+                symbol=symbol,
+                side=side,
+                qty=abs_qty,
+                price=base_price,
+                sl=sl_price,
+                tp=tp_price,
+                tag=strategy_tag,
+                activate_immediately=True,
             )
-            
+
             # DB Persistence
             try:
                 bracket_dict = {
@@ -10407,7 +10825,7 @@ class OrderManager:
                     "trailing_active": True,
                     "tag": strategy_tag,
                     "status": "ACTIVE",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 if hasattr(self._bracket_store, "save_bracket"):
                     self._bracket_store.save_bracket(bracket_dict)
@@ -10415,14 +10833,17 @@ class OrderManager:
                     self._bracket_store.add_bracket(bracket_dict)
             except Exception as e:
                 self._logger.error(f"Failed to save guard bracket: {e}")
-                
+
             self._bracket_manager.confirm_entry_fill(synthetic_id, base_price)
             return True
-            
+
         except Exception as e:
             self._logger.error(f"Guard failed: {e}")
             return False
-    def _ensure_safety_bracket(self, symbol: str, quantity: int, entry_price: float) -> None:
+
+    def _ensure_safety_bracket(
+        self, symbol: str, quantity: int, entry_price: float
+    ) -> None:
         """
         CRITICAL SAFETY NET: Places Hard SL/TP on the Broker.
         FIX: Checks active BROKER orders, not internal brackets, to ensure redundancy.
@@ -10434,59 +10855,71 @@ class OrderManager:
             # [FIX] optimization: Use active pending list if available, or quick check
             # Instead of iterating ALL history, check pending subset
             potential_protectors = [
-                o for o in self._orders.values() 
+                o
+                for o in self._orders.values()
                 if o.status not in self.FINAL_STATUSES and o.symbol == symbol
             ]
-            
+
             for order in potential_protectors:
-                if (str(order.order_type).upper() in ["SL", "SL-M", "STOP_LOSS", "STOP_LOSS_MARKET"]):
+                if str(order.order_type).upper() in [
+                    "SL",
+                    "SL-M",
+                    "STOP_LOSS",
+                    "STOP_LOSS_MARKET",
+                ]:
                     has_broker_protection = True
                     break
-        
+
         if has_broker_protection:
-            self._logger.info(f"🛡️ Safety check passed: Broker SL already exists for {symbol}.")
-            return 
+            self._logger.info(
+                f"🛡️ Safety check passed: Broker SL already exists for {symbol}."
+            )
+            return
 
         self._logger.warning(
             f"🛡️ NAKED POSITION DETECTED: {symbol}. Placing Compliant Safety Orders.",
-            extra={"event": "safety_bracket_trigger", "symbol": symbol}
+            extra={"event": "safety_bracket_trigger", "symbol": symbol},
         )
-        
+
         SL_PCT = 0.10  # 10% Max Risk (Hard Stop)
         TP_PCT = 0.20  # 20% Target
-        BUFFER_PCT = 0.05 # 5% Buffer to ensure SL-Limit fills like Market
+        BUFFER_PCT = 0.05  # 5% Buffer to ensure SL-Limit fills like Market
 
         exit_side = "SELL" if quantity > 0 else "BUY"
         qty = abs(quantity)
 
         # Calculate Prices
-        if quantity > 0: # LONG position -> Exit via SELL
+        if quantity > 0:  # LONG position -> Exit via SELL
             trigger_price = round(entry_price * (1 - SL_PCT), 1)
             # Sell Limit should be LOWER than Trigger to ensure fill
-            limit_price = round(trigger_price * (1 - BUFFER_PCT), 1) 
+            limit_price = round(trigger_price * (1 - BUFFER_PCT), 1)
             tp_price = round(entry_price * (1 + TP_PCT), 1)
-        else: # SHORT position -> Exit via BUY
+        else:  # SHORT position -> Exit via BUY
             trigger_price = round(entry_price * (1 + SL_PCT), 1)
             # Buy Limit should be HIGHER than Trigger to ensure fill
-            limit_price = round(trigger_price * (1 + BUFFER_PCT), 1) 
+            limit_price = round(trigger_price * (1 + BUFFER_PCT), 1)
             tp_price = round(entry_price * (1 - TP_PCT), 1)
 
         # Place STOP LOSS (SL-LIMIT)
         try:
             # Force "SL" string if utilizing Zerodha/Kite Connect specifics directly
-            sl_order_type = "SL" if hasattr(OrderType, 'STOP_LOSS') else OrderType.STOP_LOSS
+            sl_order_type = (
+                "SL" if hasattr(OrderType, "STOP_LOSS") else OrderType.STOP_LOSS
+            )
 
             self.place_order(
                 symbol=symbol,
                 side=exit_side,
                 quantity=qty,
-                order_type=sl_order_type,   # ✅ Ensures "SL" (Stop-Limit)
-                price=limit_price,          # ✅ Limit Price
-                trigger_price=trigger_price, # ✅ Trigger Price
+                order_type=sl_order_type,  # ✅ Ensures "SL" (Stop-Limit)
+                price=limit_price,  # ✅ Limit Price
+                trigger_price=trigger_price,  # ✅ Trigger Price
                 tag="safety_sl_hard",
-                variety="regular"
+                variety="regular",
             )
-            self._logger.info(f"✅ Hard SL Placed: Trigger {trigger_price}, Limit {limit_price}")
+            self._logger.info(
+                f"✅ Hard SL Placed: Trigger {trigger_price}, Limit {limit_price}"
+            )
         except Exception as e:
             self._logger.critical(f"⛔ FATAL: Failed to place Hard SL: {e}")
 
@@ -10499,7 +10932,7 @@ class OrderManager:
                 order_type=OrderType.LIMIT,
                 price=tp_price,
                 tag="safety_tp_wide",
-                variety="regular"
+                variety="regular",
             )
             self._logger.info(f"✅ Wide TP Placed: {tp_price}")
         except Exception as e:
@@ -10513,7 +10946,9 @@ class OrderManager:
             target_sym = normalize_symbol(str(symbol))
 
             if o_sym == target_sym:
-                self._logger.info(f"🧹 Auto-canceling stale order {o.order_id} for {symbol}")
+                self._logger.info(
+                    f"🧹 Auto-canceling stale order {o.order_id} for {symbol}"
+                )
                 try:
                     self.cancel_order(o.order_id)
                 except:
@@ -10521,10 +10956,11 @@ class OrderManager:
 
     def _generate_adjustment_order(self, symbol, qty, price=0.0):
         """Helper to inject synthetic orders."""
-        if qty == 0: return
-        import time
+        if qty == 0:
+            return
         from datetime import datetime, timezone
-        
+        import time
+
         side = "BUY" if qty > 0 else "SELL"
         details = OrderDetails(
             order_id=f"adj_{int(time.time())}",
@@ -10538,19 +10974,23 @@ class OrderManager:
             average_price=float(price),
             fill_price=float(price),
             filled_quantity=abs(qty),
-            tag="ghost_fix"
+            tag="ghost_fix",
         )
         self._register_order(details)
-        
+
         # --- FIX: Check before calling update_from_order ---
         if hasattr(self._positions, "update_from_order"):
             self._positions.update_from_order(details)
         elif hasattr(self._positions, "update_position"):
             self._positions.update_position(
-                symbol=details.symbol, qty=details.quantity,
-                price=details.average_price, side=details.side, product="MIS"
+                symbol=details.symbol,
+                qty=details.quantity,
+                price=details.average_price,
+                side=details.side,
+                product="MIS",
             )
         # ---------------------------------------------------
+
     # Alias for compatibility with main app
     reconcile_open_orders_with_broker = reconcile_open_orders
 
