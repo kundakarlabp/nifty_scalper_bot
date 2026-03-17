@@ -97,7 +97,7 @@ class StraddleThetaStrategy(EliteStrategy):
             try:
                 # Assuming standard NIFTY/BANKNIFTY underlying
                 # You might need logic to detect the specific underlying based on symbol name
-                underlying = "NSE:NIFTY 50" if "NIFTY" in symbol else "NSE:BANKNIFTY"
+                underlying = "NSE:NIFTY" if "NIFTY" in symbol else "NSE:BANKNIFTY"
                 adx = self._indicator_engine.compute_adx(underlying, period=14) or 50.0
             except Exception:
                 # Fail safe: if we can't confirm market is ranging, don't short.

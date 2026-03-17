@@ -11,7 +11,7 @@ class FakeResolver:
 
     def format_token_as_symbol(self, token: int) -> str:
         """Return symbol. Args: token. Returns: symbol. Raises: None."""
-        return 'NSE:NIFTY 50'
+        return 'NSE:NIFTY'
 
 
 def test_fetch_ticks_falls_back_to_ohlc_close_for_vwap() -> None:

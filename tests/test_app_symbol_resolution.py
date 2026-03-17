@@ -21,7 +21,7 @@ class _BrokerNoSpot:
 
 class _BrokerWithSpot:
     def ltp(self, _symbols: list[str]) -> dict[str, dict[str, float]]:
-        return {"NSE:NIFTY 50": {"last_price": 25382.4}}
+        return {"NSE:NIFTY": {"last_price": 25382.4}}
 
 
 class _ResolverStub:

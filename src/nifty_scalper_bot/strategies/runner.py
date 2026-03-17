@@ -2445,7 +2445,7 @@ class StrategyRunner:
         if not tick:
             raise RuntimeError("Execution blocked due to stale tick")
         spot_tick = (
-            self._market_data.get_latest_tick("NSE:NIFTY 50")
+            self._market_data.get_latest_tick("NSE:NIFTY")
             if self._market_data
             else None
         )
@@ -4176,7 +4176,7 @@ class StrategyRunner:
                 self._last_candle_eval[symbol] = now_eval
 
                 spot_tick = (
-                    self._market_data.get_latest_tick("NSE:NIFTY 50")
+                    self._market_data.get_latest_tick("NSE:NIFTY")
                     if self._market_data
                     else None
                 )
@@ -6479,7 +6479,7 @@ class StrategyRunner:
 
         if mdm:
             # Try getting LTP
-            ltp = mdm.get_latest_price("NSE:NIFTY 50")
+            ltp = mdm.get_latest_price("NSE:NIFTY")
             if ltp and ltp > 0:
                 spot = ltp
 

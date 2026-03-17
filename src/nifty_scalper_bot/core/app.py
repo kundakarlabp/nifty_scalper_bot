@@ -2186,7 +2186,7 @@ def _get_symbols(
         return None
 
     ltp: float = 0.0
-    spot_symbol = "NSE:NIFTY 50"
+    spot_symbol = "NSE:NIFTY"
 
     _allow_offhours = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
     _wait_timeout = 0.5 if _allow_offhours else 15.0
@@ -2357,7 +2357,7 @@ def _data_ready(mdm: MarketDataManager | None) -> bool:
     """Check live tick readiness. Args: mdm. Returns: bool. Raises: None."""
     if mdm is None:
         return False
-    required = ["NSE:NIFTY 50", "NFO:NIFTY26FEBFUT"]
+    required = ["NSE:NIFTY", "NFO:NIFTY26FEBFUT"]
     for sym in required:
         if not mdm.get_latest_tick(sym):
             return False
@@ -2967,7 +2967,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if raw_syms:
         poll_symbols = unique_normalized_symbols(raw_syms)
     else:
-        poll_symbols = ["NSE:NIFTY 50", "256265"]
+        poll_symbols = ["NSE:NIFTY", "256265"]
 
     attach_resolver = getattr(broker_client, "attach_resolver", None)
     if callable(attach_resolver):
@@ -3427,7 +3427,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         stream_supervisor = StreamSupervisor(
             streamer=streamer,
             resolver=instrument_resolver,
-            default_symbols=list(poll_symbols or ["NSE:NIFTY 50"]),
+            default_symbols=list(poll_symbols or ["NSE:NIFTY"]),
             autostart=True,
             monitor_interval_s=1.0,
             # Keep stream supervisor passive during breaker halts to avoid restart churn.
@@ -3813,7 +3813,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         risk_symbol = coalesce_str(
             "RISK_STATE_SYMBOL",
             "RISK_STATE__SYMBOL",
-            default="NSE:NIFTY 50",
+            default="NSE:NIFTY",
         )
         attach = getattr(risk_state, "attach_data_hub", None)
         if callable(attach):
@@ -5665,7 +5665,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 else:
                     LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
 
-            targets.append("NSE:NIFTY 50")
+            targets.append("NSE:NIFTY")
             targets = list(dict.fromkeys(targets))
 
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
@@ -5968,7 +5968,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             continue
 
                         spot = (
-                            ctx.market_data_manager.get_latest_price("NSE:NIFTY 50")
+                            ctx.market_data_manager.get_latest_price("NSE:NIFTY")
                             if ctx.market_data_manager
                             else None
                         )

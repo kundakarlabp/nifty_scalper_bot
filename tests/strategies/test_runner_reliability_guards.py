@@ -85,7 +85,7 @@ def test_ingest_bar_ignores_synthetic_volume_for_indicators() -> None:
 
 def test_spot_vwap_trend_filter_allows_only_directional_option_entries() -> None:
     runner = _runner()
-    base = "NSE:NIFTY 50"
+    base = "NSE:NIFTY"
     runner.add_symbol(base)
     with runner._lock:
         state = runner._symbol_state[base]
@@ -98,7 +98,7 @@ def test_spot_vwap_trend_filter_allows_only_directional_option_entries() -> None
 
 def test_set_trade_cooldown_tracks_per_candle_count() -> None:
     runner = _runner()
-    symbol = "NSE:NIFTY 50"
+    symbol = "NSE:NIFTY"
     runner.add_symbol(symbol)
     ts = datetime.now(timezone.utc).replace(second=12, microsecond=0)
 
@@ -113,4 +113,4 @@ def test_detect_market_regime_low_volatility() -> None:
     runner = _runner()
     runner._indicator_engine.get_atr = lambda _s: 8.0
 
-    assert runner.detect_market_regime("NSE:NIFTY 50") == "low_volatility"
+    assert runner.detect_market_regime("NSE:NIFTY") == "low_volatility"

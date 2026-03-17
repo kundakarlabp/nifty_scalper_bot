@@ -290,7 +290,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 if ":" not in candidate:
                     candidate = f"{self._default_exchange}:{candidate}"
                 if candidate == "NSE:NIFTY":
-                    candidate = "NSE:NIFTY 50"
+                    candidate = "NSE:NIFTY"
                 symbols.append(candidate)
                 alias_map.setdefault(candidate, candidate)
                 alias_map.setdefault(candidate.split(":", 1)[-1], candidate)
@@ -774,7 +774,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         Returns dict keyed by symbol string for consistency with Zerodha API response.
 
         Args:
-            tokens: List of integer tokens OR symbol strings (e.g., ["NSE:NIFTY 50"])
+            tokens: List of integer tokens OR symbol strings (e.g., ["NSE:NIFTY"])
 
         Returns:
             Dict mapping symbol strings to quote payloads
@@ -831,7 +831,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         ✅ PRODUCTION FIX: Now accepts both symbol strings AND integer tokens.
 
         Args:
-            instruments: List of symbols (e.g., ["NSE:NIFTY 50"]) OR tokens OR single value
+            instruments: List of symbols (e.g., ["NSE:NIFTY"]) OR tokens OR single value
 
         Returns:
             Dict mapping symbol strings to quote payloads
@@ -2075,7 +2075,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         This supports the PollingStreamer which resolves tokens to symbols before calling.
 
         Args:
-            tokens: Sequence of integer tokens OR symbol strings (e.g., "NSE:NIFTY 50")
+            tokens: Sequence of integer tokens OR symbol strings (e.g., "NSE:NIFTY")
 
         Returns:
             Tuple of (symbols list, symbol->token mapping)

@@ -322,7 +322,7 @@ class MarketDataManager:
         self._rest_poll_thread: threading.Thread | None = None
         self._health_monitor_stop = threading.Event()
         self._health_monitor_thread: threading.Thread | None = None
-        self._zombie_symbol = "NSE:NIFTY 50"
+        self._zombie_symbol = "NSE:NIFTY"
         self._zombie_tick_threshold_sec = self._parse_float_env(
             "ZOMBIE_TICK_THRESHOLD_SEC", default=60.0, minimum=10.0
         )
@@ -344,7 +344,7 @@ class MarketDataManager:
             "TICK_STALE_MS", default=2_000, minimum=0
         )
         if self._rest_poll_enabled:
-            self._tracked_symbols.add("NSE:NIFTY 50")
+            self._tracked_symbols.add("NSE:NIFTY")
 
         # Load optional settings overrides
         if settings is not None:

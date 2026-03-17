@@ -1265,7 +1265,7 @@ class TelegramBot:
         # Tier 1: Market data manager
         mdm = getattr(self.deps, "market_data_manager", None)
         if mdm:
-            for symbol in ["NIFTY", "NSE:NIFTY 50", "NSE:NIFTY50"]:
+            for symbol in ["NIFTY", "NSE:NIFTY", "NSE:NIFTY50"]:
                 try:
                     tick = mdm.get_latest_tick(symbol)
                     if tick and isinstance(tick, dict):

@@ -179,7 +179,19 @@ class IndicatorEngine:
     """Compute indicators for symbols (placeholder implementation)."""
 
     def calculate(self, symbol: str, price: float) -> dict[str, float]:
+        """Args: symbol, price. Returns: indicator map. Raises: None."""
         return {"price": price, "symbol_hash": float(hash(symbol) % 1000)}
+
+    def get_latest(self, symbol: str) -> dict[str, float] | None:
+        """Args: symbol. Returns: latest indicator payload. Raises: None."""
+        return None
+
+    def get_latest_price(self, symbol: str) -> float | None:
+        """Args: symbol. Returns: latest close price if available. Raises: None."""
+        data = self.get_latest(symbol)
+        if not data:
+            return None
+        return data.get("close")
 
 
 @dataclass(slots=True)

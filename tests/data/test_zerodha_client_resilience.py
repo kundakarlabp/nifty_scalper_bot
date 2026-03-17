@@ -111,7 +111,7 @@ def test_get_ltp_bulk_depth_maps_symbol_payload_to_token(
     class _Resolver:
         @staticmethod
         def format_token_as_symbol(token: int) -> str:
-            return {256265: 'NSE:NIFTY 50'}.get(token, '')
+            return {256265: 'NSE:NIFTY'}.get(token, '')
 
     client.attach_resolver(_Resolver())
 
@@ -119,7 +119,7 @@ def test_get_ltp_bulk_depth_maps_symbol_payload_to_token(
         client,
         'get_quote_bulk',
         lambda _tokens: {
-            'NSE:NIFTY 50': {'instrument_token': 256265, 'last_price': 25382.4}
+            'NSE:NIFTY': {'instrument_token': 256265, 'last_price': 25382.4}
         },
     )
 

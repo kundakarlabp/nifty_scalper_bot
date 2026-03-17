@@ -15,6 +15,7 @@ from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.smart_symbol import WEEKLY_EXPIRY_WEEKDAY
 
 LOGGER = get_logger(__name__)
+MIN_OPTION_PREMIUM = 3.0
 
 
 class VWAPProStrategy(EliteStrategy):
@@ -590,30 +591,44 @@ class VWAPProStrategy(EliteStrategy):
             # on a ₹0.15 option = 100% spread cost). Options ₹10-₹30 can be
             # near-ATM on expiry day and represent legitimate momentum trades.
             # Set VWAP_MIN_PREMIUM env var to override (e.g. "20" for more safety).
-            _min_premium = float(os.getenv("VWAP_MIN_PREMIUM", "10"))
+            _min_premium = float(os.getenv("VWAP_MIN_PREMIUM", str(MIN_OPTION_PREMIUM)))
+            allow_low_premium_scalping = str(
+                os.getenv("ALLOW_LOW_PREMIUM_SCALPING", "1")
+            ).strip().lower() in {"1", "true", "yes", "on"}
             if current_price < _min_premium:
-                self._telemetry["skipped_data"] += 1
-                if (
-                    self._telemetry["skipped_data"] <= 5
-                    or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY == 0
-                ):
-                    LOGGER.info(
-                        f"💰 MIN PREMIUM: {symbol} | price={current_price:.2f} < min={_min_premium:.0f} — skipping illiquid option",
-                        extra={
-                            "event": "vwap_pro_min_premium_reject",
-                            "symbol": symbol,
-                            "price": current_price,
-                        },
+                if not allow_low_premium_scalping:
+                    self._telemetry["skipped_data"] += 1
+                    if (
+                        self._telemetry["skipped_data"] <= 5
+                        or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY
+                        == 0
+                    ):
+                        LOGGER.info(
+                            f"💰 MIN PREMIUM: {symbol} | price={current_price:.2f} < min={_min_premium:.0f} — skipping illiquid option",
+                            extra={
+                                "event": "vwap_pro_min_premium_reject",
+                                "symbol": symbol,
+                                "price": current_price,
+                            },
+                        )
+                    self._log_no_signal_reason(
+                        "premium_too_low",
+                        symbol=symbol,
+                        ltp=current_price,
+                        vwap=vwap,
+                        context={"min_premium": _min_premium},
                     )
-                self._log_no_signal_reason(
-                    "premium_too_low",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=vwap,
-                    context={"min_premium": _min_premium},
+                    _emit_no_signal("premium_too_low")
+                    return None
+                LOGGER.info(
+                    "Condition met: low_premium_high_risk_allowed",
+                    extra={
+                        "event": "low_premium_high_risk_allowed",
+                        "symbol": symbol,
+                        "price": current_price,
+                        "min_premium": _min_premium,
+                    },
                 )
-                _emit_no_signal("premium_too_low")
-                return None
 
             # 💹 BID-ASK SPREAD GATE — reject when execution cost is too high.
             # Option spreads of 10-40% are common for lightly-traded strikes.
@@ -684,13 +699,13 @@ class VWAPProStrategy(EliteStrategy):
             distance = 0.0
             if _option_vwap > 0:
                 distance = abs(current_price - _option_vwap) / _option_vwap
-                if distance > 0.08:
+                if distance > 0.12:
                     self._log_no_signal_reason(
                         "vwap_distance_extension",
                         symbol=symbol,
                         ltp=current_price,
                         vwap=_option_vwap,
-                        context={"distance": distance, "max_distance": 0.08},
+                        context={"distance": distance, "max_distance": 0.12},
                     )
                     self._reset_acceptance(
                         acc_key,
@@ -708,19 +723,28 @@ class VWAPProStrategy(EliteStrategy):
                 or indicators.get("confirmation_candle")
                 or indicators.get("trend_momentum_confirm")
             )
+            breakout_detected = bool(
+                indicators.get("breakout_detected")
+                or indicators.get("breakout_signal")
+                or indicators.get("orb_breakout")
+            )
+            soft_flag = False
             if not pullback_ok or not momentum_confirmation:
+                soft_flag = True
                 self._log_no_signal_reason(
-                    "vwap_pullback_not_confirmed",
+                    "vwap_pullback_soft_flag",
                     symbol=symbol,
                     ltp=current_price,
                     vwap=_option_vwap or vwap,
                     context={
                         "pullback_ok": pullback_ok,
                         "momentum_confirmation": momentum_confirmation,
+                        "breakout_detected": breakout_detected,
                     },
                 )
-                _emit_no_signal("vwap_pullback_not_confirmed")
-                return None
+                if not breakout_detected:
+                    _emit_no_signal("vwap_pullback_not_confirmed")
+                    return None
 
             # 📏 Over-extension filter
             vwap_std = float(indicators.get("vwap_std") or 0.0)
@@ -755,7 +779,7 @@ class VWAPProStrategy(EliteStrategy):
             avg_vol = float(
                 indicators.get("avg_volume") or indicators.get("average_volume") or 0.0
             )
-            # FIX S10-3: Index symbols (NSE:NIFTY 50 etc.) report vol=0 by exchange design.
+            # FIX S10-3: Index symbols (NSE:NIFTY etc.) report vol=0 by exchange design.
             # Bypass all volume validation for them — substituting dummy 1.0 so downstream
             # vol/avg_vol gates don't reject the tick and inflate skipped_data telemetry.
             _is_tradeable = any(x in symbol.upper() for x in ("CE", "PE", "FUT"))
@@ -976,6 +1000,9 @@ class VWAPProStrategy(EliteStrategy):
                     "tp1_qty_pct": 0.5,
                     "runner_trail_after_tp1": True,
                     "direction": direction,
+                    "soft_flag": soft_flag,
+                    "breakout_detected": breakout_detected,
+                    "bypass_vwap_pullback": breakout_detected,
                 },
             )
 
