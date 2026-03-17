@@ -114,27 +114,34 @@ def test_reconciliation_broker_drift(state_tracker: StateTracker) -> None:
             "lifecycle_stage": "ACTIVE",
         },
     )
-    state_tracker.reconcile_with_broker(
-        [
-            {
-                "symbol": "NIFTY",
-                "quantity": 0,
-            },
-            {
-                "symbol": "BANKNIFTY",
-                "quantity": 3,
-                "entry_price": 400.0,
-                "entry_time": FIXED_TIME,
-                "unrealized_pnl": 5.0,
-                "stop_loss": 350.0,
-                "tp1": 420.0,
-                "tp2": 450.0,
-                "trail_active": False,
-                "lifecycle_stage": "NEW",
-            },
-        ]
-    )
+    broker_snapshot = [
+        {
+            "symbol": "NIFTY",
+            "quantity": 0,
+        },
+        {
+            "symbol": "BANKNIFTY",
+            "quantity": 3,
+            "entry_price": 400.0,
+            "entry_time": FIXED_TIME,
+            "unrealized_pnl": 5.0,
+            "stop_loss": 350.0,
+            "tp1": 420.0,
+            "tp2": 450.0,
+            "trail_active": False,
+            "lifecycle_stage": "NEW",
+        },
+    ]
+
+    state_tracker.reconcile_with_broker(broker_snapshot)
+    assert state_tracker.get_position_state("NIFTY") is not None
+
+    state_tracker.reconcile_with_broker(broker_snapshot)
+    assert state_tracker.get_position_state("NIFTY") is not None
+
+    state_tracker.reconcile_with_broker(broker_snapshot)
     assert state_tracker.get_position_state("NIFTY") is None
+
     bank = state_tracker.get_position_state("BANKNIFTY")
     assert bank is not None
     assert bank["quantity"] == 3

@@ -1422,7 +1422,7 @@ class IndicatorEngine:
             return 0.0
 
     def get_latest(self, symbol: str) -> dict[str, float | None]:
-        """Retrieve aggregated indicators for execution controllers (Dynamic TP)."""
+        """Args: symbol. Returns: latest indicator snapshot. Raises: Exception."""
         try:
             # 1. Fetch Indicators required by DynamicTPController
             # Use getattr to be safe if methods are missing, defaulting to None
@@ -1445,13 +1445,36 @@ class IndicatorEngine:
                 except (TypeError, ValueError):
                     atr_val = None
 
+            with self._lock:
+                history = self._histories.get(symbol)
+                latest_close = None
+                if history is not None and len(history) > 0:
+                    closes = history.get_closes(1)
+                    if closes:
+                        latest_close = float(closes[-1])
+
             return {
                 "rsi": rsi_val,
                 "adx": adx_val,
                 "atr": atr_val,
-                "ltp": self.get_latest_price(symbol),
+                "close": latest_close,
+                "ltp": latest_close,
             }
         except Exception as e:
             # Prevent indicator calculation errors from crashing the Order Manager
             self._logger.error(f"get_latest failed for {symbol}: {e}")
             return {}
+
+    def get_latest_price(self, symbol: str) -> float | None:
+        """Args: symbol. Returns: latest close price or None. Raises: Exception."""
+        try:
+            data = self.get_latest(symbol)
+            if not data:
+                return None
+            close_value = data.get("close")
+            if close_value is None:
+                return None
+            return float(close_value)
+        except Exception as e:
+            self._logger.error("Failure in IndicatorEngine.get_latest_price: %s", e)
+            return None
