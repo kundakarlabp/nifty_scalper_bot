@@ -1730,7 +1730,7 @@ class StrategyManager:
         # ═══════════════════════════════════════════════════════════
         try:
             # Try NIFTY 50 spot index first
-            index_quote = data_hub.get_quote('NSE:NIFTY 50', allow_pull=True)
+            index_quote = data_hub.get_quote('NSE:NIFTY', allow_pull=True)
             if not index_quote:
                 index_quote = data_hub.get_quote('NIFTY 50', allow_pull=True)
             if index_quote:

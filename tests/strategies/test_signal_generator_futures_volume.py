@@ -70,7 +70,7 @@ class StubDataHub:
     ) -> Mapping[str, Any] | None:
         '''Return a stub quote. Args: symbol, allow_pull. Returns: mapping or None. Raises: None.'''
         try:
-            if symbol in {'NSE:NIFTY 50', 'NIFTY 50'}:
+            if symbol in {'NSE:NIFTY', 'NIFTY 50'}:
                 self._index_calls += 1
                 if self._index_calls == 1:
                     return {'last_price': 20000.0, 'vwap': 19950.0}

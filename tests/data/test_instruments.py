@@ -27,7 +27,7 @@ def test_format_token_as_symbol_uses_canonical_index_symbol() -> None:
     resolver.warm()
 
     assert resolver.resolve("NIFTY") == 256265
-    assert resolver.format_token_as_symbol(256265) == "NSE:NIFTY 50"
+    assert resolver.format_token_as_symbol(256265) == "NSE:NIFTY"
 
 
 def test_format_token_as_symbol_handles_banknifty_alias() -> None:

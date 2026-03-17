@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
+import logging
+import time
+import typing as t
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import sqrt
-import os
 from statistics import mean, pstdev
-import time
-import typing as t
 
 from nifty_scalper_bot.config import settings as app_settings
-from nifty_scalper_bot.core.adaptive_calibration import AdaptiveParameterStore, WalkForwardOptimizer
+from nifty_scalper_bot.core.adaptive_calibration import (
+    AdaptiveParameterStore,
+    WalkForwardOptimizer,
+)
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.signal_generator import (
     Signal,
+)
+from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
@@ -977,19 +982,23 @@ class StrategyManager(_BaseStrategyManager):
             "orders_submitted": 0,
         }
         self._last_metrics_log_ts = time.time()
-        self._adaptive_store = AdaptiveParameterStore(window_trades=app_settings.ADAPTIVE_WINDOW_TRADES)
-        self._optimizer = WalkForwardOptimizer(recalibrate_every=app_settings.ADAPTIVE_RECALIBRATE_EVERY)
+        self._adaptive_store = AdaptiveParameterStore(
+            window_trades=app_settings.ADAPTIVE_WINDOW_TRADES
+        )
+        self._optimizer = WalkForwardOptimizer(
+            recalibrate_every=app_settings.ADAPTIVE_RECALIBRATE_EVERY
+        )
         self._regime_fallback_scale = float(app_settings.REGIME_FALLBACK_SCALE)
         self._avg_confidence_window: deque[float] = deque(maxlen=500)
         self._avg_kelly_window: deque[float] = deque(maxlen=500)
         self._market_open_since_ts: float | None = None
         self._last_zero_signal_check_ts = 0.0
         self._no_signal_summary: dict[str, int] = {
-            'total': 0,
-            'missing_indicators': 0,
-            'volume_zero': 0,
-            'avg_volume_zero': 0,
-            'error_strategies': 0,
+            "total": 0,
+            "missing_indicators": 0,
+            "volume_zero": 0,
+            "avg_volume_zero": 0,
+            "error_strategies": 0,
         }
         self._no_signal_missing: dict[str, int] = {}
         self._no_signal_last_summary_ts = time.time()
@@ -1617,47 +1626,47 @@ class StrategyManager(_BaseStrategyManager):
     ) -> None:
         """Args: symbol, missing, indicators, error_strategies. Returns: None. Raises: Exception."""
         log.debug(
-            'Entered StrategyManager._record_no_signal_summary',
-            extra={'event': 'strategy_no_signal_summary_enter', 'symbol': symbol},
+            "Entered StrategyManager._record_no_signal_summary",
+            extra={"event": "strategy_no_signal_summary_enter", "symbol": symbol},
         )
         try:
-            self._no_signal_summary['total'] += 1
+            self._no_signal_summary["total"] += 1
             if missing:
-                self._no_signal_summary['missing_indicators'] += len(missing)
+                self._no_signal_summary["missing_indicators"] += len(missing)
                 for name in missing:
                     self._no_signal_missing[name] = (
                         self._no_signal_missing.get(name, 0) + 1
                     )
-            volume = indicators.get('volume')
-            avg_volume = indicators.get('avg_volume')
+            volume = indicators.get("volume")
+            avg_volume = indicators.get("avg_volume")
             try:
                 if volume is None or float(volume) <= 0.0:
-                    self._no_signal_summary['volume_zero'] += 1
+                    self._no_signal_summary["volume_zero"] += 1
             except (TypeError, ValueError) as exc:
                 log.debug(
-                    'Failure in volume coercion: %s',
+                    "Failure in volume coercion: %s",
                     exc,
                     extra={
-                        'event': 'strategy_no_signal_volume_error',
-                        'symbol': symbol,
+                        "event": "strategy_no_signal_volume_error",
+                        "symbol": symbol,
                     },
                 )
-                self._no_signal_summary['volume_zero'] += 1
+                self._no_signal_summary["volume_zero"] += 1
             try:
                 if avg_volume is None or float(avg_volume) <= 0.0:
-                    self._no_signal_summary['avg_volume_zero'] += 1
+                    self._no_signal_summary["avg_volume_zero"] += 1
             except (TypeError, ValueError) as exc:
                 log.debug(
-                    'Failure in avg_volume coercion: %s',
+                    "Failure in avg_volume coercion: %s",
                     exc,
                     extra={
-                        'event': 'strategy_no_signal_avg_volume_error',
-                        'symbol': symbol,
+                        "event": "strategy_no_signal_avg_volume_error",
+                        "symbol": symbol,
                     },
                 )
-                self._no_signal_summary['avg_volume_zero'] += 1
+                self._no_signal_summary["avg_volume_zero"] += 1
             if error_strategies:
-                self._no_signal_summary['error_strategies'] += len(error_strategies)
+                self._no_signal_summary["error_strategies"] += len(error_strategies)
             now_ts = time.time()
             if now_ts - self._no_signal_last_summary_ts >= 60.0:
                 top_missing = sorted(
@@ -1665,28 +1674,28 @@ class StrategyManager(_BaseStrategyManager):
                     key=lambda item: item[1],
                     reverse=True,
                 )[:5]
-                log.info(
-                    'Condition met: strategy_manager_no_signal_summary',
+                log.debug(
+                    "Condition met: strategy_manager_no_signal_summary",
                     extra={
-                        'event': 'strategy_manager_no_signal_summary',
-                        'symbol': symbol,
-                        'total': self._no_signal_summary['total'],
-                        'missing_indicators': self._no_signal_summary[
-                            'missing_indicators'
+                        "event": "strategy_manager_no_signal_summary",
+                        "symbol": symbol,
+                        "total": self._no_signal_summary["total"],
+                        "missing_indicators": self._no_signal_summary[
+                            "missing_indicators"
                         ],
-                        'volume_zero': self._no_signal_summary['volume_zero'],
-                        'avg_volume_zero': self._no_signal_summary['avg_volume_zero'],
-                        'error_strategies': self._no_signal_summary['error_strategies'],
-                        'top_missing': top_missing,
+                        "volume_zero": self._no_signal_summary["volume_zero"],
+                        "avg_volume_zero": self._no_signal_summary["avg_volume_zero"],
+                        "error_strategies": self._no_signal_summary["error_strategies"],
+                        "top_missing": top_missing,
                     },
                 )
                 self._no_signal_last_summary_ts = now_ts
         except Exception as exc:  # noqa: BLE001
             log.error(
-                'Failure in StrategyManager no-signal summary: %s',
+                "Failure in StrategyManager no-signal summary: %s",
                 exc,
                 exc_info=exc,
-                extra={'event': 'strategy_no_signal_summary_error', 'symbol': symbol},
+                extra={"event": "strategy_no_signal_summary_error", "symbol": symbol},
             )
 
     def generate_signal(self, symbol: str, current_price: float) -> Signal | None:
@@ -1716,6 +1725,7 @@ class StrategyManager(_BaseStrategyManager):
             getattr(self._data_hub, "indicators_ready", False)
         ):
             return None
+
         def _log_reject(
             reason_code: str, context: dict[str, t.Any] | None = None
         ) -> None:
@@ -1777,6 +1787,7 @@ class StrategyManager(_BaseStrategyManager):
                         "reason_code": reason_code,
                     },
                 )
+
         regime_manager = self._regime_manager
         regime_snapshot: RegimeSnapshot | None = None
         adjustments: dict[str, t.Any] = {}
@@ -1828,12 +1839,28 @@ class StrategyManager(_BaseStrategyManager):
         regime_scale = self._extract_regime_scale(adjustments)
         if regime_manager is not None:
             try:
-                if not regime_manager.can_trade(context={"component": "strategy_manager_fallback", "symbol": symbol}) and self._use_regime_adaptive:
-                    regime_scale = min(regime_scale, max(self._regime_fallback_scale, 0.0))
+                if (
+                    not regime_manager.can_trade(
+                        context={
+                            "component": "strategy_manager_fallback",
+                            "symbol": symbol,
+                        }
+                    )
+                    and self._use_regime_adaptive
+                ):
+                    regime_scale = min(
+                        regime_scale, max(self._regime_fallback_scale, 0.0)
+                    )
             except Exception as exc:
-                log.error("Failure in StrategyManager.generate_signal regime fallback: %s", exc, exc_info=exc)
+                log.error(
+                    "Failure in StrategyManager.generate_signal regime fallback: %s",
+                    exc,
+                    exc_info=exc,
+                )
         regime_name = (
-            regime_snapshot.regime if isinstance(regime_snapshot, RegimeSnapshot) else None
+            regime_snapshot.regime
+            if isinstance(regime_snapshot, RegimeSnapshot)
+            else None
         )
         log.debug(
             "strategy_regime_scaling",
@@ -1867,8 +1894,12 @@ class StrategyManager(_BaseStrategyManager):
                     # Inject bid/ask spread so strategies can gate on execution cost.
                     # Options can have spreads of 5-30%+ of premium — entering without
                     # checking spread means the trade is already deeply underwater at fill.
-                    _bid = self._extract_float(opt_quote, ("bid", "best_bid", "buy_price"))
-                    _ask = self._extract_float(opt_quote, ("ask", "best_ask", "sell_price"))
+                    _bid = self._extract_float(
+                        opt_quote, ("bid", "best_bid", "buy_price")
+                    )
+                    _ask = self._extract_float(
+                        opt_quote, ("ask", "best_ask", "sell_price")
+                    )
                     if _bid and _bid > 0:
                         indicators["bid"] = _bid
                     if _ask and _ask > 0:
@@ -2037,6 +2068,7 @@ class StrategyManager(_BaseStrategyManager):
                 log,
                 key=f"strategy_manager_no_signal:{symbol}",
                 msg="Condition met: strategy_manager_no_signal",
+                level=logging.DEBUG,
                 interval_sec=10.0,
                 extra={
                     "event": "strategy_manager_no_signal",
@@ -2078,6 +2110,8 @@ class StrategyManager(_BaseStrategyManager):
             return None
 
         combined = self._combine_signals(signals)
+        if combined and bool(getattr(combined, "metadata", {}).get("is_approved")):
+            return combined
         if combined and self._filter_signal(combined):
             orchestrator = self._orchestrator
             if orchestrator is not None:
@@ -2120,7 +2154,9 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 self._observability_counters["signals_generated"] += 1
                 self._avg_confidence_window.append(float(combined.confidence))
-                self._avg_kelly_window.append(float(dict(combined.metadata).get("kelly_fraction", 0.0)))
+                self._avg_kelly_window.append(
+                    float(dict(combined.metadata).get("kelly_fraction", 0.0))
+                )
                 self._emit_metrics_snapshot()
                 return combined
         elif combined is None:
@@ -2192,10 +2228,25 @@ class StrategyManager(_BaseStrategyManager):
             extra={
                 "event": "strategy_metrics_snapshot",
                 "metrics": dict(self._observability_counters),
-                "avg_confidence": (sum(self._avg_confidence_window) / len(self._avg_confidence_window)) if self._avg_confidence_window else 0.0,
-                "avg_kelly_fraction": (sum(self._avg_kelly_window) / len(self._avg_kelly_window)) if self._avg_kelly_window else 0.0,
+                "avg_confidence": (
+                    (
+                        sum(self._avg_confidence_window)
+                        / len(self._avg_confidence_window)
+                    )
+                    if self._avg_confidence_window
+                    else 0.0
+                ),
+                "avg_kelly_fraction": (
+                    (sum(self._avg_kelly_window) / len(self._avg_kelly_window))
+                    if self._avg_kelly_window
+                    else 0.0
+                ),
                 "regime": getattr(self._regime_state, "regime", None),
-                "rolling_sharpe": float(self._performance.get("_aggregate", StrategyPerformance()).sharpe_ratio()),
+                "rolling_sharpe": float(
+                    self._performance.get(
+                        "_aggregate", StrategyPerformance()
+                    ).sharpe_ratio()
+                ),
             },
         )
 

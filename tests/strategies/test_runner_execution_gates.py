@@ -28,7 +28,7 @@ def _runner() -> StrategyRunner:
 
 def test_validate_symbol_universe_rejects_missing_option_symbols() -> None:
     runner = _runner()
-    runner._active_symbols = {"NSE:NIFTY 50"}
+    runner._active_symbols = {"NSE:NIFTY"}
 
     assert runner._validate_symbol_universe() is False
 
@@ -36,7 +36,7 @@ def test_validate_symbol_universe_rejects_missing_option_symbols() -> None:
 def test_validate_symbol_universe_rejects_index_count_mismatch() -> None:
     runner = _runner()
     runner._active_symbols = {
-        "NSE:NIFTY 50",
+        "NSE:NIFTY",
         "NSE:NIFTY BANK",
         "NIFTY25JAN25000CE",
         "NIFTY25JAN25000PE",
@@ -48,7 +48,7 @@ def test_validate_symbol_universe_rejects_index_count_mismatch() -> None:
 def test_validate_symbol_universe_accepts_index_and_options() -> None:
     runner = _runner()
     runner._active_symbols = {
-        "NSE:NIFTY 50",
+        "NSE:NIFTY",
         "NIFTY25JAN25000CE",
         "NIFTY25JAN25000PE",
     }
@@ -159,7 +159,7 @@ def test_on_tick_insufficient_history_skips_symbol_until_hydrated(
     symbol = "NIFTY25JAN25000CE"
     runner.add_symbol(symbol)
     runner._startup_timestamp = 0.0
-    runner._active_symbols = {symbol, "NSE:NIFTY 50"}
+    runner._active_symbols = {symbol, "NSE:NIFTY"}
     runner._history_ready_by_symbol[symbol] = False
     monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
 
@@ -180,7 +180,7 @@ def test_on_tick_missing_finalized_bar_warns_and_skips_symbol(
     symbol = "NIFTY25JAN25000CE"
     runner.add_symbol(symbol)
     runner._startup_timestamp = 0.0
-    runner._active_symbols = {symbol, "NSE:NIFTY 50"}
+    runner._active_symbols = {symbol, "NSE:NIFTY"}
     runner._history_ready_by_symbol[symbol] = True
     runner._required_candles = 1
     runner._symbol_state[symbol].vwap = 100.0
@@ -202,7 +202,7 @@ def test_on_tick_invalid_vwap_skips_symbol(caplog, monkeypatch) -> None:
     symbol = "NIFTY25JAN25000CE"
     runner.add_symbol(symbol)
     runner._startup_timestamp = 0.0
-    runner._active_symbols = {symbol, "NSE:NIFTY 50"}
+    runner._active_symbols = {symbol, "NSE:NIFTY"}
     runner._history_ready_by_symbol[symbol] = True
     runner._required_candles = 1
     monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
@@ -224,7 +224,7 @@ def test_rate_limit_backoff_skips_only_target_symbol(caplog, monkeypatch) -> Non
     runner.add_symbol(blocked_symbol)
     runner.add_symbol(ready_symbol)
     runner._startup_timestamp = 0.0
-    runner._active_symbols = {blocked_symbol, ready_symbol, "NSE:NIFTY 50"}
+    runner._active_symbols = {blocked_symbol, ready_symbol, "NSE:NIFTY"}
     runner._required_candles = 1
     runner._history_ready_by_symbol[blocked_symbol] = True
     runner._history_ready_by_symbol[ready_symbol] = True
@@ -325,7 +325,7 @@ def test_version_guard_blocks_stale_strategy_evaluation(monkeypatch) -> None:
     runner._running = True
     runner._trading_paused = False
     runner._runner_state = runner._runner_state.EXECUTION_ENABLED
-    runner._active_symbols = {symbol, 'NSE:NIFTY 50'}
+    runner._active_symbols = {symbol, 'NSE:NIFTY'}
     runner._history_ready_by_symbol[symbol] = True
     runner._required_candles = 1
     runner._symbol_state[symbol].vwap = 100.0

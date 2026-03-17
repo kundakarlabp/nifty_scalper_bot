@@ -813,7 +813,7 @@ class PollingStreamer:
             # ✅ FIX: Handle case where token is already a symbol string
             if isinstance(token, str):
                 if not token.strip().isdigit():
-                    # It's already a symbol like "NSE:NIFTY 50", return it directly
+                    # It's already a symbol like "NSE:NIFTY", return it directly
                     return canonical(token) if ":" in token else None
                 token_int = int(token.strip())
             else:
