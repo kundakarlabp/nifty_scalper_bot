@@ -1,4 +1,5 @@
 """Async message bus for decoupled component communication."""
+
 import asyncio
 from collections import defaultdict
 from contextlib import suppress
@@ -12,32 +13,38 @@ from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
 
+
 # --- Message Definitions ---
 class MessageType(Enum):
     """Message types flowing through the bus."""
-    TICK = "tick"              # Market data tick
-    SIGNAL = "signal"          # Strategy signal/request
+
+    TICK = "tick"  # Market data tick
+    SIGNAL = "signal"  # Strategy signal/request
     ORDER_REQUEST = "order_request"  # Order to execute
     ORDER_UPDATE = "order_update"  # Execution confirmation (Fill/Cancel/Reject)
     POSITION_UPDATE = "position_update"  # Position change
-    
-T = TypeVar('T')
+
+
+T = TypeVar("T")
+
 
 @dataclass(frozen=True)
 class Message:
     """Standardized message envelope."""
+
     type: MessageType
     timestamp: datetime
     data: dict[str, Any]
     source: str  # Component that created message
 
+
 # --- Message Bus Core ---
 class MessageBus:
     """
-    Central async message bus. 
+    Central async message bus.
     Components communicate ONLY via this bus - no direct calls.
     """
-    
+
     def __init__(self, max_queue_size: int = 5000):
         """Initialize message queues and overflow accounting."""
         if max_queue_size <= 0:
@@ -50,13 +57,15 @@ class MessageBus:
             for msg_type in MessageType
         }
         # Subscribers store (message_type -> list of handler functions)
-        self.subscribers: dict[MessageType, list[Callable[[Message], Awaitable[None]]]] = {
-            msg_type: [] for msg_type in MessageType
-        }
+        self.subscribers: dict[
+            MessageType, list[Callable[[Message], Awaitable[None]]]
+        ] = {msg_type: [] for msg_type in MessageType}
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._dropped_counts: dict[MessageType, int] = defaultdict(int)
-        LOGGER.info("MessageBus initialized with max_queue_size=%s", self._max_queue_size)
+        LOGGER.info(
+            "MessageBus initialized with max_queue_size=%s", self._max_queue_size
+        )
 
     async def publish(self, message: Message) -> None:
         """Publish a message, with pre-start buffering for TICK messages."""
@@ -68,11 +77,11 @@ class MessageBus:
                     self.queues[message.type].put_nowait(message)
                     LOGGER.debug(
                         f"⏳ Buffered pre-start tick for {message.data.get('symbol', 'unknown')}",
-                        extra={"event": "tick_buffered", "type": message.type.value}
+                        extra={"event": "tick_buffered", "type": message.type.value},
                     )
                 except asyncio.QueueFull:
                     # Only log occasionally to avoid spam
-                    if not hasattr(self, '_buffer_warn_count'):
+                    if not hasattr(self, "_buffer_warn_count"):
                         self._buffer_warn_count = 0
                     self._buffer_warn_count += 1
                     if self._buffer_warn_count % 100 == 1:
@@ -116,7 +125,7 @@ class MessageBus:
                         },
                     )
                 return
-        
+
         # Normal publish (bus is running)
         try:
             queue = self.queues[message.type]
@@ -135,7 +144,10 @@ class MessageBus:
                         ),
                         level=logging.WARNING,
                         interval_sec=15.0,
-                        extra={"event": "message_bus_backpressure_drop", "type": message.type.value},
+                        extra={
+                            "event": "message_bus_backpressure_drop",
+                            "type": message.type.value,
+                        },
                     )
                 else:
                     await queue.put(message)
@@ -172,16 +184,15 @@ class MessageBus:
             )
 
     def subscribe(
-        self,
-        message_type: MessageType,
-        handler: Callable[[Message], Awaitable[None]]
+        self, message_type: MessageType, handler: Callable[[Message], Awaitable[None]]
     ) -> None:
         """Subscribe an async handler function to a message type."""
         if not asyncio.iscoroutinefunction(handler):
-            raise TypeError(f"Handler for {message_type.value} must be an async function.")
+            raise TypeError(
+                f"Handler for {message_type.value} must be an async function."
+            )
         self.subscribers[message_type].append(handler)
         LOGGER.info("Component subscribed to %s", message_type.value)
-
 
     def queue_diagnostics(self) -> dict[str, dict[str, int]]:
         """Return queue depth and drop counters per message type."""
@@ -197,19 +208,27 @@ class MessageBus:
         """Dispatch messages from a queue to its subscribers."""
         queue = self.queues[message_type]
         handlers = self.subscribers[message_type]
-        
+
         while self._running:
             try:
                 # Wait for message
                 message = await queue.get()
                 queue.task_done()
-                
-                # Dispatch to all handlers concurrently
-                await asyncio.gather(
-                    *[handler(message) for handler in handlers],
-                    return_exceptions=True # Don't let one handler crash the whole loop
-                )
-                                            
+
+                # Dispatch without head-of-line blocking.
+                for handler in handlers:
+                    try:
+                        result = handler(message)
+                        if asyncio.iscoroutine(result):
+                            asyncio.create_task(result)
+                    except Exception as exc:
+                        LOGGER.error(
+                            "Failure in MessageBus handler dispatch: %s",
+                            exc,
+                            extra={"event": "message_bus_handler_dispatch_error"},
+                            exc_info=exc,
+                        )
+
             except asyncio.CancelledError:
                 LOGGER.debug("%s dispatch loop cancelled.", message_type.value)
                 raise
@@ -226,15 +245,14 @@ class MessageBus:
         if self._running:
             return
         self._running = True
-        
+
         for msg_type in MessageType:
             if self.subscribers[msg_type]:
                 task = asyncio.create_task(
-                    self._dispatch_loop(msg_type),
-                    name=f"dispatch-{msg_type.value}"
+                    self._dispatch_loop(msg_type), name=f"dispatch-{msg_type.value}"
                 )
                 self._tasks.append(task)
-        
+
         LOGGER.info("Message bus started with %d active dispatchers.", len(self._tasks))
 
     async def stop(self) -> None:
@@ -242,14 +260,14 @@ class MessageBus:
         if not self._running:
             return
         self._running = False
-        
+
         for task in self._tasks:
             task.cancel()
-            
+
         with asyncio.TaskGroup() as tg:
             for task in self._tasks:
                 tg.create_task(self._await_cancellation(task))
-                
+
         self._tasks.clear()
         LOGGER.info("Message bus stopped.")
 

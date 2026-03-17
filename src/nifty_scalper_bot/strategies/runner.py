@@ -515,6 +515,8 @@ class StrategyRunner:
         self._persistent_state: PersistentStateManager | None = None
         self._orders_in_flight: dict[str, float] = {}
         self._orders_lock = threading.RLock()
+        self.orders_in_flight: set[str] = set()
+        self.order_lock = asyncio.Lock()
         self._order_timeout_sec = 10
         self._symbol_last_signal_ts: dict[str, float] = {}
         self._execution_state_lock = threading.RLock()
@@ -2669,6 +2671,25 @@ class StrategyRunner:
                 return True
         return False
 
+    def _acquire_order_in_flight(
+        self, symbol: str, underlying: str | None = None
+    ) -> bool:
+        """Atomically acquire in-flight guards; Args: symbol/underlying. Returns: bool. Raises: None."""
+        now = time.time()
+        with self._orders_lock:
+            for key in (symbol, underlying):
+                if not key:
+                    continue
+                ts = self._orders_in_flight.get(key)
+                if ts is not None and now - ts <= self._order_timeout_sec:
+                    return False
+            self._orders_in_flight[symbol] = now
+            self.orders_in_flight.add(symbol)
+            if underlying and underlying != symbol:
+                self._orders_in_flight[underlying] = now
+                self.orders_in_flight.add(underlying)
+        return True
+
     def _mark_order_in_flight(self, symbol: str, underlying: str | None = None) -> None:
         """Record a fresh in-flight order timestamp for symbol and optional underlying."""
         now = time.time()
@@ -2681,10 +2702,12 @@ class StrategyRunner:
         """Clear order in-flight marker for symbol and derived underlying key."""
         with self._orders_lock:
             self._orders_in_flight.pop(symbol, None)
+            self.orders_in_flight.discard(symbol)
             try:
                 underlying = self._normalize_symbol(symbol)
                 if underlying and underlying != symbol:
                     self._orders_in_flight.pop(underlying, None)
+                    self.orders_in_flight.discard(underlying)
             except Exception:
                 pass
 
@@ -2770,6 +2793,25 @@ class StrategyRunner:
             self._main_loop = asyncio.get_running_loop()
 
         tick: dict = message.data
+        now_ts = time.time()
+        tick_timestamp = _extract_timestamp(message.data, datetime.now(timezone.utc))
+        tick_age_ms = max(
+            0.0,
+            (now_ts - tick_timestamp.astimezone(timezone.utc).timestamp()) * 1000.0,
+        )
+        if tick_age_ms > 3000.0:
+            log_throttled(
+                self._logger,
+                "stale_reconnect_tick_drop",
+                (
+                    "Condition met: stale_reconnect_tick_drop "
+                    f"age_ms={tick_age_ms:.1f}"
+                ),
+                interval_sec=15.0,
+                level=logging.DEBUG,
+            )
+            return
+
         symbol_value = tick.get("symbol")
         symbol = (
             enforce_canonical(normalize_symbol(str(symbol_value)))
@@ -3610,7 +3652,7 @@ class StrategyRunner:
                             f"orphan_guard_{symbol}",
                             f"🛡️ ORPHAN GUARD: {symbol} is unmanaged. Adopting (tick continues)...",
                             interval_sec=30.0,
-                            level=logging.WARNING,
+                            level=logging.DEBUG,
                         )
                         if hasattr(self, "_adopt_orphan_positions"):
                             self._adopt_orphan_positions()
@@ -3867,7 +3909,7 @@ class StrategyRunner:
                         f"latency_ms={tick_latency_ms:.1f}"
                     ),
                     interval_sec=30.0,
-                    level=logging.WARNING,
+                    level=logging.DEBUG,
                 )
                 skip_strategy = True
 
@@ -5270,7 +5312,9 @@ class StrategyRunner:
             # 🛡️ GUARD 0.5: ORDER IN-FLIGHT CHECK
             # Prevents duplicate submissions before order fills
             # ═══════════════════════════════════════════════════════════════
-            if self._is_order_in_flight(trade_symbol or base_symbol, base_symbol):
+            if not self._acquire_order_in_flight(
+                trade_symbol or base_symbol, base_symbol
+            ):
                 self._logger.info(
                     f"🛡️ ORDER IN-FLIGHT REJECT: {base_symbol} | "
                     "Waiting for pending order to complete",
@@ -5931,7 +5975,6 @@ class StrategyRunner:
                     use_virtual_bracket = False
 
             order_id = None
-            self._mark_order_in_flight(trade_symbol, base_symbol)
             _ = self._transition_execution_state(
                 base_symbol,
                 ExecutionState.ORDER_PENDING,

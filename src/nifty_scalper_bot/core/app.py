@@ -37,6 +37,7 @@ from typing import (
 )
 
 import pytz
+
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
 from nifty_scalper_bot.data.robust_provider import (
@@ -1634,7 +1635,7 @@ class PersistentHeartbeatFlusher:
 class RuntimeSelfChecker:
     """Run runtime self-tests to detect silent subsystem failures."""
 
-    def __init__(self, context: BotContext, interval_seconds: float = 300.0) -> None:
+    def __init__(self, context: BotContext, interval_seconds: float = 600.0) -> None:
         """Initialize the runtime self-check helper.
 
         Args:
@@ -1913,10 +1914,25 @@ class RuntimeSelfChecker:
         detail = "disconnected" if not connected else detail
         if backlog > 1000:
             detail = "backlog_high"
-            connected = False
+            self._logger.debug(
+                "Condition met: runtime_streamer_backlog_high",
+                extra={"event": "runtime_streamer_backlog_high", "backlog": backlog},
+            )
+        recent_tick_age = 0.0
+        last_tick_ts = getattr(streamer, "last_tick_ts", None)
+        if last_tick_ts is not None:
+            with suppress(Exception):
+                recent_tick_age = max(0.0, time.time() - float(last_tick_ts))
+            if recent_tick_age > 10.0:
+                connected = False
+                detail = "no_recent_ticks"
         payload = cast(
             dict[str, object],
-            {"connected": connected, "backlog": backlog},
+            {
+                "connected": connected,
+                "backlog": backlog,
+                "recent_tick_age": round(recent_tick_age, 3),
+            },
         )
         return connected, detail, payload
 
@@ -5404,7 +5420,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                 await _reconcile_state(ctx)
                 LOGGER.info("startup_position_reconciliation_complete")
             except Exception as reconcile_exc:
-                LOGGER.error("Failure in startup position reconciliation: %s", reconcile_exc)
+                LOGGER.error(
+                    "Failure in startup position reconciliation: %s", reconcile_exc
+                )
     except Exception as e:
         LOGGER.error(f"Broker connection failed: {e}")
         broker_ready = False
@@ -5493,7 +5511,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                     f"✅ Synced {synced_count}/{total_items} NFO instruments to resolver"
                 )
                 if synced_count <= 0:
-                    raise RuntimeError("InstrumentResolver initialized with empty token cache")
+                    raise RuntimeError(
+                        "InstrumentResolver initialized with empty token cache"
+                    )
                 instrument_cache_ready.set()
 
                 # ✅ FIX #3: Populate _option_contracts from broker NFO instruments
@@ -5685,16 +5705,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 if isinstance(c, dict):
                                     # kiteconnect SDK format: dict with "date" key
                                     ts = c.get("date") or c.get("timestamp")
-                                    o  = c.get("open")
-                                    h  = c.get("high")
-                                    l  = c.get("low")
+                                    o = c.get("open")
+                                    h = c.get("high")
+                                    l = c.get("low")
                                     c_p = c.get("close")
-                                    v  = c.get("volume", 0)
+                                    v = c.get("volume", 0)
                                 elif isinstance(c, (list, tuple)) and len(c) >= 6:
                                     # Raw REST format: [ts, O, H, L, C, V] or
                                     # [ts, O, H, L, C, V, OI] — index-safe slice
                                     ts, o, h, l, c_p, v = (
-                                        c[0], c[1], c[2], c[3], c[4], c[5]
+                                        c[0],
+                                        c[1],
+                                        c[2],
+                                        c[3],
+                                        c[4],
+                                        c[5],
                                     )
                                 else:
                                     continue  # unknown or incomplete row
@@ -5726,10 +5751,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 if runner and hasattr(runner, "ingest_historical_bar"):
                                     bar_data = {
                                         "symbol": sym,
-                                        "open":   float(o),
-                                        "high":   float(h),
-                                        "low":    float(l),
-                                        "close":  float(c_p),
+                                        "open": float(o),
+                                        "high": float(h),
+                                        "low": float(l),
+                                        "close": float(c_p),
                                         "volume": int(v or 0),
                                         "timestamp": ts,
                                     }
@@ -5810,7 +5835,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                         LOGGER.warning(
                             "startup_hydration_incomplete_forcing_ready symbols=%s",
                             fallback_symbols,
-                            extra={"event": "startup_hydration_incomplete_forcing_ready"},
+                            extra={
+                                "event": "startup_hydration_incomplete_forcing_ready"
+                            },
                         )
                         runner.mark_ready(fallback_symbols)
                     else:
@@ -6165,8 +6192,11 @@ async def startup_sequence(ctx: BotContext) -> None:
     if ctx.telegram_bot is not None and ctx.telegram_bot._app is not None:
         try:
             mode_icon = "🔴" if not ctx.shadow_mode_enabled else "🟡"
-            mode_text = "LIVE TRADING" if not ctx.shadow_mode_enabled else "PAPER / SHADOW"
+            mode_text = (
+                "LIVE TRADING" if not ctx.shadow_mode_enabled else "PAPER / SHADOW"
+            )
             from datetime import datetime as _dt
+
             startup_html = (
                 f"<b>{mode_icon} Nifty Scalper Bot Online</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -6622,9 +6652,10 @@ class NiftyScalperApp:
         self._self_test_task: asyncio.Task[None] | None = None
         self._telegram_task: asyncio.Task[None] | None = None
         self._telegram_application_started = False
-        self._self_test_interval = 300.0
+        self._self_test_interval = 600.0
         # Edge-trigger runtime self-check state to avoid repeated failure floods.
         self._last_self_check_ok: bool | None = None
+        self._self_test_failure_count = 0
 
     @property
     def config(self) -> AppConfig:
@@ -6896,9 +6927,20 @@ class NiftyScalperApp:
                 if previous_ok is not None and current_ok == previous_ok:
                     continue
                 if current_ok:
+                    self._self_test_failure_count = 0
                     LOGGER.info(
                         "Condition met: runtime self-test recovered",
                         extra={"event": "runtime_self_test_recovered"},
+                    )
+                    continue
+                self._self_test_failure_count += 1
+                if self._self_test_failure_count < 3:
+                    LOGGER.debug(
+                        "Condition met: runtime self-test transient failure",
+                        extra={
+                            "event": "runtime_self_test_transient_failure",
+                            "failure_count": self._self_test_failure_count,
+                        },
                     )
                     continue
                 for name, result in results.items():
