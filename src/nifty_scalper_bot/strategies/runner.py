@@ -6057,6 +6057,7 @@ class StrategyRunner:
                             opt_state.last_signal_at = timestamp
 
             if order_id:
+                self._reset_execution_state(base_symbol)
                 self._logger.info(f"🟢 ORDER SUBMITTED! ID: {order_id}")
 
                 # Async Verification & Chase Logic
@@ -6112,6 +6113,7 @@ class StrategyRunner:
 
         except Exception as exc:
             self._clear_order_in_flight(trade_symbol)
+            self._reset_execution_state(base_symbol)
             self._execution_circuit_breaker.record_failure()
             self._logger.error(f"🔴 ENTRY LOGIC CRASH: {exc}", exc_info=True)
             # Ensure cooldown even on crash

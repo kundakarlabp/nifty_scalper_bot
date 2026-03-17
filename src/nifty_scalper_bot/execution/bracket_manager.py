@@ -582,6 +582,12 @@ class BracketManager:
             None.
         """
         symbol = normalize_symbol(symbol)
+        if symbol in self.active_brackets:
+            LOGGER.info(
+                "Condition met: bracket_symbol_already_active",
+                extra={"event": "bracket_symbol_already_active", "symbol": symbol},
+            )
+            return
         with self._lock:
             # 1. Deduplication: Update existing if found
             if order_id in self._brackets:

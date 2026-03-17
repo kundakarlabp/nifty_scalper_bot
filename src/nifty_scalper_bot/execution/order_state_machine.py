@@ -10,6 +10,7 @@ class ExecutionState(str, Enum):
     """Supported execution lifecycle states."""
 
     IDLE = "IDLE"
+    READY = "READY"
     SIGNAL_RECEIVED = "SIGNAL_RECEIVED"
     ORDER_PENDING = "ORDER_PENDING"
     POSITION_OPEN = "POSITION_OPEN"
@@ -20,7 +21,8 @@ class OrderStateMachine:
     """Track and validate order lifecycle transitions per symbol."""
 
     _VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {
-        ExecutionState.IDLE: {ExecutionState.SIGNAL_RECEIVED},
+        ExecutionState.IDLE: {ExecutionState.READY, ExecutionState.SIGNAL_RECEIVED},
+        ExecutionState.READY: {ExecutionState.SIGNAL_RECEIVED, ExecutionState.IDLE},
         ExecutionState.SIGNAL_RECEIVED: {
             ExecutionState.ORDER_PENDING,
             ExecutionState.IDLE,
@@ -50,7 +52,7 @@ class OrderStateMachine:
     def can_accept_signal(self) -> bool:
         """Check whether a new signal can be accepted."""
         with self._lock:
-            return self._state == ExecutionState.IDLE
+            return self._state in (ExecutionState.IDLE, ExecutionState.READY)
 
     def transition(self, new_state: ExecutionState) -> bool:
         """Apply validated transition. Args: new_state. Returns: bool. Raises: none."""

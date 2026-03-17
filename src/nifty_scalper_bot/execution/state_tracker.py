@@ -91,6 +91,7 @@ class StateTracker:
             self._path = Path(self._settings.db_path)
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._lock = threading.Lock()
+            self._missing_position_counts: dict[str, int] = {}
             self._conn = sqlite3.connect(self._path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._initialize_schema()
@@ -664,16 +665,27 @@ class StateTracker:
             for symbol, local in current_positions.items():
                 broker_quantity = int(broker_map.get(symbol, {}).get("quantity", 0))
                 if symbol not in broker_map or broker_quantity == 0:
-                    self.update_position(symbol, {"delete": True})
-                    self._logger.info(
-                        "state_tracker_reconcile_removed",
-                        extra={"symbol": symbol},
-                    )
+                    missing = self._missing_position_counts.get(symbol, 0) + 1
+                    self._missing_position_counts[symbol] = missing
+                    if missing >= 3:
+                        self.update_position(symbol, {"delete": True})
+                        self._missing_position_counts.pop(symbol, None)
+                        self._logger.info(
+                            "state_tracker_reconcile_removed",
+                            extra={"symbol": symbol, "missing_count": missing},
+                        )
+                    continue
+                self._missing_position_counts.pop(symbol, None)
             for symbol, snapshot in broker_map.items():
                 quantity = int(snapshot.get("quantity", 0))
                 if quantity == 0:
-                    self.update_position(symbol, {"delete": True})
+                    missing = self._missing_position_counts.get(symbol, 0) + 1
+                    self._missing_position_counts[symbol] = missing
+                    if missing >= 3:
+                        self.update_position(symbol, {"delete": True})
+                        self._missing_position_counts.pop(symbol, None)
                     continue
+                self._missing_position_counts.pop(symbol, None)
                 local = current_positions.get(symbol, {})
                 updates = {
                     "symbol": symbol,
