@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
+from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.execution.execution_router import (
     ExecutionResult,
     ExecutionRouter,
@@ -25,9 +26,14 @@ from nifty_scalper_bot.execution.preflight_validator import (
     ValidationResult,
 )
 from nifty_scalper_bot.execution.state_tracker import StateTracker
+from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+
+class ExecutionError(RuntimeError):
+    """Raised when deterministic execution flow fails."""
 
 
 class OrderExecutionHub:
@@ -102,6 +108,113 @@ class OrderExecutionHub:
         self._last_circuit_log = 0.0
         self._order_log = Path("data/order_submissions.jsonl")
         self._restore_pending_orders()
+
+    def execute(self, signal: Signal) -> str | None:
+        """Execute a validated strategy signal via the single deterministic path.
+
+        Args:
+            signal: Strategy signal emitted on a closed candle.
+
+        Returns:
+            str | None: Broker order id when execution succeeds.
+
+        Raises:
+            ExecutionError: If broker execution fails after retries.
+            Exception: Re-raises critical integration failures.
+        """
+        LOGGER.info(
+            {
+                "event": "SIGNAL_GENERATED",
+                "symbol": signal.symbol,
+                "action": signal.action,
+                "quantity": signal.quantity,
+                "reason": signal.reason,
+            }
+        )
+        try:
+            if signal.action not in {"BUY", "SELL"}:
+                LOGGER.info(
+                    {
+                        "event": "SIGNAL_REJECTED",
+                        "symbol": signal.symbol,
+                        "reason": "non_entry_action",
+                        "action": signal.action,
+                    }
+                )
+                return None
+            risk_manager = self._risk_manager or getattr(
+                self._preflight_validator, "_risk_manager", None
+            )
+            if risk_manager is not None and hasattr(risk_manager, "allow_trade"):
+                risk_allowed = risk_manager.allow_trade(signal)
+                if risk_allowed is False or (
+                    isinstance(risk_allowed, tuple) and not risk_allowed[0]
+                ):
+                    reason = (
+                        risk_allowed[1]
+                        if isinstance(risk_allowed, tuple) and len(risk_allowed) > 1
+                        else "risk_blocked"
+                    )
+                    LOGGER.info(
+                        {
+                            "event": "SIGNAL_REJECTED",
+                            "symbol": signal.symbol,
+                            "reason": reason,
+                        }
+                    )
+                    return None
+            trade_manager = getattr(self, "_trade_manager", None)
+            if isinstance(trade_manager, TradeManager) and trade_manager.has_open_trade(
+                signal.symbol
+            ):
+                LOGGER.info(
+                    {
+                        "event": "SIGNAL_REJECTED",
+                        "symbol": signal.symbol,
+                        "reason": "open_trade_exists",
+                    }
+                )
+                return None
+
+            request = OrderRequest(
+                symbol=signal.symbol,
+                side=cast(Literal["BUY", "SELL"], signal.action),
+                quantity=int(signal.quantity),
+                intent="ENTRY",
+                price=signal.metadata.get("signal_price"),
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                metadata=dict(signal.metadata or {}),
+            )
+            validation = self._run_preflight(request)
+            if validation is None:
+                LOGGER.info(
+                    {
+                        "event": "SIGNAL_REJECTED",
+                        "symbol": signal.symbol,
+                        "reason": "preflight_rejected",
+                    }
+                )
+                return None
+            result = self._execution_router.execute(request)
+            if not result.order_id:
+                raise ExecutionError("Order placement failed")
+            self._handle_execution_result(request, result)
+            LOGGER.info(
+                {
+                    "event": "SIGNAL_EXECUTED",
+                    "symbol": signal.symbol,
+                    "order_id": result.order_id,
+                }
+            )
+            return result.order_id
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception(
+                "[CRITICAL FAILURE]",
+                extra={"event": "order_execution_hub_execute_error"},
+                exc_info=True,
+            )
+            raise
 
     async def start(self) -> None:
         """Start lifecycle dependencies and queue worker.
@@ -562,18 +675,17 @@ class OrderExecutionHub:
                 context={"intent": request.intent, "quantity": request.quantity},
             )
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "Failure in OrderExecutionHub._run_preflight: %s",
-                exc,
+            LOGGER.exception(
+                "[CRITICAL FAILURE]",
                 extra={"event": "order_execution_hub_preflight_error"},
-                exc_info=exc,
+                exc_info=True,
             )
             VALIDATION_FAILURES.labels(
                 symbol=request.symbol, gate="preflight", level="ERROR"
             ).inc()
             self._stats["rejected"] += 1
             self._persist_order(request, status="rejected")
-            return None
+            raise
         if not outcome.allowed:
             LOGGER.info(
                 "Condition met: order rejected by preflight",
@@ -642,15 +754,15 @@ class OrderExecutionHub:
                         },
                     )
             except Exception as exc:  # noqa: BLE001
-                LOGGER.error(
-                    'Failure in OrderExecutionHub._dispatch_request stale check: %s',
-                    exc,
+                LOGGER.exception(
+                    '[CRITICAL FAILURE]',
                     extra={
                         'event': 'order_execution_hub_stale_check_error',
                         'symbol': request.symbol,
                     },
-                    exc_info=exc,
+                    exc_info=True,
                 )
+                raise
 
         LOGGER.debug(
             "Entered OrderExecutionHub._dispatch_request",
@@ -664,15 +776,14 @@ class OrderExecutionHub:
             # Use asyncio.to_thread for blocking execution to keep the main event loop responsive
             result = await asyncio.to_thread(self._execution_router.execute, request)
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "Failure in OrderExecutionHub._dispatch_request: %s",
-                exc,
+            LOGGER.exception(
+                "[CRITICAL FAILURE]",
                 extra={"event": "order_execution_hub_dispatch_error"},
-                exc_info=exc,
+                exc_info=True,
             )
             self._stats["failed"] += 1
             self._persist_order(request, status="failed")
-            return
+            raise
         self._handle_execution_result(request, result)
 
     def _enrich_request_metadata(self, request: OrderRequest) -> None:

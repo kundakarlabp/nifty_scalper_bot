@@ -39,6 +39,8 @@ from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.data.source import DataIntegrityError, ensure_ltp
+from nifty_scalper_bot.execution.order_execution_hub import OrderExecutionHub
 from nifty_scalper_bot.execution.circuit_breaker import ExecutionCircuitBreaker
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
 from nifty_scalper_bot.execution.order_state_machine import (
@@ -174,7 +176,7 @@ class DeterministicExecutionPipeline:
 
     trade_manager: TradeManager
     risk_manager: DeterministicRiskManager
-    order_executor: Any
+    order_executor: OrderExecutionHub
     log_throttle: LogThrottle
 
     def on_new_candle(
@@ -183,47 +185,23 @@ class DeterministicExecutionPipeline:
         """Process one closed-candle decision. Args: symbol/signal/ltp/risk. Returns: status. Raises: Exception."""
         if signal is None:
             return "NO_SIGNAL"
-        LOGGER.info(
-            '{"event":"SIGNAL_GENERATED","symbol":"%s","action":"%s"}',
-            symbol,
-            signal.action,
-        )
-        if self.trade_manager.has_open_trade(symbol):
-            LOGGER.info(
-                '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"duplicate_trade"}',
-                symbol,
-            )
-            return "REJECTED_DUPLICATE"
-        allowed, reason = self.risk_manager.allow_trade(risk)
-        if not allowed:
-            LOGGER.info(
-                '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"%s"}',
-                symbol,
-                reason,
-            )
-            return "REJECTED_RISK"
         try:
-            order_id = self.order_executor.place_market_order(
-                symbol=symbol,
-                side=signal.action,
-                qty=signal.quantity,
-                price=ltp,
-            )
-            self.trade_manager.create_trade(
-                order_id,
-                symbol,
-                signal.action,
-                signal.quantity,
-                ltp,
-                signal.stop_loss or ltp,
-                signal.take_profit or ltp,
-            )
-            LOGGER.info(
-                '{"event":"ORDER_PLACED","symbol":"%s","order_id":"%s"}',
-                symbol,
-                order_id,
-            )
+            _ = ensure_ltp(ltp)
+            signal = signal.with_metadata(signal_price=ltp, pipeline="deterministic")
+            order_id = self.order_executor.execute(signal)
+            if not order_id:
+                LOGGER.info(
+                    '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"execution_rejected"}',
+                    symbol,
+                )
+                return "REJECTED_EXECUTION"
             return "ORDER_PLACED"
+        except DataIntegrityError:
+            LOGGER.info(
+                '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"data_integrity"}',
+                symbol,
+            )
+            raise
         except Exception as e:
             LOGGER.exception(
                 '{"event":"ORDER_FAILED","symbol":"%s","error":"%s"}',

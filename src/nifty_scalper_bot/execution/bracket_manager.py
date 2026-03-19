@@ -725,7 +725,13 @@ class BracketManager:
             if METRICS_AVAILABLE and METRICS:
                 try:
                     METRICS.brackets_created.inc()
-                except Exception: pass
+                except Exception as exc:
+                    LOGGER.exception(
+                        '[CRITICAL FAILURE]',
+                        extra={'event': 'bracket_manager_metrics_increment_error'},
+                        exc_info=True,
+                    )
+                    raise
             
             # ✅ FIX: Persist immediately so we don't lose this if we crash now
             self.save_state()
@@ -2361,11 +2367,11 @@ class BracketManager:
                     calc_atr = getattr(atr_snapshot, "value", atr_snapshot)
                 if calc_atr and float(calc_atr) > 0:
                     atr = float(calc_atr)
-        except Exception:
+        except Exception as exc:
             self._orphan_retry_count[symbol] = self._orphan_retry_count.get(symbol, 0) + 1
             self._orphan_retry_last_attempt[symbol] = now
-            LOGGER.exception("Failed orphan adoption")
-            return oid
+            LOGGER.exception('[CRITICAL FAILURE]', exc_info=True)
+            raise
 
         # 2. Define Rescue Levels (1.5x Risk / 3.0x Reward)
         # Handle 'BUY'/'LONG' vs 'SELL'/'SHORT'
