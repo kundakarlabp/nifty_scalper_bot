@@ -18,10 +18,8 @@ class TradeState(Enum):
     INIT = "INIT"
     ORDER_PLACED = "ORDER_PLACED"
     FILLED = "FILLED"
-    SL_PLACED = "SL_PLACED"
     ACTIVE = "ACTIVE"
     EXITED = "EXITED"
-    FAILED = "FAILED"
 
 
 @dataclass(slots=True)
@@ -46,6 +44,17 @@ class TradeManager:
         self._trades_by_id: dict[str, Trade] = {}
         self._open_by_symbol: dict[str, str] = {}
         self._lock = RLock()
+        self._valid_transitions: dict[TradeState, set[TradeState]] = {
+            TradeState.INIT: {TradeState.ORDER_PLACED},
+            TradeState.ORDER_PLACED: {TradeState.FILLED},
+            TradeState.FILLED: {TradeState.ACTIVE},
+            TradeState.ACTIVE: {TradeState.EXITED},
+            TradeState.EXITED: set(),
+        }
+
+    def valid_transition(self, old_state: TradeState, new_state: TradeState) -> bool:
+        """Return whether transition from old_state to new_state is legal."""
+        return new_state in self._valid_transitions.get(old_state, set())
 
     def has_open_trade(self, symbol: str) -> bool:
         """Check symbol open state. Args: symbol. Returns: bool. Raises: None."""
@@ -79,10 +88,11 @@ class TradeManager:
                 entry_price=float(entry_price),
                 sl=float(sl),
                 target=float(target),
-                status=TradeState.ORDER_PLACED,
+                status=TradeState.INIT,
             )
             self._trades_by_id[trade_id] = trade
             self._open_by_symbol[symbol_key] = trade_id
+            self.update_trade(trade_id, TradeState.ORDER_PLACED)
             logger.info(
                 '{"event":"ORDER_PLACED","symbol":"%s","trade_id":"%s","qty":%s}',
                 symbol_key,
@@ -95,6 +105,11 @@ class TradeManager:
         """Update trade fields. Args: trade_id/status/updates. Returns: Trade. Raises: KeyError."""
         with self._lock:
             trade = self._trades_by_id[trade_id]
+            old_state = trade.status
+            assert self.valid_transition(old_state, status), (
+                f"Invalid trade transition for {trade_id}: "
+                f"{old_state.value} -> {status.value}"
+            )
             for key, value in updates.items():
                 if hasattr(trade, key):
                     setattr(trade, key, value)
@@ -112,6 +127,11 @@ class TradeManager:
         """Close trade and release symbol lock. Args: trade_id/final_state. Returns: Trade. Raises: KeyError."""
         with self._lock:
             trade = self._trades_by_id[trade_id]
+            old_state = trade.status
+            assert self.valid_transition(old_state, final_state), (
+                f"Invalid trade transition for {trade_id}: "
+                f"{old_state.value} -> {final_state.value}"
+            )
             trade.status = final_state
             self._open_by_symbol.pop(trade.symbol.upper(), None)
             logger.info(

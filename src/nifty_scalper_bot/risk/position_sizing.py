@@ -16,6 +16,7 @@ class RiskSnapshot:
     day_pnl: float
     trades_today: int
     open_exposure: float
+    volatility: float = 0.0
 
 
 class RiskManager:
@@ -26,11 +27,13 @@ class RiskManager:
         max_daily_loss: float,
         max_trades: int,
         max_open_exposure: float,
+        min_volatility: float = 0.0,
     ) -> None:
         """Initialise limits. Args: limits. Returns: None. Raises: ValueError."""
         self.max_daily_loss = abs(float(max_daily_loss))
         self.max_trades = int(max_trades)
         self.max_open_exposure = float(max_open_exposure)
+        self.min_volatility = float(min_volatility)
 
     def allow_trade(self, snapshot: RiskSnapshot) -> tuple[bool, str | None]:
         """Validate trade permission. Args: snapshot. Returns: allow/reason. Raises: None."""
@@ -44,6 +47,10 @@ class RiskManager:
             return False, reason
         if snapshot.open_exposure >= self.max_open_exposure:
             reason = "open_exposure_limit"
+            logger.warning('{"event":"RISK_BLOCKED_TRADE","reason":"%s"}', reason)
+            return False, reason
+        if snapshot.volatility < self.min_volatility:
+            reason = "volatility_filter"
             logger.warning('{"event":"RISK_BLOCKED_TRADE","reason":"%s"}', reason)
             return False, reason
         return True, None

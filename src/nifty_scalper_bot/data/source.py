@@ -40,3 +40,15 @@ def ensure_ltp(ltp: float | None) -> float:
     if ltp is None:
         raise DataIntegrityError("Missing LTP")
     return float(ltp)
+
+
+def ensure_indicator_values(indicators: dict[str, float | int | None]) -> None:
+    """Validate indicator map has no missing/NaN values. Args: indicators. Returns: None. Raises: DataIntegrityError."""
+    if not indicators:
+        raise DataIntegrityError("Missing indicator values")
+    for name, raw_value in indicators.items():
+        if raw_value is None:
+            raise DataIntegrityError(f"Indicator {name} is missing")
+        value = float(raw_value)
+        if pd.isna(value):
+            raise DataIntegrityError(f"Indicator {name} is NaN")

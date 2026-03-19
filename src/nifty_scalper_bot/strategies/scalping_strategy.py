@@ -23,7 +23,7 @@ class ScalpingStrategyConfig:
     def from_env(cls) -> "ScalpingStrategyConfig":
         """Load strategy config from environment. Args: none. Returns: config. Raises: ValueError."""
         raw = os.getenv("SCALPING_SCORE_THRESHOLD", "2.5")
-        return cls(score_threshold=float(raw))
+        return cls(score_threshold=abs(float(raw)))
 
 
 class ScalpingStrategy:
@@ -48,20 +48,27 @@ class ScalpingStrategy:
         logger.info(
             '{"event":"SIGNAL_GENERATED","symbol":"%s","score":%.4f}', symbol, score
         )
-        if score < self.config.score_threshold:
+        threshold = abs(self.config.score_threshold)
+        if abs(score) < threshold:
             logger.info(
                 '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"score_below_threshold","score":%.4f,"threshold":%.4f}',
                 symbol,
                 score,
-                self.config.score_threshold,
+                threshold,
             )
             return None
         action = "BUY" if score >= 0 else "SELL"
+        logger.info(
+            '{"event":"SIGNAL_EXECUTED","symbol":"%s","action":"%s","score":%.4f}',
+            symbol,
+            action,
+            score,
+        )
         return Signal(
             action=action,
             symbol=symbol,
             quantity=1,
-            confidence=min(1.0, abs(score) / max(1.0, self.config.score_threshold)),
+            confidence=min(1.0, abs(score) / max(1.0, threshold)),
             reason="weighted_score",
             stop_loss=None,
             take_profit=None,

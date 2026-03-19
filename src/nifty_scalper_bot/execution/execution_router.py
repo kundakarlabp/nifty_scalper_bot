@@ -95,13 +95,12 @@ class SlippageModel:
             )
             return signed_slip
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "Failure in SlippageModel.estimate: %s",
-                exc,
+            LOGGER.exception(
+                "[CRITICAL FAILURE]",
                 extra={"event": "execution_router_slippage_error", "symbol": symbol},
-                exc_info=exc,
+                exc_info=True,
             )
-            return 0.0
+            raise
 
 
 class ExecutionRouter:
@@ -177,7 +176,7 @@ class ExecutionRouter:
             ExecutionResult describing live/paper outcomes.
 
         Raises:
-            None. Exceptions are caught and converted to ``FAILED`` results.
+            Exception: Re-raises router failures as critical execution failures.
         """
 
         LOGGER.debug(
@@ -196,23 +195,16 @@ class ExecutionRouter:
                 return self._execute_live(request)
             return self._execute_shadow(request)
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "Failure in ExecutionRouter.execute: %s",
-                exc,
+            LOGGER.exception(
+                "[CRITICAL FAILURE]",
                 extra={
                     "event": "execution_router_execute_error",
                     "mode": self._mode,
                     "symbol": request.symbol,
                 },
-                exc_info=exc,
+                exc_info=True,
             )
-            return ExecutionResult(
-                status="FAILED",
-                order_id=None,
-                fill_quantity=0,
-                fill_price=None,
-                rejection_reason=str(exc),
-            )
+            raise
 
     # ------------------------------------------------------------------
     def get_stats(self) -> dict[str, float]:
@@ -282,6 +274,8 @@ class ExecutionRouter:
                     stop_loss=request.stop_loss,
                     take_profit=request.take_profit,
                 )
+                if not order_id:
+                    raise OrderPlacementError("Order placement failed")
                 latency = time.monotonic() - start_time
                 EXECUTION_LATENCY.labels(executor="LIVE", status="SUBMITTED").observe(
                     latency
@@ -315,15 +309,14 @@ class ExecutionRouter:
                     latency
                 )
                 last_error = str(exc)
-                LOGGER.error(
-                    "Live order failure: %s",
-                    exc,
+                LOGGER.exception(
+                    "[CRITICAL FAILURE]",
                     extra={
                         "event": "execution_router_live_error",
                         "symbol": request.symbol,
                         "attempt": attempt,
                     },
-                    exc_info=exc,
+                    exc_info=True,
                 )
             if attempt < attempts and delay > 0:
                 time.sleep(delay)
@@ -435,15 +428,15 @@ class ExecutionRouter:
                     },
                 )
             except Exception as exc:  # noqa: BLE001
-                LOGGER.error(
-                    "Failure in ExecutionRouter._execute_paper slippage: %s",
-                    exc,
+                LOGGER.exception(
+                    "[CRITICAL FAILURE]",
                     extra={
                         "event": "execution_router_paper_slippage_error",
                         "symbol": request.symbol,
                     },
-                    exc_info=exc,
+                    exc_info=True,
                 )
+                raise
         return ExecutionResult(
             status=exec_status,
             order_id=order_id,
