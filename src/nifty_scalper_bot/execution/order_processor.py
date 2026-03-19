@@ -412,8 +412,13 @@ class OrderProcessor:
             if not is_exit_check:
                 try:
                     active_positions = self.pos_manager.get_all_positions()
-                except Exception:
-                    active_positions = []
+                except Exception as exc:
+                    LOGGER.exception(
+                        "[CRITICAL FAILURE]",
+                        extra={"event": "order_processor_position_fetch_error"},
+                        exc_info=True,
+                    )
+                    raise
 
                 active_option_count = sum(
                     1
@@ -528,18 +533,8 @@ class OrderProcessor:
                         trailing_spec=trailing_spec,
                     )
                 else:
-                    # Critical fallback if OrderManager is outdated, but logs the orphan risk
-                    LOGGER.error(
-                        "❌ OrderManager missing 'place_bracket_order'. Placing ORPHAN trade."
-                    )
-                    broker_order_id = await asyncio.to_thread(
-                        self.executor.place_order,
-                        symbol=symbol,
-                        side=side,
-                        quantity=qty,
-                        order_type=order_type,
-                        price=price,
-                        tag=strategy_name,
+                    raise RuntimeError(
+                        "place_bracket_order missing for entry; refusing fragmented execution"
                     )
             else:
                 # Standard Execution for Exits or Naked Entries (if missing SL/TP)
@@ -585,7 +580,7 @@ class OrderProcessor:
             )
 
         except Exception as exc:  # noqa: BLE001
-            LOGGER.error("❌ Order Execution Failed: %s", exc, exc_info=exc)
+            LOGGER.exception("[CRITICAL FAILURE]", exc_info=True)
 
             await self.bus.publish(
                 Message(
@@ -595,6 +590,7 @@ class OrderProcessor:
                     source="order_processor",
                 )
             )
+            raise
         finally:
             # ✅ FIX 3 (Refined): Release lock AFTER protection logic completes.
             # This ensures we don't accept a new signal until the bracket is effectively registered
