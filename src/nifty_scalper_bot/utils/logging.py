@@ -26,10 +26,29 @@ _DEFAULT_RATE_LIMIT_SEC = 3.0
 _DEFAULT_DEDUP_WINDOW_SEC = 2.0
 
 _RESERVED_ATTRS = {
-    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
-    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
-    "created", "msecs", "relativeCreated", "thread", "threadName",
-    "processName", "process", "message", "asctime", "event",
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "processName",
+    "process",
+    "message",
+    "asctime",
+    "event",
 }
 
 _EVENT_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -46,6 +65,7 @@ _FILTER_INSTALL_LOCK = threading.Lock()
 # =============================================================================
 # 2. PRIVATE UTILITIES (Helpers & Environment)
 # =============================================================================
+
 
 def _normalise_event(value: object, default: str) -> str:
     """Return a sanitised event label suitable for metrics exporters."""
@@ -67,7 +87,8 @@ def _resolve_bool(name: str, default: bool) -> bool:
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in _resolve_bool for %s: %s",
-            name, exc,
+            name,
+            exc,
             extra={"event": "logging_resolve_bool_error", "variable": name},
             exc_info=exc,
         )
@@ -84,7 +105,8 @@ def _resolve_float(name: str, default: float) -> float:
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in _resolve_float for %s: %s",
-            name, exc,
+            name,
+            exc,
             extra={"event": "logging_resolve_float_error", "variable": name},
             exc_info=exc,
         )
@@ -101,16 +123,37 @@ def _resolve_int(name: str, default: int) -> int:
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in _resolve_int for %s: %s",
-            name, exc,
+            name,
+            exc,
             extra={"event": "logging_resolve_int_error", "variable": name},
             exc_info=exc,
         )
         return int(default)
 
 
+class LogThrottle:
+    """Per-key cooldown helper for repetitive logs."""
+
+    def __init__(self) -> None:
+        """Initialise throttle state. Args: none. Returns: None. Raises: None."""
+        self._seen: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def should_log(self, key: str, cooldown_seconds: float) -> bool:
+        """Check if key can log now. Args: key/cooldown_seconds. Returns: bool. Raises: None."""
+        now = time.monotonic()
+        with self._lock:
+            last = self._seen.get(key, 0.0)
+            if now - last < max(0.0, float(cooldown_seconds)):
+                return False
+            self._seen[key] = now
+        return True
+
+
 # =============================================================================
 # 3. FORMATTERS & FILTERS
 # =============================================================================
+
 
 class EventEnricher(logging.Filter):
     """Ensure every record has an ``event`` attribute for scraping."""
@@ -174,7 +217,8 @@ class _BurstDedupFilter(logging.Filter):
             return True
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in _BurstDedupFilter.filter: %s", exc,
+                "Failure in _BurstDedupFilter.filter: %s",
+                exc,
                 extra={"event": "logging_burst_dedup_error", "bypass_filters": True},
                 exc_info=exc,
             )
@@ -210,8 +254,12 @@ class _RateLimitFilter(logging.Filter):
             return True
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in _RateLimitFilter.filter: %s", exc,
-                extra={"event": "logging_rate_limit_filter_error", "bypass_filters": True},
+                "Failure in _RateLimitFilter.filter: %s",
+                exc,
+                extra={
+                    "event": "logging_rate_limit_filter_error",
+                    "bypass_filters": True,
+                },
                 exc_info=exc,
             )
             return True
@@ -300,6 +348,7 @@ class DedupLogger:
 # 4. SETUP & CONFIGURATION LOGIC
 # =============================================================================
 
+
 def _apply_noisy_overrides() -> None:
     """Apply default log level overrides for noisy modules."""
     LOGGER.debug(
@@ -322,7 +371,8 @@ def _apply_noisy_overrides() -> None:
                 logging.getLogger(logger_name).setLevel(level_value)
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            "Failure in _apply_noisy_overrides: %s", exc,
+            "Failure in _apply_noisy_overrides: %s",
+            exc,
             extra={"event": "logging_noisy_overrides_error", "bypass_filters": True},
             exc_info=exc,
         )
@@ -342,16 +392,20 @@ def _install_filters_once() -> None:
             if not root.handlers:
                 return
             rate_limit = _resolve_float(
-                "LOG_RATE_LIMIT_SEC", _DEFAULT_RATE_LIMIT_SEC,
+                "LOG_RATE_LIMIT_SEC",
+                _DEFAULT_RATE_LIMIT_SEC,
             )
             dedup_window = _resolve_float(
-                "LOG_DEDUP_WINDOW_SEC", _DEFAULT_DEDUP_WINDOW_SEC,
+                "LOG_DEDUP_WINDOW_SEC",
+                _DEFAULT_DEDUP_WINDOW_SEC,
             )
             rate_filter = _RateLimitFilter(rate_limit)
             dedup_filter = _BurstDedupFilter(dedup_window)
-            
+
             # Use default regex if environment variable not set
-            sample_regex = os.getenv("LOG_SAMPLE_EVENT_REGEX", r"^regime_multiplier_applied$")
+            sample_regex = os.getenv(
+                "LOG_SAMPLE_EVENT_REGEX", r"^regime_multiplier_applied$"
+            )
             sample_every = _resolve_int("LOG_SAMPLE_EVERY", 50)
             sampling_filter = _EventSamplingFilter(sample_regex, sample_every)
 
@@ -366,14 +420,17 @@ def _install_filters_once() -> None:
                 ):
                     handler.addFilter(rate_filter)
                 # Ensure sampling filter is also added if needed
-                if not any(isinstance(flt, _EventSamplingFilter) for flt in existing_filters):
+                if not any(
+                    isinstance(flt, _EventSamplingFilter) for flt in existing_filters
+                ):
                     handler.addFilter(sampling_filter)
 
             _apply_noisy_overrides()
             root._nifty_filters_installed = True  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            "Failure in _install_filters_once: %s", exc,
+            "Failure in _install_filters_once: %s",
+            exc,
             extra={"event": "logging_install_filters_error", "bypass_filters": True},
             exc_info=exc,
         )
@@ -390,14 +447,12 @@ def setup_logging(level: str = "INFO") -> None:
         numeric_level = getattr(logging, resolved_level_name.upper(), logging.INFO)
         handler = logging.StreamHandler()
         handler.addFilter(EventEnricher())
-        
-        # Note: We add filters here for the new handler, but _install_filters_once 
+
+        # Note: We add filters here for the new handler, but _install_filters_once
         # attaches them to existing handlers on the root logger later as well.
         if _resolve_bool("LOG_DEDUP_ENABLED", True):
-            handler.addFilter(
-                _DedupFilter(_resolve_float("LOG_DEDUP_WINDOW_SEC", 2.0))
-            )
-        
+            handler.addFilter(_DedupFilter(_resolve_float("LOG_DEDUP_WINDOW_SEC", 2.0)))
+
         # Standard format vs JSON format
         if os.getenv("LOG_FORMAT", "").strip().lower() == "json":
             handler.setFormatter(
@@ -427,7 +482,8 @@ def setup_logging(level: str = "INFO") -> None:
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            "Failure in setup_logging: %s", exc,
+            "Failure in setup_logging: %s",
+            exc,
             extra={"event": "logging_setup_error"},
         )
 
@@ -435,6 +491,7 @@ def setup_logging(level: str = "INFO") -> None:
 # =============================================================================
 # 5. PUBLIC API (Helpers)
 # =============================================================================
+
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
     """Return a named logger, defaulting to the package root."""
@@ -448,7 +505,9 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
         return DedupLogger(base_logger)  # type: ignore[return-value]
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            "Failure in get_logger for %s: %s", target, exc,
+            "Failure in get_logger for %s: %s",
+            target,
+            exc,
             extra={"event": "logging_get_logger_error"},
         )
         return LOGGER
@@ -469,7 +528,8 @@ def get_tracer_logger(name: Optional[str] = None) -> logging.Logger:
         return tracer
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
-            "Failure in get_tracer_logger: %s", exc,
+            "Failure in get_tracer_logger: %s",
+            exc,
             extra={"event": "logging_tracer_logger_error"},
         )
         return LOGGER
@@ -509,7 +569,8 @@ def log_throttled(
         logger.log(level, msg, extra=extra or {})
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "Failure in log_throttled: %s", exc,
+            "Failure in log_throttled: %s",
+            exc,
             extra={"event": "logging_log_throttled_error", "log_key": key},
             exc_info=exc,
         )
@@ -543,7 +604,8 @@ def log_state_change(
         return True
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "Failure in log_state_change: %s", exc,
+            "Failure in log_state_change: %s",
+            exc,
             extra={"event": "logging_log_state_change_error", "log_key": key},
             exc_info=exc,
         )
@@ -554,9 +616,17 @@ def log_state_change(
 # 6. CONVENIENCE: THIRD-PARTY SILENCING
 # =============================================================================
 
+
 def silence_third_party_loggers() -> None:
     """Suppress verbose third-party HTTP and async logging."""
-    for logger_name in ["httpcore", "httpx", "urllib3", "asyncio", "concurrent.futures", "selector"]:
+    for logger_name in [
+        "httpcore",
+        "httpx",
+        "urllib3",
+        "asyncio",
+        "concurrent.futures",
+        "selector",
+    ]:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
@@ -564,7 +634,7 @@ def enable_business_logic_logging() -> None:
     """Enable logs for Decisions, but silence the Loops."""
     # ❌ FIX: Commented out these lines so they don't override your Railway config.
     # Now, if you set LOG_LEVEL=INFO, these will actually stay at INFO.
-    
+
     # logging.getLogger("nifty_scalper_bot.strategies").setLevel(logging.DEBUG)
     # logging.getLogger("nifty_scalper_bot.core").setLevel(logging.DEBUG)
 
@@ -574,6 +644,7 @@ def enable_business_logic_logging() -> None:
     # logging.getLogger("nifty_scalper_bot.risk").setLevel(logging.INFO)
     # logging.getLogger("nifty_scalper_bot.lifecycle").setLevel(logging.INFO)
     pass
+
 
 # =============================================================================
 # 7. MODULE INITIALIZATION

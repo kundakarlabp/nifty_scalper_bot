@@ -610,8 +610,9 @@ class RiskManager:
         if risk_state is not None:
             try:
                 risk_state.reset_staleness()
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
     def risk_gate_should_trade(self) -> tuple[bool, tuple[str, ...]]:
         """Return whether the micro risk state permits new trades."""
@@ -870,8 +871,9 @@ class RiskManager:
                 lot_size = int(resolved)
                 if lot_size > 0:
                     return lot_size
-            except Exception:
-                pass  # Fallthrough to settings
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise  # Fallthrough to settings
 
         # 2. Fallback to Settings (Safety Net)
         # Your settings.py already defaults contract_lot_size to 75. Use it!
@@ -929,8 +931,9 @@ class RiskManager:
         self._last_rejection = None
         try:
             self._switches.engage_cooldown(0.0)
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
         self._set_cooldown_metric(0.0)
 
     def snapshot(self) -> RiskSnapshot:  # pragma: no cover
@@ -1100,12 +1103,14 @@ class RiskManager:
 
         try:
             METRICS.set_live_pnl(book="primary", value=current)
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
         try:
             METRICS.set_pnl_breakdown(book="primary", realized=current)
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
 
         reason = self._switches.breach_reason()
         if reason:
@@ -1135,8 +1140,9 @@ class RiskManager:
         if self.alert_callback is not None:
             try:
                 self.alert_callback(reason, snapshot)
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
     def _schedule_breaker_alert(self, reason: str) -> None:
         """Schedule asynchronous alert dispatch when the breaker trips."""
@@ -1240,8 +1246,9 @@ class RiskManager:
         self._last_rejection = code if code != "OK" else reason
         try:
             self._m_blocks.inc()
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
         self._logger.warning(
             "RISK GATE BLOCK (soft)",
             extra={
@@ -1256,8 +1263,9 @@ class RiskManager:
     def _set_cooldown_metric(self, value: float) -> None:  # pragma: no cover
         try:
             self._m_cooldown.set(value)
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
 
     def _daily_loss_limit_pct(self) -> float:  # pragma: no cover
         return getattr(
@@ -1310,8 +1318,9 @@ class RiskState:
             METRICS.set_pnl_breakdown(
                 book="primary", realized=realized_pnl, unrealized=unrealized_pnl
             )
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
         equity = realized_pnl + unrealized_pnl
         if not self._initialized_equity:
             self._peak_equity = equity

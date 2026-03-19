@@ -1165,8 +1165,9 @@ class MarketDataManager:
                         price = quote.get("last_price") or quote.get("ltp")
                         if price:
                             return float(price)
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
 
             return None
 
@@ -4262,8 +4263,9 @@ class MarketDataManager:
                         t = resolver.get_token(symbol)
                         if t:
                             token = int(t)
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
 
             # Try Broker Instrument Lookup (Final Fallback)
             if (
@@ -4275,8 +4277,9 @@ class MarketDataManager:
                     t = self._broker.get_instrument_token(symbol)
                     if t:
                         token = int(t)
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
 
         if not token:
             self._logger.warning(

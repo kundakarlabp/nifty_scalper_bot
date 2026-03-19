@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-import time
 from itertools import count
+import time
 from typing import Any, Dict, Iterable, Optional, Sequence, cast
 
 from nifty_scalper_bot.config.base import RiskConfig
 from nifty_scalper_bot.execution.entry_price import EntryPriceModel, Side
 from nifty_scalper_bot.execution.options_policy import OptionsExecutionPolicy
 from nifty_scalper_bot.utils.errors import BrokerError, OrderPlacementError
+
+
+class ExecutionError(OrderPlacementError):
+    """Raised when broker execution fails hard."""
+
+
 from nifty_scalper_bot.utils.logging import get_logger
 
 
@@ -109,21 +115,44 @@ class OrderExecutor:
             "price": rounded_price,
             "client_order_id": client_order_id,
         }
-        try:
-            response = self._broker.place_order(payload)
-        except BrokerError as exc:
-            response = self._find_open_order(client_order_id)
-            if response is None:
-                raise OrderPlacementError("Broker rejected order") from exc
+        response: Dict[str, object] | None = None
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                response = self._broker.place_order(payload)
+                break
+            except BrokerError as exc:
+                last_error = exc
+                self._logger.warning(
+                    '{"event":"ORDER_RETRY","symbol":"%s","attempt":%s}',
+                    symbol,
+                    attempt,
+                )
+                response = self._find_open_order(client_order_id)
+                if response is not None:
+                    break
+                if attempt >= 3:
+                    raise ExecutionError(
+                        "Order placement failed after retries"
+                    ) from exc
+                time.sleep(0.1 * attempt)
+        if response is None:
+            raise ExecutionError("Order placement failed") from last_error
+        if not isinstance(response, dict):
+            raise ExecutionError("Invalid broker response payload")
         if "order_id" not in response:
             existing = self._find_open_order(client_order_id)
             if existing and "order_id" in existing:
                 response = existing
             else:
-                raise OrderPlacementError("Broker response missing order_id")
+                raise ExecutionError("Broker response missing order_id")
         self._daily_trade_count += 1
         order_id = str(response["order_id"])
-        self._logger.info("Placed order %s for %s", order_id, symbol)
+        if not order_id:
+            raise ExecutionError("Order placement failed")
+        self._logger.info(
+            '{"event":"ORDER_PLACED","symbol":"%s","order_id":"%s"}', symbol, order_id
+        )
         self._open_orders[client_order_id] = {
             "order_id": order_id,
             "symbol": symbol,

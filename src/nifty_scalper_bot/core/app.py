@@ -1407,8 +1407,9 @@ def get_http_app() -> FastAPI:
             if ctx and ctx.telegram_bot:
                 LOGGER.info("🛑 Shutting down Telegram Bot...")
                 await ctx.telegram_bot.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
 
     # ----------------------------------------------------------------
 
@@ -2139,8 +2140,9 @@ def _find_existing_nifty_option_symbol(
                     return (
                         s_up if not s_up.startswith("NFO:") else s_up.split(":", 1)[-1]
                     )
-    except Exception:
-        pass
+    except Exception as e:
+        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+        raise
 
     return None
 
@@ -2268,8 +2270,9 @@ def _get_symbols(
                             if price > 0:
                                 ltp = price
                                 break
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
         except Exception as exc:
             LOGGER.error("Error fetching live price: %s", exc, exc_info=True)
 
@@ -3188,8 +3191,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     )
                     if not mapped:
                         mapped = instrument_resolver.format_token_as_symbol(token_int)
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
 
             # Try MDM
             if not mapped and market_data_manager:
@@ -4287,8 +4291,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                             logger=LOGGER,
                         )
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
     background_tasks: list[asyncio.Task[Any]] = []
     try:
@@ -6130,8 +6135,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             reset_fn = getattr(_inner, "_reset_transient_state", None)
                             if callable(reset_fn):
                                 reset_fn()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                        raise
                     from nifty_scalper_bot.utils.market_hours import (
                         is_market_open as _imo,
                     )

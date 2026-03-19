@@ -1282,8 +1282,9 @@ class TelegramBot:
                 snapshot = hub.snapshot("NIFTY")
                 if snapshot and snapshot.get("ltp"):
                     return float(snapshot["ltp"])
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
                 
         return None
 

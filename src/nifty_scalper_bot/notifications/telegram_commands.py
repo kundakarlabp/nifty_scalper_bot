@@ -312,8 +312,9 @@ def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE, services: Servi
             # Try iterator first, then list
             pos_source = getattr(services.order_manager, "get_open_positions", lambda: [])()
             pos_count = len(list(pos_source))
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
             
     mdm_connected = False
     if services.market_data:
@@ -353,8 +354,9 @@ def cmd_net(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> st
     if callable(fn):
         try:
             return f"api latency: {float(fn()):.0f}ms"
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
     return "net: n/a"
 
 
@@ -504,8 +506,9 @@ def cmd_regime(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) ->
         if snap:
             s = snap[0]
             return f"{s.symbol}: {s.regime} ({s.confidence:.2f})"
-    except Exception:
-        pass
+    except Exception as e:
+        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+        raise
     return "Regime unknown"
 
 

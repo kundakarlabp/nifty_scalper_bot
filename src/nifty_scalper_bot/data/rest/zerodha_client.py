@@ -2105,8 +2105,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                             info = resolver.lookup_by_symbol(token_str)
                             if info and "instrument_token" in info:
                                 symbol_map[token_str] = int(info["instrument_token"])
-                    except Exception:
-                        pass  # Token lookup failed, but we can still use the symbol
+                    except Exception as e:
+                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                        raise  # Token lookup failed, but we can still use the symbol
                     continue
 
                 # Check if it's a numeric string (token as string)

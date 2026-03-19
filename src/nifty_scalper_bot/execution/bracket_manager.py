@@ -803,8 +803,9 @@ class BracketManager:
             # Persist state
             try:
                 self.save_state()
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
     # --------------------------------------------------------------------------
     # 2. MARKET DATA INGESTION (NEW)
@@ -1152,8 +1153,9 @@ class BracketManager:
                     if hook is not None:
                         try:
                             hook(symbol)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                            raise
                 else:
                     LOGGER.critical('EXIT_FAILED_AFTER_FALLBACK symbol=%s qty=%s', symbol, qty)
             except Exception as e:
@@ -1543,8 +1545,9 @@ class BracketManager:
                     atr_value = getattr(snapshot, "value", snapshot)
                 if atr_value is not None and float(atr_value) > 0:
                     return float(atr_value)
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
         
         # Fallback to local cache with type-safe normalization.
         atr_raw = self._current_atr.get(symbol, 0.0)
@@ -1737,8 +1740,9 @@ class BracketManager:
             # Persist state (non-blocking if using async)
             try:
                 self.save_state()
-            except Exception:
-                pass  # Don't let persistence failure block exit
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise  # Don't let persistence failure block exit
 
         # ═══════════════════════════════════════════════════════════
         # ✅ WORLD-CLASS: SLIPPAGE-PROTECTED EXIT
@@ -1805,8 +1809,9 @@ class BracketManager:
             if METRICS_AVAILABLE and METRICS:
                 try:
                     METRICS.brackets_triggered.inc()
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
                 
             # Cleanup if full exit
             if not is_partial and bracket.remaining_quantity <= 0:
@@ -1824,8 +1829,9 @@ class BracketManager:
                     bracket.active = True
                 try:
                     self.save_state()
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
                 
             # ✅ FALLBACK: Try MARKET order as last resort
             return self._market_fallback_exit(bracket, qty, exit_side, reason)
@@ -2297,8 +2303,9 @@ class BracketManager:
                         )
                         if ltp and float(ltp) > 0:
                             self.on_tick(_sym, float(ltp))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                        raise
                 
                 # Register with market data manager
                 if hasattr(self._market_data, 'subscribe'):

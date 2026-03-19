@@ -166,8 +166,9 @@ class HubStore:
     def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
         try:
             self.close()
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
 
 
 MappingPayload = Mapping[str, Any]

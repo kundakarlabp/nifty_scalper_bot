@@ -8,14 +8,16 @@ Production Entrypoint
 - ✅ FIX: Data directory permission handling
 """
 
-import sys
-import os
 import asyncio
-import logging
 from contextlib import asynccontextmanager
+import logging
+import os
 from pathlib import Path
-from fastapi import FastAPI
+import sys
+
 from dotenv import load_dotenv
+from fastapi import FastAPI
+
 from nifty_scalper_bot.config.paths import get_data_dir
 
 # -------------------------------------------------------
@@ -27,7 +29,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 def _load_env_file() -> None:
     """Load .env file from multiple possible locations.
-    
+
     Search order:
     1. Current working directory
     2. /app/.env (Docker/Railway standard)
@@ -40,28 +42,31 @@ def _load_env_file() -> None:
         Path(__file__).resolve().parent.parent.parent.parent / ".env",
         Path(__file__).resolve().parent.parent.parent / ".env",
     ]
-    
+
     workdir = os.getenv("WORKDIR") or os.getenv("APP_DIR")
     if workdir:
         search_paths.insert(0, Path(workdir) / ".env")
-    
+
     env_loaded = False
     for env_path in search_paths:
         if env_path.exists() and env_path.is_file():
             print(f"✅ ENV FILE FOUND: {env_path}", flush=True)
             load_dotenv(dotenv_path=str(env_path), override=True)
             env_loaded = True
-            
+
             enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
             exec_mode = os.getenv("EXECUTION_MODE", "NOT_SET")
             print(f"   📋 ENABLE_LIVE={enable_live}", flush=True)
             print(f"   📋 EXECUTION_MODE={exec_mode}", flush=True)
             break
-    
+
     if not env_loaded:
-        print("⚠️ WARNING: No .env file found! Using Railway/system env vars only.", flush=True)
+        print(
+            "⚠️ WARNING: No .env file found! Using Railway/system env vars only.",
+            flush=True,
+        )
         print(f"   Searched paths: {[str(p) for p in search_paths]}", flush=True)
-    
+
     load_dotenv(override=False)
 
 
@@ -88,6 +93,7 @@ print(f"   🔧 DATA_DIR = {os.getenv('DATA_DIR', 'NOT_SET')}", flush=True)
 # -------------------------------------------------------
 # FASTAPI LIFESPAN (SUPERVISOR ONLY)
 # -------------------------------------------------------
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -131,8 +137,11 @@ async def lifespan(app: FastAPI):
             task.cancel()
         if app.state.bot:
             await app.state.bot.stop()
-    except Exception:
-        pass
+    except Exception as e:
+        __import__("logging").getLogger(__name__).exception(
+            "[CRITICAL] unhandled exception", exc_info=True
+        )
+        raise
 
 
 # -------------------------------------------------------
@@ -171,7 +180,9 @@ def debug_env():
         "ENABLE_LIVE": os.getenv("ENABLE_LIVE", "NOT_SET"),
         "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "NOT_SET"),
         "FORCE_SIGNAL": os.getenv("FORCE_SIGNAL", "NOT_SET"),
-        "GLOBAL_MIN_SIGNAL_CONFIDENCE": os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "NOT_SET"),
+        "GLOBAL_MIN_SIGNAL_CONFIDENCE": os.getenv(
+            "GLOBAL_MIN_SIGNAL_CONFIDENCE", "NOT_SET"
+        ),
         "MIN_INDICATOR_BARS": os.getenv("MIN_INDICATOR_BARS", "NOT_SET"),
         "ELITE_STRATEGIES_ENABLED": os.getenv("ELITE_STRATEGIES_ENABLED", "NOT_SET"),
         "SMC_ENABLED": os.getenv("SMC_ENABLED", "NOT_SET"),
@@ -188,11 +199,19 @@ def trading_status():
     """Check if bot is configured for LIVE trading."""
     enable_live = os.getenv("ENABLE_LIVE", "false").lower() == "true"
     exec_mode = os.getenv("EXECUTION_MODE", "SHADOW")
-    
+
     return {
         "enable_live": enable_live,
         "execution_mode": exec_mode,
         "will_trade": enable_live and exec_mode.upper() == "LIVE",
-        "bot_status": "running" if app.state.bot else ("degraded" if app.state.bot_error else "starting"),
-        "warning": None if enable_live else "⚠️ ENABLE_LIVE is not 'true' - bot will NOT execute real trades!",
+        "bot_status": (
+            "running"
+            if app.state.bot
+            else ("degraded" if app.state.bot_error else "starting")
+        ),
+        "warning": (
+            None
+            if enable_live
+            else "⚠️ ENABLE_LIVE is not 'true' - bot will NOT execute real trades!"
+        ),
     }

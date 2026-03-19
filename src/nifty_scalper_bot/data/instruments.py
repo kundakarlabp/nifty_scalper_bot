@@ -375,8 +375,9 @@ class InstrumentResolver:
                 return int(symbol)
             if isinstance(symbol, str) and symbol.strip().isdigit():
                 return int(symbol.strip())
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
 
         key = str(symbol).strip().upper()
         if not key:
@@ -1052,8 +1053,9 @@ class InstrumentResolver:
                             if int(c.get("instrument_token") or 0) == token:
                                 lot = c.get("lot_size")
                                 return int(lot) if lot not in (None, "", "NULL") else None
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
 
         # direct symbol lookup
         with self._lock:
@@ -1155,8 +1157,9 @@ class InstrumentResolver:
             ts = float(s)
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             return dt.date()
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
         return None
 
     # ------------------------- static utilities ---------------------------

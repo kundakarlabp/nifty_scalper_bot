@@ -415,8 +415,9 @@ class WebSocketManager:
             if ticker is not None:
                 try:
                     await asyncio.to_thread(ticker.close)
-                except Exception:
-                    pass  # Best effort cleanup
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise  # Best effort cleanup
             self._ticker = None
             self._schedule_reconnect("connect_failure")
 
@@ -469,8 +470,9 @@ class WebSocketManager:
                 if self._ticker is not None:
                     try:
                         await asyncio.to_thread(self._ticker.close)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                        raise
                     self._ticker = None
                 await self._connect_once(reason="reconnect")
                 if self._connected.is_set():
