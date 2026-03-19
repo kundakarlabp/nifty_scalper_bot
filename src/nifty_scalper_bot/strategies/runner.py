@@ -34,6 +34,7 @@ from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.event_bus import EventBus
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
@@ -47,6 +48,10 @@ from nifty_scalper_bot.execution.order_state_machine import (
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
 from nifty_scalper_bot.risk import RiskManager
+from nifty_scalper_bot.risk.position_sizing import (
+    RiskManager as DeterministicRiskManager,
+    RiskSnapshot,
+)
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.market_regime_engine import (
@@ -56,7 +61,7 @@ from nifty_scalper_bot.strategies.market_regime_engine import (
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import LogThrottle, get_logger
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     get_market_state,
@@ -161,6 +166,72 @@ _NIFTY_OPTION_SLIPPAGE_GAUGE = metrics.Gauge(
     "Observed slippage for NIFTY option orders",
     ["underlying"],
 )
+
+
+@dataclass(slots=True)
+class DeterministicExecutionPipeline:
+    """Data->signal->validation->risk->execution pipeline."""
+
+    trade_manager: TradeManager
+    risk_manager: DeterministicRiskManager
+    order_executor: Any
+    log_throttle: LogThrottle
+
+    def on_new_candle(
+        self, symbol: str, signal: Signal | None, ltp: float, risk: RiskSnapshot
+    ) -> str:
+        """Process one closed-candle decision. Args: symbol/signal/ltp/risk. Returns: status. Raises: Exception."""
+        if signal is None:
+            return "NO_SIGNAL"
+        LOGGER.info(
+            '{"event":"SIGNAL_GENERATED","symbol":"%s","action":"%s"}',
+            symbol,
+            signal.action,
+        )
+        if self.trade_manager.has_open_trade(symbol):
+            LOGGER.info(
+                '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"duplicate_trade"}',
+                symbol,
+            )
+            return "REJECTED_DUPLICATE"
+        allowed, reason = self.risk_manager.allow_trade(risk)
+        if not allowed:
+            LOGGER.info(
+                '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"%s"}',
+                symbol,
+                reason,
+            )
+            return "REJECTED_RISK"
+        try:
+            order_id = self.order_executor.place_market_order(
+                symbol=symbol,
+                side=signal.action,
+                qty=signal.quantity,
+                price=ltp,
+            )
+            self.trade_manager.create_trade(
+                order_id,
+                symbol,
+                signal.action,
+                signal.quantity,
+                ltp,
+                signal.stop_loss or ltp,
+                signal.take_profit or ltp,
+            )
+            LOGGER.info(
+                '{"event":"ORDER_PLACED","symbol":"%s","order_id":"%s"}',
+                symbol,
+                order_id,
+            )
+            return "ORDER_PLACED"
+        except Exception as e:
+            LOGGER.exception(
+                '{"event":"ORDER_FAILED","symbol":"%s","error":"%s"}',
+                symbol,
+                e,
+                exc_info=True,
+            )
+            raise
 
 
 class OrderRouter(Protocol):
@@ -1631,8 +1702,11 @@ class StrategyRunner:
                 if len(ind_history) >= self._required_candles:
                     # Provide a list of the correct length; individual items unused.
                     effective_bars = [None] * len(ind_history)  # type: ignore[list-item]
-            except Exception:
-                pass  # fall through to actual bars — hydration will be HYDRATING
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
+                raise  # fall through to actual bars — hydration will be HYDRATING
 
         return self.update_symbol_hydration(symbol, effective_bars, indicators)
 
@@ -1833,8 +1907,11 @@ class StrategyRunner:
                         ie_vwap = None
                         try:
                             ie_vwap = self._indicator_engine.get_vwap(symbol)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            __import__("logging").getLogger(__name__).exception(
+                                "[CRITICAL] unhandled exception", exc_info=True
+                            )
+                            raise
                         state.vwap = (
                             ie_vwap if ie_vwap and ie_vwap > 0 else float(bar.close)
                         )
@@ -2363,8 +2440,11 @@ class StrategyRunner:
                     float(best.liquidity_score)
                 )
 
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception(
+                "[CRITICAL] unhandled exception", exc_info=True
+            )
+            raise
 
         self._logger.info(
             "Condition met: best_option_selected",
@@ -2559,8 +2639,11 @@ class StrategyRunner:
                         underlying=underlying_label
                     ).set(slippage)
 
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
+                raise
 
             self._logger.info(
                 "order_submitted",
@@ -2592,8 +2675,11 @@ class StrategyRunner:
                         counters["success"] / total
                     )
 
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
+                raise
 
             self._logger.error(
                 "Failure in StrategyRunner._execute_order: %s",
@@ -2708,8 +2794,11 @@ class StrategyRunner:
                 if underlying and underlying != symbol:
                     self._orders_in_flight.pop(underlying, None)
                     self.orders_in_flight.discard(underlying)
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
+                raise
 
     def _get_execution_state_machine(self, symbol: str) -> OrderStateMachine:
         """Return symbol state machine. Args: symbol. Returns: OrderStateMachine. Raises: none."""
@@ -3884,8 +3973,11 @@ class StrategyRunner:
                 if hasattr(self._position_manager, "update_position_price"):
                     try:
                         self._position_manager.update_position_price(symbol, price)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        __import__("logging").getLogger(__name__).exception(
+                            "[CRITICAL] unhandled exception", exc_info=True
+                        )
+                        raise
                 return
 
             skip_strategy = False
@@ -4004,8 +4096,11 @@ class StrategyRunner:
             if hasattr(self._position_manager, "update_position_price"):
                 try:
                     self._position_manager.update_position_price(symbol, price)
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception(
+                        "[CRITICAL] unhandled exception", exc_info=True
+                    )
+                    raise
 
             # =================================================================
             # PHASE 6: RISK CHECK (Block trading if risk conditions not met)
@@ -4950,8 +5045,11 @@ class StrategyRunner:
                             timestamp, signal.action, 0, price, "error", str(exc)
                         ),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception(
+                        "[CRITICAL] unhandled exception", exc_info=True
+                    )
+                    raise
 
     def _adopt_orphan_positions(self) -> None:
         """
@@ -6243,8 +6341,11 @@ class StrategyRunner:
                     atr_val = float(raw)
                     if atr_val > 0:
                         source = "indicator_engine"
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
+                raise
 
         # 4. Try base underlying (e.g., NIFTY instead of NIFTY2620325200CE)
         if atr_val <= 0:

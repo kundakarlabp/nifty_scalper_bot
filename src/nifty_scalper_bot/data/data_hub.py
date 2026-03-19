@@ -340,8 +340,9 @@ class DataHub:
             # 2. Update Metrics (Throttled)
             try:
                 self._capture_option_metrics(normalized_symbol, tick)
-            except Exception:
-                pass  # Don't let math errors kill the tick
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise  # Don't let math errors kill the tick
 
         # 3. Publish to MessageBus (outside lock)
         if self._message_bus:
@@ -461,8 +462,9 @@ class DataHub:
                     if ws_connected and not poll_enabled:
                         return None
                 return self._mdm.pull_quote(symbol)
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
         return None
 
@@ -707,8 +709,9 @@ class DataHub:
 
             self._last_greeks_update[symbol] = now
 
-        except Exception:
-            pass
+        except Exception as e:
+            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            raise
 
     def _get_underlying_price(self, base: str) -> float | None:
         candidates = [canonical(base)]
@@ -744,8 +747,9 @@ class DataHub:
                     )
                     base = "NIFTY" if "NIFTY" in clean_sym else "BANKNIFTY"
                     return base, ts, strike, is_call
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
         return None
 
     def _clock(self) -> float:

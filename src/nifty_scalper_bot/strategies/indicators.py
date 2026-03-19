@@ -278,8 +278,9 @@ class IndicatorEngine:
             indicators["vwap"] = self.get_vwap(symbol)
             try:
                 self._augment_session_metrics(symbol, indicators)
-            except Exception:
-                pass  # Session metrics are non-critical — don't crash pipeline
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise  # Session metrics are non-critical — don't crash pipeline
             # ✅ FIX S1: Expose latest-bar OHLC for strategies that need it
             history = self._histories.get(symbol)
             if history and len(history) > 0:
@@ -1320,8 +1321,9 @@ class IndicatorEngine:
                                 f"(bars={len(hist)}, min_needed={min_bars})"
                             )
                             return estimated_atr
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
             return None
 
         try:
@@ -1370,8 +1372,9 @@ class IndicatorEngine:
                     closes = hist.get_closes(5)
                     if closes:
                         return float(closes[-1]) * 0.015
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
             return None
 
     def calculate_slope(

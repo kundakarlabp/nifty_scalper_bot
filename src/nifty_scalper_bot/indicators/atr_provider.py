@@ -121,8 +121,9 @@ class SafeATRProvider:
                                     timestamp=time(),
                                     source="estimated",
                                 )
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
 
                 # 5. Final non-None fallback to keep risk guards operational
                 return ATRSnapshot(

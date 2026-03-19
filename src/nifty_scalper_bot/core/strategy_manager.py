@@ -1907,8 +1907,9 @@ class StrategyManager(_BaseStrategyManager):
                     if _bid and _ask and _bid > 0 and _ask > _bid:
                         _mid = (_bid + _ask) / 2.0
                         indicators["spread_pct"] = float((_ask - _bid) / _mid * 100.0)
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
         invalid_reason: str | None = None
         vwap = indicators.get("vwap") or indicators.get("exchange_vwap")
         volume = indicators.get("volume")

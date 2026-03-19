@@ -182,8 +182,9 @@ class StrategyOrchestrator:
                     pos = position_manager.get_position(symbol)
                     if pos and getattr(pos, "quantity", 0) > 0:
                         is_position_close = True
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
 
             if not is_position_close:
                 self._logger.info(

@@ -1526,8 +1526,9 @@ class OrderManager:
                 info = self._resolver.resolve_by_symbol(symbol)
                 if info and "exchange" in info:
                     return info["exchange"]
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
         # 3. Default fallback for this bot (mostly trades Options)
         return "NFO"
@@ -1544,8 +1545,9 @@ class OrderManager:
                 info = self._resolver.resolve_by_symbol(symbol)
                 if info and "tradingsymbol" in info:
                     return info["tradingsymbol"]
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
         # 3. Fallback: Return as is (assuming it's already a tradingsymbol)
         return symbol
@@ -4421,8 +4423,9 @@ class OrderManager:
                 if hasattr(self._positions, "update_from_order"):
                     try:
                         self._positions.update_from_order(order)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                        raise
 
             # ── FIX (BUG 3): CANCELLED exit orders — reactivate bracket.
             # _check_zombie_orders cancels stuck PENDING orders after 45s via
@@ -4467,8 +4470,9 @@ class OrderManager:
             if hasattr(self, "save_orders"):
                 try:
                     self.save_orders()
-                except Exception:
-                    pass
+                except Exception as e:
+                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    raise
 
     def place_atomic_entry(
         self,
@@ -4782,8 +4786,9 @@ class OrderManager:
             try:
                 if self._market_data is not None:
                     _exit_ltp = self._market_data.get_latest_price(symbol)
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
             exit_id = self.place_order(
                 symbol=symbol,
@@ -5325,8 +5330,9 @@ class OrderManager:
         for oid in zombies:
             try:
                 self.cancel_order(oid)
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
     # ----------------------------------------------------------------
     # 💾 PERSISTENCE LAYER (Crash Recovery)
@@ -8224,8 +8230,9 @@ class OrderManager:
                     is False
                 ):
                     payload["instrument_token"] = int(instrument_token)
-            except Exception:
-                pass  # Default to not sending if settings fail
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise  # Default to not sending if settings fail
 
         return payload
 
@@ -10681,8 +10688,9 @@ class OrderManager:
                             )
                             if ltp and float(ltp) > 0:
                                 self._bracket_manager.on_tick(symbol, float(ltp))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                            raise
 
                     if self._market_data:
                         self._market_data.ensure_tracking(symbol, seed=True)
@@ -10729,8 +10737,9 @@ class OrderManager:
                 self._adopt_orphan_position(
                     symbol, {"qty": quantity, "price": base_price}
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                raise
 
         # --- STEP 3: Fix Protection ---
         try:
