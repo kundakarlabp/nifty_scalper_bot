@@ -65,6 +65,8 @@ class Signal:
     stop_loss: float | None
     take_profit: float | None
     metadata: dict[str, Any] = field(default_factory=dict)
+    tradable: bool = True
+    source: str = "runner"
 
     def with_metadata(self, **updates: Any) -> "Signal":
         """Return a new signal with ``metadata`` merged with *updates*."""
@@ -93,6 +95,16 @@ class Signal:
         strategy = self.metadata.get("strategy", "manual")
         raw_sig = f"{strategy}:{self.symbol}:{self.action}:{ts_str}"
         return hashlib.md5(raw_sig.encode()).hexdigest()[:16]
+
+    @property
+    def direction(self) -> str:
+        """Return normalized signal direction."""
+        return self.action
+
+    @property
+    def strength(self) -> float:
+        """Return signal strength as confidence."""
+        return float(self.confidence)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to JSON-serializable dict."""

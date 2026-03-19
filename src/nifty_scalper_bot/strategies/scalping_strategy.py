@@ -72,5 +72,11 @@ class ScalpingStrategy:
             reason="weighted_score",
             stop_loss=None,
             take_profit=None,
-            metadata={"score": score},
+            metadata={
+                "score": score,
+                "direction": action,
+                "strength": score,
+            },
+            tradable=True,
+            source="runner",
         )

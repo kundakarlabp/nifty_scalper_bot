@@ -122,6 +122,18 @@ class OrderExecutionHub:
             ExecutionError: If broker execution fails after retries.
             Exception: Re-raises critical integration failures.
         """
+        if not hasattr(signal, "source") or getattr(signal, "source", "") != "runner":
+            LOGGER.warning("Blocked non-runner execution call")
+            return None
+        if not getattr(signal, "tradable", True):
+            LOGGER.info(
+                {
+                    "event": "SIGNAL_REJECTED",
+                    "symbol": signal.symbol,
+                    "reason": "signal_not_tradable",
+                }
+            )
+            return None
         LOGGER.info(
             {
                 "event": "SIGNAL_GENERATED",

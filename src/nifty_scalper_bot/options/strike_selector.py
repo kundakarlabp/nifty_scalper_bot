@@ -165,6 +165,8 @@ class _OptionContract:
             if strike_value is None:
                 return None
         strike = float(strike_value)
+        if int(strike) % 50 != 0:
+            LOGGER.warning("Unexpected strike: %s", strike)
         expiry_raw = payload.get("expiry") or payload.get("expiry_date")
         expiry_dt = _parse_expiry(expiry_raw)
         if expiry_dt is None:
