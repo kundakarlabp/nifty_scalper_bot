@@ -471,6 +471,7 @@ class TelegramService:
             .write_timeout(35)
             .connect_timeout(15)
             .pool_timeout(15)
+            .connection_pool_size(100)
             .build()
         )
         app.add_error_handler(self._on_error)
