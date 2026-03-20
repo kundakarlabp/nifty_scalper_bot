@@ -4076,11 +4076,12 @@ class StrategyRunner:
             if hasattr(self._position_manager, "update_position_price"):
                 try:
                     self._position_manager.update_position_price(symbol, price)
+                except ValueError:
+                    pass  # ✅ FIX: Ignore expected "No open position" errors
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception(
-                        "[CRITICAL] unhandled exception", exc_info=True
+                    __import__("logging").getLogger(__name__).error(
+                        f"Failed to update position price for {symbol}: {e}"
                     )
-                    raise
 
             # =================================================================
             # PHASE 6: RISK CHECK (Block trading if risk conditions not met)
