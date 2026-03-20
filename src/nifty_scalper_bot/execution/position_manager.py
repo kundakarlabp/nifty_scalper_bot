@@ -1321,7 +1321,8 @@ class PositionManager:
 
         position = self._positions.get(symbol.upper())
         if position is None:
-            raise ValueError(f"No open position for {symbol}")
+            return  # ✅ FIX: Silently ignore ticks for symbols we don't hold
+        
         position.current_price = float(current_price)
         self.save_state()
 
