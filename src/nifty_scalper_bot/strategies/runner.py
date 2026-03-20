@@ -519,8 +519,9 @@ class StrategyRunner:
             lambda: {"success": 0, "error": 0}
         )
 
+        self._settings = get_settings()
         try:
-            settings = get_settings()
+            settings = self._settings
             option_cfg = getattr(settings, "nifty_options", None)
             if option_cfg is not None:
                 self._option_delta_target = float(option_cfg.delta_target)
@@ -674,6 +675,7 @@ class StrategyRunner:
         self._trade_counter_lock = threading.RLock()
         self._market_regime_engine = MarketRegimeEngine()
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
+        self.last_trade_time: datetime | None = None
 
         # FIX S10-2: wire bracket-exit callback so direction lock clears on SL/TP
         if self._bracket_manager is not None and hasattr(
@@ -4712,6 +4714,20 @@ class StrategyRunner:
                                 "state": current_state.value,
                             },
                         )
+                        if last_bar_ts is not None:
+                            candle_age_seconds = (
+                                datetime.now(timezone.utc) - last_bar_ts
+                            ).total_seconds()
+                            if candle_age_seconds > 2:
+                                self._logger.warning(
+                                    "Stale data detected. Skipping signal.",
+                                    extra={
+                                        "event": "stale_data_detected",
+                                        "symbol": symbol,
+                                        "candle_age_seconds": candle_age_seconds,
+                                    },
+                                )
+                                return
                         try:
                             signal = self._strategy_manager.generate_signal(
                                 symbol, price
@@ -4888,6 +4904,42 @@ class StrategyRunner:
                 "Failure in StrategyRunner._should_enforce_freshness_backoff: %s", exc
             )
             return True
+
+    def verify_state(self) -> bool:
+        """Validate broker state before order release. Args: none. Returns: bool. Raises: none."""
+        try:
+            broker = getattr(self, "_broker", None) or getattr(
+                self._order_manager, "_broker", None
+            )
+            if broker is None or not hasattr(broker, "get_positions"):
+                return True
+            broker_positions = broker.get_positions()
+            if broker_positions is None:
+                return False
+            return True
+        except Exception as e:
+            self._logger.error(f"State verification failed: {e}")
+            return False
+
+    def _risk_kill_switch_triggered(self) -> bool:
+        """Check hard trading kill switches. Args: none. Returns: bool. Raises: none."""
+        settings = self._settings if hasattr(self, "_settings") else get_settings()
+        metrics_obj = getattr(self, "metrics", None)
+        daily_pnl = float(getattr(metrics_obj, "daily_pnl", 0.0) or 0.0)
+        consecutive_losses = int(
+            getattr(metrics_obj, "consecutive_losses", 0) or 0
+        )
+        max_daily_loss = float(getattr(settings, "max_daily_loss", float("inf")) or 0.0)
+        if max_daily_loss > 0 and daily_pnl <= -max_daily_loss:
+            self._logger.critical("Max daily loss hit. Trading halted.")
+            return True
+        max_consecutive_losses = int(
+            getattr(settings, "max_consecutive_losses", 0) or 0
+        )
+        if max_consecutive_losses > 0 and consecutive_losses >= max_consecutive_losses:
+            self._logger.critical("Consecutive loss limit hit.")
+            return True
+        return False
 
     def set_data_freshness_backoff(
         self,
@@ -5356,6 +5408,23 @@ class StrategyRunner:
                 "Entered StrategyRunner._handle_entry_signal_inner",
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
             )
+
+            settings = self._settings if hasattr(self, "_settings") else get_settings()
+            cooldown_seconds = int(getattr(settings, "cooldown_seconds", 0) or 0)
+            if (
+                cooldown_seconds > 0
+                and self.last_trade_time is not None
+                and (
+                    datetime.now(timezone.utc) - self.last_trade_time
+                ).total_seconds()
+                < cooldown_seconds
+            ):
+                return
+            if self._risk_kill_switch_triggered():
+                return
+            if not self.verify_state():
+                self._logger.warning("Skipping trade due to state mismatch")
+                return
 
             if self._execution_circuit_breaker.is_open():
                 self._logger.warning(
@@ -5935,6 +6004,8 @@ class StrategyRunner:
                     # Add 1% "Freak Trade Protection" buffer
                     buffer = 1.01 if entry_side == "BUY" else 0.99
                     execution_price = round(base * buffer, 2)
+            if getattr(settings, "simulate_slippage", False):
+                execution_price += 0.5
 
             # ✅ FIX 6a: Shift SL/TP when execution_price diverges from trade_price
             _price_shift = execution_price - trade_price
@@ -6113,6 +6184,7 @@ class StrategyRunner:
                 )
             if order_id:
                 self._execution_circuit_breaker.record_success()
+                self.last_trade_time = datetime.now(timezone.utc)
                 manager = getattr(self, "_strategy_manager", None)
                 if manager is not None and hasattr(
                     manager, "increment_observability_counter"

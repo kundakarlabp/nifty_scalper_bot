@@ -624,6 +624,16 @@ class TelegramBot:
             self._running = False
             log.error("Telegram polling failed: %s", exc, exc_info=True)
 
+    def send_message(self, text: str):
+        """Send plain Telegram message. Args: text. Returns: telegram message | None. Raises: None."""
+        try:
+            if self._app is None or self._app.bot is None:
+                return None
+            return self._app.bot.send_message(chat_id=self.deps.chat_id, text=text)
+        except Exception as e:
+            log.error(f"Telegram send failed: {e}")
+            return None
+
     async def _start_polling_if_needed(self) -> None:
         """
         Starts polling with explicit initialization to fix RuntimeError.
