@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 from io import BytesIO
 
@@ -24,6 +25,7 @@ class SafeMessenger:
 
     def __init__(self, bot) -> None:  # type: ignore[no-untyped-def]
         self.bot = bot
+        self._send_semaphore = asyncio.Semaphore(10)
 
     def _truncate(self, text: str, max_len: int = MAX) -> str:
         if len(text) <= max_len:
@@ -47,12 +49,13 @@ class SafeMessenger:
         else:
             body = self._truncate(raw_text if html_ready else html.escape(raw_text))
         try:
-            return await self.bot.send_message(
-                chat_id=chat_id,
-                text=body,
-                parse_mode=parse_mode,
-                **kwargs,
-            )
+            async with self._send_semaphore:
+                return await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=body,
+                    parse_mode=parse_mode,
+                    **kwargs,
+                )
         except BadRequest:
             try:
                 _SEND_FAILURES.inc()
@@ -60,12 +63,13 @@ class SafeMessenger:
                 pass
             if parse_mode is not None:
                 try:
-                    return await self.bot.send_message(
-                        chat_id=chat_id,
-                        text=self._truncate(raw_text),
-                        parse_mode=None,
-                        **kwargs,
-                    )
+                    async with self._send_semaphore:
+                        return await self.bot.send_message(
+                            chat_id=chat_id,
+                            text=self._truncate(raw_text),
+                            parse_mode=None,
+                            **kwargs,
+                        )
                 except BadRequest:
                     try:
                         _SEND_FAILURES.inc()
@@ -73,11 +77,12 @@ class SafeMessenger:
                         pass
             payload = BytesIO(raw_text.encode("utf-8"))
             payload.name = "output.txt"
-            return await self.bot.send_document(
-                chat_id=chat_id,
-                document=payload,
-                caption="Output too long",
-            )
+            async with self._send_semaphore:
+                return await self.bot.send_document(
+                    chat_id=chat_id,
+                    document=payload,
+                    caption="Output too long",
+                )
 
     async def send_html(
         self,

@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from kiteconnect import KiteTicker
 
+from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger
 
 TickCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -52,7 +53,7 @@ class WebSocketManager:
         max_backoff_seconds: float = 60.0,
         base_backoff_seconds: float = 1.0,
         heartbeat_interval_seconds: float = 10.0,
-        stale_threshold_seconds: float = 30.0,
+        stale_threshold_seconds: float = 10.0,
         heartbeat_timeout_seconds: float = 25.0,
         handshake_timeout_seconds: float = 30.0,
         circuit_breaker_threshold: int = 5,
@@ -140,6 +141,7 @@ class WebSocketManager:
         self._on_disconnect_callback: Callable[[], None] | None = None
         self._connect_started_mono = 0.0
         self._last_tick_mono = 0.0
+        self._last_stale_log_time = 0.0
         self._last_pong_mono = 0.0
         self._last_backoff_delay = self._base_backoff
         self._circuit = _CircuitState()
@@ -249,7 +251,7 @@ class WebSocketManager:
                 self._loop = asyncio.get_running_loop()
             if self._connect_task is not None and not self._connect_task.done():
                 return
-            self._connect_task = self._loop.create_task(self.connect())
+            self._connect_task = safe_task(self.connect())
         except Exception as e:
             self._logger.error("Failure in start: %s", e)
             raise
@@ -260,7 +262,7 @@ class WebSocketManager:
         try:
             if self._loop is None:
                 return
-            self._loop.create_task(self.disconnect())
+            safe_task(self.disconnect())
         except Exception as e:
             self._logger.error("Failure in stop: %s", e)
             raise
@@ -333,6 +335,11 @@ class WebSocketManager:
         """Args: none; Returns: none; Raises: none."""
 
         self._schedule_reconnect("manual")
+
+    def reconnect(self) -> None:
+        """Reconnect websocket session. Args: none. Returns: none. Raises: none."""
+
+        self.force_reconnect()
 
     def is_connected(self) -> bool:
         """Args: none; Returns: bool; Raises: none."""
@@ -431,7 +438,7 @@ class WebSocketManager:
                 if self._reconnect_task is not None and not self._reconnect_task.done():
                     return
                 self._state = ConnectionState.RECONNECTING
-                self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason))
+                self._reconnect_task = safe_task(self._reconnect_loop(reason))
 
         self._schedule_async(_ensure_task())
 
@@ -529,12 +536,14 @@ class WebSocketManager:
                 if self._connected.is_set() and self._last_tick_mono > 0.0:
                     last_tick_age = now - self._last_tick_mono
                     if last_tick_age > self._stale_threshold:
-                        self._logger.warning(
-                            "Condition met: websocket_tick_stale "
-                            "age=%.2fs threshold=%.2fs",
-                            last_tick_age,
-                            self._stale_threshold,
-                        )
+                        now_wall = time.time()
+                        if now_wall - self._last_stale_log_time > 5.0:
+                            self._last_stale_log_time = now_wall
+                            self._logger.warning(
+                                "WebSocket stale. Reconnecting... age=%.2fs threshold=%.2fs",
+                                last_tick_age,
+                                self._stale_threshold,
+                            )
                         if (
                             not self._fallback_active
                             and self._fallback_start_callback is not None
@@ -556,7 +565,7 @@ class WebSocketManager:
         """Args: none; Returns: none; Raises: none."""
 
         if self._watchdog_task is None or self._watchdog_task.done():
-            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+            self._watchdog_task = safe_task(self._watchdog_loop())
 
     async def _replace_ticker(self) -> None:
         """Args: none; Returns: none; Raises: Exception."""
@@ -663,6 +672,14 @@ class WebSocketManager:
         now = time.monotonic()
         self._last_tick_mono = now
         self._last_pong_mono = now
+        update_authoritative = getattr(
+            market_data_manager, "update_authoritative_ticks", None
+        )
+        if callable(update_authoritative):
+            try:
+                update_authoritative(ticks)
+            except Exception as e:
+                self._logger.error("Failure in _on_ticks.update_authoritative: %s", e)
         if self._fallback_active and self._fallback_stop_callback is not None:
             self._fallback_active = False
             try:
@@ -797,9 +814,9 @@ class WebSocketManager:
         except RuntimeError:
             running = None
         if running is loop:
-            loop.create_task(coroutine)
+            safe_task(coroutine)
             return
-        loop.call_soon_threadsafe(lambda: loop.create_task(coroutine))
+        loop.call_soon_threadsafe(lambda: safe_task(coroutine))
 
     def _schedule_async(self, coroutine: Coroutine[Any, Any, Any]) -> None:
         """Args: coroutine; Returns: none; Raises: none."""

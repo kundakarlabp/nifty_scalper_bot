@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from nifty_scalper_bot.config.paths import get_data_dir
+from nifty_scalper_bot.utils.async_helpers import safe_task
 
 # -------------------------------------------------------
 # BASIC PROCESS SETUP - PRODUCTION-GRADE ENV LOADING
@@ -129,7 +130,7 @@ async def lifespan(app: FastAPI):
                 "Condition met: bot entered degraded mode after startup failure"
             )
 
-    task = asyncio.create_task(run_bot_background())
+    task = safe_task(run_bot_background())
     yield
 
     try:

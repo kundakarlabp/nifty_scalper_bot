@@ -11,6 +11,8 @@ from telegram import Message, Update
 from telegram.error import Conflict, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
+from nifty_scalper_bot.utils.async_helpers import safe_task
+
 _LOG = logging.getLogger("nifty_scalper_bot.telegram")
 
 
@@ -582,7 +584,7 @@ class TelegramService:
                     await self._stop_polling()
             _LOG.info("Telegram runner stopped.")
 
-        self._task = asyncio.create_task(_runner(), name="telegram-runner")
+        self._task = safe_task(_runner())
 
     async def stop(self) -> None:
         """Stop polling and dispose of the application."""

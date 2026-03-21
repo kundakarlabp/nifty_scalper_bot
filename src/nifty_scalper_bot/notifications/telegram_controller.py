@@ -117,6 +117,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 F = t.TypeVar("F", bound=t.Callable[..., t.Any])
 
@@ -557,8 +558,8 @@ class TelegramBot:
         quiet_window = timedelta(seconds=self._aggregation_interval)
         self._alert_deduplicator = AlertDeduplicator(
             quiet_window,
-            bucket_capacity=5,
-            bucket_refill_seconds=max(self._aggregation_interval / 5.0, 60.0),
+            bucket_capacity=20,
+            bucket_refill_seconds=10.0,
         )
         self._log_handler: logging.Handler | None = None
         self._allocation_history: deque[tuple[datetime, dict[str, float]]] = deque(
@@ -1475,14 +1476,9 @@ class TelegramBot:
             try:
                 queue.put_nowait((key, message, severity, dispatch_now))
             except asyncio.QueueFull:
-                log.warning(
-                    "Alert queue full; delivering immediately",
-                    extra={"event": "telegram_alert_queue_full", "key": key},
-                )
-                loop.create_task(  # type: ignore[union-attr]
-                    self._dispatch_alert(message, severity),
-                    name="telegram-alert-overflow",
-                )
+                # Queue backpressure is expected under bursty fault loops.
+                # Drop silently to avoid immediate-send amplification.
+                return
 
         loop.call_soon_threadsafe(_put)
 
@@ -3675,7 +3671,14 @@ class TelegramBot:
                 b = b.token(self.deps.token)
             return b
 
+        request = HTTPXRequest(
+            connection_pool_size=100,
+            read_timeout=10,
+            write_timeout=10,
+            connect_timeout=5,
+        )
         b = b.token(self.deps.token)
+        b = b.request(request)
         if _HAS_RATE_LIMITER and _AIORateLimiter is not None:
             try:
                 limiter = t.cast(t.Any, _AIORateLimiter())

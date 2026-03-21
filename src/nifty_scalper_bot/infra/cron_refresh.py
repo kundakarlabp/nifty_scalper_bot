@@ -19,6 +19,7 @@ from nifty_scalper_bot.data import (
 )
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.async_helpers import safe_task
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
@@ -191,7 +192,7 @@ def schedule_instrument_refresh(
                 )
 
     try:
-        task = asyncio.create_task(_refresh_loop())
+        task = safe_task(_refresh_loop())
         LOGGER.info(
             "instrument_refresh_task_scheduled",
             extra={

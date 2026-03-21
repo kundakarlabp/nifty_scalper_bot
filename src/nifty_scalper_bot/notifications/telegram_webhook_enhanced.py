@@ -25,6 +25,7 @@ from telegram.error import (
 from telegram.ext import Application
 
 from nifty_scalper_bot.config.settings import NotificationSettings
+from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger
 
 
@@ -221,7 +222,7 @@ class TelegramEnhancedNotifier:
             try:
                 loop = asyncio.get_running_loop()
                 # We're in a running loop - schedule as task
-                loop.create_task(_dispatch())
+                safe_task(_dispatch())
                 self._logger.info(
                     "Alert scheduled on running loop",
                     extra={"event": "notifier.send_alert.scheduled"},
@@ -501,7 +502,7 @@ class TelegramWebhookController:
             )
             return Response(status_code=status.HTTP_200_OK)
 
-        asyncio.create_task(self.dispatch_update(update))
+        safe_task(self.dispatch_update(update))
         return Response(status_code=status.HTTP_200_OK)
 
     def attach_application(self, application: Application) -> None:
@@ -563,9 +564,8 @@ class TelegramWebhookController:
             )
             with suppress(TelegramError):
                 await self.bot.delete_webhook(drop_pending_updates=False)
-            self._polling_task = asyncio.create_task(
+            self._polling_task = safe_task(
                 self._polling_loop(poll_interval),
-                name="telegram-polling-fallback",
             )
 
     async def _polling_loop(self, interval: float) -> None:
@@ -651,7 +651,7 @@ class TelegramWebhookController:
                     "telegram_ptb_process_failed", extra={"err": str(exc)}
                 )
 
-        asyncio.create_task(_runner())
+        safe_task(_runner())
 
     async def process_update(self, update: Update) -> None:
         """Process ``update`` applying whitelist checks and dispatching."""
@@ -995,7 +995,7 @@ def start_fallback_polling(
             global _POLLING_TASK_STARTED
             _POLLING_TASK_STARTED = False
 
-    asyncio.create_task(_starter(), name="telegram-polling-fallback")
+    safe_task(_starter())
 
 
 __all__ = [
