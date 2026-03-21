@@ -4681,6 +4681,12 @@ class StrategyRunner:
                             interval_sec=60.0,
                             level=logging.DEBUG,
                         )
+                        if (
+                            self._market_data is not None
+                            and hasattr(self._market_data, "is_data_stale")
+                            and self._market_data.is_data_stale()
+                        ):
+                            return
 
                         mdm_last_tick = getattr(
                             self._market_data, "_last_tick_time", {}
@@ -6488,7 +6494,6 @@ class StrategyRunner:
         if selection is None and position_manager is not None:
             positions = position_manager.get_positions(trade_symbol)
             if not positions:
-                self._logger.warning(f"No position to close for {trade_symbol}")
                 self._record_trade(
                     base_symbol,
                     TradeRecord(
@@ -6531,7 +6536,6 @@ class StrategyRunner:
             )
 
         if position is None:
-            self._logger.warning(f"No position found for {trade_symbol}")
             self._record_trade(
                 base_symbol,
                 TradeRecord(

@@ -9,6 +9,7 @@ from enum import Enum
 import logging
 from typing import Any, Awaitable, Callable, TypeVar
 
+from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
@@ -220,7 +221,7 @@ class MessageBus:
                     try:
                         result = handler(message)
                         if asyncio.iscoroutine(result):
-                            asyncio.create_task(result)
+                            safe_task(result)
                     except Exception as exc:
                         LOGGER.error(
                             "Failure in MessageBus handler dispatch: %s",
@@ -248,9 +249,7 @@ class MessageBus:
 
         for msg_type in MessageType:
             if self.subscribers[msg_type]:
-                task = asyncio.create_task(
-                    self._dispatch_loop(msg_type), name=f"dispatch-{msg_type.value}"
-                )
+                task = safe_task(self._dispatch_loop(msg_type))
                 self._tasks.append(task)
 
         LOGGER.info("Message bus started with %d active dispatchers.", len(self._tasks))

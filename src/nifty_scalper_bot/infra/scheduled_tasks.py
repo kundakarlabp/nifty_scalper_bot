@@ -7,6 +7,7 @@ import inspect
 from typing import Any, Awaitable, Callable
 
 from nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive
+from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -129,7 +130,7 @@ def start_background_tasks(order_manager: Any, logger: Any) -> list[asyncio.Task
     )
     tasks: list[asyncio.Task[Any]] = []
     tasks.append(
-        asyncio.create_task(
+        safe_task(
             run_periodic_task(
                 task_fn=order_manager.persist_history_batch,
                 interval_sec=300.0,
@@ -138,7 +139,7 @@ def start_background_tasks(order_manager: Any, logger: Any) -> list[asyncio.Task
         )
     )
     tasks.append(
-        asyncio.create_task(
+        safe_task(
             run_periodic_task(
                 task_fn=lambda: run_archive_rotation(order_manager, max_age_days=90),
                 interval_sec=86_400.0,

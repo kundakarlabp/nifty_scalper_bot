@@ -30,6 +30,7 @@ from nifty_scalper_bot.streaming.websocket_manager import (
     WebSocketManager,
 )
 from nifty_scalper_bot.utils.env import get_str
+from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
 from nifty_scalper_bot.utils.metrics import Counter
@@ -224,6 +225,7 @@ class MarketDataManager:
         self._last_quote_ts_ms: dict[str, float] = {}
         self._last_mid: dict[str, tuple[float, float]] = {}
         self._lock = threading.RLock()
+        self._authoritative_tick_lock = threading.Lock()
         self._account_lock = threading.RLock()
         self._last_tick_source: dict[str, str] = {}
         self._last_tick_hash: dict[str, int] = {}
@@ -267,7 +269,11 @@ class MarketDataManager:
         self._margin_lock = threading.RLock()
         self._margin_snapshot: dict[str, Any] | None = None
         self._last_margin_refresh: float = 0.0
-        self.last_tick_time = 0.0
+        self.latest_ticks: list[dict[str, Any]] = []
+        self.last_tick_time = time.time()
+        self._stale_threshold_seconds = self._parse_float_env(
+            "MDM_STALE_THRESHOLD_SECONDS", default=10.0, minimum=1.0
+        )
         self._tick_warn_last: dict[str, float] = (
             {}
         )  # ✅ FIX: rate-limit cache-miss warnings
@@ -1081,9 +1087,12 @@ class MarketDataManager:
             and tick_age > stale_threshold
         )
         ws_disconnected = not self._is_ws_connected()
+        refresh_symbol = normalized_symbol
+        if isinstance(symbol, str) and ":" not in symbol:
+            refresh_symbol = f"NSE:{symbol.strip().upper()}"
 
-        if tick_stale and ws_disconnected:
-            self._schedule_rest_refresh(normalized_symbol)
+        if tick_stale and (ws_disconnected or self.is_data_stale()):
+            self._schedule_rest_refresh(refresh_symbol)
         return tick
 
     def time_since_last_tick(self, symbol: str) -> float | None:
@@ -1126,8 +1135,8 @@ class MarketDataManager:
         """Args: symbol; Returns: none; Raises: none."""
 
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._rest_refresh(symbol))
+            asyncio.get_running_loop()
+            safe_task(self._rest_refresh(symbol))
         except RuntimeError:
             thread = threading.Thread(
                 target=lambda: asyncio.run(self._rest_refresh(symbol)),
@@ -2429,9 +2438,24 @@ class MarketDataManager:
                     return
             self._tick_cache[symbol] = incoming
             self._last_tick_time[symbol] = time.time()
+            self.last_tick_time = time.time()
             self._handle_tick(incoming)
         except Exception as e:
             self._logger.error("Failure in MarketDataManager._on_tick: %s", e)
+
+    def update_authoritative_ticks(self, ticks: list[dict[str, Any]]) -> None:
+        """Update authoritative wall-clock tick snapshot. Args: ticks. Returns: None. Raises: None."""
+
+        now = time.time()
+        with self._authoritative_tick_lock:
+            self.last_tick_time = now
+            self.latest_ticks = list(ticks)
+
+    def is_data_stale(self) -> bool:
+        """Return whether feed age exceeds threshold. Args: none. Returns: bool. Raises: None."""
+
+        with self._authoritative_tick_lock:
+            return (time.time() - self.last_tick_time) > self._stale_threshold_seconds
 
     # ------------------------------------------------------------------
     # Internal plumbing
@@ -2448,7 +2472,9 @@ class MarketDataManager:
         if instrument_token is None or last_price is None:
             return
 
-        self._last_tick_time["__global__"] = time.monotonic()
+        now = time.time()
+        self._last_tick_time["__global__"] = now
+        self.last_tick_time = now
 
         token: int | None = None
         try:
@@ -2678,7 +2704,7 @@ class MarketDataManager:
                     loop = self._main_loop
                     if loop is not None and loop.is_running():
                         loop.call_soon_threadsafe(
-                            lambda: loop.create_task(callback(dict(tick_payload)))
+                            lambda: safe_task(callback(dict(tick_payload)))
                         )
                     else:
                         with self._lock:
