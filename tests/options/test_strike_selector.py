@@ -39,9 +39,16 @@ class _StubMDM:
     def __init__(self, quotes: dict[str, dict[str, Any]]) -> None:
         self._quotes = quotes
         self.refresh_requests: list[str] = []
+        self._bars: dict[str, list[dict[str, Any]]] = {
+            symbol: [{"timestamp": datetime.now(timezone.utc), "close": 1.0}]
+            for symbol in quotes
+        }
 
     def get_quote(self, symbol: str) -> dict[str, Any] | None:
         return self._quotes.get(symbol)
+
+    def get_ohlc_bars(self, symbol: str) -> list[dict[str, Any]]:
+        return self._bars.get(symbol, [{"timestamp": datetime.now(timezone.utc)}])
 
     def refresh_quote_now(self, symbol: str) -> dict[str, Any] | None:
         self.refresh_requests.append(symbol)

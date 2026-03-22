@@ -6,7 +6,7 @@ import asyncio
 import calendar
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from enum import Enum
 import json
 import logging
@@ -29,6 +29,9 @@ from typing import (
     Sequence,
     cast,
 )
+from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.event_bus import EventBus
@@ -39,9 +42,13 @@ from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-from nifty_scalper_bot.data.source import DataIntegrityError, ensure_ltp
-from nifty_scalper_bot.execution.order_execution_hub import OrderExecutionHub
+from nifty_scalper_bot.data.source import (
+    DataIntegrityError,
+    ensure_ltp,
+    is_symbol_valid,
+)
 from nifty_scalper_bot.execution.circuit_breaker import ExecutionCircuitBreaker
+from nifty_scalper_bot.execution.order_execution_hub import OrderExecutionHub
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
@@ -91,6 +98,7 @@ RELAX_REGIME_FILTER = (
 _THROTTLE_CACHE: Dict[str, float] = {}
 _THROTTLE_LOCK = threading.Lock()
 MIN_EVAL_INTERVAL_SECONDS = 5.0
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 def log_throttled(
@@ -603,6 +611,7 @@ class StrategyRunner:
         )
         self._history_gate_failed: bool = False
         self._history_ready_by_symbol: dict[str, bool] = {}
+        self._required_symbol_count: int = int(os.getenv("REQUIRED_SYMBOL_COUNT", "1"))
         self._symbol_states: dict[str, SymbolState] = {}
         self._symbol_bar_count: dict[str, int] = {}
         self._last_eval_ts: dict[str, float] = defaultdict(float)
@@ -654,6 +663,8 @@ class StrategyRunner:
         self._candle_versions: dict[str, int] = defaultdict(int)
         self._last_strategy_versions: dict[str, int] = defaultdict(int)
         self._gap_repair_inflight: set[str] = set()
+        self._history_refresh_interval_seconds: float = 60.0
+        self._last_history_refresh_by_symbol: dict[str, float] = {}
         # BUG W1 FIX: track symbols that have received at least one LIVE (non-backfill)
         # completed bar.  Used by the PHASE-9 stale-bar gate instead of
         # _symbol_history, which is populated by hydration bars (hours old).
@@ -886,6 +897,29 @@ class StrategyRunner:
             self._set_symbol_hydration_state(symbol, SymbolState.READY)
             return
         self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+
+    def _symbol_has_valid_data(self, symbol: str) -> bool:
+        """Validate symbol candle data integrity. Args: symbol. Returns: bool. Raises: None."""
+        if self._market_data is None:
+            return False
+        try:
+            bars = self._market_data.get_ohlc_bars(symbol) or []
+            if len(bars) == 0:
+                return False
+            df = pd.DataFrame(bars)
+            if "timestamp" not in df.columns:
+                return False
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df = df.dropna(subset=["timestamp"]).set_index("timestamp")
+            return is_symbol_valid(df, min_required_bars=self._required_candles)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in StrategyRunner._symbol_has_valid_data: %s",
+                exc,
+                extra={"event": "symbol_data_validation_error", "symbol": symbol},
+                exc_info=exc,
+            )
+            return False
 
     def remove_symbol(self, symbol: str) -> None:
         """Stop tracking a symbol."""
@@ -1274,6 +1308,7 @@ class StrategyRunner:
         Public API to finalize startup hydration.
         Explicitly registers symbols and sets readiness flags.
         """
+        valid_symbols: list[str] = []
         with self._lock:
             for sym in symbols:
                 normalized = enforce_canonical(normalize_symbol(sym))
@@ -1296,15 +1331,36 @@ class StrategyRunner:
                 # 4. Set High-Water Mark (Prevent dropping first live tick)
                 if normalized not in self._last_bar_ts:
                     self._last_bar_ts[normalized] = datetime.now(timezone.utc)
+                if self._symbol_has_valid_data(normalized):
+                    valid_symbols.append(normalized)
+                else:
+                    self._logger.warning(
+                        "Condition met: symbol_excluded_invalid_data",
+                        extra={
+                            "event": "symbol_excluded_invalid_data",
+                            "symbol": normalized,
+                        },
+                    )
 
         # 5. Keep _startup_hydrated=True so Phase 7 can promote HYDRATING→DEGRADED
         # while _symbol_history is still empty (no live bars yet, first minute after
         # startup). _backfill_history() checks indicator bar counts, NOT this flag,
         # so setting it True here does not re-trigger backfill.
         self._startup_hydrated = True
-        self._runner_state = RunnerState.EXECUTION_ENABLED
-        self.ready = True
-        self._logger.info("🚀 StrategyRunner execution enabled")
+        self.ready = len(valid_symbols) >= self._required_symbol_count
+        if self.ready:
+            self._runner_state = RunnerState.EXECUTION_ENABLED
+            self._logger.info("🚀 StrategyRunner execution enabled")
+        else:
+            self._runner_state = RunnerState.HISTORICAL_READY
+            self._logger.warning(
+                "Condition met: runner_not_ready_invalid_symbol_data",
+                extra={
+                    "event": "runner_not_ready_invalid_symbol_data",
+                    "valid_symbols": len(valid_symbols),
+                    "required_symbols": self._required_symbol_count,
+                },
+            )
 
         # BUG W1 FIX: Removed deadlocking tick-wait that caused 21s startup delay.
         # mark_ready() is called from startup_sequence() (event-loop thread).
@@ -1499,6 +1555,24 @@ class StrategyRunner:
             self._logger.debug("gap_history_refresh_failed for %s: %s", symbol, exc)
         finally:
             self._gap_repair_inflight.discard(symbol)
+
+    def _refresh_history_if_due(self, symbol: str) -> None:
+        """Trigger periodic historical refresh. Args: symbol. Returns: None. Raises: None."""
+        if not symbol or self._main_loop is None or not self._main_loop.is_running():
+            return
+        now_mono = time.monotonic()
+        last_refresh = self._last_history_refresh_by_symbol.get(symbol, 0.0)
+        if now_mono - last_refresh < self._history_refresh_interval_seconds:
+            return
+        self._last_history_refresh_by_symbol[symbol] = now_mono
+        self._logger.info(
+            "Condition met: historical_refresh_triggered",
+            extra={"event": "historical_refresh_triggered", "symbol": symbol},
+        )
+        asyncio.run_coroutine_threadsafe(
+            self._refresh_gap_history_async(symbol),
+            self._main_loop,
+        )
 
     def _emit_composite_reports(self) -> None:
         """Emit periodic system/strategy aggregate logs. Args: none; Returns: none; Raises: none."""
@@ -2924,14 +2998,15 @@ class StrategyRunner:
     def _is_market_open(self, now: datetime) -> bool:
         """Return True only when market state is OPEN."""
         try:
-            _ = now
+            now_ist = now.astimezone(_IST) if now.tzinfo else now.replace(tzinfo=_IST)
+            within_session = dt_time(9, 15) <= now_ist.time() <= dt_time(15, 30)
             settings = get_settings()
             env_name = str(getattr(settings, "environment", "")).lower()
             if env_name == "production":
-                return get_market_state() == MarketState.OPEN
+                return within_session and get_market_state() == MarketState.OPEN
             if bool(getattr(settings, "allow_offmarket_trading", False)):
                 return True
-            return get_market_state() == MarketState.OPEN
+            return within_session and get_market_state() == MarketState.OPEN
         except Exception as e:
             self._logger.warning(
                 f"Market time check failed: {e}. Defaulting to CLOSED."
@@ -4116,6 +4191,7 @@ class StrategyRunner:
                 )
                 return
 
+            self._refresh_history_if_due(symbol)
             if skip_strategy:
                 return
 
@@ -4933,9 +5009,7 @@ class StrategyRunner:
         settings = self._settings if hasattr(self, "_settings") else get_settings()
         metrics_obj = getattr(self, "metrics", None)
         daily_pnl = float(getattr(metrics_obj, "daily_pnl", 0.0) or 0.0)
-        consecutive_losses = int(
-            getattr(metrics_obj, "consecutive_losses", 0) or 0
-        )
+        consecutive_losses = int(getattr(metrics_obj, "consecutive_losses", 0) or 0)
         max_daily_loss = float(getattr(settings, "max_daily_loss", float("inf")) or 0.0)
         if max_daily_loss > 0 and daily_pnl <= -max_daily_loss:
             self._logger.critical("Max daily loss hit. Trading halted.")
@@ -5421,9 +5495,7 @@ class StrategyRunner:
             if (
                 cooldown_seconds > 0
                 and self.last_trade_time is not None
-                and (
-                    datetime.now(timezone.utc) - self.last_trade_time
-                ).total_seconds()
+                and (datetime.now(timezone.utc) - self.last_trade_time).total_seconds()
                 < cooldown_seconds
             ):
                 return
