@@ -39,6 +39,12 @@ from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
+from nifty_scalper_bot.data.candle_engine import (
+    CandleEngine,
+    ensure_valid_data,
+    normalize_ohlc_timezone,
+    validate_dataframe,
+)
 
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
@@ -618,7 +624,9 @@ class StrategyRunner:
         self._eval_gate_lock = threading.Lock()
         self._last_global_eval_ts: float = time.monotonic()
         self._last_tick_seen_ts: float = time.monotonic()
+        self._last_tick_time_by_symbol: dict[str, float] = {}
         self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
+        self._candle_engines: dict[str, CandleEngine] = {}
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._hydration_ready_streak: dict[str, int] = {}
         self._frozen_universe: set[str] = set()
@@ -837,6 +845,7 @@ class StrategyRunner:
         """Begin tracking a new symbol."""
         normalized = self._normalize_symbol(symbol)
         with self._lock:
+            self._candle_engines.setdefault(normalized, CandleEngine())
             state = self._symbol_state.get(normalized)
             if state is None:
                 state = SymbolRuntimeState(
@@ -910,7 +919,10 @@ class StrategyRunner:
             if "timestamp" not in df.columns:
                 return False
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-            df = df.dropna(subset=["timestamp"]).set_index("timestamp")
+            df = df.dropna(subset=["timestamp"])
+            if not validate_dataframe(df, min_required=self._required_candles):
+                return False
+            df = normalize_ohlc_timezone(df)
             return is_symbol_valid(df, min_required_bars=self._required_candles)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
@@ -1334,13 +1346,7 @@ class StrategyRunner:
                 if self._symbol_has_valid_data(normalized):
                     valid_symbols.append(normalized)
                 else:
-                    self._logger.warning(
-                        "Condition met: symbol_excluded_invalid_data",
-                        extra={
-                            "event": "symbol_excluded_invalid_data",
-                            "symbol": normalized,
-                        },
-                    )
+                    self._logger.warning("skipped: invalid data")
 
         # 5. Keep _startup_hydrated=True so Phase 7 can promote HYDRATING→DEGRADED
         # while _symbol_history is still empty (no live bars yet, first minute after
@@ -1353,14 +1359,7 @@ class StrategyRunner:
             self._logger.info("🚀 StrategyRunner execution enabled")
         else:
             self._runner_state = RunnerState.HISTORICAL_READY
-            self._logger.warning(
-                "Condition met: runner_not_ready_invalid_symbol_data",
-                extra={
-                    "event": "runner_not_ready_invalid_symbol_data",
-                    "valid_symbols": len(valid_symbols),
-                    "required_symbols": self._required_symbol_count,
-                },
-            )
+            self._logger.warning("skipped: invalid data")
 
         # BUG W1 FIX: Removed deadlocking tick-wait that caused 21s startup delay.
         # mark_ready() is called from startup_sequence() (event-loop thread).
@@ -3057,6 +3056,9 @@ class StrategyRunner:
             normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
             if normalized_symbol.count(":") != 1:
                 raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
+            self._last_tick_time_by_symbol[normalized_symbol] = time.time()
+            engine = self._candle_engines.setdefault(normalized_symbol, CandleEngine())
+            engine.on_tick(tick)
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
             # ✅ FIX: Throttle stall warning to 30s — same-bar-skip causes expected
@@ -3092,6 +3094,20 @@ class StrategyRunner:
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
             )
+            safe_df = ensure_valid_data(
+                normalized_symbol,
+                engine,
+                fetch_historical=lambda sym: pd.DataFrame(
+                    self._hydrate_missing_bars(sym, max(self._required_candles, 50))
+                ),
+                fetch_recent_rest=lambda sym: pd.DataFrame(
+                    self._hydrate_missing_bars(sym, max(self._required_candles, 50))
+                ),
+                min_required=max(self._required_candles, 50),
+            )
+            if safe_df is None:
+                self._logger.warning("skipped: invalid data")
+                return
             with self._eval_gate_lock:
                 if normalized_symbol in self._eval_in_progress_symbols:
                     return
@@ -3163,6 +3179,22 @@ class StrategyRunner:
                     "stall_sec": round(now - self._last_global_eval_ts, 1),
                 },
             )
+        now_wall = time.time()
+        for symbol, engine in self._candle_engines.items():
+            if now_wall - self._last_tick_time_by_symbol.get(symbol, 0.0) > 2.0:
+                self._logger.info("%s: WS stale → backfill", symbol)
+                try:
+                    repaired = pd.DataFrame(
+                        self._hydrate_missing_bars(
+                            symbol, max(self._required_candles, 50)
+                        )
+                    )
+                    if not repaired.empty:
+                        engine.df = repaired
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        "Failure in StrategyRunner._health_watchdog: %s", exc
+                    )
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
