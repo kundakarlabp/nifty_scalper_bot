@@ -1237,14 +1237,21 @@ class StrategyRunner:
 
             def _callback(tick: Mapping[str, Any], sym: str = symbol) -> None:
                 try:
-                    # Defensive copy and symbol injection
+                    # 1. Guard against empty or malformed ticks (prevents dict() TypeError)
+                    if not tick:
+                        return
+                        
+                    # 2. Defensive copy to a mutable dictionary
                     payload = dict(tick)
                     payload["symbol"] = sym
+                    
+                    # 3. Publish to the event bus
                     self._event_bus.publish(payload)
                 except Exception:
-                    # Use .exception to capture traceback for senior-level debugging
+                    # Capture full stack trace AND the raw tick data for senior-level debugging
                     self._logger.exception(
-                        "Failure in StrategyRunner._subscribe_symbol callback for %s", sym
+                        "CRITICAL: Failure in StrategyRunner._subscribe_symbol callback for %s. Raw tick: %s", 
+                        sym, tick
                     )
 
             callback = _callback
