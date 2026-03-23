@@ -3189,6 +3189,7 @@ class StrategyRunner:
         now = time.monotonic()
         tick_flowing = (now - self._last_tick_seen_ts) <= 5.0
         eval_stalled = (now - self._last_global_eval_ts) > 5.0
+        
         # ✅ FIX: Throttle — same-bar-skip keeps eval_stalled=True for the whole bar.
         # Only warn if stall > 90s (longer than one full bar cycle) to avoid spam.
         genuine_stall = (now - self._last_global_eval_ts) > 90.0
@@ -3200,43 +3201,60 @@ class StrategyRunner:
                     "stall_sec": round(now - self._last_global_eval_ts, 1),
                 },
             )
+
         now_wall = time.time()
+        stale_count = 0
+
         for symbol, engine in self._candle_engines.items():
-            stale_for = now_wall - self._last_tick_time_by_symbol[symbol]
-            if stale_for > 3.0:
-                if now_wall - self._last_ws_stale_log_ts_by_symbol[symbol] >= 15.0:
-                    self._logger.info("%s: WS stale → backfill", symbol)
+            # 1. Use .get() to prevent KeyError on newly subscribed symbols
+            stale_for = now_wall - self._last_tick_time_by_symbol.get(symbol, now_wall)
+            
+            # 2. Relax threshold to 15.0s (3.0s is too tight for OTM options)
+            if stale_for > 15.0:
+                stale_count += 1
+                last_log_ts = self._last_ws_stale_log_ts_by_symbol.get(symbol, 0.0)
+                
+                # 3. GATE THE ENTIRE BACKFILL PROCESS, not just the logger
+                if now_wall - last_log_ts >= 60.0:
+                    self._logger.warning("⚠️ %s: WS stale (%.1fs) → triggering backfill", symbol, stale_for)
                     self._last_ws_stale_log_ts_by_symbol[symbol] = now_wall
-                try:
-                    repair_input = pd.DataFrame(
-                        self._hydrate_missing_bars(symbol, max(self._required_candles, 50))
-                    )
-                    if repair_input.empty:
-                        continue
-                    with self._symbol_locks[symbol]:
-                        repaired = repair_with_backfill(
-                            symbol,
-                            sanitize(engine.get_df()),
-                            fetch_recent_rest=lambda _sym: repair_input,
-                            max_bars=engine.max_bars,
-                        )
-                        if not repaired.empty:
-                            engine.df = repaired
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in StrategyRunner._health_watchdog: %s", exc
-                    )
-                if now_wall - self._last_ws_reconnect_attempt_ts >= 5.0:
-                    self._last_ws_reconnect_attempt_ts = now_wall
+                    
                     try:
-                        reconnect = getattr(self._market_data, "_trigger_zombie_ws_restart", None)
-                        if callable(reconnect):
-                            reconnect()
-                    except Exception as exc:  # noqa: BLE001
-                        self._logger.error(
-                            "Failure in StrategyRunner._health_watchdog.reconnect: %s",
-                            exc,
+                        repair_input = pd.DataFrame(
+                            self._hydrate_missing_bars(symbol, max(self._required_candles, 50))
                         )
+                        if repair_input.empty:
+                            continue
+                            
+                        with self._symbol_locks[symbol]:
+                            repaired = repair_with_backfill(
+                                symbol,
+                                sanitize(engine.get_df()),
+                                fetch_recent_rest=lambda _sym: repair_input,
+                                max_bars=engine.max_bars,
+                            )
+                            if not repaired.empty:
+                                engine.df = repaired
+                    except Exception:
+                        # 4. Use .exception to capture traceback and stop silent failures
+                        self._logger.exception(
+                            "CRITICAL: Failure in StrategyRunner._health_watchdog backfill for %s", symbol
+                        )
+
+        # 5. Move WS Reconnect OUTSIDE the symbol loop. 
+        # We only want to evaluate a WS restart once per cycle, not once per symbol.
+        if stale_count > 0:
+            last_reconnect_ts = getattr(self, "_last_ws_reconnect_attempt_ts", 0.0)
+            # Increase WS restart throttle to 30s to prevent bouncing the connection
+            if now_wall - last_reconnect_ts >= 30.0:
+                self._last_ws_reconnect_attempt_ts = now_wall
+                try:
+                    reconnect = getattr(self._market_data, "_trigger_zombie_ws_restart", None)
+                    if callable(reconnect):
+                        self._logger.warning("🔄 Watchdog triggering zombie WS restart (%d symbols stale)", stale_count)
+                        reconnect()
+                except Exception:
+                    self._logger.exception("CRITICAL: Failure in StrategyRunner._health_watchdog.reconnect")
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
