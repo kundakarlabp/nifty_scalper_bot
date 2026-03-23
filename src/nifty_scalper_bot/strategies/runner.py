@@ -915,22 +915,19 @@ class StrategyRunner:
         self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
 
     def _symbol_has_valid_data(self, symbol: str) -> bool:
-        """Validate symbol candle data integrity. Args: symbol. Returns: bool. Raises: None."""
-        if self._market_data is None:
-            return False
+        """Validate symbol candle data integrity from the indicator engine. Args: symbol. Returns: bool. Raises: None."""
         try:
-            bars = self._market_data.get_ohlc_bars(symbol) or []
-            if len(bars) == 0:
-                return False
-            df = pd.DataFrame(bars)
-            if "timestamp" not in df.columns:
-                return False
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-            df = df.dropna(subset=["timestamp"])
-            if not validate_dataframe(df, min_required=self._required_candles):
-                return False
-            df = normalize_ohlc_timezone(df)
-            return is_symbol_valid(df, min_required_bars=self._required_candles)
+            # Startup hydration injects data directly into the indicator engine.
+            # We must validate against the engine, not the raw market data REST client.
+            if self._indicator_engine and self._indicator_engine.has_min_bars(symbol, self._required_candles):
+                return True
+            
+            # Fallback: check raw memory history in case indicator engine is lagging
+            history = self._symbol_history.get(symbol, [])
+            if len(history) >= self._required_candles:
+                return True
+                
+            return False
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in StrategyRunner._symbol_has_valid_data: %s",
@@ -1377,9 +1374,13 @@ class StrategyRunner:
         if self.ready:
             self._runner_state = RunnerState.EXECUTION_ENABLED
             self._logger.info("🚀 StrategyRunner execution enabled")
+            self._logger.info(f"✅ StrategyRunner marked READY with {len(valid_symbols)} active symbols")
         else:
             self._runner_state = RunnerState.HISTORICAL_READY
-            self._logger.warning("skipped: invalid data")
+            self._logger.warning(
+                f"⚠️ StrategyRunner downgraded to HISTORICAL_READY. "
+                f"Valid symbols ({len(valid_symbols)}) < required ({self._required_symbol_count})"
+            )
 
         # BUG W1 FIX: Removed deadlocking tick-wait that caused 21s startup delay.
         # mark_ready() is called from startup_sequence() (event-loop thread).
@@ -1396,17 +1397,18 @@ class StrategyRunner:
         # are unlocked.  This bridges the gap between "Indicators hydrated" (app.py) and
         # the per-symbol "WARMUP COMPLETE" log emitted on the first tick.
         for _sym in symbols:
+            norm_sym = enforce_canonical(normalize_symbol(_sym))
             try:
-                _bc = len(self._indicator_engine.get_history(_sym) or [])
-                _ok = self._indicator_engine.has_min_bars(_sym, self._required_candles)
+                _bc = len(self._indicator_engine.get_history(norm_sym) or [])
+                _ok = self._indicator_engine.has_min_bars(norm_sym, self._required_candles)
             except Exception:
                 _bc, _ok = 0, False
             self._logger.info(
-                f"📊 WARMUP SUMMARY: {_sym} | bars={_bc} | "
+                f"📊 WARMUP SUMMARY: {norm_sym} | bars={_bc} | "
                 f"min_required={self._required_candles} | ready={_ok}",
                 extra={
                     "event": "warmup_summary",
-                    "symbol": _sym,
+                    "symbol": norm_sym,
                     "bar_count": _bc,
                     "required": self._required_candles,
                     "ready": _ok,
