@@ -9,6 +9,8 @@ from nifty_scalper_bot.data.candle_engine import (
     detect_gap,
     ensure_valid_data,
     fetch_historical_safe,
+    repair_with_backfill,
+    sanitize,
     validate_dataframe,
 )
 
@@ -105,3 +107,72 @@ def test_ensure_valid_data_hydrates_when_cache_invalid() -> None:
 
     assert out is not None
     assert len(out) == 50
+
+
+def test_sanitize_deduplicates_and_fills_missing_close() -> None:
+    ts = datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)
+    dirty = pd.DataFrame(
+        [
+            {"timestamp": ts, "open": 100.0, "high": 101.0, "low": 99.0, "close": None},
+            {
+                "timestamp": ts + timedelta(minutes=1),
+                "open": 101.0,
+                "high": 102.0,
+                "low": 100.0,
+                "close": 101.5,
+            },
+            {
+                "timestamp": ts + timedelta(minutes=1),
+                "open": 100.5,
+                "high": 102.0,
+                "low": 100.0,
+                "close": 101.6,
+            },
+        ]
+    )
+
+    cleaned = sanitize(dirty)
+    assert len(cleaned) == 2
+    assert cleaned["close"].isna().sum() == 0
+
+
+def test_repair_with_backfill_merges_existing_and_recent() -> None:
+    ts = datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)
+    old = pd.DataFrame(
+        [
+            {
+                "timestamp": ts + timedelta(minutes=i),
+                "open": 100 + i,
+                "high": 101 + i,
+                "low": 99 + i,
+                "close": 100.5 + i,
+            }
+            for i in range(2)
+        ]
+    )
+    recent = pd.DataFrame(
+        [
+            {
+                "timestamp": ts + timedelta(minutes=1),
+                "open": 200.0,
+                "high": 201.0,
+                "low": 199.0,
+                "close": 200.5,
+            },
+            {
+                "timestamp": ts + timedelta(minutes=2),
+                "open": 202.0,
+                "high": 203.0,
+                "low": 201.0,
+                "close": 202.5,
+            },
+        ]
+    )
+
+    merged = repair_with_backfill(
+        "NFO:NIFTY",
+        old,
+        fetch_recent_rest=lambda _symbol: recent,
+    )
+    assert len(merged) == 3
+    assert float(merged.iloc[-1]["close"]) == 202.5

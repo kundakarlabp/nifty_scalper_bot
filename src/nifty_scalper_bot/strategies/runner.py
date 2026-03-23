@@ -43,6 +43,8 @@ from nifty_scalper_bot.data.candle_engine import (
     CandleEngine,
     ensure_valid_data,
     normalize_ohlc_timezone,
+    repair_with_backfill,
+    sanitize,
     validate_dataframe,
 )
 
@@ -624,7 +626,12 @@ class StrategyRunner:
         self._eval_gate_lock = threading.Lock()
         self._last_global_eval_ts: float = time.monotonic()
         self._last_tick_seen_ts: float = time.monotonic()
-        self._last_tick_time_by_symbol: dict[str, float] = {}
+        self._last_tick_time_by_symbol: dict[str, float] = defaultdict(float)
+        self._symbol_locks: defaultdict[str, threading.Lock] = defaultdict(
+            threading.Lock
+        )
+        self._last_ws_stale_log_ts_by_symbol: dict[str, float] = defaultdict(float)
+        self._last_ws_reconnect_attempt_ts: float = 0.0
         self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
         self._candle_engines: dict[str, CandleEngine] = {}
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
@@ -1239,20 +1246,22 @@ class StrategyRunner:
             callback = _callback
             self._callbacks[symbol] = callback
 
-        if self._data_hub is not None:
-            # Primary deterministic path: DataHub subscription only.
-            try:
+        self._safe_subscribe(symbol, callback)
+
+    def _safe_subscribe(
+        self, symbol: str, callback: Callable[[Mapping[str, Any]], None]
+    ) -> None:
+        """Subscribe symbol safely. Args: symbol/callback. Returns: None. Raises: None."""
+        try:
+            if self._data_hub is not None:
                 self._data_hub.subscribe_ticks(symbol, callback)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in StrategyRunner._subscribe_symbol: %s", exc
-                )
-        elif self._legacy_tick_subscription_mode:
-            self._market_data.subscribe(symbol, callback)
-        else:
-            self._logger.error(
-                "DataHub unavailable and legacy subscription mode disabled"
-            )
+                return
+            if self._legacy_tick_subscription_mode:
+                self._market_data.subscribe(symbol, callback)
+                return
+            raise RuntimeError("DataHub unavailable and legacy subscription disabled")
+        except Exception as exc:
+            self._logger.error("SUBSCRIBE_FAIL %s: %s", symbol, exc)
 
     def ingest_historical_bar(self, data: dict) -> None:
         """
@@ -3058,7 +3067,8 @@ class StrategyRunner:
                 raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
             self._last_tick_time_by_symbol[normalized_symbol] = time.time()
             engine = self._candle_engines.setdefault(normalized_symbol, CandleEngine())
-            engine.on_tick(tick)
+            with self._symbol_locks[normalized_symbol]:
+                engine.on_tick(tick)
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
             # ✅ FIX: Throttle stall warning to 30s — same-bar-skip causes expected
@@ -3181,20 +3191,41 @@ class StrategyRunner:
             )
         now_wall = time.time()
         for symbol, engine in self._candle_engines.items():
-            if now_wall - self._last_tick_time_by_symbol.get(symbol, 0.0) > 2.0:
-                self._logger.info("%s: WS stale → backfill", symbol)
+            stale_for = now_wall - self._last_tick_time_by_symbol[symbol]
+            if stale_for > 3.0:
+                if now_wall - self._last_ws_stale_log_ts_by_symbol[symbol] >= 15.0:
+                    self._logger.info("%s: WS stale → backfill", symbol)
+                    self._last_ws_stale_log_ts_by_symbol[symbol] = now_wall
                 try:
-                    repaired = pd.DataFrame(
-                        self._hydrate_missing_bars(
-                            symbol, max(self._required_candles, 50)
-                        )
+                    repair_input = pd.DataFrame(
+                        self._hydrate_missing_bars(symbol, max(self._required_candles, 50))
                     )
-                    if not repaired.empty:
-                        engine.df = repaired
+                    if repair_input.empty:
+                        continue
+                    with self._symbol_locks[symbol]:
+                        repaired = repair_with_backfill(
+                            symbol,
+                            sanitize(engine.get_df()),
+                            fetch_recent_rest=lambda _sym: repair_input,
+                            max_bars=engine.max_bars,
+                        )
+                        if not repaired.empty:
+                            engine.df = repaired
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in StrategyRunner._health_watchdog: %s", exc
                     )
+                if now_wall - self._last_ws_reconnect_attempt_ts >= 5.0:
+                    self._last_ws_reconnect_attempt_ts = now_wall
+                    try:
+                        reconnect = getattr(self._market_data, "_trigger_zombie_ws_restart", None)
+                        if callable(reconnect):
+                            reconnect()
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.error(
+                            "Failure in StrategyRunner._health_watchdog.reconnect: %s",
+                            exc,
+                        )
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
