@@ -13,6 +13,26 @@ FetchHistoricalFn = Callable[[str], pd.DataFrame | None]
 FetchRecentFn = Callable[[str], pd.DataFrame | None]
 
 
+def sanitize(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Sanitize OHLCV frame. Args: df. Returns: cleaned DataFrame. Raises: None."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    cleaned = df.copy()
+    if "timestamp" in cleaned.columns:
+        cleaned["timestamp"] = pd.to_datetime(
+            cleaned["timestamp"], utc=True, errors="coerce"
+        )
+        cleaned = cleaned.dropna(subset=["timestamp"])
+        cleaned = cleaned.drop_duplicates(subset="timestamp", keep="last")
+        cleaned = cleaned.sort_values("timestamp")
+    else:
+        cleaned = cleaned.drop_duplicates()
+    cleaned = cleaned.ffill().bfill()
+    if "close" in cleaned.columns:
+        cleaned = cleaned[~cleaned["close"].isna()]
+    return cleaned.reset_index(drop=True)
+
+
 @dataclass(slots=True)
 class CandleEngine:
     """Build candles from ticks.
@@ -131,15 +151,13 @@ def repair_with_backfill(
 
     Args: symbol/df/fetch_recent_rest/max_bars. Returns: DataFrame. Raises: Exception.
     """
-    recent = fetch_recent_rest(symbol)
-    if recent is None or recent.empty:
-        return df.tail(max_bars).copy() if df is not None else pd.DataFrame()
+    old_df = sanitize(df)
+    recent = sanitize(fetch_recent_rest(symbol))
+    if recent.empty:
+        return old_df.tail(max_bars).copy()
 
-    merged = pd.concat([df, recent], ignore_index=True)
-    merged["timestamp"] = pd.to_datetime(merged["timestamp"], utc=True, errors="coerce")
-    merged = merged.dropna(subset=["timestamp"])
-    merged = merged.drop_duplicates(subset="timestamp", keep="last")
-    merged = merged.sort_values("timestamp")
+    merged = pd.concat([old_df, recent], ignore_index=True)
+    merged = sanitize(merged)
     return merged.tail(max_bars).reset_index(drop=True)
 
 
@@ -169,6 +187,8 @@ def validate_dataframe(df: pd.DataFrame | None, min_required: int = 50) -> bool:
     if df is None:
         return False
     if len(df) < min_required:
+        return False
+    if "timestamp" not in df.columns:
         return False
     if df.isnull().any().any():
         return False
@@ -201,7 +221,9 @@ def ensure_valid_data(
     Args: symbol/engine/fetch_historical/fetch_recent_rest/min_required.
     Returns: DataFrame|None. Raises: None.
     """
-    df = engine.get_df()
+    df = sanitize(engine.get_df())
+    if not df.equals(engine.df):
+        engine.df = df.copy(deep=True)
 
     if not validate_dataframe(df, min_required=min_required):
         df_hist = fetch_historical_safe(
@@ -210,9 +232,24 @@ def ensure_valid_data(
             min_required=min_required,
         )
         if df_hist is not None:
-            engine.df = df_hist.copy(deep=True)
-            return engine.get_df()
-        return None
+            repaired = sanitize(df_hist)
+            engine.df = repaired.copy(deep=True)
+            df = engine.get_df()
+        else:
+            return None
+
+    if not validate_dataframe(df, min_required=min_required):
+        repaired = repair_with_backfill(
+            symbol,
+            df,
+            fetch_recent_rest=fetch_recent_rest,
+            max_bars=engine.max_bars,
+        )
+        if validate_dataframe(repaired, min_required=min_required):
+            engine.df = repaired.copy(deep=True)
+            df = engine.get_df()
+        else:
+            return None
 
     if detect_gap(df):
         repaired = repair_with_backfill(
