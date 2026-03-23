@@ -915,14 +915,13 @@ class StrategyRunner:
         self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
 
     def _symbol_has_valid_data(self, symbol: str) -> bool:
-        """Validate symbol candle data integrity from the indicator engine. Args: symbol. Returns: bool. Raises: None."""
+        """Validate symbol candle data integrity from the indicator engine."""
         try:
-            # Startup hydration injects data directly into the indicator engine.
-            # We must validate against the engine, not the raw market data REST client.
+            # 1. Primary check: Has the indicator engine processed enough bars?
             if self._indicator_engine and self._indicator_engine.has_min_bars(symbol, self._required_candles):
                 return True
             
-            # Fallback: check raw memory history in case indicator engine is lagging
+            # 2. Fallback check: Does our raw history deque have enough bars?
             history = self._symbol_history.get(symbol, [])
             if len(history) >= self._required_candles:
                 return True
@@ -1390,7 +1389,8 @@ class StrategyRunner:
         # spends 21 extra seconds blocked before becoming EXECUTION_ENABLED.
         # Tick availability is already handled per-evaluation (spot_stale=True path).
 
-        self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
+        # REMOVE the hardcoded logger at the bottom of the function:
+        # self._logger.info(f"✅ StrategyRunner marked READY with {len(symbols)} symbols")
 
         # BUG W2 FIX: Log per-symbol bar-count summary at mark_ready() so Railway logs
         # confirm exactly how many indicator bars each symbol has at the moment strategies
