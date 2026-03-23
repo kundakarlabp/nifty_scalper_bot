@@ -7,10 +7,10 @@ that calculates common technical indicators from the stored price history.
 
 from __future__ import annotations
 
-import logging
-import threading
 from collections import deque
 from datetime import datetime, time, timedelta, timezone
+import logging
+import threading
 from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -279,7 +279,9 @@ class IndicatorEngine:
             try:
                 self._augment_session_metrics(symbol, indicators)
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
                 raise  # Session metrics are non-critical — don't crash pipeline
             # ✅ FIX S1: Expose latest-bar OHLC for strategies that need it
             history = self._histories.get(symbol)
@@ -804,16 +806,16 @@ class IndicatorEngine:
                 log_throttled(
                     LOGGER,
                     f"indicator_gap_{symbol}",
-                    "Condition met: indicator_integrity_missing_candle",
+                    "skipped: invalid data",
                     interval_sec=300.0,
                     level=logging.WARNING,
                     extra={
-                        "event": "indicator_integrity_missing_candle",
+                        "event": "indicator_gap_detected",
                         "symbol": symbol,
                         "gap_seconds": gap_seconds,
                     },
                 )
-                continue
+                return False
         return True
 
     def ensure_min_bars(
@@ -1322,7 +1324,9 @@ class IndicatorEngine:
                             )
                             return estimated_atr
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
                 raise
             return None
 
@@ -1373,7 +1377,9 @@ class IndicatorEngine:
                     if closes:
                         return float(closes[-1]) * 0.015
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
                 raise
             return None
 
