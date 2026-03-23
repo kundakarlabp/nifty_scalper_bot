@@ -1237,10 +1237,14 @@ class StrategyRunner:
 
             def _callback(tick: Mapping[str, Any], sym: str = symbol) -> None:
                 try:
-                    self._event_bus.publish({**dict(tick), "symbol": sym})
-                except Exception as e:
-                    self._logger.error(
-                        "Failure in StrategyRunner._subscribe_symbol callback: %s", e
+                    # Defensive copy and symbol injection
+                    payload = dict(tick)
+                    payload["symbol"] = sym
+                    self._event_bus.publish(payload)
+                except Exception:
+                    # Use .exception to capture traceback for senior-level debugging
+                    self._logger.exception(
+                        "Failure in StrategyRunner._subscribe_symbol callback for %s", sym
                     )
 
             callback = _callback
