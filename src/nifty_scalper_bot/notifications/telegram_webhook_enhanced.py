@@ -5,19 +5,15 @@ and robust command replies (/ping, /status, /start).
 from __future__ import annotations
 
 import asyncio
+import json
+import random
 from contextlib import suppress
 from dataclasses import dataclass, field
-import json
 from logging import Logger
-import random
 from time import monotonic
 from typing import Any, Callable, Iterable, Mapping, Sequence, cast
 
 from fastapi import APIRouter, Request, Response, status
-
-from nifty_scalper_bot.config.settings import NotificationSettings
-from nifty_scalper_bot.utils.async_helpers import safe_task
-from nifty_scalper_bot.utils.logging import get_logger
 from telegram import Bot, Message, Update
 from telegram.error import (
     Forbidden,
@@ -27,6 +23,10 @@ from telegram.error import (
     TimedOut,
 )
 from telegram.ext import Application
+
+from nifty_scalper_bot.config.settings import NotificationSettings
+from nifty_scalper_bot.utils.async_helpers import safe_task
+from nifty_scalper_bot.utils.logging import get_logger
 
 
 def _ensure_set(values: Iterable[int] | None) -> set[int]:
@@ -343,9 +343,7 @@ class TelegramEnhancedNotifier:
                     # Repeated hard failures indicate transport degradation; latch
                     # to avoid retry spam from every caller until cooldown expires.
                     self._telegram_degraded = True
-                    self._telegram_degraded_until = (
-                        _current_loop_time() + retry_window_s
-                    )
+                    self._telegram_degraded_until = _current_loop_time() + retry_window_s
                     if not self._telegram_degraded_logged:
                         self._telegram_degraded_logged = True
                         self._logger.error(
@@ -397,9 +395,7 @@ class TelegramEnhancedNotifier:
                     # Generic Telegram transport failures are latched as degraded so
                     # recovery waits for cooldown instead of immediate retry storms.
                     self._telegram_degraded = True
-                    self._telegram_degraded_until = (
-                        _current_loop_time() + retry_window_s
-                    )
+                    self._telegram_degraded_until = _current_loop_time() + retry_window_s
                     if not self._telegram_degraded_logged:
                         self._telegram_degraded_logged = True
                         self._logger.error(
@@ -450,14 +446,6 @@ class TelegramWebhookController:
     commands work out of the box without pulling in the legacy console.
     """
 
-    _instance: TelegramWebhookController | None = None
-
-    def __new__(cls, *args: object, **kwargs: object) -> TelegramWebhookController:
-        if cls._instance is None:
-            cls._instance = cast(TelegramWebhookController, super().__new__(cls))
-            setattr(cls._instance, "_initialized", False)
-        return cls._instance
-
     def __init__(
         self,
         bot: Bot,
@@ -466,8 +454,6 @@ class TelegramWebhookController:
         status_provider: Callable[[], Mapping[str, object]] | None = None,
         application: Application | None = None,
     ) -> None:
-        if getattr(self, "_initialized", False):
-            return
         self.bot = bot
         self.settings = settings
         self.logger = get_logger(__name__)
@@ -496,7 +482,6 @@ class TelegramWebhookController:
         self._user_whitelist = _ensure_set(
             getattr(settings, "whitelist_user_ids", None)
         )
-        self._initialized = True
 
     async def _handle_webhook(self, request: Request) -> Response:
         try:
