@@ -13,6 +13,56 @@ class DataIntegrityError(ValueError):
 
 
 @dataclass(slots=True)
+class MarketDataValidator:
+    """Central OHLC validator. Args: min_candles. Returns: MarketDataValidator. Raises: None."""
+
+    min_candles: int = 1
+
+    def validate_ohlc(self, df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Validate OHLCV frame. Args: df/symbol. Returns: validated frame. Raises: DataIntegrityError."""
+        if df is None or df.empty:
+            raise DataIntegrityError(f"{symbol}: empty dataframe")
+
+        required = ["open", "high", "low", "close", "volume"]
+        missing = [col for col in required if col not in df.columns]
+        if missing:
+            raise DataIntegrityError(f"{symbol}: missing columns {missing}")
+
+        if len(df) < int(self.min_candles):
+            raise DataIntegrityError(
+                f"{symbol}: insufficient candles {len(df)}<{int(self.min_candles)}"
+            )
+
+        validated = df
+        if validated[required].isnull().any().any():
+            validated = validated.ffill()
+            validated = validated.dropna(subset=required)
+
+        if validated.empty:
+            raise DataIntegrityError(f"{symbol}: no rows after null cleanup")
+
+        if "timestamp" in validated.columns:
+            ts = pd.to_datetime(validated["timestamp"], utc=True, errors="coerce")
+            if ts.isna().any():
+                raise DataIntegrityError(f"{symbol}: invalid timestamps")
+            if not ts.is_monotonic_increasing:
+                raise DataIntegrityError(f"{symbol}: non-monotonic timestamps")
+        elif isinstance(validated.index, pd.DatetimeIndex):
+            if not validated.index.is_monotonic_increasing:
+                raise DataIntegrityError(f"{symbol}: non-monotonic datetime index")
+
+        highs_ok = validated["high"] >= validated[["open", "close"]].max(axis=1)
+        if not bool(highs_ok.all()):
+            raise DataIntegrityError(f"{symbol}: invalid high values")
+
+        lows_ok = validated["low"] <= validated[["open", "close"]].min(axis=1)
+        if not bool(lows_ok.all()):
+            raise DataIntegrityError(f"{symbol}: invalid low values")
+
+        return validated
+
+
+@dataclass(slots=True)
 class CandleFrame:
     """OHLCV wrapper with integrity checks. Args: df. Returns: CandleFrame. Raises: DataIntegrityError."""
 
