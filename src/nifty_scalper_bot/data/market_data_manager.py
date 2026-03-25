@@ -121,23 +121,6 @@ class _OHLCBuilder:
                 bar.close = price
                 bar.volume += volume_delta
             else:
-                if bucket:
-                    interval = timedelta(minutes=1)
-                    last_bar = bucket[-1]
-                    last_bar_time = last_bar.timestamp
-                    last_close = last_bar.close
-                    while last_bar_time + interval < timestamp:
-                        last_bar_time += interval
-                        bucket.append(
-                            _OHLCBar(
-                                timestamp=last_bar_time,
-                                open=last_close,
-                                high=last_close,
-                                low=last_close,
-                                close=last_close,
-                                volume=0.0,
-                            )
-                        )
                 bucket.append(
                     _OHLCBar(
                         timestamp=timestamp,
@@ -256,6 +239,9 @@ class MarketDataManager:
         self._poll_jitter_pct = 0.0
         self._poll_batch_ceiling = 0
         self._ohlc_builder = _OHLCBuilder(maxlen=self._cache_len)
+        self._ohlc: dict[str, Deque[dict[str, Any]]] = defaultdict(
+            lambda: deque(maxlen=self._cache_len)
+        )
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
@@ -2641,6 +2627,11 @@ class MarketDataManager:
         self._notify_unified_manager(symbol, cached_tick)
         bar_symbol = self._bar_symbol_key(symbol)
         self._ohlc_builder.add_tick(bar_symbol, cached_tick)
+        with self._lock:
+            self._ohlc[bar_symbol] = deque(
+                self._ohlc_builder.get_bars(bar_symbol),
+                maxlen=self._cache_len,
+            )
         staleness_seconds = 0.0
         try:
             staleness_seconds = max(time.time() - float(wallclock), 0.0)
@@ -2668,6 +2659,9 @@ class MarketDataManager:
         with self._lock:
             last_emit = float(self._last_emit_mono.get(symbol, 0.0))
             if (
+                source != "warmup"
+                and source != "historical"
+                and
                 self._tick_emit_min_interval > 0
                 and (now_emit - last_emit) < self._tick_emit_min_interval
             ):
@@ -3539,14 +3533,24 @@ class MarketDataManager:
         """Return trailing one-minute OHLC bars for *symbol*."""
 
         bar_symbol = self._bar_symbol_key(symbol)
-        return self._ohlc_builder.get_bars(bar_symbol, limit=limit)
+        with self._lock:
+            bars = list(self._ohlc.get(bar_symbol, ()))
+        if limit is not None and limit >= 0:
+            bars = bars[-limit:]
+        return bars
+
+    def get_ohlc(self, symbol: str) -> list[dict[str, Any]]:
+        """Return finalized candles for *symbol*. Args: symbol. Returns: list of candles. Raises: None."""
+        return self.get_ohlc_bars(symbol)
 
     @property
     def market_data(self) -> dict[str, Any]:
         """Return derived market data snapshots such as OHLC bars."""
 
         snapshot: dict[str, Any] = {}
-        for symbol, bars in self._ohlc_builder.snapshot().items():
+        with self._lock:
+            ohlc_snapshot = {symbol: list(bars) for symbol, bars in self._ohlc.items()}
+        for symbol, bars in ohlc_snapshot.items():
             snapshot[f"{symbol}_bars"] = bars
         return snapshot
 

@@ -16,7 +16,7 @@ from nifty_scalper_bot.data.candle_engine import (
 
 
 def _tick(ts: datetime, price: float) -> dict[str, float | datetime]:
-    return {"timestamp": ts, "price": price, "volume": 1.0}
+    return {"symbol": "NFO:NIFTY", "timestamp": ts, "ltp": price, "volume": 1.0}
 
 
 def test_candle_engine_finalizes_closed_candle() -> None:
@@ -109,7 +109,7 @@ def test_ensure_valid_data_hydrates_when_cache_invalid() -> None:
     assert len(out) == 50
 
 
-def test_sanitize_deduplicates_and_fills_missing_close() -> None:
+def test_sanitize_deduplicates_and_drops_missing_close() -> None:
     ts = datetime(2026, 1, 2, 9, 15, tzinfo=timezone.utc)
     dirty = pd.DataFrame(
         [
@@ -132,7 +132,7 @@ def test_sanitize_deduplicates_and_fills_missing_close() -> None:
     )
 
     cleaned = sanitize(dirty)
-    assert len(cleaned) == 2
+    assert len(cleaned) == 1
     assert cleaned["close"].isna().sum() == 0
 
 
