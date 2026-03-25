@@ -1408,7 +1408,9 @@ def get_http_app() -> FastAPI:
                 LOGGER.info("🛑 Shutting down Telegram Bot...")
                 await ctx.telegram_bot.stop()
         except Exception as e:
-            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            __import__("logging").getLogger(__name__).exception(
+                "[CRITICAL] unhandled exception", exc_info=True
+            )
             raise
 
     # ----------------------------------------------------------------
@@ -2141,7 +2143,9 @@ def _find_existing_nifty_option_symbol(
                         s_up if not s_up.startswith("NFO:") else s_up.split(":", 1)[-1]
                     )
     except Exception as e:
-        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+        __import__("logging").getLogger(__name__).exception(
+            "[CRITICAL] unhandled exception", exc_info=True
+        )
         raise
 
     return None
@@ -2271,7 +2275,9 @@ def _get_symbols(
                                 ltp = price
                                 break
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    __import__("logging").getLogger(__name__).exception(
+                        "[CRITICAL] unhandled exception", exc_info=True
+                    )
                     raise
         except Exception as exc:
             LOGGER.error("Error fetching live price: %s", exc, exc_info=True)
@@ -3192,7 +3198,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     if not mapped:
                         mapped = instrument_resolver.format_token_as_symbol(token_int)
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    __import__("logging").getLogger(__name__).exception(
+                        "[CRITICAL] unhandled exception", exc_info=True
+                    )
                     raise
 
             # Try MDM
@@ -4292,7 +4300,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         )
                     )
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                __import__("logging").getLogger(__name__).exception(
+                    "[CRITICAL] unhandled exception", exc_info=True
+                )
                 raise
 
     background_tasks: list[asyncio.Task[Any]] = []
@@ -5675,122 +5685,117 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
 
-            # ---------- HISTORICAL HYDRATION (RATE-LIMIT SAFE FIX) ----------
+            # ---------- HISTORICAL HYDRATION (PARALLEL FETCH + SERIAL COMMIT) ----------
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(days=5)
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-            engine = ctx.market_regime_manager.indicators
-            HYDRATION_DELAY_SEC = 1.3  # Zerodha-safe pacing
             hydrated_counts: dict[str, int] = {}
+            runner = ctx.strategy_runner
 
-            for idx, sym in enumerate(targets, start=1):
-                try:
-                    LOGGER.debug(f"📥 Hydration {idx}/{len(targets)}: {sym}")
+            async def _fetch_symbol(symbol: str) -> tuple[str, list[Any]]:
+                """Fetch historical records for one symbol. Args: symbol. Returns: symbol and raw records. Raises: Exception."""
+                records = await asyncio.to_thread(
+                    ctx.broker_client.get_ohlc,
+                    symbol,
+                    "minute",
+                    from_str,
+                    to_str,
+                )
+                LOGGER.info(
+                    "hydration_fetch_complete",
+                    extra={
+                        "event": "hydration_fetch_complete",
+                        "symbol": symbol,
+                        "records": len(records or []),
+                    },
+                )
+                return symbol, list(records or [])
 
-                    records = await asyncio.to_thread(
-                        ctx.broker_client.get_ohlc,
-                        sym,
-                        "minute",
-                        from_str,
-                        to_str,
+            fetch_results = await asyncio.gather(
+                *[_fetch_symbol(sym) for sym in targets], return_exceptions=True
+            )
+
+            LOGGER.info(
+                "hydration_commit_start",
+                extra={
+                    "event": "hydration_commit_start",
+                    "symbols": len(targets),
+                },
+            )
+            for result in fetch_results:
+                if isinstance(result, Exception):
+                    LOGGER.warning(f"❌ Failed to fetch hydration symbol: {result}")
+                    continue
+                sym, records = result
+                count = 0
+                for row in records:
+                    try:
+                        if isinstance(row, dict):
+                            ts = row.get("date") or row.get("timestamp")
+                            o = row.get("open")
+                            h = row.get("high")
+                            l = row.get("low")
+                            c_p = row.get("close")
+                            v = row.get("volume", 0)
+                        elif isinstance(row, (list, tuple)) and len(row) >= 6:
+                            ts, o, h, l, c_p, v = (
+                                row[0],
+                                row[1],
+                                row[2],
+                                row[3],
+                                row[4],
+                                row[5],
+                            )
+                        else:
+                            continue
+
+                        if isinstance(ts, str):
+                            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        elif not isinstance(ts, datetime):
+                            ts = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        if not all(x is not None for x in (o, h, l, c_p)):
+                            continue
+
+                        bar_data = {
+                            "symbol": sym,
+                            "open": float(o),
+                            "high": float(h),
+                            "low": float(l),
+                            "close": float(c_p),
+                            "volume": int(v or 0),
+                            "timestamp": ts,
+                        }
+                        if runner is not None and hasattr(runner, "safe_ingest"):
+                            await runner.safe_ingest(bar_data)
+                        elif runner is not None and hasattr(
+                            runner, "ingest_historical_bar"
+                        ):
+                            runner.ingest_historical_bar(bar_data)
+                        count += 1
+                    except Exception as candle_err:
+                        LOGGER.debug(f"Skipping bad candle for {sym}: {candle_err}")
+
+                hydrated_counts[sym] = count
+                LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
+                if ctx.market_data_manager:
+                    bars_snapshot = ctx.market_data_manager.get_ohlc_bars(sym)
+                    ctx.market_data_manager.update_hydration_status(
+                        sym, bars_snapshot or records
                     )
 
-                    if records:
-                        count = 0
-                        # 1. Get Reference to Runner
-                        runner = ctx.strategy_runner
-
-                        for c in records:
-                            # Per-candle guard: one bad candle must not abort
-                            # the remaining bars for this symbol.
-                            try:
-                                # --- Parse OHLCV --------------------------------
-                                if isinstance(c, dict):
-                                    # kiteconnect SDK format: dict with "date" key
-                                    ts = c.get("date") or c.get("timestamp")
-                                    o = c.get("open")
-                                    h = c.get("high")
-                                    l = c.get("low")
-                                    c_p = c.get("close")
-                                    v = c.get("volume", 0)
-                                elif isinstance(c, (list, tuple)) and len(c) >= 6:
-                                    # Raw REST format: [ts, O, H, L, C, V] or
-                                    # [ts, O, H, L, C, V, OI] — index-safe slice
-                                    ts, o, h, l, c_p, v = (
-                                        c[0],
-                                        c[1],
-                                        c[2],
-                                        c[3],
-                                        c[4],
-                                        c[5],
-                                    )
-                                else:
-                                    continue  # unknown or incomplete row
-
-                                # --- Timestamp normalisation -------------------
-                                # Zerodha REST: string "2026-03-06 09:15:00+05:30"
-                                # KiteConnect SDK: datetime object
-                                if isinstance(ts, str):
-                                    ts = datetime.fromisoformat(
-                                        ts.replace("Z", "+00:00")
-                                    )
-                                elif not isinstance(ts, datetime):
-                                    # e.g. unix epoch float/int
-                                    try:
-                                        ts = datetime.fromtimestamp(
-                                            float(ts), tz=timezone.utc
-                                        )
-                                    except Exception:
-                                        continue  # unparseable timestamp
-
-                                if ts.tzinfo is None:
-                                    ts = ts.replace(tzinfo=timezone.utc)
-
-                                # --- Skip None/zero OHLC (bad rows) -----------
-                                if not all(x is not None for x in (o, h, l, c_p)):
-                                    continue
-
-                                # --- Feed runner indicator_engine --------------
-                                if runner and hasattr(runner, "ingest_historical_bar"):
-                                    bar_data = {
-                                        "symbol": sym,
-                                        "open": float(o),
-                                        "high": float(h),
-                                        "low": float(l),
-                                        "close": float(c_p),
-                                        "volume": int(v or 0),
-                                        "timestamp": ts,
-                                    }
-                                    runner.ingest_historical_bar(bar_data)
-
-                                count += 1
-                            except Exception as _candle_err:
-                                LOGGER.debug(
-                                    f"Skipping bad candle for {sym}: {_candle_err}"
-                                )
-
-                        LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
-                        hydrated_counts[sym] = count
-                        if ctx.market_data_manager:
-                            bars_snapshot = ctx.market_data_manager.get_ohlc_bars(sym)
-                            ctx.market_data_manager.update_hydration_status(
-                                sym, bars_snapshot or records
-                            )
-
-                    await asyncio.sleep(HYDRATION_DELAY_SEC)
-
-                except Exception as e:
-                    if "rate limit" in str(e).lower():
-                        LOGGER.warning(
-                            f"⚠️ Rate limit hit for {sym}, skipping hydration"
-                        )
-                    else:
-                        LOGGER.warning(f"❌ Failed to hydrate {sym}: {e}")
-
-                    await asyncio.sleep(HYDRATION_DELAY_SEC)
-
+            LOGGER.info(
+                "hydration_commit_done",
+                extra={
+                    "event": "hydration_commit_done",
+                    "symbols": len(hydrated_counts),
+                    "hydrated_counts": hydrated_counts,
+                },
+            )
             if get_settings().enable_live and ctx.market_data_manager is not None:
                 failed = [
                     s
@@ -6136,7 +6141,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if callable(reset_fn):
                                 reset_fn()
                     except Exception as e:
-                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                        __import__("logging").getLogger(__name__).exception(
+                            "[CRITICAL] unhandled exception", exc_info=True
+                        )
                         raise
                     from nifty_scalper_bot.utils.market_hours import (
                         is_market_open as _imo,
