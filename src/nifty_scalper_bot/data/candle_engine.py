@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
+import time
 from typing import Any, Callable, Mapping
 
 import pandas as pd
@@ -27,7 +27,8 @@ def sanitize(df: pd.DataFrame | None) -> pd.DataFrame:
         cleaned = cleaned.sort_values("timestamp")
     else:
         cleaned = cleaned.drop_duplicates()
-    cleaned = cleaned.ffill().bfill()
+    cleaned = cleaned.ffill()
+    cleaned = cleaned.dropna()
     if "close" in cleaned.columns:
         cleaned = cleaned[~cleaned["close"].isna()]
     return cleaned.reset_index(drop=True)
