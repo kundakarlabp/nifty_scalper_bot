@@ -648,6 +648,9 @@ class StrategyRunner:
         self._history_cache_dir = Path(".cache/candles")
         self._history_cache_dir.mkdir(parents=True, exist_ok=True)
         self._hydrate_failures: dict[str, int] = {}
+        self._ingest_lock = asyncio.Lock()
+        self._hydration_complete = False
+        self._quarantined_symbols: set[str] = set()
         self._session_gap_count: dict[str, int] = {}
         self._runner_state: RunnerState = RunnerState.STARTING
         self._active_orphan_guards: set[str] = set()
@@ -917,16 +920,27 @@ class StrategyRunner:
     def _symbol_has_valid_data(self, symbol: str) -> bool:
         """Validate symbol candle data integrity from the indicator engine."""
         try:
-            # 1. Primary check: Has the indicator engine processed enough bars?
-            if self._indicator_engine and self._indicator_engine.has_min_bars(symbol, self._required_candles):
-                return True
-            
-            # 2. Fallback check: Does our raw history deque have enough bars?
             history = self._symbol_history.get(symbol, [])
-            if len(history) >= self._required_candles:
-                return True
-                
-            return False
+            if len(history) < self._required_candles:
+                if self._indicator_engine and self._indicator_engine.has_min_bars(
+                    symbol, self._required_candles
+                ):
+                    return True
+                return False
+
+            bar_rows = [
+                (bar.__dict__ if hasattr(bar, "__dict__") else bar.as_mapping())
+                for bar in history
+            ]
+            frame = pd.DataFrame(bar_rows)
+            required_columns = {"open", "high", "low", "close", "volume"}
+            if not required_columns.issubset(frame.columns):
+                return False
+            if len(frame) < self._required_candles:
+                return False
+            if frame[list(required_columns)].isna().any().any():
+                return False
+            return True
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in StrategyRunner._symbol_has_valid_data: %s",
@@ -935,6 +949,36 @@ class StrategyRunner:
                 exc_info=exc,
             )
             return False
+
+    def quarantine_symbol(self, symbol: str, reason: str, **context: Any) -> None:
+        """Move symbol to quarantine set while keeping runner online. Args: symbol, reason. Returns: None. Raises: None."""
+        try:
+            normalized = enforce_canonical(normalize_symbol(symbol))
+            with self._lock:
+                self._quarantined_symbols.add(normalized)
+                self._set_symbol_hydration_state(
+                    normalized, SymbolState.DEGRADED, allow_downgrade=True
+                )
+            self._logger.critical(
+                "symbol_quarantined",
+                extra={
+                    "event": "symbol_quarantined",
+                    "symbol": normalized,
+                    "reason": reason,
+                    **context,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in StrategyRunner.quarantine_symbol: %s",
+                exc,
+                extra={
+                    "event": "quarantine_symbol_error",
+                    "symbol": symbol,
+                    "reason": reason,
+                },
+                exc_info=exc,
+            )
 
     def remove_symbol(self, symbol: str) -> None:
         """Stop tracking a symbol."""
@@ -1236,18 +1280,19 @@ class StrategyRunner:
                     # 1. Guard against empty or malformed ticks (prevents dict() TypeError)
                     if not tick:
                         return
-                        
+
                     # 2. Defensive copy to a mutable dictionary
                     payload = dict(tick)
                     payload["symbol"] = sym
-                    
+
                     # 3. Publish to the event bus
                     self._event_bus.publish(payload)
                 except Exception:
                     # Capture full stack trace AND the raw tick data for senior-level debugging
                     self._logger.exception(
-                        "CRITICAL: Failure in StrategyRunner._subscribe_symbol callback for %s. Raw tick: %s", 
-                        sym, tick
+                        "CRITICAL: Failure in StrategyRunner._subscribe_symbol callback for %s. Raw tick: %s",
+                        sym,
+                        tick,
                     )
 
             callback = _callback
@@ -1270,14 +1315,8 @@ class StrategyRunner:
         except Exception as exc:
             self._logger.error("SUBSCRIBE_FAIL %s: %s", symbol, exc)
 
-    def ingest_historical_bar(self, data: dict) -> None:
-        """
-        Public API for Startup Hydration.
-        Strictly conforms to OneMinuteBar(slots=True).
-        """
-        # [FIX] Mark as hydrated so _backfill_history knows to skip
-        self._startup_hydrated = True
-
+    def _ingest_historical_bar_unlocked(self, data: dict[str, Any]) -> None:
+        """Ingest one historical candle into runner state. Args: data. Returns: None. Raises: None."""
         try:
             # 1. Extract + normalise timestamp
             ts = data["timestamp"]
@@ -1331,12 +1370,24 @@ class StrategyRunner:
                 f"❌ Hydration Ingest Failed for {data.get('symbol')}: {exc}"
             )
 
+    def ingest_historical_bar(self, data: dict) -> None:
+        """Public API for startup hydration ingestion. Args: data. Returns: None. Raises: None."""
+        self._startup_hydrated = True
+        self._ingest_historical_bar_unlocked(data)
+
+    async def safe_ingest(self, data: dict[str, Any]) -> None:
+        """Synchronize hydration ingestion on event loop. Args: data. Returns: None. Raises: None."""
+        self._startup_hydrated = True
+        async with self._ingest_lock:
+            self._ingest_historical_bar_unlocked(data)
+
     def mark_ready(self, symbols: list[str]) -> None:
         """
         Public API to finalize startup hydration.
         Explicitly registers symbols and sets readiness flags.
         """
         valid_symbols: list[str] = []
+        self._hydration_complete = True
         with self._lock:
             for sym in symbols:
                 normalized = enforce_canonical(normalize_symbol(sym))
@@ -1362,7 +1413,11 @@ class StrategyRunner:
                 if self._symbol_has_valid_data(normalized):
                     valid_symbols.append(normalized)
                 else:
-                    self._logger.warning("skipped: invalid data")
+                    self.quarantine_symbol(
+                        normalized,
+                        reason="invalid_hydration_data",
+                        bar_count=self._symbol_bar_count.get(normalized, 0),
+                    )
 
         # 5. Keep _startup_hydrated=True so Phase 7 can promote HYDRATING→DEGRADED
         # while _symbol_history is still empty (no live bars yet, first minute after
@@ -1373,7 +1428,17 @@ class StrategyRunner:
         if self.ready:
             self._runner_state = RunnerState.EXECUTION_ENABLED
             self._logger.info("🚀 StrategyRunner execution enabled")
-            self._logger.info(f"✅ StrategyRunner marked READY with {len(valid_symbols)} active symbols")
+            self._logger.info(
+                "execution_enabled",
+                extra={
+                    "event": "execution_enabled",
+                    "valid_symbols": sorted(valid_symbols),
+                    "required_symbol_count": self._required_symbol_count,
+                },
+            )
+            self._logger.info(
+                f"✅ StrategyRunner marked READY with {len(valid_symbols)} active symbols"
+            )
         else:
             self._runner_state = RunnerState.HISTORICAL_READY
             self._logger.warning(
@@ -1400,7 +1465,9 @@ class StrategyRunner:
             norm_sym = enforce_canonical(normalize_symbol(_sym))
             try:
                 _bc = len(self._indicator_engine.get_history(norm_sym) or [])
-                _ok = self._indicator_engine.has_min_bars(norm_sym, self._required_candles)
+                _ok = self._indicator_engine.has_min_bars(
+                    norm_sym, self._required_candles
+                )
             except Exception:
                 _bc, _ok = 0, False
             self._logger.info(
@@ -3191,7 +3258,7 @@ class StrategyRunner:
         now = time.monotonic()
         tick_flowing = (now - self._last_tick_seen_ts) <= 5.0
         eval_stalled = (now - self._last_global_eval_ts) > 5.0
-        
+
         # ✅ FIX: Throttle — same-bar-skip keeps eval_stalled=True for the whole bar.
         # Only warn if stall > 90s (longer than one full bar cycle) to avoid spam.
         genuine_stall = (now - self._last_global_eval_ts) > 90.0
@@ -3210,24 +3277,30 @@ class StrategyRunner:
         for symbol, engine in self._candle_engines.items():
             # 1. Use .get() to prevent KeyError on newly subscribed symbols
             stale_for = now_wall - self._last_tick_time_by_symbol.get(symbol, now_wall)
-            
+
             # 2. Relax threshold to 15.0s (3.0s is too tight for OTM options)
             if stale_for > 15.0:
                 stale_count += 1
                 last_log_ts = self._last_ws_stale_log_ts_by_symbol.get(symbol, 0.0)
-                
+
                 # 3. GATE THE ENTIRE BACKFILL PROCESS, not just the logger
                 if now_wall - last_log_ts >= 60.0:
-                    self._logger.warning("⚠️ %s: WS stale (%.1fs) → triggering backfill", symbol, stale_for)
+                    self._logger.warning(
+                        "⚠️ %s: WS stale (%.1fs) → triggering backfill",
+                        symbol,
+                        stale_for,
+                    )
                     self._last_ws_stale_log_ts_by_symbol[symbol] = now_wall
-                    
+
                     try:
                         repair_input = pd.DataFrame(
-                            self._hydrate_missing_bars(symbol, max(self._required_candles, 50))
+                            self._hydrate_missing_bars(
+                                symbol, max(self._required_candles, 50)
+                            )
                         )
                         if repair_input.empty:
                             continue
-                            
+
                         with self._symbol_locks[symbol]:
                             repaired = repair_with_backfill(
                                 symbol,
@@ -3240,10 +3313,11 @@ class StrategyRunner:
                     except Exception:
                         # 4. Use .exception to capture traceback and stop silent failures
                         self._logger.exception(
-                            "CRITICAL: Failure in StrategyRunner._health_watchdog backfill for %s", symbol
+                            "CRITICAL: Failure in StrategyRunner._health_watchdog backfill for %s",
+                            symbol,
                         )
 
-        # 5. Move WS Reconnect OUTSIDE the symbol loop. 
+        # 5. Move WS Reconnect OUTSIDE the symbol loop.
         # We only want to evaluate a WS restart once per cycle, not once per symbol.
         if stale_count > 0:
             last_reconnect_ts = getattr(self, "_last_ws_reconnect_attempt_ts", 0.0)
@@ -3251,12 +3325,19 @@ class StrategyRunner:
             if now_wall - last_reconnect_ts >= 30.0:
                 self._last_ws_reconnect_attempt_ts = now_wall
                 try:
-                    reconnect = getattr(self._market_data, "_trigger_zombie_ws_restart", None)
+                    reconnect = getattr(
+                        self._market_data, "_trigger_zombie_ws_restart", None
+                    )
                     if callable(reconnect):
-                        self._logger.warning("🔄 Watchdog triggering zombie WS restart (%d symbols stale)", stale_count)
+                        self._logger.warning(
+                            "🔄 Watchdog triggering zombie WS restart (%d symbols stale)",
+                            stale_count,
+                        )
                         reconnect()
                 except Exception:
-                    self._logger.exception("CRITICAL: Failure in StrategyRunner._health_watchdog.reconnect")
+                    self._logger.exception(
+                        "CRITICAL: Failure in StrategyRunner._health_watchdog.reconnect"
+                    )
 
     # ✅ FIX: New Method to Prime Indicators
     async def _backfill_history(self) -> None:
@@ -3671,6 +3752,17 @@ class StrategyRunner:
             with self._lock:
                 symbols = sorted(self._active_symbols)
                 active_set = set(symbols)
+                quarantined = symbol in self._quarantined_symbols
+
+            if quarantined:
+                self._logger.warning(
+                    "Skipping quarantined symbol",
+                    extra={
+                        "event": "symbol_quarantined_skip",
+                        "symbol": symbol,
+                    },
+                )
+                return False
 
             if self._max_symbol_count > 0 and len(symbols) > self._max_symbol_count:
                 self._warn_symbol_gate(
@@ -4282,6 +4374,16 @@ class StrategyRunner:
                     f"⛔ Execution blocked: runner_state={self._runner_state}",
                     interval_sec=30.0,
                     level=logging.WARNING,
+                )
+                return
+            if not self._hydration_complete:
+                log_throttled(
+                    self._logger,
+                    "execution_blocked_hydration",
+                    "⛔ Execution blocked: hydration barrier not complete",
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={"event": "execution_blocked_hydration"},
                 )
                 return
 

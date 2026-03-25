@@ -7,6 +7,7 @@ import pytest
 
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar
 from nifty_scalper_bot.strategies.runner import (
+    RunnerState,
     SymbolState,
     StrategyRunner,
     StrategyRunnerConfig,
@@ -82,6 +83,22 @@ def test_validate_symbol_for_cycle_debugs_and_skips_when_symbol_not_active(
     assert ok is False
     assert any(
         getattr(record, "event", "") == "symbol_outside_active_universe"
+        for record in caplog.records
+    )
+
+
+def test_validate_symbol_for_cycle_skips_quarantined_symbol(caplog) -> None:
+    runner = _runner()
+    symbol = "NIFTY25JAN25000CE"
+    runner._active_symbols = {symbol}
+    runner._quarantined_symbols.add(symbol)
+
+    with caplog.at_level("WARNING", logger=runner._logger.name):
+        ok = runner._validate_symbol_for_cycle(symbol)
+
+    assert ok is False
+    assert any(
+        getattr(record, "event", "") == "symbol_quarantined_skip"
         for record in caplog.records
     )
 
@@ -167,7 +184,28 @@ def test_on_tick_insufficient_history_skips_symbol_until_hydrated(
         runner._on_tick(symbol, {"ltp": 101.0, "timestamp": 1_700_000_000})
 
     assert any(
-        getattr(record, "event", "") == "symbol_hydrating"
+        getattr(record, "event", "") == "symbol_hydrating" for record in caplog.records
+    )
+    assert runner._strategy_manager.generate_signal.call_count == 0
+
+
+def test_on_tick_hydration_barrier_blocks_execution(caplog, monkeypatch) -> None:
+    runner = _runner()
+    symbol = "NIFTY25JAN25000CE"
+    runner.add_symbol(symbol)
+    runner._startup_timestamp = 0.0
+    runner._active_symbols = {symbol, "NSE:NIFTY"}
+    runner._history_ready_by_symbol[symbol] = True
+    runner._required_candles = 1
+    runner._runner_state = RunnerState.EXECUTION_ENABLED
+    runner._hydration_complete = False
+    monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
+
+    with caplog.at_level("WARNING", logger=runner._logger.name):
+        runner._on_tick(symbol, {"ltp": 101.0, "timestamp": 1_700_000_000})
+
+    assert any(
+        getattr(record, "event", "") == "execution_blocked_hydration"
         for record in caplog.records
     )
     assert runner._strategy_manager.generate_signal.call_count == 0
@@ -211,8 +249,7 @@ def test_on_tick_invalid_vwap_skips_symbol(caplog, monkeypatch) -> None:
         runner._on_tick(symbol, {"ltp": 101.0, "timestamp": 1_700_000_000})
 
     assert any(
-        getattr(record, "event", "") == "symbol_hydrating"
-        for record in caplog.records
+        getattr(record, "event", "") == "symbol_hydrating" for record in caplog.records
     )
     assert runner._strategy_manager.generate_signal.call_count == 0
 
@@ -289,7 +326,7 @@ def test_ready_symbol_does_not_downgrade_without_session_reset() -> None:
 
 def test_repair_candle_gap_creates_synthetic_when_history_missing() -> None:
     runner = _runner()
-    symbol = 'NIFTY25JAN25000CE'
+    symbol = "NIFTY25JAN25000CE"
     prev = OneMinuteBar(
         open=100.0,
         high=101.0,
@@ -320,20 +357,20 @@ def test_repair_candle_gap_creates_synthetic_when_history_missing() -> None:
 
 def test_version_guard_blocks_stale_strategy_evaluation(monkeypatch) -> None:
     runner = _runner()
-    symbol = 'NIFTY25JAN25000CE'
+    symbol = "NIFTY25JAN25000CE"
     runner.add_symbol(symbol)
     runner._running = True
     runner._trading_paused = False
     runner._runner_state = runner._runner_state.EXECUTION_ENABLED
-    runner._active_symbols = {symbol, 'NSE:NIFTY'}
+    runner._active_symbols = {symbol, "NSE:NIFTY"}
     runner._history_ready_by_symbol[symbol] = True
     runner._required_candles = 1
     runner._symbol_state[symbol].vwap = 100.0
     runner._candle_versions[symbol] = 1
     runner._last_strategy_versions[symbol] = 1
-    monkeypatch.setattr(runner, '_is_market_open', lambda _now: True)
+    monkeypatch.setattr(runner, "_is_market_open", lambda _now: True)
 
-    runner._on_tick(symbol, {'ltp': 101.0, 'timestamp': 1_700_000_000})
+    runner._on_tick(symbol, {"ltp": 101.0, "timestamp": 1_700_000_000})
 
     assert runner._strategy_manager.generate_signal.call_count == 0
 
@@ -342,12 +379,12 @@ def test_composite_reports_emit_aggregate_logs(caplog) -> None:
     runner = _runner()
     runner._last_system_heartbeat_log = 0.0
     runner._last_strategy_status_log = 0.0
-    runner._strategy_window_symbols = {'A', 'B'}
+    runner._strategy_window_symbols = {"A", "B"}
     runner._strategy_window_signals = 3
 
-    with caplog.at_level('INFO', logger=runner._logger.name):
+    with caplog.at_level("INFO", logger=runner._logger.name):
         runner._emit_composite_reports()
 
-    events = {getattr(record, 'event', '') for record in caplog.records}
-    assert 'system_heartbeat' in events
-    assert 'strategy_status_report' in events
+    events = {getattr(record, "event", "") for record in caplog.records}
+    assert "system_heartbeat" in events
+    assert "strategy_status_report" in events
