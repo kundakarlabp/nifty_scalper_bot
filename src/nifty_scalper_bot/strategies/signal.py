@@ -15,6 +15,7 @@ from nifty_scalper_bot.utils.logging import get_logger
 from .signal_generator import Signal, Strategy
 
 LOGGER = get_logger(__name__)
+ACTIVE_STRATEGIES = ['SMC']
 
 
 def _load_enabled_strategy_modules() -> list[str]:
@@ -69,8 +70,8 @@ def _load_enabled_strategy_modules() -> list[str]:
             "No elite modules enabled; using defaults",
             extra={"event": "strategy_config_empty"},
         )
-        return list(ELITE_STRATEGY_MODULES)
-    return normalized
+        return ['smc_liquidity']
+    return ['smc_liquidity']
 
 
 def basic_signal(
