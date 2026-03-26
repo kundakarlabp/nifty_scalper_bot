@@ -497,7 +497,7 @@ class StrategyRunner:
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
-        self._message_bus.subscribe(MessageType.TICK, self._handle_tick_message)
+        self._logger.info("Tick message-bus subscription disabled; using market-data manager callbacks")
 
         hedge_env = os.getenv("NSB__ALLOW_HEDGE_ENTRIES", "false").strip().lower()
         self._allow_hedge_entries = hedge_env in {"1", "true", "yes", "on"}

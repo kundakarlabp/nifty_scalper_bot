@@ -11,31 +11,13 @@ from typing import Any, Callable, Mapping
 import pandas as pd
 
 from nifty_scalper_bot.data.source import DataIntegrityError
+from nifty_scalper_bot.data.validator import Tick, validate_tick
 
 LOGGER = logging.getLogger(__name__)
 FetchHistoricalFn = Callable[[str], pd.DataFrame | None]
 FetchRecentFn = Callable[[str], pd.DataFrame | None]
 _OHLC_COLUMNS = ('timestamp', 'open', 'high', 'low', 'close', 'volume')
 
-
-def validate_tick(tick: dict[str, Any]) -> dict[str, Any]:
-    """Validate tick payload strictly. Args: tick. Returns: normalized tick. Raises: DataIntegrityError."""
-    required = ('symbol', 'timestamp', 'ltp')
-    for key in required:
-        if key not in tick:
-            raise DataIntegrityError(f'Missing {key}')
-    ltp = float(tick['ltp'])
-    if ltp <= 0:
-        raise DataIntegrityError('Invalid price')
-    ts = pd.to_datetime(tick['timestamp'], utc=True, errors='coerce')
-    if pd.isna(ts):
-        raise DataIntegrityError('Invalid timestamp')
-    payload = dict(tick)
-    payload['ltp'] = ltp
-    payload['timestamp'] = ts
-    payload['symbol'] = str(payload['symbol'])
-    payload['volume'] = float(payload.get('volume') or 0.0)
-    return payload
 
 
 def sanitize(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -74,8 +56,9 @@ class CandleEngine:
         if self.interval != '1min':
             raise ValueError(f'Unsupported interval: {self.interval}')
 
-        validated = validate_tick(dict(tick))
-        timestamp = pd.Timestamp(validated['timestamp'])
+        validated = tick if isinstance(tick, Tick) else validate_tick(dict(tick))
+        payload = validated.to_dict()
+        timestamp = pd.Timestamp(validated.timestamp)
         minute = timestamp.floor('1min')
 
         if self._last_tick_ts is not None and timestamp < self._last_tick_ts:
@@ -83,7 +66,7 @@ class CandleEngine:
 
         finalized: dict[str, Any] | None = None
         if self.current_candle is None:
-            self.current_candle = self._start_candle(validated, minute)
+            self.current_candle = self._start_candle(payload, minute)
             LOGGER.debug('candle_created', extra={'event': 'candle_created', 'minute': minute.isoformat()})
         else:
             current_minute = pd.Timestamp(self.current_candle['timestamp'])
@@ -91,10 +74,10 @@ class CandleEngine:
                 raise DataIntegrityError('out-of-order minute bucket')
             if minute > current_minute:
                 finalized = self._finalize_current_candle()
-                self.current_candle = self._start_candle(validated, minute)
+                self.current_candle = self._start_candle(payload, minute)
                 LOGGER.debug('candle_created', extra={'event': 'candle_created', 'minute': minute.isoformat()})
             else:
-                self._update_candle(validated)
+                self._update_candle(payload)
 
         self._last_tick_ts = timestamp
         return finalized

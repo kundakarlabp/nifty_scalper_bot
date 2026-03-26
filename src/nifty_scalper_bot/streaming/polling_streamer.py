@@ -38,7 +38,8 @@ class PollingStreamer:
         self._on_tick = on_tick
         self._resolver = instrument_resolver
         self._data_hub = data_hub
-        self._interval_s = max(0.2, float(poll_interval_ms) / 1000.0)
+        configured_interval = float(poll_interval_ms) / 1000.0
+        self._interval_s = configured_interval if configured_interval > 0 else 0.0
         self._batch_size = max(1, int(batch_size))
         self._tokens: set[int] = set()
         self._seeded_tokens: set[int] = set()
@@ -67,6 +68,9 @@ class PollingStreamer:
 
     def start(self) -> None:
         """Start the background polling thread."""
+        if self._interval_s <= 0:
+            LOGGER.info("Polling disabled (interval <= 0)", extra={"event": "polling_disabled"})
+            return
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
