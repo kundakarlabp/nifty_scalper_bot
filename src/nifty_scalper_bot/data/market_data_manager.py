@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import math
 import os
+from random import uniform
 import threading
 import time
 from typing import (
@@ -123,14 +124,6 @@ class MarketDataManager:
         self._tick_counter = 0
         self._last_tick_log_time = time.monotonic()
         self._last_tick_time: dict[str, float] = {}
-        self._last_emit_mono: dict[str, float] = {}
-        self._tick_burst_window_sec = self._parse_float_env(
-            "MDM_TICK_BURST_WINDOW_SEC", default=1.0, minimum=0.1
-        )
-        self._tick_burst_limit = self._parse_int_env(
-            "MDM_TICK_BURST_LIMIT", default=200, minimum=1
-        )
-        self._tick_burst_tracker: dict[str, tuple[float, int]] = {}
         self._tick_bus: Any | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._async_dispatch_drops = 0
@@ -147,6 +140,7 @@ class MarketDataManager:
         )
         self._engines: dict[str, CandleEngine] = {}
         self._last_historical_ts: dict[str, float] = {}
+        self._last_tick_ts: dict[str, float] = {}
         self._tick_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._tick_consumer_task: asyncio.Task[None] | None = None
         self._account_snapshot: dict[str, float] = {}
@@ -266,62 +260,14 @@ class MarketDataManager:
         raise DataIntegrityError("REST quote ingestion disabled; websocket only")
 
     def set_unified_manager(self, manager: Any | None) -> None:
-        """Attach unified manager callbacks for cache updates.
-
-        Args:
-            manager: Unified manager instance to notify or ``None`` to detach.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered MarketDataManager.set_unified_manager",
-            extra={"event": "mdm_unified_manager_set_enter"},
-        )
+        """Retain compatibility hook. Args: manager. Returns: None. Raises: None."""
         self._unified_manager = manager
-
-    def _notify_unified_manager(self, symbol: str, tick: Mapping[str, Any]) -> None:
-        """Forward cache updates to the unified manager when configured.
-
-        Args:
-            symbol: Symbol identifier associated with the tick payload.
-            tick: Mapping of normalized tick fields to forward.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        manager = self._unified_manager
-        if manager is None or not symbol:
-            return
-        callback = getattr(manager, "on_cache_update", None)
-        if not callable(callback):
-            return
-        try:
-            callback(symbol, dict(tick))
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarketDataManager._notify_unified_manager: %s",
-                exc,
-                extra={
-                    "event": "mdm_unified_manager_notify_error",
-                    "symbol": symbol,
-                },
-                exc_info=exc,
-            )
 
     @staticmethod
     def _bar_symbol_key(symbol: str) -> str:
         """Return normalized bar key for *symbol*."""
 
-        return enforce_canonical(normalize_symbol(symbol))
+        return normalize_symbol(symbol)
 
     def _now_ms(self) -> float:
         """Return the current wall-clock timestamp in milliseconds.
@@ -811,7 +757,7 @@ class MarketDataManager:
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
-        symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        symbol = normalize_symbol(str(symbol))
         if symbol.count(":") != 1:
             raise RuntimeError(f"Malformed canonical symbol: {symbol}")
         with self._lock:
@@ -2356,11 +2302,16 @@ class MarketDataManager:
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
         """Process one queued tick deterministically."""
         tick = validate_tick(raw)
-        symbol = enforce_canonical(normalize_symbol(str(tick["symbol"])))
+        symbol = str(tick["symbol"])
+        ts_seconds = float(pd.Timestamp(tick["timestamp"]).timestamp())
+        last_ts = self._last_tick_ts.get(symbol)
+        if last_ts is not None and ts_seconds <= last_ts:
+            return
+        self._last_tick_ts[symbol] = ts_seconds
         engine = self._get_engine(symbol)
         candle = engine.on_tick(tick)
         tick_payload = dict(tick)
-        tick_payload["timestamp"] = pd.Timestamp(tick["timestamp"]).timestamp()
+        tick_payload["timestamp"] = ts_seconds
         self._emit_tick(symbol, tick_payload, source="ws")
         if candle:
             self._ohlc[self._bar_symbol_key(symbol)].append(candle)
@@ -2370,44 +2321,6 @@ class MarketDataManager:
         if symbol not in self._engines:
             self._engines[symbol] = CandleEngine()
         return self._engines[symbol]
-
-    def _allow_tick_for_symbol(self, symbol: str) -> bool:
-        """Args: symbol; Returns: burst-gate decision; Raises: none."""
-
-        try:
-            now = time.monotonic()
-            with self._lock:
-                window_start, count = self._tick_burst_tracker.get(symbol, (now, 0))
-                if now - window_start >= self._tick_burst_window_sec:
-                    window_start = now
-                    count = 0
-                count += 1
-                self._tick_burst_tracker[symbol] = (window_start, count)
-            if count <= self._tick_burst_limit:
-                return True
-            log_throttled(
-                self._logger,
-                f"mdm_tick_burst_drop_{symbol}",
-                "Dropping burst tick flood for %s count=%d window=%.2fs"
-                % (symbol, count, self._tick_burst_window_sec),
-                interval_sec=5.0,
-                level=logging.WARNING,
-                extra={
-                    "event": "mdm_tick_burst_drop",
-                    "symbol": symbol,
-                    "count": count,
-                    "window_sec": self._tick_burst_window_sec,
-                },
-            )
-            return False
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarketDataManager._allow_tick_for_symbol: %s",
-                exc,
-                extra={"event": "mdm_tick_burst_error", "symbol": symbol},
-                exc_info=exc,
-            )
-            return True
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
@@ -2439,7 +2352,7 @@ class MarketDataManager:
         wallclock = tick.get("timestamp", time.time())
 
         # 🔥 PRODUCTION FIX — enforce canonical key
-        symbol = enforce_canonical(normalize_symbol(symbol))
+        symbol = normalize_symbol(symbol)
 
         cached_tick = dict(tick)
         self._latest_ticks[symbol] = cached_tick
@@ -2447,7 +2360,6 @@ class MarketDataManager:
         self._last_tick_time[symbol] = time.time()
         self._history[symbol].append(cached_tick)
         self._last_tick_wallclock[symbol] = float(wallclock)
-        self._notify_unified_manager(symbol, cached_tick)
         staleness_seconds = 0.0
         try:
             staleness_seconds = max(time.time() - float(wallclock), 0.0)
@@ -2550,7 +2462,7 @@ class MarketDataManager:
                 raise RuntimeError("WARMUP failed: historical data client unavailable")
 
             for symbol in symbols:
-                canonical_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+                canonical_symbol = normalize_symbol(str(symbol))
                 token = self._token_by_symbol.get(canonical_symbol)
                 if not token:
                     # BUG-β FIX: Never raise — skip and warn so remaining
@@ -2603,12 +2515,6 @@ class MarketDataManager:
                         "source": "historical",
                     }
                     validated = validate_tick(historical_tick)
-                    validated_payload = dict(validated)
-                    validated_payload["timestamp"] = float(
-                        validated["timestamp"].timestamp()
-                    )
-                    validated_payload["source"] = "historical"
-                    self._store_tick(canonical_symbol, validated_payload)
                     engine = self._get_engine(canonical_symbol)
                     finalized = engine.on_tick(validated)
                     if finalized:
@@ -2922,21 +2828,6 @@ class MarketDataManager:
                 exc_info=exc,
             )
             return []
-        # diagnostic batch log
-        try:
-            self._logger.info(
-                "REST polling batch",
-                extra={
-                    "event": "mdm_rest_poll_batch",
-                    "batch_size": len(symbols),
-                    "symbols_preview": symbols[:5],
-                    "poll_interval": float(self._rest_poll_interval),
-                },
-            )
-        except Exception:
-            # don't let diagnostics break the loop
-            pass
-
     def ensure_tracking(self, symbol: str, *, seed: bool = True) -> bool:
         """Ensure *symbol* is tracked for REST polling and optional seeding.
 

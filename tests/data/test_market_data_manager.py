@@ -267,6 +267,31 @@ def test_ohlc_builder_generates_minute_bars(
     assert "NIFTYFUT_bars" in snapshot
 
 
+def test_out_of_order_live_tick_is_dropped(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    events: list[dict[str, Any]] = []
+    manager.subscribe('NIFTY23', events.append)
+    assert ws.on_tick is not None
+    ws.on_tick(
+        {
+            'instrument_token': 123,
+            'last_price': 100.0,
+            'timestamp': 1_700_000_000.0,
+        }
+    )
+    ws.on_tick(
+        {
+            'instrument_token': 123,
+            'last_price': 99.5,
+            'timestamp': 1_699_999_990.0,
+        }
+    )
+    assert len(events) == 1
+    assert events[0]['ltp'] == 100.0
+
+
 def test_resolver_candidates() -> None:
     class _Resolver:
         def lookup(self, symbol: str) -> dict[str, Any]:  # noqa: D401 - test stub
@@ -450,8 +475,7 @@ async def test_warmup_history_primes_cache_without_emitting_callbacks(
 
     assert events == []
     latest = manager.get_latest_tick("NSE:NIFTY23")
-    assert latest is not None
-    assert latest["ltp"] == pytest.approx(102.0)
+    assert latest is None
     bars = manager.get_ohlc_bars("NSE:NIFTY23")
     assert bars
 
@@ -474,7 +498,7 @@ def test_out_of_order_tick_is_discarded(
     assert latest["ltp"] == 100.0
 
 
-def test_tick_burst_protection_drops_excess_ticks(
+def test_all_ticks_are_processed_without_burst_throttle(
     monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
 ) -> None:
     monkeypatch.setenv("MDM_TICK_BURST_LIMIT", "2")
@@ -488,7 +512,7 @@ def test_tick_burst_protection_drops_excess_ticks(
     ws.on_tick({"instrument_token": 123, "last_price": 101.0, "timestamp": 1001.0})
     ws.on_tick({"instrument_token": 123, "last_price": 102.0, "timestamp": 1002.0})
 
-    assert len(events) == 2
+    assert len(events) == 3
     latest = manager.get_latest_tick("NIFTY23")
     assert latest is not None
-    assert latest["ltp"] == pytest.approx(101.0)
+    assert latest["ltp"] == pytest.approx(102.0)
