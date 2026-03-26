@@ -47,6 +47,11 @@ from nifty_scalper_bot.data.candle_engine import (
     sanitize,
     validate_dataframe,
 )
+from nifty_scalper_bot.data.pipeline import (
+    MarketDataPipeline,
+    get_pipeline,
+    MIN_REQUIRED_CANDLES as PIPELINE_MIN_CANDLES,
+)
 
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
@@ -634,6 +639,10 @@ class StrategyRunner:
         self._last_ws_reconnect_attempt_ts: float = 0.0
         self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
         self._candle_engines: dict[str, CandleEngine] = {}
+        # STEP 1/4: Single deterministic pipeline — ticks flow here → closed candles only
+        self._pipeline: MarketDataPipeline = get_pipeline(store_maxlen=1500)
+        # STEP 5: counter for "invalid data" drops — never silently discarded
+        self._invalid_data_skip_counter: int = 0
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._hydration_ready_streak: dict[str, int] = {}
         self._frozen_universe: set[str] = set()
@@ -949,6 +958,90 @@ class StrategyRunner:
                 exc_info=exc,
             )
             return False
+
+    def _seed_pipeline_store(self, symbol: str) -> None:
+        """Seed pipeline CandleStore from IndicatorEngine PriceHistory.
+
+        CandleStore.seed() is a no-op if already populated (STEP 6 guard).
+        Called inside self._lock — PriceHistory getters hold their own internal lock.
+        """
+        try:
+            if self._indicator_engine is None:
+                return
+            ph = self._indicator_engine._histories.get(symbol)
+            if ph is None or len(ph) == 0:
+                return
+            opens = ph.get_opens()
+            highs = ph.get_highs()
+            lows = ph.get_lows()
+            closes = ph.get_closes()
+            volumes = ph.get_volumes()
+            timestamps = ph.get_timestamps()
+            if not closes:
+                return
+            bars: list[dict[str, Any]] = []
+            for i, ts in enumerate(timestamps):
+                bars.append({
+                    "timestamp": ts,
+                    "open":   opens[i]   if i < len(opens)   else closes[i],
+                    "high":   highs[i]   if i < len(highs)   else closes[i],
+                    "low":    lows[i]    if i < len(lows)    else closes[i],
+                    "close":  closes[i],
+                    "volume": volumes[i] if i < len(volumes) else 0.0,
+                })
+            self._pipeline.store.seed(symbol, bars)
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to seed pipeline store for %s: %s", symbol, exc,
+                extra={"event": "pipeline_store_seed_failed", "symbol": symbol},
+            )
+
+    def _seed_candle_engine_from_history(self, symbol: str) -> None:
+        """Seed legacy CandleEngine.df from IndicatorEngine PriceHistory.
+
+        Ensures ensure_valid_data() passes on first tick without broker API calls.
+        Called inside self._lock.
+        """
+        try:
+            if self._indicator_engine is None:
+                return
+            ph = self._indicator_engine._histories.get(symbol)
+            if ph is None or len(ph) == 0:
+                return
+            opens = ph.get_opens()
+            highs = ph.get_highs()
+            lows = ph.get_lows()
+            closes = ph.get_closes()
+            volumes = ph.get_volumes()
+            timestamps = ph.get_timestamps()
+            if not closes:
+                return
+            rows = []
+            for i, ts in enumerate(timestamps):
+                rows.append({
+                    "timestamp": pd.Timestamp(ts, tz="UTC") if ts.tzinfo is None
+                                 else pd.Timestamp(ts),
+                    "open":   float(opens[i])   if i < len(opens)   else float(closes[i]),
+                    "high":   float(highs[i])   if i < len(highs)   else float(closes[i]),
+                    "low":    float(lows[i])    if i < len(lows)    else float(closes[i]),
+                    "close":  float(closes[i]),
+                    "volume": float(volumes[i]) if i < len(volumes) else 0.0,
+                })
+            df = pd.DataFrame(rows)
+            df = df.drop_duplicates(subset="timestamp", keep="last")
+            df = df.sort_values("timestamp").reset_index(drop=True)
+            engine = self._candle_engines.setdefault(symbol, CandleEngine())
+            engine.df = df.tail(engine.max_bars).reset_index(drop=True)
+            self._logger.debug(
+                "candle_engine_seeded",
+                extra={"event": "candle_engine_seeded", "symbol": symbol,
+                       "bars": len(engine.df)},
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to seed CandleEngine for %s: %s", symbol, exc,
+                extra={"event": "candle_engine_seed_failed", "symbol": symbol},
+            )
 
     def quarantine_symbol(self, symbol: str, reason: str, **context: Any) -> None:
         """Move symbol to quarantine set while keeping runner online. Args: symbol, reason. Returns: None. Raises: None."""
@@ -1410,19 +1503,34 @@ class StrategyRunner:
                 # 4. Set High-Water Mark (Prevent dropping first live tick)
                 if normalized not in self._last_bar_ts:
                     self._last_bar_ts[normalized] = datetime.now(timezone.utc)
-                if self._symbol_has_valid_data(normalized):
+
+                # FIX: _symbol_has_valid_data checked MDM._ohlc_builder (live ticks only —
+                # always empty at startup) → valid_symbols=[] → EXECUTION_ENABLED never set
+                # → every tick returned at Phase-6 gate → zero trades.
+                # Correct gate: use IndicatorEngine.has_min_bars (reflects hydrated bars).
+                # Require ≥1 bar so any hydrated symbol qualifies; the 20/50-bar minimum
+                # is enforced at strategy evaluation time by indicator_engine.has_min_bars().
+                has_history = (
+                    self._indicator_engine is not None
+                    and self._indicator_engine.has_min_bars(normalized, 1)
+                )
+                if has_history:
                     valid_symbols.append(normalized)
+                    # FIX (STEP 2): Seed pipeline CandleStore from IndicatorEngine
+                    # PriceHistory so pipeline.candles_ready() passes immediately on
+                    # the first tick — no broker API calls needed for warmup.
+                    # STEP 6: CandleStore.seed() is a no-op if already seeded.
+                    self._seed_pipeline_store(normalized)
+                    # FIX (legacy path): Also seed CandleEngine.df so ensure_valid_data
+                    # passes on first tick (avoids _hydrate_missing_bars broker calls).
+                    self._seed_candle_engine_from_history(normalized)
                 else:
-                    self.quarantine_symbol(
-                        normalized,
-                        reason="invalid_hydration_data",
-                        bar_count=self._symbol_bar_count.get(normalized, 0),
+                    self._logger.info(
+                        "mark_ready: no hydrated bars for symbol — leaving unready",
+                        extra={"event": "mark_ready_no_bars", "symbol": normalized},
                     )
 
-        # 5. Keep _startup_hydrated=True so Phase 7 can promote HYDRATING→DEGRADED
-        # while _symbol_history is still empty (no live bars yet, first minute after
-        # startup). _backfill_history() checks indicator bar counts, NOT this flag,
-        # so setting it True here does not re-trigger backfill.
+        # 5. Keep _startup_hydrated=True
         self._startup_hydrated = True
         self.ready = len(valid_symbols) >= self._required_symbol_count
         if self.ready:
@@ -1441,9 +1549,16 @@ class StrategyRunner:
             )
         else:
             self._runner_state = RunnerState.HISTORICAL_READY
-            self._logger.warning(
-                f"⚠️ StrategyRunner downgraded to HISTORICAL_READY. "
-                f"Valid symbols ({len(valid_symbols)}) < required ({self._required_symbol_count})"
+            self._logger.info(
+                "mark_ready: HISTORICAL_READY "
+                f"(valid={len(valid_symbols)}/{len(symbols)}, "
+                f"required={self._required_symbol_count})",
+                extra={
+                    "event": "mark_ready_historical_ready",
+                    "valid_symbols": len(valid_symbols),
+                    "total_symbols": len(symbols),
+                    "required": self._required_symbol_count,
+                },
             )
 
         # BUG W1 FIX: Removed deadlocking tick-wait that caused 21s startup delay.
@@ -3196,7 +3311,15 @@ class StrategyRunner:
                 min_required=max(self._required_candles, 50),
             )
             if safe_df is None:
-                self._logger.warning("skipped: invalid data")
+                self._invalid_data_skip_counter += 1
+                self._logger.error(
+                    "data_invalid_tick_dropped",
+                    extra={
+                        "event": "data_invalid_tick_dropped",
+                        "symbol": normalized_symbol,
+                        "total_dropped": self._invalid_data_skip_counter,
+                    },
+                )
                 return
             with self._eval_gate_lock:
                 if normalized_symbol in self._eval_in_progress_symbols:
