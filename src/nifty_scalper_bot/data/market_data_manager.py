@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import math
 import os
+from random import uniform
 import threading
 import time
 from typing import (
@@ -22,8 +23,12 @@ from typing import (
     Sequence,
     cast,
 )
+import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.data.candle_engine import CandleEngine
+from nifty_scalper_bot.data.validator import validate_tick
+from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.streaming.websocket_manager import (
     ConnectionState,
@@ -63,119 +68,6 @@ _EXPIRY_FORMATS: tuple[str, ...] = (
 _COMPACT_EXPIRY_FORMATS: tuple[str, ...] = ("%d%b%Y", "%d%b%y")
 
 _logger = get_tracer_logger(__name__)
-
-
-@dataclass(slots=True)
-class _OHLCBar:
-    """Normalized one-minute OHLCV bar."""
-
-    timestamp: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-
-
-class _OHLCBuilder:
-    """Aggregate ticks into fixed one-minute OHLC bars."""
-
-    def __init__(self, *, maxlen: int = 500) -> None:
-        self._bars: dict[str, Deque[_OHLCBar]] = defaultdict(
-            lambda: deque(maxlen=maxlen)
-        )
-        self._last_cumulative_volume: dict[str, float] = {}
-        self._lock = threading.RLock()
-
-    def add_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
-        """Update the latest bar for *symbol* with the provided tick."""
-
-        if not symbol:
-            return
-        ts_value = tick.get("timestamp")
-        price_value = tick.get("ltp")
-        if not isinstance(ts_value, (int, float)) or not isinstance(
-            price_value, (int, float)
-        ):
-            return
-        timestamp = datetime.fromtimestamp(float(ts_value), timezone.utc).replace(
-            second=0, microsecond=0
-        )
-        price = float(price_value)
-        volume_delta = 0.0
-        raw_volume = tick.get("volume")
-        if isinstance(raw_volume, (int, float)):
-            cumulative = float(raw_volume)
-            last_cumulative = self._last_cumulative_volume.get(symbol)
-            if last_cumulative is not None:
-                diff = cumulative - last_cumulative
-                if diff >= 0:
-                    volume_delta = diff
-            self._last_cumulative_volume[symbol] = cumulative
-        with self._lock:
-            bucket = self._bars[symbol]
-            if bucket and bucket[-1].timestamp == timestamp:
-                bar = bucket[-1]
-                bar.high = max(bar.high, price)
-                bar.low = min(bar.low, price)
-                bar.close = price
-                bar.volume += volume_delta
-            else:
-                if bucket:
-                    interval = timedelta(minutes=1)
-                    last_bar = bucket[-1]
-                    last_bar_time = last_bar.timestamp
-                    last_close = last_bar.close
-                    while last_bar_time + interval < timestamp:
-                        last_bar_time += interval
-                        bucket.append(
-                            _OHLCBar(
-                                timestamp=last_bar_time,
-                                open=last_close,
-                                high=last_close,
-                                low=last_close,
-                                close=last_close,
-                                volume=0.0,
-                            )
-                        )
-                bucket.append(
-                    _OHLCBar(
-                        timestamp=timestamp,
-                        open=price,
-                        high=price,
-                        low=price,
-                        close=price,
-                        volume=volume_delta,
-                    )
-                )
-
-    def get_bars(
-        self, symbol: str, *, limit: int | None = None
-    ) -> list[dict[str, Any]]:
-        """Return a snapshot of recent bars for *symbol*."""
-
-        with self._lock:
-            bars = list(self._bars.get(symbol, ()))
-        if limit is not None and limit >= 0:
-            bars = bars[-limit:]
-        return [
-            {
-                "timestamp": bar.timestamp,
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-            }
-            for bar in bars
-        ]
-
-    def snapshot(self) -> dict[str, list[dict[str, Any]]]:
-        """Return complete bar snapshot for all tracked symbols."""
-
-        with self._lock:
-            symbols = list(self._bars.keys())
-        return {symbol: self.get_bars(symbol) for symbol in symbols}
 
 
 class MarketDataManager:
@@ -233,17 +125,6 @@ class MarketDataManager:
         self._tick_counter = 0
         self._last_tick_log_time = time.monotonic()
         self._last_tick_time: dict[str, float] = {}
-        self._last_emit_mono: dict[str, float] = {}
-        self._tick_emit_min_interval = self._parse_float_env(
-            "MDM_TICK_EMIT_MIN_INTERVAL_SEC", default=0.02, minimum=0.0
-        )
-        self._tick_burst_window_sec = self._parse_float_env(
-            "MDM_TICK_BURST_WINDOW_SEC", default=1.0, minimum=0.1
-        )
-        self._tick_burst_limit = self._parse_int_env(
-            "MDM_TICK_BURST_LIMIT", default=200, minimum=1
-        )
-        self._tick_burst_tracker: dict[str, tuple[float, int]] = {}
         self._tick_bus: Any | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._async_dispatch_drops = 0
@@ -255,7 +136,14 @@ class MarketDataManager:
         self._fallback_enabled = False
         self._poll_jitter_pct = 0.0
         self._poll_batch_ceiling = 0
-        self._ohlc_builder = _OHLCBuilder(maxlen=self._cache_len)
+        self._ohlc: dict[str, Deque[dict[str, Any]]] = defaultdict(
+            lambda: deque(maxlen=self._cache_len)
+        )
+        self._engines: dict[str, CandleEngine] = {}
+        self._last_historical_ts: dict[str, float] = {}
+        self._last_tick_ts: dict[str, float] = {}
+        self._tick_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._tick_consumer_task: asyncio.Task[None] | None = None
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
@@ -298,9 +186,7 @@ class MarketDataManager:
             margin_segment = "equity"
         self._margin_segment = margin_segment
 
-        poll_env = os.getenv("MDM_POLL_FALLBACK", "").strip().lower()
-        poll_flag_provided = bool(poll_env)
-        self._rest_poll_enabled = poll_env in {"1", "true", "yes", "on"}
+        self._rest_poll_enabled = False
         self._rest_poll_interval = self._parse_float_env(
             "MDM_POLL_INTERVAL_SECONDS", default=3.0, minimum=0.5
         )
@@ -311,19 +197,7 @@ class MarketDataManager:
             configured_poll_max if self._rest_poll_enabled else 0
         )
         self._fallback_enabled = self._rest_poll_enabled
-        if not poll_flag_provided and not self._rest_poll_enabled and self._ws is None:
-            self._rest_poll_enabled = True
-            self._rest_poll_interval = max(self._rest_poll_interval, 2.0)
-            self._rest_poll_max_symbols = max(configured_poll_max, 5)
-            self._fallback_enabled = True
-            self._logger.info(
-                "Condition met: mdm_rest_poll_auto_enabled",
-                extra={
-                    "event": "mdm_rest_poll_auto_enabled",
-                    "interval": float(self._rest_poll_interval),
-                    "max_symbols": int(self._rest_poll_max_symbols),
-                },
-            )
+        self._fallback_enabled = False
         self._rest_poll_stop = threading.Event()
         self._rest_poll_thread: threading.Thread | None = None
         self._health_monitor_stop = threading.Event()
@@ -371,129 +245,27 @@ class MarketDataManager:
 
         if self._ws is not None:
             if hasattr(self._ws, "_on_tick_callback"):
-                self._ws._on_tick_callback = self._handle_tick
+                self._ws._on_tick_callback = self._enqueue_tick_threadsafe
             else:
-                self._ws.on_tick = self._handle_tick
-        if self._tick_bus is not None:
-            self._tick_bus.subscribe(self._on_tick)
-            with suppress(Exception):
-                self._ws_connected = bool(self._ws.is_connected())
+                self._ws.on_tick = self._enqueue_tick_threadsafe
 
         self._m_ticks = Counter("mdm_ticks_total", "Normalized ticks processed")
         self._last_balance_log_time = 0.0
+        self._started = False
 
     def ingest_rest_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
-        """Commit REST quote payload for ``symbol`` into cache AND emit to subscribers."""
-        if not symbol or not isinstance(quote, Mapping):
-            return
-
-        try:
-            normalized_symbol = symbol.strip().upper()
-            if not normalized_symbol:
-                return
-
-            # Normalize fields
-            ltp = _coerce_float(quote.get("ltp") or quote.get("last_price"))
-            bid = _coerce_float(quote.get("bid"))
-            ask = _coerce_float(quote.get("ask"))
-            timestamp = _coerce_float(
-                quote.get("timestamp") or quote.get("server_ts_s")
-            )
-            volume = _coerce_float(quote.get("volume") or quote.get("volume_traded"))
-
-            payload = {
-                "symbol": normalized_symbol,
-                "ltp": ltp,
-                "bid": bid,
-                "ask": ask,
-                "volume": volume,
-                "timestamp": timestamp or time.time(),
-                "_source": "rest",
-                "depth": quote.get("depth"),
-            }
-
-            with self._lock:
-                previous = self._latest_ticks.get(normalized_symbol)
-                self._latest_ticks[normalized_symbol] = payload
-
-            # [FIX] CRITICAL: Emit to Strategy Runner!
-            # [FIX] CRITICAL: Emit to Strategy Runner!
-            normalized_tick = self._normalize_tick(normalized_symbol, payload, previous)
-
-            # Fallback: If normalization is too strict but we successfully extracted an LTP
-            # in the payload above, use the payload directly.
-            tick_to_emit = normalized_tick
-            if tick_to_emit is None and payload.get("ltp") is not None:
-                tick_to_emit = payload
-
-            if tick_to_emit:
-                self._emit_tick(normalized_symbol, tick_to_emit, source="rest")
-
-        except Exception as exc:
-            self._logger.error(
-                "Failure in MarketDataManager.ingest_rest_quote: %s",
-                exc,
-                extra={"event": "mdm_ingest_rest_quote_error", "symbol": symbol},
-                exc_info=exc,
-            )
+        """Reject non-websocket feed ingestion for deterministic tick path."""
+        raise DataIntegrityError("REST quote ingestion disabled; websocket only")
 
     def set_unified_manager(self, manager: Any | None) -> None:
-        """Attach unified manager callbacks for cache updates.
-
-        Args:
-            manager: Unified manager instance to notify or ``None`` to detach.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered MarketDataManager.set_unified_manager",
-            extra={"event": "mdm_unified_manager_set_enter"},
-        )
+        """Retain compatibility hook. Args: manager. Returns: None. Raises: None."""
         self._unified_manager = manager
-
-    def _notify_unified_manager(self, symbol: str, tick: Mapping[str, Any]) -> None:
-        """Forward cache updates to the unified manager when configured.
-
-        Args:
-            symbol: Symbol identifier associated with the tick payload.
-            tick: Mapping of normalized tick fields to forward.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        manager = self._unified_manager
-        if manager is None or not symbol:
-            return
-        callback = getattr(manager, "on_cache_update", None)
-        if not callable(callback):
-            return
-        try:
-            callback(symbol, dict(tick))
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarketDataManager._notify_unified_manager: %s",
-                exc,
-                extra={
-                    "event": "mdm_unified_manager_notify_error",
-                    "symbol": symbol,
-                },
-                exc_info=exc,
-            )
 
     @staticmethod
     def _bar_symbol_key(symbol: str) -> str:
         """Return normalized bar key for *symbol*."""
 
-        return enforce_canonical(normalize_symbol(symbol))
+        return normalize_symbol(symbol)
 
     def _now_ms(self) -> float:
         """Return the current wall-clock timestamp in milliseconds.
@@ -636,25 +408,27 @@ class MarketDataManager:
     # ------------------------------------------------------------------
     # Lifecycle helpers
     def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
         if self._ws is not None:
             try:
                 self._ws.start()
             except Exception:
                 self._logger.exception("Failure in ws.start")
-
-        # 🔥 Force REST fallback if WS not connected
-        if self._rest_poll_enabled:
-            if not self._ws or not self._ws.is_connected():
-                self._logger.info(
-                    "mdm_rest_fallback_activated",
-                    extra={"event": "mdm_rest_fallback_activated"},
-                )
-                self._start_rest_poll()
+        if self._main_loop is not None and self._tick_consumer_task is None:
+            self._tick_consumer_task = self._main_loop.create_task(self._consume_ticks())
         self._start_health_monitor()
 
     def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
         if self._ws is not None:
             self._ws.stop()
+        if self._tick_consumer_task is not None:
+            self._tick_consumer_task.cancel()
+            self._tick_consumer_task = None
         if self._rest_poll_thread is not None:
             self._rest_poll_stop.set()
             self._rest_poll_thread.join(timeout=2.0)
@@ -987,7 +761,7 @@ class MarketDataManager:
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
-        symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        symbol = normalize_symbol(str(symbol))
         if symbol.count(":") != 1:
             raise RuntimeError(f"Malformed canonical symbol: {symbol}")
         with self._lock:
@@ -1112,24 +886,8 @@ class MarketDataManager:
 
     async def _rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
-
-        normalized_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
-        with self._lock:
-            if normalized_symbol in self._rest_refresh_inflight:
-                return
-            self._rest_refresh_inflight.add(normalized_symbol)
-        try:
-            await asyncio.to_thread(self.pull_quote, normalized_symbol)
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in _rest_refresh: %s",
-                exc,
-                extra={"event": "mdm_rest_refresh_error", "symbol": normalized_symbol},
-                exc_info=exc,
-            )
-        finally:
-            with self._lock:
-                self._rest_refresh_inflight.discard(normalized_symbol)
+        del symbol
+        return None
 
     def _schedule_rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
@@ -1344,10 +1102,7 @@ class MarketDataManager:
 
         normalized = self._normalize_tick(symbol, quote, previous)
         if normalized is not None:
-            if not self._is_duplicate(symbol, normalized):
-                self._emit_tick(symbol, normalized, source="rest")
-            else:
-                self._store_tick(symbol, normalized)
+            self._store_tick(symbol, normalized)
             return normalized
         return {"symbol": symbol, **quote}
 
@@ -2392,9 +2147,9 @@ class MarketDataManager:
             return True
         state = self._ws.connection_state()
         if state != ConnectionState.CONNECTED:
-            return self._rest_poll_enabled and self._has_recent_rest_ticks()
+            return False
         if not self._ws.is_connected():
-            return self._rest_poll_enabled and self._has_recent_rest_ticks()
+            return False
         return True
 
     def attach_tick_bus(self, tick_bus: Any) -> None:
@@ -2416,32 +2171,22 @@ class MarketDataManager:
         except Exception as e:
             self._logger.error("Failure in MarketDataManager.set_event_loop: %s", e)
 
+    async def push_tick(self, raw_tick: dict[str, Any]) -> None:
+        """Queue one raw websocket tick for deterministic consumption."""
+        await self._tick_queue.put(dict(raw_tick))
+
+    def _enqueue_tick_threadsafe(self, tick: dict[str, Any]) -> None:
+        """Enqueue websocket ticks from sync callbacks onto the async queue."""
+        loop = self._main_loop
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.push_tick(tick), loop)
+            return
+        self._tick_queue.put_nowait(dict(tick))
+        self._drain_tick_queue_sync()
+
     def _on_tick(self, tick: dict[str, Any]) -> None:
-        """Args: tick; Returns: none; Raises: none."""
-        try:
-            symbol_value = tick.get("symbol")
-            if not symbol_value:
-                return
-            symbol = enforce_canonical(normalize_symbol(str(symbol_value)))
-            incoming = dict(tick)
-            incoming_ts = float(incoming.get("timestamp") or time.time())
-            previous = self._tick_cache.get(symbol)
-            if previous is not None:
-                previous_ts = float(previous.get("timestamp") or 0.0)
-                previous_source = str(previous.get("source", "")).lower()
-                incoming_source = str(incoming.get("source", "")).lower()
-                if (
-                    previous_source == "ws"
-                    and incoming_source in {"rest", "polling"}
-                    and incoming_ts <= previous_ts
-                ):
-                    return
-            self._tick_cache[symbol] = incoming
-            self._last_tick_time[symbol] = time.time()
-            self.last_tick_time = time.time()
-            self._handle_tick(incoming)
-        except Exception as e:
-            self._logger.error("Failure in MarketDataManager._on_tick: %s", e)
+        """Legacy tick-bus hook routed to queue ingestion."""
+        self._enqueue_tick_threadsafe(tick)
 
     def update_authoritative_ticks(self, ticks: list[dict[str, Any]]) -> None:
         """Update authoritative wall-clock tick snapshot. Args: ticks. Returns: None. Raises: None."""
@@ -2461,143 +2206,43 @@ class MarketDataManager:
     # Internal plumbing
 
     def _handle_tick(self, tick: dict[str, Any]) -> None:
-        """Process an incoming raw tick from WebSocket or Polling."""
+        """Deprecated sync entrypoint retained for compatibility."""
+        self._enqueue_tick_threadsafe(tick)
 
-        if not isinstance(tick, dict):
-            self._logger.error("Invalid tick format: %s", type(tick))
-            return
+    async def _consume_ticks(self) -> None:
+        """Consume websocket ticks serially and build finalized candles."""
+        while True:
+            raw = await self._tick_queue.get()
+            self._process_queued_tick(raw)
 
-        instrument_token = tick.get("instrument_token")
-        last_price = tick.get("last_price")
-        if instrument_token is None or last_price is None:
-            return
+    def _drain_tick_queue_sync(self) -> None:
+        """Drain queued ticks serially when async loop is unavailable."""
+        while True:
+            try:
+                raw = self._tick_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._process_queued_tick(raw)
 
-        now = time.time()
-        self._last_tick_time["__global__"] = now
-        self.last_tick_time = now
+    def _process_queued_tick(self, raw: dict[str, Any]) -> None:
+        """Process one queued tick deterministically."""
+        tick = validate_tick(raw)
+        symbol = tick.symbol
+        last_ts = self._last_tick_ts.get(symbol)
+        if last_ts is not None and tick.timestamp <= last_ts:
+            raise DataIntegrityError(f"non-monotonic tick for {symbol}")
+        self._last_tick_ts[symbol] = tick.timestamp
+        engine = self._get_engine(symbol)
+        candle = engine.on_tick(tick)
+        self._store_tick(symbol, tick.to_dict())
+        if candle:
+            self._ohlc[symbol].append(candle)
 
-        token: int | None = None
-        try:
-            token = int(instrument_token)
-        except (ValueError, TypeError):
-            token = None
-
-        symbol = None
-        if token is not None:
-            resolver = getattr(self, "_resolver", None)
-            resolve_token = getattr(resolver, "resolve_token", None)
-            if callable(resolve_token):
-                symbol = resolve_token(token)
-            if not symbol:
-                symbol = self._symbol_by_token.get(token)
-
-        if not symbol:
-            self._logger.error(
-                "Token %s not mapped to symbol — dropping tick",
-                instrument_token,
-            )
-            return
-
-        symbol = enforce_canonical(normalize_symbol(str(symbol)))
-        if symbol.count(":") != 1:
-            raise RuntimeError(f"Malformed canonical symbol: {symbol}")
-
-        if symbol not in self._tracked_symbols:
-            self._tracked_symbols.add(symbol)
-
-        if not self._allow_tick_for_symbol(symbol):
-            return
-
-        with self._lock:
-            previous = self._latest_ticks.get(symbol)
-
-        try:
-            normalized_tick = self._normalize_tick(symbol, tick, previous)
-        except Exception as exc:
-            self._logger.error(
-                f"mdm_normalize_crash: {exc}", extra={"symbol": symbol}, exc_info=True
-            )
-            return
-
-        if not normalized_tick:
-            return
-
-        with self._lock:
-            last_seen = self._latest_ticks.get(symbol)
-        if isinstance(last_seen, Mapping):
-            last_ts = float(last_seen.get("timestamp") or 0.0)
-            current_ts = float(normalized_tick.get("timestamp") or 0.0)
-            if current_ts <= last_ts:
-                self._logger.debug(
-                    "Dropping out-of-order tick for %s ts=%.3f last=%.3f",
-                    symbol,
-                    current_ts,
-                    last_ts,
-                )
-                return
-
-        if self._is_duplicate(symbol, normalized_tick):
-            return
-
-        if self._ws:
-            self.set_ws_connected(True)
-        self.bump_heartbeat()
-        log_throttled(
-            self._logger,
-            f"live_tick_{symbol}",
-            f"LIVE_TICK {symbol} {last_price}",
-            interval_sec=5.0,
-            level=logging.DEBUG,
-        )
-        self._tick_stats[symbol] += 1
-        now = time.monotonic()
-        if now - self._last_tick_stats_log >= 15.0:
-            summary = ", ".join(
-                f"{sym}:{cnt}" for sym, cnt in sorted(self._tick_stats.items())
-            )
-            self._logger.debug(f"TICK_RATE_15S {summary}")
-            self._tick_stats.clear()
-            self._last_tick_stats_log = now
-        tick_source = str(tick.get("source", "ws") or "ws").lower()
-        self._emit_tick(symbol, normalized_tick, source=tick_source)
-
-    def _allow_tick_for_symbol(self, symbol: str) -> bool:
-        """Args: symbol; Returns: burst-gate decision; Raises: none."""
-
-        try:
-            now = time.monotonic()
-            with self._lock:
-                window_start, count = self._tick_burst_tracker.get(symbol, (now, 0))
-                if now - window_start >= self._tick_burst_window_sec:
-                    window_start = now
-                    count = 0
-                count += 1
-                self._tick_burst_tracker[symbol] = (window_start, count)
-            if count <= self._tick_burst_limit:
-                return True
-            log_throttled(
-                self._logger,
-                f"mdm_tick_burst_drop_{symbol}",
-                "Dropping burst tick flood for %s count=%d window=%.2fs"
-                % (symbol, count, self._tick_burst_window_sec),
-                interval_sec=5.0,
-                level=logging.WARNING,
-                extra={
-                    "event": "mdm_tick_burst_drop",
-                    "symbol": symbol,
-                    "count": count,
-                    "window_sec": self._tick_burst_window_sec,
-                },
-            )
-            return False
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in MarketDataManager._allow_tick_for_symbol: %s",
-                exc,
-                extra={"event": "mdm_tick_burst_error", "symbol": symbol},
-                exc_info=exc,
-            )
-            return True
+    def _get_engine(self, symbol: str) -> CandleEngine:
+        """Return or create candle engine for symbol."""
+        if symbol not in self._engines:
+            self._engines[symbol] = CandleEngine()
+        return self._engines[symbol]
 
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
         if token is None:
@@ -2629,18 +2274,14 @@ class MarketDataManager:
         wallclock = tick.get("timestamp", time.time())
 
         # 🔥 PRODUCTION FIX — enforce canonical key
-        symbol = enforce_canonical(normalize_symbol(symbol))
+        symbol = normalize_symbol(symbol)
 
         cached_tick = dict(tick)
-        with self._lock:
-            self._latest_ticks[symbol] = cached_tick
-            self._tick_cache[symbol] = cached_tick
-            self._last_tick_time[symbol] = time.time()
-            self._history[symbol].append(cached_tick)
-            self._last_tick_wallclock[symbol] = float(wallclock)
-        self._notify_unified_manager(symbol, cached_tick)
-        bar_symbol = self._bar_symbol_key(symbol)
-        self._ohlc_builder.add_tick(bar_symbol, cached_tick)
+        self._latest_ticks[symbol] = cached_tick
+        self._tick_cache[symbol] = cached_tick
+        self._last_tick_time[symbol] = time.time()
+        self._history[symbol].append(cached_tick)
+        self._last_tick_wallclock[symbol] = float(wallclock)
         staleness_seconds = 0.0
         try:
             staleness_seconds = max(time.time() - float(wallclock), 0.0)
@@ -2664,26 +2305,13 @@ class MarketDataManager:
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
-        now_emit = time.monotonic()
-        with self._lock:
-            last_emit = float(self._last_emit_mono.get(symbol, 0.0))
-            if (
-                self._tick_emit_min_interval > 0
-                and (now_emit - last_emit) < self._tick_emit_min_interval
-            ):
-                return
-            self._last_emit_mono[symbol] = now_emit
         self._store_tick(symbol, tick)
-        if source == "warmup":
-            return
         callbacks: list[TickCallback]
         tick_payload = dict(tick)
-        with self._lock:
-            self._last_tick_source[symbol] = source
-            callbacks = list(self._subscribers.get(symbol, ()))
-            self._tick_counter += 1
-        if source != "ws":
-            self.bump_heartbeat()
+        self._last_tick_source[symbol] = source
+        callbacks = list(self._subscribers.get(symbol, ()))
+        self._tick_counter += 1
+        self.bump_heartbeat()
         now_mono = time.monotonic()
         tick_stats_interval = float(os.getenv("TICK_STATS_INTERVAL", "5.0"))
         if now_mono - self._last_tick_log_time >= tick_stats_interval:
@@ -2707,9 +2335,8 @@ class MarketDataManager:
                             lambda: safe_task(callback(dict(tick_payload)))
                         )
                     else:
-                        with self._lock:
-                            self._async_dispatch_drops += 1
-                            async_dispatch_drops = self._async_dispatch_drops
+                        self._async_dispatch_drops += 1
+                        async_dispatch_drops = self._async_dispatch_drops
                         now = time.monotonic()
                         if now - self._last_async_drop_log > 5.0:
                             self._logger.warning(
@@ -2757,7 +2384,7 @@ class MarketDataManager:
                 raise RuntimeError("WARMUP failed: historical data client unavailable")
 
             for symbol in symbols:
-                canonical_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+                canonical_symbol = normalize_symbol(str(symbol))
                 token = self._token_by_symbol.get(canonical_symbol)
                 if not token:
                     # BUG-β FIX: Never raise — skip and warn so remaining
@@ -2802,15 +2429,23 @@ class MarketDataManager:
                     if candle_dt.tzinfo is None:
                         candle_dt = candle_dt.replace(tzinfo=timezone.utc)
 
-                    synthetic_tick = {
-                        "instrument_token": token,
-                        "symbol": symbol,
-                        "last_price": float(candle.get("close", 0.0)),
-                        "volume": candle.get("volume", 0),
-                        "timestamp": float(candle_dt.timestamp()),
-                        "source": "warmup",
+                    historical_tick = {
+                        "symbol": canonical_symbol,
+                        "ltp": float(candle.get("close", 0.0)),
+                        "volume": float(candle.get("volume", 0.0)),
+                        "timestamp": candle_dt,
+                        "source": "historical",
                     }
-                    self._handle_tick(synthetic_tick)
+                    validated = validate_tick(historical_tick)
+                    engine = self._get_engine(canonical_symbol)
+                    finalized = engine.on_tick(validated)
+                    if finalized:
+                        self._ohlc[self._bar_symbol_key(canonical_symbol)].append(
+                            finalized
+                        )
+                    self._last_historical_ts[canonical_symbol] = float(
+                        validated["timestamp"].timestamp()
+                    )
 
             self._logger.info("WARMUP_COMPLETE")
         except Exception as e:
@@ -3115,21 +2750,6 @@ class MarketDataManager:
                 exc_info=exc,
             )
             return []
-        # diagnostic batch log
-        try:
-            self._logger.info(
-                "REST polling batch",
-                extra={
-                    "event": "mdm_rest_poll_batch",
-                    "batch_size": len(symbols),
-                    "symbols_preview": symbols[:5],
-                    "poll_interval": float(self._rest_poll_interval),
-                },
-            )
-        except Exception:
-            # don't let diagnostics break the loop
-            pass
-
     def ensure_tracking(self, symbol: str, *, seed: bool = True) -> bool:
         """Ensure *symbol* is tracked for REST polling and optional seeding.
 
@@ -3539,14 +3159,24 @@ class MarketDataManager:
         """Return trailing one-minute OHLC bars for *symbol*."""
 
         bar_symbol = self._bar_symbol_key(symbol)
-        return self._ohlc_builder.get_bars(bar_symbol, limit=limit)
+        with self._lock:
+            bars = list(self._ohlc.get(bar_symbol, ()))
+        if limit is not None and limit >= 0:
+            bars = bars[-limit:]
+        return bars
+
+    def get_ohlc(self, symbol: str) -> list[dict[str, Any]]:
+        """Return finalized candles for *symbol*. Args: symbol. Returns: list of candles. Raises: None."""
+        return self.get_ohlc_bars(symbol)
 
     @property
     def market_data(self) -> dict[str, Any]:
         """Return derived market data snapshots such as OHLC bars."""
 
         snapshot: dict[str, Any] = {}
-        for symbol, bars in self._ohlc_builder.snapshot().items():
+        with self._lock:
+            ohlc_snapshot = {symbol: list(bars) for symbol, bars in self._ohlc.items()}
+        for symbol, bars in ohlc_snapshot.items():
             snapshot[f"{symbol}_bars"] = bars
         return snapshot
 
@@ -3906,39 +3536,10 @@ class MarketDataManager:
             None.
         """
 
-        candidates: list[str | int] = self._candidate_quote_keys(symbol)
-        if not candidates:
-            candidates = [symbol]
-        quote: dict[str, Any] | None = None
-        for key in candidates:
-            broker_key: str | int
-            if isinstance(key, int):
-                broker_key = int(key)
-            else:
-                broker_key = key
-            fetched = self._broker_quote_any(broker_key)
-            if fetched:
-                quote = fetched
-                break
-        if quote is None:
-            return
-        if not isinstance(quote, dict):
-            quote = dict(quote)
-        with self._lock:
-            previous = self._latest_ticks.get(symbol)
-        normalized = self._normalize_tick(symbol, quote, previous)
-        if normalized is None:
-            return
-        if self._is_duplicate(symbol, normalized):
-            return
-        self._emit_tick(symbol, normalized, source="rest")
+        del symbol
+        return
 
     def _has_recent_rest_ticks(self) -> bool:
-        cutoff = time.time() - max(self._rest_poll_interval * 2.0, 5.0)
-        with self._lock:
-            for symbol, ts in self._last_tick_wallclock.items():
-                if self._last_tick_source.get(symbol) == "rest" and ts >= cutoff:
-                    return True
         return False
 
     @staticmethod

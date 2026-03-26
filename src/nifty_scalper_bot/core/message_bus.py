@@ -19,7 +19,7 @@ LOGGER = get_logger(__name__)
 class MessageType(Enum):
     """Message types flowing through the bus."""
 
-    TICK = "tick"  # Market data tick
+    TICK = "tick"  # Deprecated: disallowed for publish/subscribe
     SIGNAL = "signal"  # Strategy signal/request
     ORDER_REQUEST = "order_request"  # Order to execute
     ORDER_UPDATE = "order_update"  # Execution confirmation (Fill/Cancel/Reject)
@@ -69,91 +69,24 @@ class MessageBus:
         )
 
     async def publish(self, message: Message) -> None:
-        """Publish a message, with pre-start buffering for TICK messages."""
+        """Publish a message to subscribed handlers."""
+        if message.type.value == 'tick':
+            raise RuntimeError('MessageBus does not carry tick events')
         if not self._running:
-            # Buffer tick messages for later dispatch
-            if message.type == MessageType.TICK:
-                try:
-                    # Use put_nowait to avoid blocking - queue will buffer
-                    self.queues[message.type].put_nowait(message)
-                    LOGGER.debug(
-                        f"⏳ Buffered pre-start tick for {message.data.get('symbol', 'unknown')}",
-                        extra={"event": "tick_buffered", "type": message.type.value},
-                    )
-                except asyncio.QueueFull:
-                    # Only log occasionally to avoid spam
-                    if not hasattr(self, "_buffer_warn_count"):
-                        self._buffer_warn_count = 0
-                    self._buffer_warn_count += 1
-                    if self._buffer_warn_count % 100 == 1:
-                        log_throttled(
-                            LOGGER,
-                            "message_bus_prestart_tick_buffer_full",
-                            (
-                                "⚠️ Pre-start tick buffer full (dropped "
-                                f"{self._buffer_warn_count} ticks)"
-                            ),
-                            level=logging.WARNING,
-                            interval_sec=60.0,
-                            extra={"event": "buffer_full"},
-                        )
-                return
-            else:
-                # Non-tick messages before start are logged but not dropped
+            try:
+                self.queues[message.type].put_nowait(message)
+            except asyncio.QueueFull:
                 log_throttled(
                     LOGGER,
-                    f"message_bus_prestart_{message.type.value}",
-                    (
-                        "⚠️ MessageBus received "
-                        f"'{message.type.value}' before start() - queuing"
-                    ),
-                    level=logging.DEBUG,
+                    f"message_bus_prestart_full_{message.type.value}",
+                    f"Queue full for pre-start {message.type.value}",
+                    level=logging.ERROR,
                     interval_sec=30.0,
-                    extra={"event": "pre_start_message", "type": message.type.value},
+                    extra={'event': 'pre_start_queue_full', 'type': message.type.value},
                 )
-                try:
-                    self.queues[message.type].put_nowait(message)
-                except asyncio.QueueFull:
-                    log_throttled(
-                        LOGGER,
-                        f"message_bus_prestart_full_{message.type.value}",
-                        f"Queue full for pre-start {message.type.value}",
-                        level=logging.ERROR,
-                        interval_sec=30.0,
-                        extra={
-                            "event": "pre_start_queue_full",
-                            "type": message.type.value,
-                        },
-                    )
-                return
-
-        # Normal publish (bus is running)
+            return
         try:
-            queue = self.queues[message.type]
-            if queue.qsize() >= self._soft_drop_threshold:
-                if message.type is MessageType.TICK:
-                    with suppress(asyncio.QueueEmpty):
-                        queue.get_nowait()
-                        queue.task_done()
-                    self._dropped_counts[message.type] += 1
-                    log_throttled(
-                        LOGGER,
-                        "message_bus_tick_backpressure_drop",
-                        (
-                            "Dropping oldest tick under backpressure "
-                            f"(depth={queue.qsize()}, dropped={self._dropped_counts[message.type]})"
-                        ),
-                        level=logging.WARNING,
-                        interval_sec=15.0,
-                        extra={
-                            "event": "message_bus_backpressure_drop",
-                            "type": message.type.value,
-                        },
-                    )
-                else:
-                    await queue.put(message)
-                    return
-            queue.put_nowait(message)
+            self.queues[message.type].put_nowait(message)
         except asyncio.QueueFull:
             self._dropped_counts[message.type] += 1
             log_throttled(
@@ -162,32 +95,14 @@ class MessageBus:
                 f"Queue full for {message.type.value} - dropping message.",
                 level=logging.ERROR,
                 interval_sec=15.0,
-                extra={
-                    "event": "message_drop",
-                    "type": message.type.value,
-                    "dropped": self._dropped_counts[message.type],
-                },
+                extra={'event': 'message_drop', 'type': message.type.value, 'dropped': self._dropped_counts[message.type]},
             )
-        except KeyError:
-            LOGGER.error(
-                "Attempted to publish unknown message type: %s",
-                message.type.value,
-            )
-        except Exception as exc:  # noqa: BLE001 - defensive logging
-            LOGGER.error(
-                "Failure in MessageBus.publish: %s",
-                exc,
-                extra={
-                    "event": "message_bus_publish_error",
-                    "type": message.type.value,
-                },
-                exc_info=exc,
-            )
-
     def subscribe(
         self, message_type: MessageType, handler: Callable[[Message], Awaitable[None]]
     ) -> None:
         """Subscribe an async handler function to a message type."""
+        if message_type.value == 'tick':
+            raise RuntimeError('MessageBus does not carry tick events')
         if not asyncio.iscoroutinefunction(handler):
             raise TypeError(
                 f"Handler for {message_type.value} must be an async function."

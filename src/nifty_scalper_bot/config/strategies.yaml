@@ -1,12 +1,2 @@
 enabled_strategies:
   - smc_liquidity
-  - vwap_pro
-  - oi_max_pain
-  - gamma_scalping
-  - cpr_breakout
-  - order_flow
-  - bb_squeeze
-  - rsi_divergence
-  - orb_pro
-  - straddle_theta
-  - elite_tuesday_gamma_buyer

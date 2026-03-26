@@ -1,7 +1,8 @@
-"""Deterministic candle lifecycle + data hydration helpers."""
+"""Deterministic 1-minute candle engine and strict OHLC validation helpers."""
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,135 +10,145 @@ from typing import Any, Callable, Mapping
 
 import pandas as pd
 
+from nifty_scalper_bot.data.source import DataIntegrityError
+from nifty_scalper_bot.data.validator import Tick, validate_tick
+
+LOGGER = logging.getLogger(__name__)
 FetchHistoricalFn = Callable[[str], pd.DataFrame | None]
 FetchRecentFn = Callable[[str], pd.DataFrame | None]
+_OHLC_COLUMNS = ('timestamp', 'open', 'high', 'low', 'close', 'volume')
+
 
 
 def sanitize(df: pd.DataFrame | None) -> pd.DataFrame:
-    """Sanitize OHLCV frame. Args: df. Returns: cleaned DataFrame. Raises: None."""
+    """Drop invalid OHLC rows without synthetic repair. Args: df. Returns: cleaned DataFrame. Raises: None."""
     if df is None or df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=_OHLC_COLUMNS)
     cleaned = df.copy()
-    if "timestamp" in cleaned.columns:
-        cleaned["timestamp"] = pd.to_datetime(
-            cleaned["timestamp"], utc=True, errors="coerce"
-        )
-        cleaned = cleaned.dropna(subset=["timestamp"])
-        cleaned = cleaned.drop_duplicates(subset="timestamp", keep="last")
-        cleaned = cleaned.sort_values("timestamp")
-    else:
-        cleaned = cleaned.drop_duplicates()
-    cleaned = cleaned.ffill().bfill()
-    if "close" in cleaned.columns:
-        cleaned = cleaned[~cleaned["close"].isna()]
-    return cleaned.reset_index(drop=True)
+    for col in ('open', 'high', 'low', 'close', 'volume'):
+        if col not in cleaned.columns:
+            cleaned[col] = 0.0
+        cleaned[col] = pd.to_numeric(cleaned[col], errors='coerce')
+    cleaned['timestamp'] = pd.to_datetime(cleaned.get('timestamp'), utc=True, errors='coerce')
+    before = len(cleaned)
+    cleaned = cleaned.dropna(subset=['timestamp', 'open', 'high', 'low', 'close'])
+    cleaned = cleaned.drop_duplicates(subset='timestamp', keep='last')
+    cleaned = cleaned.sort_values('timestamp').reset_index(drop=True)
+    dropped = before - len(cleaned)
+    if dropped > 0:
+        LOGGER.warning('tick_invalid', extra={'event': 'tick_invalid', 'dropped_rows': dropped})
+    return cleaned[list(_OHLC_COLUMNS)]
 
 
 @dataclass(slots=True)
 class CandleEngine:
-    """Build candles from ticks.
+    """Build deterministic 1-minute candles from validated ticks. Args: interval/max_bars. Returns: engine. Raises: ValueError."""
 
-    Args: interval/max_bars. Returns: engine. Raises: ValueError.
-    """
-
-    interval: str = "1min"
+    interval: str = '1min'
     max_bars: int = 500
-    df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    df: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=_OHLC_COLUMNS))
     current_candle: dict[str, Any] | None = None
     last_candle_close: datetime | None = None
+    _last_tick_ts: pd.Timestamp | None = None
 
-    def on_tick(self, tick: Mapping[str, Any]) -> None:
-        """Ingest tick. Args: tick. Returns: None. Raises: ValueError."""
-        ts = pd.to_datetime(tick["timestamp"], utc=True)
-        raw_price = tick.get("price") or tick.get("ltp") or tick.get("last_price")
-        if raw_price is None:
-            msg = "tick price is required"
-            raise ValueError(msg)
-        price = float(raw_price)
-        normalized_tick: dict[str, Any] = {
-            "timestamp": ts,
-            "price": price,
-            "volume": float(tick.get("volume") or 0.0),
-        }
+    def on_tick(self, tick: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Ingest one tick. Args: tick. Returns: finalized candle|None. Raises: DataIntegrityError."""
+        if self.interval != '1min':
+            raise ValueError(f'Unsupported interval: {self.interval}')
 
+        validated = tick if isinstance(tick, Tick) else validate_tick(dict(tick))
+        payload = validated.to_dict()
+        timestamp = pd.Timestamp(validated.timestamp)
+        minute = timestamp.floor('1min')
+
+        if self._last_tick_ts is not None and timestamp < self._last_tick_ts:
+            raise DataIntegrityError('timestamps must be monotonic')
+
+        finalized: dict[str, Any] | None = None
         if self.current_candle is None:
-            self.current_candle = self._init_candle(normalized_tick)
-            return
-
-        if ts >= self._candle_close_time(
-            pd.Timestamp(self.current_candle["timestamp"])
-        ):
-            self._finalize_candle()
-            self.current_candle = self._init_candle(normalized_tick)
+            self.current_candle = self._start_candle(payload, minute)
+            LOGGER.debug('candle_created', extra={'event': 'candle_created', 'minute': minute.isoformat()})
         else:
-            self._update_candle(normalized_tick)
+            current_minute = pd.Timestamp(self.current_candle['timestamp'])
+            if minute < current_minute:
+                raise DataIntegrityError('out-of-order minute bucket')
+            if minute > current_minute:
+                finalized = self._finalize_current_candle()
+                self.current_candle = self._start_candle(payload, minute)
+                LOGGER.debug('candle_created', extra={'event': 'candle_created', 'minute': minute.isoformat()})
+            else:
+                self._update_candle(payload)
 
-    def _init_candle(self, tick: Mapping[str, Any]) -> dict[str, Any]:
-        """Create candle. Args: tick. Returns: candle dict. Raises: None."""
-        price = float(tick["price"])
+        self._last_tick_ts = timestamp
+        return finalized
+
+    def _start_candle(self, tick: Mapping[str, Any], minute: pd.Timestamp) -> dict[str, Any]:
+        """Initialize a minute candle. Args: tick/minute. Returns: candle. Raises: None."""
+        price = float(tick['ltp'])
         return {
-            "timestamp": pd.to_datetime(tick["timestamp"], utc=True),
-            "open": price,
-            "high": price,
-            "low": price,
-            "close": price,
-            "volume": float(tick.get("volume") or 0.0),
+            'timestamp': minute,
+            'open': price,
+            'high': price,
+            'low': price,
+            'close': price,
+            'volume': float(tick.get('volume') or 0.0),
         }
 
     def _update_candle(self, tick: Mapping[str, Any]) -> None:
-        """Update candle. Args: tick. Returns: None. Raises: None."""
+        """Update active candle OHLC. Args: tick. Returns: None. Raises: DataIntegrityError."""
         if self.current_candle is None:
-            return
-        price = float(tick["price"])
-        self.current_candle["high"] = max(float(self.current_candle["high"]), price)
-        self.current_candle["low"] = min(float(self.current_candle["low"]), price)
-        self.current_candle["close"] = price
-        self.current_candle["volume"] = float(
-            self.current_candle.get("volume") or 0.0
-        ) + float(tick.get("volume") or 0.0)
+            raise DataIntegrityError('missing current candle')
+        price = float(tick['ltp'])
+        self.current_candle['high'] = max(float(self.current_candle['high']), price)
+        self.current_candle['low'] = min(float(self.current_candle['low']), price)
+        self.current_candle['close'] = price
+        self.current_candle['volume'] = float(self.current_candle['volume']) + float(tick.get('volume') or 0.0)
 
-    def _candle_close_time(self, ts: pd.Timestamp) -> pd.Timestamp:
-        """Return close time. Args: ts. Returns: timestamp. Raises: ValueError."""
-        if self.interval != "1min":
-            msg = f"Unsupported interval: {self.interval}"
-            raise ValueError(msg)
-        base = ts.floor("min")
-        return base + pd.Timedelta(minutes=1)
-
-    def _finalize_candle(self) -> None:
-        """Persist candle. Args: none. Returns: None. Raises: None."""
+    def _finalize_current_candle(self) -> dict[str, Any] | None:
+        """Finalize active candle. Args: none. Returns: candle|None. Raises: DataIntegrityError."""
         if self.current_candle is None:
-            return
-        df_new = pd.DataFrame([self.current_candle])
-        merged = pd.concat([self.df, df_new], ignore_index=True)
-        merged = merged.drop_duplicates(subset="timestamp", keep="last")
-        merged = (
-            merged.sort_values("timestamp").tail(self.max_bars).reset_index(drop=True)
-        )
-        self.df = merged
-        self.last_candle_close = pd.to_datetime(
-            self.current_candle["timestamp"], utc=True
-        )
+            return None
+        candle = dict(self.current_candle)
+        _validate_ohlc_row(candle)
+        frame = pd.concat([self.df, pd.DataFrame([candle])], ignore_index=True)
+        frame = sanitize(frame).tail(self.max_bars).reset_index(drop=True)
+        if frame['timestamp'].duplicated().any():
+            raise DataIntegrityError('duplicate candle timestamps')
+        if not frame['timestamp'].is_monotonic_increasing:
+            raise DataIntegrityError('candle timestamps must be monotonic')
+        self.df = frame
+        self.last_candle_close = pd.to_datetime(candle['timestamp'], utc=True).to_pydatetime()
+        LOGGER.info('candle_finalized', extra={'event': 'candle_finalized', 'timestamp': pd.Timestamp(candle['timestamp']).isoformat()})
+        return candle
+
+    def flush(self) -> dict[str, Any] | None:
+        """Flush active candle into finalized store. Args: none. Returns: candle|None. Raises: DataIntegrityError."""
+        return self._finalize_current_candle()
 
     def get_df(self) -> pd.DataFrame:
-        """Return candles. Args: none. Returns: DataFrame. Raises: None."""
+        """Return finalized candles. Args: none. Returns: DataFrame. Raises: None."""
         return self.df.copy(deep=True)
 
 
+def _validate_ohlc_row(row: Mapping[str, Any]) -> None:
+    """Validate OHLC consistency invariants. Args: row. Returns: None. Raises: DataIntegrityError."""
+    op = float(row['open'])
+    hi = float(row['high'])
+    lo = float(row['low'])
+    cl = float(row['close'])
+    if hi < max(op, cl):
+        raise DataIntegrityError('high must be >= open/close')
+    if lo > min(op, cl):
+        raise DataIntegrityError('low must be <= open/close')
+
+
 def detect_gap(df: pd.DataFrame) -> bool:
-    """Detect gaps. Args: df. Returns: bool. Raises: None."""
-    if df is None or len(df) < 3 or "timestamp" not in df.columns:
+    """Detect missing 1-minute buckets. Args: df. Returns: bool. Raises: None."""
+    clean = sanitize(df)
+    if len(clean) < 2:
         return False
-    ts = (
-        pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-        .dropna()
-        .sort_values()
-    )
-    if len(ts) < 3:
-        return False
-    diffs = ts.diff().dropna()
-    expected = diffs.mode().iloc[0]
-    return bool((diffs != expected).any())
+    diffs = clean['timestamp'].diff().dropna()
+    return bool((diffs != pd.Timedelta(minutes=1)).any())
 
 
 def repair_with_backfill(
@@ -147,17 +158,10 @@ def repair_with_backfill(
     fetch_recent_rest: FetchRecentFn,
     max_bars: int = 500,
 ) -> pd.DataFrame:
-    """Repair gaps.
-
-    Args: symbol/df/fetch_recent_rest/max_bars. Returns: DataFrame. Raises: Exception.
-    """
-    old_df = sanitize(df)
+    """Merge deterministic recent candles only (no fill/backfill). Args: symbol/df/fetch_recent_rest/max_bars. Returns: DataFrame. Raises: DataIntegrityError."""
+    LOGGER.info('data_integrity_error', extra={'event': 'data_integrity_error', 'symbol': symbol, 'reason': 'repair_with_backfill_deprecated'})
     recent = sanitize(fetch_recent_rest(symbol))
-    if recent.empty:
-        return old_df.tail(max_bars).copy()
-
-    merged = pd.concat([old_df, recent], ignore_index=True)
-    merged = sanitize(merged)
+    merged = sanitize(pd.concat([sanitize(df), recent], ignore_index=True))
     return merged.tail(max_bars).reset_index(drop=True)
 
 
@@ -169,43 +173,47 @@ def fetch_historical_safe(
     retries: int = 3,
     sleep_seconds: float = 0.5,
 ) -> pd.DataFrame | None:
-    """Fetch history safely.
-
-    Args: symbol/fetch_historical/min_required/retries/sleep_seconds.
-    Returns: DataFrame|None. Raises: None.
-    """
-    for _ in range(retries):
-        df = fetch_historical(symbol)
-        if df is not None and len(df) >= min_required:
-            return df
-        time.sleep(sleep_seconds)
+    """Fetch historical candles with explicit retries and logs. Args: symbol/fetch_historical/min_required/retries/sleep_seconds. Returns: DataFrame|None. Raises: None."""
+    for attempt in range(1, retries + 1):
+        frame = sanitize(fetch_historical(symbol))
+        if validate_dataframe(frame, min_required=min_required):
+            return frame
+        LOGGER.warning(
+            'data_integrity_error',
+            extra={'event': 'data_integrity_error', 'symbol': symbol, 'attempt': attempt, 'reason': 'historical_validation_failed'},
+        )
+        if attempt < retries:
+            time.sleep(sleep_seconds)
     return None
 
 
 def validate_dataframe(df: pd.DataFrame | None, min_required: int = 50) -> bool:
-    """Validate candles. Args: df/min_required. Returns: bool. Raises: None."""
+    """Validate OHLC frame integrity. Args: df/min_required. Returns: bool. Raises: None."""
     if df is None:
         return False
-    if len(df) < min_required:
+    clean = sanitize(df)
+    if len(clean) < min_required:
         return False
-    if "timestamp" not in df.columns:
+    if clean['timestamp'].duplicated().any() or not clean['timestamp'].is_monotonic_increasing:
         return False
-    if df.isnull().any().any():
+    if detect_gap(clean):
         return False
-    if df.duplicated(subset="timestamp").any():
-        return False
-    if detect_gap(df):
+    try:
+        for row in clean.to_dict(orient='records'):
+            _validate_ohlc_row(row)
+    except DataIntegrityError:
         return False
     return True
 
 
 def normalize_ohlc_timezone(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize tz. Args: df. Returns: DataFrame. Raises: None."""
-    normalized = df.copy()
-    ts = pd.to_datetime(normalized["timestamp"], errors="coerce", utc=True)
-    normalized["timestamp"] = ts.dt.tz_convert("Asia/Kolkata")
-    normalized = normalized.dropna(subset=["timestamp"]).set_index("timestamp")
-    return normalized
+    """Normalize timestamp index to Asia/Kolkata. Args: df. Returns: DataFrame. Raises: DataIntegrityError."""
+    normalized = sanitize(df)
+    ts = pd.to_datetime(normalized['timestamp'], errors='coerce', utc=True)
+    if ts.isna().any():
+        raise DataIntegrityError('Invalid timestamp in normalize_ohlc_timezone')
+    normalized['timestamp'] = ts.dt.tz_convert('Asia/Kolkata')
+    return normalized.set_index('timestamp')
 
 
 def ensure_valid_data(
@@ -216,48 +224,20 @@ def ensure_valid_data(
     fetch_recent_rest: FetchRecentFn,
     min_required: int = 50,
 ) -> pd.DataFrame | None:
-    """Ensure valid candles.
+    """Ensure candle cache integrity with startup hydration only. Args: symbol/engine/fetch_historical/fetch_recent_rest/min_required. Returns: DataFrame|None. Raises: None."""
+    del fetch_recent_rest
+    frame = sanitize(engine.get_df())
+    if validate_dataframe(frame, min_required=min_required):
+        return frame
 
-    Args: symbol/engine/fetch_historical/fetch_recent_rest/min_required.
-    Returns: DataFrame|None. Raises: None.
-    """
-    df = sanitize(engine.get_df())
-    if not df.equals(engine.df):
-        engine.df = df.copy(deep=True)
-
-    if not validate_dataframe(df, min_required=min_required):
-        df_hist = fetch_historical_safe(
-            symbol,
-            fetch_historical=fetch_historical,
-            min_required=min_required,
-        )
-        if df_hist is not None:
-            repaired = sanitize(df_hist)
-            engine.df = repaired.copy(deep=True)
-            df = engine.get_df()
-        else:
-            return None
-
-    if not validate_dataframe(df, min_required=min_required):
-        repaired = repair_with_backfill(
-            symbol,
-            df,
-            fetch_recent_rest=fetch_recent_rest,
-            max_bars=engine.max_bars,
-        )
-        if validate_dataframe(repaired, min_required=min_required):
-            engine.df = repaired.copy(deep=True)
-            df = engine.get_df()
-        else:
-            return None
-
-    if detect_gap(df):
-        repaired = repair_with_backfill(
-            symbol,
-            df,
-            fetch_recent_rest=fetch_recent_rest,
-            max_bars=engine.max_bars,
-        )
-        engine.df = repaired.copy(deep=True)
-
+    hydrated = fetch_historical_safe(
+        symbol,
+        fetch_historical=fetch_historical,
+        min_required=min_required,
+        retries=1,
+    )
+    if hydrated is None:
+        LOGGER.error('data_integrity_error', extra={'event': 'data_integrity_error', 'symbol': symbol, 'reason': 'insufficient_historical'})
+        return None
+    engine.df = hydrated.tail(engine.max_bars).reset_index(drop=True)
     return engine.get_df()

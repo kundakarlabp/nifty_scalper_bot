@@ -13,6 +13,7 @@ import time
 from typing import Any, Callable, Iterable, Mapping, TypedDict, cast
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
+from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
@@ -32,58 +33,6 @@ LOGGER = get_logger(__name__)
 Tick = dict[str, Any]
 OrderListener = Callable[[dict[str, Any]], None]
 TickListener = Callable[[dict[str, Any]], None]
-
-
-@dataclass(slots=True)
-class CandleBuilder:
-    """Build minute OHLCV candles from ticks. Args: none; Returns: none; Raises: none."""
-
-    current_minute: datetime | None = None
-    candle: dict[str, Any] | None = None
-
-    def update(self, tick: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Update builder state with a tick. Args: tick; Returns: closed candle|None; Raises: ValueError."""
-        timestamp_raw = tick.get("timestamp")
-        if not isinstance(timestamp_raw, datetime):
-            msg = "tick.timestamp must be datetime"
-            raise ValueError(msg)
-        timestamp = timestamp_raw
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        minute_ts = timestamp.replace(second=0, microsecond=0)
-
-        price = float(tick.get("price") or tick.get("ltp") or tick.get("last_price") or 0.0)
-        volume = float(tick.get("volume") or 0.0)
-
-        if self.current_minute != minute_ts:
-            closed = dict(self.candle) if self.candle else None
-            self.current_minute = minute_ts
-            self.candle = {
-                "timestamp": minute_ts,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": volume,
-            }
-            return closed
-
-        if self.candle is None:
-            self.candle = {
-                "timestamp": minute_ts,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": volume,
-            }
-            return None
-
-        self.candle["high"] = max(float(self.candle["high"]), price)
-        self.candle["low"] = min(float(self.candle["low"]), price)
-        self.candle["close"] = price
-        self.candle["volume"] = float(self.candle["volume"]) + volume
-        return None
 
 
 class EventBus:
@@ -246,7 +195,6 @@ class DataHub:
         self._store = store
         self._lock = RLock()
         self.tick_bus = TickBus()
-        self.tick_bus.subscribe(self.ingest_tick_sync)
         attach_tick_bus = getattr(self._mdm, "attach_tick_bus", None)
         if callable(attach_tick_bus):
             try:
@@ -283,8 +231,6 @@ class DataHub:
             os.getenv("HISTORY_FRESHNESS_MAX_AGE_SECONDS", "120")
         )
         self._main_loop: asyncio.AbstractEventLoop | None = None
-        self._candle_builders: dict[str, CandleBuilder] = {}
-        self.symbol_candles: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.broker = getattr(self._mdm, "broker", None) or getattr(self._mdm, "_broker", None)
         self.bar_aggregator = getattr(self._mdm, "bar_aggregator", None)
         self.indicators_ready = False
@@ -305,6 +251,9 @@ class DataHub:
 
     async def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick."""
+        source = str(tick.get("source", "ws") or "ws").lower()
+        if source != "ws":
+            raise DataIntegrityError(f"non-websocket source rejected: {source}")
         symbol = tick.get("symbol")
         if not symbol:
             return
@@ -315,23 +264,6 @@ class DataHub:
             raise RuntimeError(
                 f"Malformed canonical symbol in ingest_tick: {canonical_tick['symbol']}"
             )
-
-        try:
-            tick_dt = canonical_tick.get("timestamp")
-            if isinstance(tick_dt, (int, float)):
-                canonical_tick["timestamp"] = datetime.fromtimestamp(float(tick_dt), tz=timezone.utc)
-            elif isinstance(tick_dt, str):
-                canonical_tick["timestamp"] = datetime.fromisoformat(tick_dt.replace("Z", "+00:00"))
-            elif tick_dt is None:
-                canonical_tick["timestamp"] = datetime.now(timezone.utc)
-            if "price" not in canonical_tick:
-                canonical_tick["price"] = float(canonical_tick.get("ltp") or canonical_tick.get("last_price") or 0.0)
-            builder = self._candle_builders.setdefault(normalized_symbol, CandleBuilder())
-            closed_candle = builder.update(canonical_tick)
-            if closed_candle is not None:
-                self.symbol_candles[normalized_symbol].append(closed_candle)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error("Failure in DataHub.ingest_tick candle_build: %s", exc, exc_info=exc)
 
         with self._lock:
             # 1. Update Cache
@@ -344,23 +276,7 @@ class DataHub:
                 __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise  # Don't let math errors kill the tick
 
-        # 3. Publish to MessageBus (outside lock)
-        if self._message_bus:
-            try:
-                await self._message_bus.publish(
-                    Message(
-                        type=MessageType.TICK,
-                        timestamp=datetime.now(timezone.utc),
-                        data=dict(canonical_tick),
-                        source="data_hub",
-                    )
-                )
-            except Exception as exc:
-                LOGGER.error("Failure in DataHub.ingest_tick: %s", exc, exc_info=True)
-        else:
-            LOGGER.debug("DataHub has no event_bus — tick cached without bus publish")
-
-        # 4. Notify Legacy Subscribers (outside lock)
+        # 3. Notify Legacy Subscribers (outside lock)
         with self._lock:
             callbacks = list(self._tick_subscribers.get(normalized_symbol, ()))
 
@@ -404,24 +320,6 @@ class DataHub:
         with self._lock:
             self._quotes[canonical_symbol] = dict(payload)
 
-        if self._message_bus is not None:
-            message = Message(
-                type=MessageType.TICK,
-                timestamp=datetime.now(timezone.utc),
-                data=payload,
-                source="data_hub",
-            )
-            try:
-                publish_result = self._message_bus.publish(message)
-                if asyncio.iscoroutine(publish_result):
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        asyncio.run(publish_result)
-                    else:
-                        loop.create_task(publish_result)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error("Failure in DataHub.store_quote: %s", exc, exc_info=exc)
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
         """Atomically replace the entire position snapshot."""

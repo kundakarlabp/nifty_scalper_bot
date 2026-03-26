@@ -34,8 +34,8 @@ class AlertDeduplicator:
         self,
         quiet_window: timedelta,
         *,
-        bucket_capacity: int = 20,
-        bucket_refill_seconds: float = 10.0,
+        bucket_capacity: int = 100,
+        bucket_refill_seconds: float = 100.0,
     ) -> None:
         """Initialise deduplicator with quiet window and rate limiter.
 
