@@ -3241,10 +3241,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if "timestamp" not in t:
             t["timestamp"] = datetime.now(timezone.utc).timestamp()
 
-        # 6. Authoritative tick pipeline via DataHub TickBus.
-        if data_hub is not None and hasattr(data_hub, "tick_bus"):
+        # 6. Authoritative tick pipeline via MarketDataManager queue.
+        if market_data_manager is not None:
             try:
-                data_hub.tick_bus.publish(t)
+                market_data_manager._enqueue_tick_threadsafe(t)
             except Exception as exc:
                 LOGGER.error("Failure in _on_poll_tick: %s", exc, exc_info=exc)
 

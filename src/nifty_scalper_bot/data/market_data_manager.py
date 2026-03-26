@@ -26,7 +26,8 @@ from typing import (
 import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
-from nifty_scalper_bot.data.candle_engine import CandleEngine, validate_tick
+from nifty_scalper_bot.data.candle_engine import CandleEngine
+from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.streaming.websocket_manager import (
@@ -244,16 +245,13 @@ class MarketDataManager:
 
         if self._ws is not None:
             if hasattr(self._ws, "_on_tick_callback"):
-                self._ws._on_tick_callback = self._handle_tick
+                self._ws._on_tick_callback = self._enqueue_tick_threadsafe
             else:
-                self._ws.on_tick = self._handle_tick
-        if self._tick_bus is not None:
-            self._tick_bus.subscribe(self._on_tick)
-            with suppress(Exception):
-                self._ws_connected = bool(self._ws.is_connected())
+                self._ws.on_tick = self._enqueue_tick_threadsafe
 
         self._m_ticks = Counter("mdm_ticks_total", "Normalized ticks processed")
         self._last_balance_log_time = 0.0
+        self._started = False
 
     def ingest_rest_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
         """Reject non-websocket feed ingestion for deterministic tick path."""
@@ -410,6 +408,9 @@ class MarketDataManager:
     # ------------------------------------------------------------------
     # Lifecycle helpers
     def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
         if self._ws is not None:
             try:
                 self._ws.start()
@@ -420,6 +421,9 @@ class MarketDataManager:
         self._start_health_monitor()
 
     def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
         if self._ws is not None:
             self._ws.stop()
         if self._tick_consumer_task is not None:
@@ -2167,12 +2171,22 @@ class MarketDataManager:
         except Exception as e:
             self._logger.error("Failure in MarketDataManager.set_event_loop: %s", e)
 
+    async def push_tick(self, raw_tick: dict[str, Any]) -> None:
+        """Queue one raw websocket tick for deterministic consumption."""
+        await self._tick_queue.put(dict(raw_tick))
+
+    def _enqueue_tick_threadsafe(self, tick: dict[str, Any]) -> None:
+        """Enqueue websocket ticks from sync callbacks onto the async queue."""
+        loop = self._main_loop
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.push_tick(tick), loop)
+            return
+        self._tick_queue.put_nowait(dict(tick))
+        self._drain_tick_queue_sync()
+
     def _on_tick(self, tick: dict[str, Any]) -> None:
-        """Args: tick; Returns: none; Raises: none."""
-        try:
-            self._handle_tick(tick)
-        except Exception as e:
-            self._logger.error("Failure in MarketDataManager._on_tick: %s", e)
+        """Legacy tick-bus hook routed to queue ingestion."""
+        self._enqueue_tick_threadsafe(tick)
 
     def update_authoritative_ticks(self, ticks: list[dict[str, Any]]) -> None:
         """Update authoritative wall-clock tick snapshot. Args: ticks. Returns: None. Raises: None."""
@@ -2192,100 +2206,11 @@ class MarketDataManager:
     # Internal plumbing
 
     def _handle_tick(self, tick: dict[str, Any]) -> None:
-        """Process an incoming raw tick from websocket only."""
-
-        if not isinstance(tick, dict):
-            self._logger.error("Invalid tick format: %s", type(tick))
-            return
-
-        instrument_token = tick.get("instrument_token")
-        last_price = tick.get("last_price")
-        if instrument_token is None or last_price is None:
-            return
-
-        now = time.time()
-        self._last_tick_time["__global__"] = now
-        self.last_tick_time = now
-
-        token: int | None = None
-        try:
-            token = int(instrument_token)
-        except (ValueError, TypeError):
-            token = None
-
-        symbol = None
-        if token is not None:
-            resolver = getattr(self, "_resolver", None)
-            resolve_token = getattr(resolver, "resolve_token", None)
-            if callable(resolve_token):
-                symbol = resolve_token(token)
-            if not symbol:
-                symbol = self._symbol_by_token.get(token)
-
-        if not symbol:
-            self._logger.error(
-                "Token %s not mapped to symbol — dropping tick",
-                instrument_token,
-            )
-            return
-
-        symbol = enforce_canonical(normalize_symbol(str(symbol)))
-        if symbol.count(":") != 1:
-            raise RuntimeError(f"Malformed canonical symbol: {symbol}")
-
-        if symbol not in self._tracked_symbols:
-            self._tracked_symbols.add(symbol)
-
-        tick_source = str(tick.get("source", "ws") or "ws").lower()
-        if tick_source != "ws":
-            raise DataIntegrityError(f"non-websocket source rejected: {tick_source}")
-
-        previous = self._latest_ticks.get(symbol)
-        normalized_tick = self._normalize_tick(symbol, tick, previous)
-        if not normalized_tick:
-            raise DataIntegrityError(f"invalid tick payload for {symbol}")
-        normalized_tick["source"] = "ws"
-        raw_for_validation = dict(normalized_tick)
-        raw_for_validation["timestamp"] = datetime.fromtimestamp(
-            float(normalized_tick["timestamp"]),
-            tz=timezone.utc,
-        )
-        raw_validated = validate_tick(raw_for_validation)
-        raw_validated["source"] = "ws"
-        raw_validated["instrument_token"] = token
-
-        last_hist = float(self._last_historical_ts.get(symbol, 0.0))
-        if float(pd.Timestamp(raw_validated["timestamp"]).timestamp()) <= last_hist:
-            raise DataIntegrityError("live tick timestamp must be after historical")
-
-        if self._ws:
-            self.set_ws_connected(True)
-        self.bump_heartbeat()
-        log_throttled(
-            self._logger,
-            f"live_tick_{symbol}",
-            f"LIVE_TICK {symbol} {last_price}",
-            interval_sec=5.0,
-            level=logging.DEBUG,
-        )
-        self._tick_stats[symbol] += 1
-        now = time.monotonic()
-        if now - self._last_tick_stats_log >= 15.0:
-            summary = ", ".join(
-                f"{sym}:{cnt}" for sym, cnt in sorted(self._tick_stats.items())
-            )
-            self._logger.debug(f"TICK_RATE_15S {summary}")
-            self._tick_stats.clear()
-            self._last_tick_stats_log = now
-        loop = self._main_loop
-        if loop is None or not loop.is_running():
-            self._tick_queue.put_nowait(raw_validated)
-            self._drain_tick_queue_sync()
-            return
-        asyncio.run_coroutine_threadsafe(self._tick_queue.put(raw_validated), loop)
+        """Deprecated sync entrypoint retained for compatibility."""
+        self._enqueue_tick_threadsafe(tick)
 
     async def _consume_ticks(self) -> None:
-        """Consume websocket ticks serially and build candles deterministically."""
+        """Consume websocket ticks serially and build finalized candles."""
         while True:
             raw = await self._tick_queue.get()
             self._process_queued_tick(raw)
@@ -2302,19 +2227,16 @@ class MarketDataManager:
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
         """Process one queued tick deterministically."""
         tick = validate_tick(raw)
-        symbol = str(tick["symbol"])
-        ts_seconds = float(pd.Timestamp(tick["timestamp"]).timestamp())
+        symbol = tick.symbol
         last_ts = self._last_tick_ts.get(symbol)
-        if last_ts is not None and ts_seconds <= last_ts:
-            return
-        self._last_tick_ts[symbol] = ts_seconds
+        if last_ts is not None and tick.timestamp <= last_ts:
+            raise DataIntegrityError(f"non-monotonic tick for {symbol}")
+        self._last_tick_ts[symbol] = tick.timestamp
         engine = self._get_engine(symbol)
         candle = engine.on_tick(tick)
-        tick_payload = dict(tick)
-        tick_payload["timestamp"] = ts_seconds
-        self._emit_tick(symbol, tick_payload, source="ws")
+        self._store_tick(symbol, tick.to_dict())
         if candle:
-            self._ohlc[self._bar_symbol_key(symbol)].append(candle)
+            self._ohlc[symbol].append(candle)
 
     def _get_engine(self, symbol: str) -> CandleEngine:
         """Return or create candle engine for symbol."""

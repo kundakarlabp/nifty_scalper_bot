@@ -276,23 +276,7 @@ class DataHub:
                 __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise  # Don't let math errors kill the tick
 
-        # 3. Publish to MessageBus (outside lock)
-        if self._message_bus:
-            try:
-                await self._message_bus.publish(
-                    Message(
-                        type=MessageType.TICK,
-                        timestamp=datetime.now(timezone.utc),
-                        data=dict(canonical_tick),
-                        source="data_hub",
-                    )
-                )
-            except Exception as exc:
-                LOGGER.error("Failure in DataHub.ingest_tick: %s", exc, exc_info=True)
-        else:
-            LOGGER.debug("DataHub has no event_bus — tick cached without bus publish")
-
-        # 4. Notify Legacy Subscribers (outside lock)
+        # 3. Notify Legacy Subscribers (outside lock)
         with self._lock:
             callbacks = list(self._tick_subscribers.get(normalized_symbol, ()))
 
@@ -336,24 +320,6 @@ class DataHub:
         with self._lock:
             self._quotes[canonical_symbol] = dict(payload)
 
-        if self._message_bus is not None:
-            message = Message(
-                type=MessageType.TICK,
-                timestamp=datetime.now(timezone.utc),
-                data=payload,
-                source="data_hub",
-            )
-            try:
-                publish_result = self._message_bus.publish(message)
-                if asyncio.iscoroutine(publish_result):
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        asyncio.run(publish_result)
-                    else:
-                        loop.create_task(publish_result)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error("Failure in DataHub.store_quote: %s", exc, exc_info=exc)
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
         """Atomically replace the entire position snapshot."""
