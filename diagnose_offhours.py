@@ -127,7 +127,7 @@ def main():
         }
 
         # Call the same internal hook the poller uses
-        mdm._handle_tick(tick)  # noqa: SLF001 (intentionally calling internal)
+        await mdm._handle_tick(tick)  # noqa: SLF001 (intentionally calling internal)
         time.sleep(0.05)
         cached = mdm.get_latest_tick(symbol)
         _assert(
