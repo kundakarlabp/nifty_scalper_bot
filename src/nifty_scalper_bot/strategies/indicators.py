@@ -37,8 +37,13 @@ class PriceHistory:
     can be provided either as a single closing price or as OHLC tuples/mappings.
     """
 
-    def __init__(self, max_length: int = 500):
-        """Initialize with max history length."""
+    def __init__(self, max_length: int = 1500):
+        """Initialize with max history length.
+
+        Default raised 500→1500: Zerodha returns up to 5 trading days of 1-min
+        bars (≈5×375=1875 bars). 500 silently discarded ~1375 bars, degrading
+        ATR/VWAP/EMA accuracy. 1500 holds a full 4-day window comfortably.
+        """
         if max_length <= 0:
             msg = "max_length must be positive"
             raise ValueError(msg)
@@ -797,25 +802,44 @@ class IndicatorEngine:
                 )
                 return False
             gap_seconds = (curr - prev).total_seconds()
-            # ✅ FIX F: NFO options/futures tick once per ~13 min; a 2-min gap
-            # is normal.  The 120s threshold spammed the log on every option tick.
-            # Use 600s (10 min) for NFO symbols, 300s for spot index.
-            _is_nfo_sym = any(x in symbol for x in ("CE", "PE", "FUT", "NFO:"))
-            _gap_warn_thresh = 600.0 if _is_nfo_sym else 300.0
-            if gap_seconds > _gap_warn_thresh:
+            # FIX S12-1: Skip gaps that span non-market hours (overnight / weekend).
+            # Zerodha historical data has ~63,900-second gaps between 15:30 and 09:15
+            # next day (17h45m) plus ~176,400s over weekends.  The previous 600s
+            # threshold rejected EVERY multi-day history, making has_min_bars()
+            # return False for all 20 symbols → valid_symbols=[] → EXECUTION_ENABLED
+            # never set → zero trades on every startup.
+            # Fix: only flag gaps that fall entirely within a single market session
+            # (i.e. both endpoints are within 09:15-15:30 IST on the same day AND
+            # neither endpoint is outside market hours).  A gap is an intra-session
+            # anomaly only when prev is already past open AND curr is still before
+            # close on the same session date.  Overnight/weekend gaps are expected.
+            prev_ist = prev.astimezone(_INDIA_TZ)
+            curr_ist = curr.astimezone(_INDIA_TZ)
+            prev_time = prev_ist.time().replace(tzinfo=None)
+            curr_time = curr_ist.time().replace(tzinfo=None)
+            prev_in_session = _MARKET_OPEN <= prev_time <= _MARKET_CLOSE
+            curr_in_session = _MARKET_OPEN <= curr_time <= _MARKET_CLOSE
+            same_day = prev_ist.date() == curr_ist.date()
+            intra_session_gap = prev_in_session and curr_in_session and same_day
+            if intra_session_gap and gap_seconds > 600.0:
+                # Genuine intra-session data hole — could corrupt indicators
                 log_throttled(
                     LOGGER,
                     f"indicator_gap_{symbol}",
-                    "skipped: invalid data",
+                    "indicator_gap_detected: %s gap=%.0fs",
                     interval_sec=300.0,
                     level=logging.WARNING,
                     extra={
                         "event": "indicator_gap_detected",
                         "symbol": symbol,
                         "gap_seconds": gap_seconds,
+                        "prev": prev.isoformat(),
+                        "curr": curr.isoformat(),
                     },
                 )
-                return False
+                # Log but do NOT return False — intra-session gaps in historical
+                # data are common for illiquid options and must not block strategy
+                # evaluation.  The strategy itself gates on recent candle staleness.
         return True
 
     def ensure_min_bars(

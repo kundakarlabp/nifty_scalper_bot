@@ -2100,11 +2100,13 @@ class StrategyRunner:
             if hasattr(self._indicator_engine, "update_bar"):
                 self._indicator_engine.update_bar(symbol, bar)
             else:
-                # Fallback to update_price (Standard API seen in app.py)
+                # FIX S12-3: was float(bar.close) — scalar input causes _normalize_price
+                # to use close for ALL of open/high/low/close, destroying ATR/EMA accuracy.
+                # Pass bar.as_mapping() so the full OHLC is stored correctly.
                 indicator_volume = 0 if getattr(bar, "synthetic", False) else bar.volume
                 self._indicator_engine.update_price(
                     symbol,
-                    float(bar.close),
+                    bar.as_mapping(),
                     volume=indicator_volume,
                     timestamp=bar.timestamp,
                     is_complete=True,
