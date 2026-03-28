@@ -2096,8 +2096,7 @@ class StrategyRunner:
 
         try:
             # 3. INDICATORS: Feed the Engine
-            # [FIX] Use update_price() instead of update_bar()
-            # We convert the bar to a dict using .as_mapping() as expected by the engine.
+            # [FIX] Use update_price() instead of update_bar().
             if hasattr(self._indicator_engine, "update_bar"):
                 self._indicator_engine.update_bar(symbol, bar)
             else:
@@ -2105,7 +2104,7 @@ class StrategyRunner:
                 indicator_volume = 0 if getattr(bar, "synthetic", False) else bar.volume
                 self._indicator_engine.update_price(
                     symbol,
-                    bar.as_mapping(),
+                    float(bar.close),
                     volume=indicator_volume,
                     timestamp=bar.timestamp,
                     is_complete=True,

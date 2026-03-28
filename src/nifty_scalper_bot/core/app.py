@@ -5685,7 +5685,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
 
-            # ---------- HISTORICAL HYDRATION (PARALLEL FETCH + SERIAL COMMIT) ----------
+            # ---------- HISTORICAL HYDRATION (SEQUENTIAL FETCH + SERIAL COMMIT) ----------
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(days=5)
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -5713,9 +5713,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 return symbol, list(records or [])
 
-            fetch_results = await asyncio.gather(
-                *[_fetch_symbol(sym) for sym in targets], return_exceptions=True
-            )
+            fetch_results: list[tuple[str, list[Any]] | Exception] = []
+            for target_symbol in targets:
+                try:
+                    fetch_results.append(await _fetch_symbol(target_symbol))
+                except Exception as exc:  # noqa: BLE001
+                    fetch_results.append(exc)
+                await asyncio.sleep(0.35)
 
             LOGGER.info(
                 "hydration_commit_start",
