@@ -150,7 +150,7 @@ class MarketDataManager:
         self._tick_stats: dict[str, int] = defaultdict(int)
         self._last_tick_stats_log = time.monotonic()
         self._account_cache_ttl = self._parse_float_env(
-            "MDM_ACCOUNT_CACHE_TTL", default=30.0, minimum=1.0
+            "MDM_ACCOUNT_CACHE_TTL", default=60.0, minimum=1.0
         )
         self._account_segment = _resolve_account_segment()
 
