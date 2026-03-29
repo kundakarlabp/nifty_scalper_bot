@@ -175,7 +175,7 @@ _ComponentT = TypeVar("_ComponentT")
 def _get_current_nifty_futures_symbol() -> str:
     """
     Compute the current month's NIFTY futures symbol.
-    Auto-rolls to next month after monthly expiry (last Thursday).
+    Auto-rolls to next month after monthly expiry (last Tuesday).
 
     Returns:
         str: Symbol like "NFO:NIFTY26FEBFUT"
@@ -187,10 +187,11 @@ def _get_current_nifty_futures_symbol() -> str:
     year = now.year
     month = now.month
 
-    # Find last Thursday of current month (monthly expiry)
+    # FIX S13: NIFTY expiry day is Tuesday (not Thursday).
+    # Find last Tuesday of current month for futures rollover.
     last_day = calendar.monthrange(year, month)[1]
     expiry_date = datetime(year, month, last_day)
-    while expiry_date.weekday() != 3:  # Thursday = 3
+    while expiry_date.weekday() != 1:  # Tuesday = 1
         expiry_date -= timedelta(days=1)
 
     # If we're past expiry, roll to next month
@@ -2691,10 +2692,10 @@ def parse_nifty_option_symbol(symbol: str) -> dict | None:
         if month:
             year_full = 2000 + int(year)
 
-            # Find last Thursday of the month (Standard Monthly Expiry Logic)
+            # FIX S13: NIFTY expiry is Tuesday (not Thursday).
             last_day = calendar.monthrange(year_full, month)[1]
             expiry = datetime(year_full, month, last_day)
-            while expiry.weekday() != 3:  # Thursday is 3
+            while expiry.weekday() != 1:  # Tuesday = 1
                 expiry = expiry - timedelta(days=1)
 
             # Use total_seconds for float days_to_expiry

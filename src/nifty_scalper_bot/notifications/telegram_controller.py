@@ -1319,10 +1319,10 @@ class TelegramBot:
             if month:
                 year_full = 2000 + int(year)
                 
-                # Find the last Thursday of the month for expiry
+                # FIX S13: NIFTY expiry is Tuesday (not Thursday)
                 last_day = calendar.monthrange(year_full, month)[1]
                 expiry = datetime(year_full, month, last_day)
-                while expiry.weekday() != 3: # 3 is Thursday
+                while expiry.weekday() != 1:  # Tuesday = 1
                     expiry = expiry - timedelta(days=1)
                             
                 days = max((expiry - datetime.now()).days, 0)

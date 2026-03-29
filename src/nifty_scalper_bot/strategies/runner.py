@@ -447,7 +447,7 @@ def _is_monthly_expiry(expiry: datetime) -> bool:
         tzinfo=normalized.tzinfo,
     )
 
-    while anchor.weekday() != 3:  # Thursday
+    while anchor.weekday() != 1:  # FIX S13: Tuesday = 1 (NIFTY expiry day)
         anchor -= timedelta(days=1)
 
     return anchor.date() == expiry_date
@@ -6334,14 +6334,20 @@ class StrategyRunner:
                 sized_qty = min(int(sized_qty), size_by_margin)
 
             if sized_qty <= 0:
-                lot_size = 65
+                # FIX S13: derive lot_size from risk settings (contract_lot_size=65)
+                # rather than bare hardcoded literal — single source of truth.
+                _cfg_lot = int(getattr(
+                    getattr(self._risk_manager, "settings", None),
+                    "contract_lot_size", 65,
+                ))
+                lot_size = _cfg_lot
                 if hasattr(self._risk_manager, "_resolve_lot_size"):
                     try:
                         lot_size = int(
                             self._risk_manager._resolve_lot_size(trade_symbol)
                         )
                     except Exception:
-                        lot_size = 65
+                        lot_size = _cfg_lot
                 required_margin = float(trade_price) * float(lot_size)
                 if required_margin <= available_margin and entry_side == "BUY":
                     sized_qty = lot_size
