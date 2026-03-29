@@ -887,7 +887,12 @@ class BracketManager:
             for eid in relevant_ids:
                 b = self._brackets.get(eid)
                 # 🟢 FIX: Remove 'b.active' check so we can catch inactive ones
-                if b and b.remaining_quantity > 0 and not b.exit_executed and not b.exit_in_progress:
+                if (
+                    b
+                    and b.remaining_quantity > 0
+                    and not b.exit_executed
+                    and not b.exit_in_progress
+                ):
                     candidates.append(b)
         
         if not candidates:
@@ -910,43 +915,48 @@ class BracketManager:
         exits_to_fire = []
         
         for bracket in candidates:
-            # 🟢 FAILSAFE: Auto-activate on first tick if stuck inactive
-            if not bracket.active:
-                if ltp > 0:
-                    bracket.active = True
-                    # Fix missing entry price (Market Orders)
-                    if bracket.entry_price <= 0:
-                        bracket.entry_price = ltp
-                    
-                    # Initialize Watermarks for Trailing
-                    if bracket.side == "BUY": 
-                        bracket.highest_ltp = ltp
-                    else: 
-                        bracket.lowest_ltp = ltp
-                    
-                    # ✅ CORRECTED ATTRIBUTE: Use 'entry_order_id', not 'order_id'
-                    self._log_throttled('debug', f'failsafe_{bracket.entry_order_id}', 5.0, 'FAILSAFE_ACTIVATION entry_id=%s ltp=%s', bracket.entry_order_id, round(ltp, 2))
-                else:
-                    # If we can't activate (no price), skip this bracket
-                    continue
+            # Keep all bracket field mutations atomic against watchdog reads.
+            with self._lock:
+                # 🟢 FAILSAFE: Auto-activate on first tick if stuck inactive
+                if not bracket.active:
+                    if ltp > 0:
+                        bracket.active = True
+                        # Fix missing entry price (Market Orders)
+                        if bracket.entry_price <= 0:
+                            bracket.entry_price = ltp
 
-            # Track previous tick for jump/cross stop-loss detection.
-            bracket.previous_ltp = float(bracket.last_ltp or ltp)
-            bracket.last_ltp = ltp
-            
-            # Update high/low water marks (atomic operations)
-            if bracket.side == "BUY":
-                if ltp > bracket.highest_ltp:
-                    bracket.highest_ltp = ltp
-            else:
-                if ltp < bracket.lowest_ltp:
-                    bracket.lowest_ltp = ltp
-            
-            # Fast SL check with cross detection (jump-safe) before trailing updates.
-            pre_action = self._evaluate_exit_fast(bracket, ltp)
-            if pre_action and pre_action.get('type') == 'SL':
-                exits_to_fire.append((bracket, pre_action))
-                continue
+                        # Initialize Watermarks for Trailing
+                        if bracket.side == "BUY":
+                            bracket.highest_ltp = ltp
+                        else:
+                            bracket.lowest_ltp = ltp
+
+                        # ✅ CORRECTED ATTRIBUTE: Use 'entry_order_id', not 'order_id'
+                        self._log_throttled(
+                            "debug",
+                            f"failsafe_{bracket.entry_order_id}",
+                            5.0,
+                            "FAILSAFE_ACTIVATION entry_id=%s ltp=%s",
+                            bracket.entry_order_id,
+                            round(ltp, 2),
+                        )
+                    else:
+                        # If we can't activate (no price), skip this bracket
+                        continue
+
+                # Track previous tick for jump/cross stop-loss detection.
+                bracket.previous_ltp = float(
+                    bracket.last_ltp or bracket.entry_price or ltp
+                )
+                bracket.last_ltp = ltp
+
+                # Update high/low water marks (atomic operations)
+                if bracket.side == "BUY":
+                    if ltp > bracket.highest_ltp:
+                        bracket.highest_ltp = ltp
+                else:
+                    if ltp < bracket.lowest_ltp:
+                        bracket.lowest_ltp = ltp
             
             # Check trailing controller (if attached)
             # Wrapped in try/except so trailing failures cannot block SL/TP eval
@@ -1011,6 +1021,32 @@ class BracketManager:
             ]
         )
 
+    def eod_flatten_all(self) -> None:
+        """Force-exit all active brackets for EOD risk control. Args: none; Returns: none; Raises: none."""
+        exits_to_fire: list[tuple[BracketState, dict[str, object]]] = []
+        with self._lock:
+            for bracket in self._brackets.values():
+                if (
+                    bracket.remaining_quantity <= 0
+                    or bracket.exit_executed
+                    or bracket.exit_in_progress
+                ):
+                    continue
+                exits_to_fire.append(
+                    (
+                        bracket,
+                        {
+                            "type": "SL",
+                            "price": bracket.last_ltp or bracket.entry_price,
+                            "qty": bracket.remaining_quantity,
+                            "reason": "EOD_FLATTEN_1524",
+                        },
+                    )
+                )
+        if exits_to_fire:
+            LOGGER.info("EOD flatten triggered for %s active brackets", len(exits_to_fire))
+            self._fire_exits_batch(exits_to_fire)
+
     def _sl_crossed(self, bracket: BracketState, ltp: float) -> bool:
         """Return True when a tick crosses stop-loss. Args: bracket, ltp; Returns: bool; Raises: none."""
         prev_ltp = float(bracket.previous_ltp or bracket.last_ltp or ltp)
@@ -1063,12 +1099,16 @@ class BracketManager:
         
         # Check SL (CRITICAL - always check last) using jump-safe cross detection.
         if bracket.sl_trigger_price > 0:
-            prev_ltp = float(bracket.previous_ltp or ltp)
+            prev_ltp = float(bracket.previous_ltp or bracket.entry_price or ltp)
             triggered = False
             if bracket.side == "BUY":
-                triggered = prev_ltp > bracket.sl_trigger_price and ltp <= bracket.sl_trigger_price
+                crossed = prev_ltp > bracket.sl_trigger_price and ltp <= bracket.sl_trigger_price
+                breached = ltp <= bracket.sl_trigger_price
+                triggered = crossed or breached
             elif bracket.side == "SELL":
-                triggered = prev_ltp < bracket.sl_trigger_price and ltp >= bracket.sl_trigger_price
+                crossed = prev_ltp < bracket.sl_trigger_price and ltp >= bracket.sl_trigger_price
+                breached = ltp >= bracket.sl_trigger_price
+                triggered = crossed or breached
 
             if triggered:
                 return {
@@ -1233,22 +1273,6 @@ class BracketManager:
         with self._lock:
             return {b.symbol: b for b in self._brackets.values() if b.active}
 
-
-    def _check_and_fire(self, bracket: BracketState, ltp: float) -> None:
-        """Evaluate logic for a single bracket: Exits, Partials, and Trailing."""
-        
-        # 1. UPDATE TRAILING STATE (High/Low Water Marks)
-        self._process_trailing_logic(bracket, ltp)
-
-        # 2. STOP LOSS CHECK
-        if self._check_stop_loss(bracket, ltp):
-            return  # SL hit, stop processing
-
-        # 3. PARTIAL TARGETS (TP1)
-        self._check_partial_targets(bracket, ltp)
-
-        # 4. FINAL TARGET (TP2)
-        self._check_final_target(bracket, ltp)
 
     def _process_trailing_logic(self, bracket: BracketState, ltp: float) -> None:
         """Updates High/Low marks and adjusts SL if Trailing is enabled."""

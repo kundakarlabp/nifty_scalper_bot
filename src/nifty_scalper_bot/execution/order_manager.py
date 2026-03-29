@@ -2041,13 +2041,24 @@ class OrderManager:
                 # We use the 'Thread' class already imported at top of file
                 t = Thread(target=target, name=f"ord_{unique_client_id}", daemon=True)
                 t.start()
-                t.join(timeout=3.0)  # Strict 3s timeout
+                t.join(timeout=8.0)
 
                 if t.is_alive():
-                    self._logger.critical(
-                        f"🚨 Broker API hung on attempt {attempt}! Timeout forced."
+                    self._logger.warning(
+                        "Broker call exceeded 8s for %s (attempt %s); waiting recovery window",
+                        normalized_symbol,
+                        attempt,
                     )
-                    raise TimeoutError("Broker API call timed out (3s)")
+                    t.join(timeout=2.0)
+                    if t.is_alive():
+                        self._logger.critical(
+                            f"🚨 Broker API hung on attempt {attempt}! Timeout forced."
+                        )
+                        raise TimeoutError("Broker API call timed out (10s)")
+                    self._logger.info(
+                        "Recovered late broker response inside grace window for %s",
+                        normalized_symbol,
+                    )
 
                 response = result_holder["resp"]
 

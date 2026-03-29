@@ -6286,6 +6286,24 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error(f"Failed to wire bracket ticks: {e}")
 
+    if ctx.bracket_manager:
+        try:
+            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+            eod_target_ist = now_ist.replace(hour=15, minute=24, second=0, microsecond=0)
+            if now_ist >= eod_target_ist:
+                eod_target_ist = eod_target_ist + timedelta(days=1)
+            seconds_to_15h24 = max(
+                0.0, (eod_target_ist - now_ist).total_seconds()
+            )
+            loop.call_later(seconds_to_15h24, ctx.bracket_manager.eod_flatten_all)
+            LOGGER.info(
+                "EOD bracket flatten scheduled for %s IST (in %.1fs)",
+                eod_target_ist.isoformat(),
+                seconds_to_15h24,
+            )
+        except Exception as e:
+            LOGGER.error("Failed to schedule EOD flatten: %s", e)
+
     LOGGER.info("✅ Startup sequence fully complete.")
 
 
