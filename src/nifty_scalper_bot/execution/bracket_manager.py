@@ -1021,8 +1021,13 @@ class BracketManager:
             ]
         )
 
-    def eod_flatten_all(self) -> None:
-        """Force-exit all active brackets for EOD risk control. Args: none; Returns: none; Raises: none."""
+    def eod_flatten_all(
+        self,
+        reason: str = 'EOD_FLATTEN_1524',
+        *_: object,
+        **__: object,
+    ) -> None:
+        """Force-exit all active brackets for EOD risk control. Args: reason. Returns: none. Raises: none."""
         exits_to_fire: list[tuple[BracketState, dict[str, object]]] = []
         with self._lock:
             for bracket in self._brackets.values():
@@ -1039,7 +1044,7 @@ class BracketManager:
                             "type": "SL",
                             "price": bracket.last_ltp or bracket.entry_price,
                             "qty": bracket.remaining_quantity,
-                            "reason": "EOD_FLATTEN_1524",
+                            "reason": reason,
                         },
                     )
                 )

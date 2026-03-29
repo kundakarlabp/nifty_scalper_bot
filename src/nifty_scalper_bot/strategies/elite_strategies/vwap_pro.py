@@ -29,7 +29,7 @@ class VWAPProStrategy(EliteStrategy):
     """
 
     MIN_BARS_REQUIRED = 10
-    COOLDOWN_SECONDS = 45  # ✅ FIX #5: Reduced from 60s → 45s; prevents overtrading while capturing fast NIFTY moves
+    COOLDOWN_SECONDS = 20  # ✅ Scalping fix: shorter directional cooldown for rapid continuation legs
     VWAP_ACCEPTANCE_BARS = 1  # ✅ FIX #5: Reduced from 2 → 1; index bias gate is already a strong 2-condition filter
     TELEMETRY_LOG_EVERY = 5
     VOLUME_GRACE_SECONDS = 900.0  # ✅ FIX C: Extended from 120s → 900s (15 min). NFO options tick ≈once/13min between batches; 120s grace expired before next tick arrived → volume_below_threshold on every call.

@@ -9452,12 +9452,12 @@ class OrderManager:
                 order_type = OrderType(
                     payload.get("order_type", OrderType.MARKET.value)
                 )
-            except:
+            except (TypeError, ValueError):
                 order_type = OrderType.MARKET
 
             try:
                 status = OrderStatus(payload.get("status", OrderStatus.SUBMITTED.value))
-            except:
+            except (TypeError, ValueError):
                 status = OrderStatus.SUBMITTED
 
             # Robust Timestamp

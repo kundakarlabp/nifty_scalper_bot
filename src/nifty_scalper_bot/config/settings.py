@@ -732,7 +732,7 @@ class RiskSettings:
     atr_stop_multiple: float = 1.0
     contract_lot_size: int = 65  # NIFTY options lot size = 65 (current)
     allow_pyramiding: bool = False
-    signal_debounce_seconds: float = 60.0
+    signal_debounce_seconds: float = 15.0
 
     def __post_init__(self) -> None:
         # Keep the historical ``daily_pnl_cap_pct`` alias in sync with the

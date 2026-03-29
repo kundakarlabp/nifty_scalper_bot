@@ -605,7 +605,7 @@ class StrategyRunner:
         self._last_valid_price: dict[str, float] = {}
         self._last_valid_price_ts: dict[str, datetime] = {}
         self._post_exit_cooldown_seconds: float = float(
-            os.getenv("POST_EXIT_COOLDOWN_SECONDS", "60.0")
+            os.getenv("POST_EXIT_COOLDOWN_SECONDS", "20.0")
         )
         # Global risk-halt latch keeps control-plane work quiet once breaker trips.
         # We intentionally keep this sticky so per-symbol loops cannot spam checks/logs.
@@ -707,7 +707,26 @@ class StrategyRunner:
             os.getenv("MAX_TRADES_PER_SYMBOL_PER_CANDLE", "1")
         )
         self._min_trade_interval_seconds = float(
-            os.getenv("MIN_TRADE_INTERVAL_SECONDS", "180")
+            os.getenv("MIN_TRADE_INTERVAL_SECONDS", "60")
+        )
+        self._session_allow_out_of_hours = (
+            os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
+        )
+        self._force_signal_enabled = os.getenv("FORCE_SIGNAL", "").lower() == "true"
+        self._disable_early_forced_signals = (
+            os.getenv("FEATURE_DISABLE_EARLY_FORCED_SIGNALS", "").lower() == "true"
+        )
+        self._vwap_crossover_enabled = (
+            os.getenv("ENABLE_VWAP_CROSSOVER", "false").lower() == "true"
+        )
+        self._vwap_sl_pct = float(os.getenv("VWAP_SL_PCT", "1.5"))
+        self._vwap_tp_pct = float(os.getenv("VWAP_TP_PCT", "2.0"))
+        self._global_min_signal_confidence = float(
+            os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45")
+        )
+        self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
+        self._exit_reentry_cooldown_sec = float(
+            os.getenv("EXIT_REENTRY_COOLDOWN_SEC", "300")
         )
         self._trade_counter_by_symbol_candle: dict[tuple[str, datetime], int] = {}
         self._trade_counter_lock = threading.RLock()
@@ -4691,13 +4710,7 @@ class StrategyRunner:
                 generated_signal = None
 
                 # 8A. FORCED SIGNAL (Testing only)
-                force_signal_enabled = os.getenv("FORCE_SIGNAL", "").lower() == "true"
-                disable_early_forced = (
-                    os.getenv("FEATURE_DISABLE_EARLY_FORCED_SIGNALS", "").lower()
-                    == "true"
-                )
-
-                if force_signal_enabled and not disable_early_forced:
+                if self._force_signal_enabled and not self._disable_early_forced_signals:
                     generated_signal = Signal(
                         action="BUY",
                         symbol=symbol,
@@ -4711,12 +4724,8 @@ class StrategyRunner:
                     self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
 
                 # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
-                vwap_crossover_enabled = (
-                    os.getenv("ENABLE_VWAP_CROSSOVER", "false").lower() == "true"
-                )
-
                 if (
-                    vwap_crossover_enabled
+                    self._vwap_crossover_enabled
                     and generated_signal is None
                     and state.vwap
                     and state.vwap > 0
@@ -4739,10 +4748,8 @@ class StrategyRunner:
                         )
 
                         # ✅ FIX: Calculate proper stop_loss and take_profit
-                        sl_pct = float(os.getenv("VWAP_SL_PCT", "1.5"))  # 1.5% SL
-                        tp_pct = float(
-                            os.getenv("VWAP_TP_PCT", "2.0")
-                        )  # 2.0% TP (1:1.33 RR)
+                        sl_pct = self._vwap_sl_pct  # 1.5% SL
+                        tp_pct = self._vwap_tp_pct  # 2.0% TP (1:1.33 RR)
 
                         if is_cross_up:
                             # BUY signal - SL below, TP above
@@ -5623,7 +5630,7 @@ class StrategyRunner:
         from zoneinfo import ZoneInfo
 
         # Check session override for testing
-        allow_off_hours = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
+        allow_off_hours = self._session_allow_out_of_hours
         ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
         is_market_hours = 9 <= ist_now.hour < 16
 
@@ -5894,9 +5901,7 @@ class StrategyRunner:
             # -----------------------------------------------------------
             import time as _time_mod
 
-            _exit_cooldown_sec = float(
-                os.getenv("EXIT_REENTRY_COOLDOWN_SEC", "300")
-            )  # 5 min default
+            _exit_cooldown_sec = self._exit_reentry_cooldown_sec
             _last_exit_time = self._recently_closed.get(base_symbol, 0)
             if (
                 _last_exit_time
@@ -5988,7 +5993,7 @@ class StrategyRunner:
                     return
 
                 # ✅ FIX (6 Feb 2026): Cross-strike check — block if ANY NIFTY option is active
-                _max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
+                _max_nifty_positions = self._max_nifty_positions
                 _all_positions = (
                     list(self._position_manager.get_open_positions())
                     if hasattr(self._position_manager, "get_open_positions")
@@ -6069,7 +6074,7 @@ class StrategyRunner:
             confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
 
             # Confidence Threshold
-            min_confidence = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45"))
+            min_confidence = self._global_min_signal_confidence
 
             if confidence < min_confidence:
                 self._logger.info(
