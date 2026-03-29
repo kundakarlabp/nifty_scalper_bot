@@ -1,15 +1,8 @@
 
-.venv/
 reports/
 data/order_submissions.jsonl
-__pycache__/
-.venv*/
 
-sync.log
 
-*.pyc
-*.log
 .vscode/
 .idea/
-venv/
 *.db
