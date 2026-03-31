@@ -1,0 +1,17 @@
+[Unit]
+Description=Nifty Options AI Bot (Docker)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+Environment=ENV_FILE=/opt/niftybot/.env
+ExecStartPre=/usr/bin/docker rm -f niftybot || true
+ExecStart=/usr/bin/docker run --name niftybot --env-file ${ENV_FILE} -p 8000:8000 --restart=always niftybot:latest
+ExecStop=/usr/bin/docker stop -t 25 niftybot
+
+[Install]
+WantedBy=multi-user.target

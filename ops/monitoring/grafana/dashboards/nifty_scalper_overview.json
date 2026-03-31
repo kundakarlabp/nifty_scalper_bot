@@ -1,0 +1,294 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "nifty-overview",
+    "title": "Nifty Scalper Observability",
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "panels": [
+      {
+        "type": "timeseries",
+        "title": "Tick Latency (p50/p95)",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.5, sum(rate(tick_latency_seconds_bucket[1m])) by (le))",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(tick_latency_seconds_bucket[1m])) by (le))",
+            "legendFormat": "p95"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "percentage",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 1 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Order Latency (p50/p95)",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.5, sum(rate(order_latency_seconds_bucket[1m])) by (le))",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(order_latency_seconds_bucket[1m])) by (le))",
+            "legendFormat": "p95"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "percentage",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 1 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "heatmap",
+        "title": "Tick Staleness by Symbol",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "max by (symbol) (tick_staleness_seconds)",
+            "legendFormat": "{{symbol}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 2 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Error Bursts (1m)",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "sum(increase(error_count_by_type[1m])) by (type)",
+            "legendFormat": "{{type}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 5 },
+                { "color": "red", "value": 10 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "PnL Breakdown & Cooldown",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "live_pnl_gauge",
+            "legendFormat": "Live PnL {{book}}"
+          },
+          {
+            "expr": "pnl_breakdown{kind=\"realized\"}",
+            "legendFormat": "Realized {{book}}"
+          },
+          {
+            "expr": "pnl_breakdown{kind=\"unrealized\"}",
+            "legendFormat": "Unrealized {{book}}"
+          },
+          {
+            "expr": "risk_cooldown_seconds",
+            "legendFormat": "Cooldown"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "percentage",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0 },
+                { "color": "red", "value": -5000 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "table",
+        "title": "Strategy Position & Risk Breakdown",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "sum by (strategy) (strategy_active_positions)",
+            "legendFormat": "positions"
+          },
+          {
+            "expr": "sum by (strategy) (strategy_risk_budget_pct)",
+            "legendFormat": "risk"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+        "options": {
+          "showHeader": true,
+          "footer": { "show": false }
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Order Queue Depth",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "max(order_queue_depth) by (symbol)",
+            "legendFormat": "{{symbol}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 50 },
+                { "color": "red", "value": 100 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Order Rejections (5m)",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "sum(increase(order_rejections_total[5m])) by (reason)",
+            "legendFormat": "{{reason}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 5 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Regime Transitions (5m)",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "sum(increase(market_regime_change_total[5m])) by (regime)",
+            "legendFormat": "{{regime}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 5 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Persistent Flush Latency",
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.5, sum(rate(persistent_state_flush_latency_seconds_bucket[5m])) by (le))",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(persistent_state_flush_latency_seconds_bucket[5m])) by (le))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "sum(increase(persistent_state_flush_total[5m])) by (outcome)",
+            "legendFormat": "{{outcome}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 1 }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      }
+    ]
+  },
+  "overwrite": true
+}

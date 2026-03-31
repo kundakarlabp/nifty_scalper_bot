@@ -1,0 +1,23 @@
+[Unit]
+Description=Nifty Scalper Trading Bot
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Environment="PYTHONPATH=/home/ubuntu/nifty_scalper_bot"
+ExecStart=/home/ubuntu/nifty_scalper_bot/venv/bin/python -m src.nifty_scalper_bot.main
+WorkingDirectory=/home/ubuntu/nifty_scalper_botr
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+TimeoutStopSec=60
+MemoryMax=400M
+LimitNOFILE=65535
+User=ubuntu
+Group=nifty
+StandardOutput=append:/var/log/nifty-scalper/bot.log
+StandardError=append:/var/log/nifty-scalper/bot.log
+
+[Install]
+WantedBy=multi-user.target

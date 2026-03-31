@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nifty-scalper-bot"
+version = "0.1.0"
+description = "Typed scaffolding for a Nifty intraday scalper bot"
+authors = [{ name = "Refactor Assistant" }]
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "requests>=2.31",
+    "python-telegram-bot>=21.4",
+    "kiteconnect>=4.2,<5",
+    "httpx>=0.27,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["nifty_scalper_bot*"]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.3.0",
+    "mypy>=1.9.0",
+    "pytest>=7.4",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src", "nifty_scalper_bot"]
+respect-gitignore = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+combine_as_imports = true
+force_sort_within_sections = true
+skip_gitignore = true
+known_first_party = ["nifty_scalper_bot", "tests"]
+src_paths = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+mypy_path = "src"
+namespace_packages = true
+show_error_codes = true
+warn_unused_configs = true
+
+[tool.coverage.run]
+source = ["src/nifty_scalper_bot"]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

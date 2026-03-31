@@ -1,0 +1,876 @@
+"""Polling-based market data streamer for Zerodha REST APIs."""
+
+from __future__ import annotations
+
+from contextlib import suppress
+import logging
+import math
+import random
+import threading
+import time
+from typing import Any, Callable, Iterable, Sequence
+
+# [FIX] Use centralized logging utilities
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
+from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
+from nifty_scalper_bot.utils.metrics import Counter, Gauge
+from nifty_scalper_bot.utils.symbols import canonical, enforce_canonical
+
+LOGGER = get_logger(__name__)
+
+
+class PollingStreamer:
+    """Production-safe poller that replaces WebSocket streaming."""
+
+    def __init__(
+        self,
+        *,
+        broker_client: Any,
+        on_tick: Callable[[dict[str, Any]], None],
+        instrument_resolver: Any,
+        data_hub: Any = None,
+        poll_interval_ms: int = 700,
+        batch_size: int = 200,
+        require_depth: bool = False,
+        warn_on_rate_limit: bool = True,
+    ) -> None:
+        self._broker = broker_client
+        self._on_tick = on_tick
+        self._resolver = instrument_resolver
+        self._data_hub = data_hub
+        configured_interval = float(poll_interval_ms) / 1000.0
+        self._interval_s = configured_interval if configured_interval > 0 else 0.0
+        self._batch_size = max(1, int(batch_size))
+        self._tokens: set[int] = set()
+        self._seeded_tokens: set[int] = set()
+        self._symbol_lookup_failed_once: set[int] = set()
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._require_depth = bool(require_depth)
+        self._warn_on_rate_limit = bool(warn_on_rate_limit)
+        self._kite_streamer = None  # Optional KiteTicker reference for health checks
+        self._websocket_mode_enabled = False
+        self._last_poll_heartbeat = time.monotonic()
+
+        # Metrics
+        self._m_poll_ok = Counter("polling_success_total", "Successful poll cycles")
+        self._m_poll_fail = Counter("polling_failure_total", "Failed poll cycles")
+        self._m_ticks_ingested = Counter(
+            "polling_ticks_total", "Ticks ingested via polling"
+        )
+        self._m_last_success = Gauge(
+            "polling_last_success_timestamp", "Last successful poll epoch"
+        )
+        self._m_last_tick = Gauge(
+            "polling_last_tick_timestamp", "Last tick ingestion epoch"
+        )
+
+    def start(self) -> None:
+        """Start the background polling thread."""
+        if self._interval_s <= 0:
+            LOGGER.info("Polling disabled (interval <= 0)", extra={"event": "polling_disabled"})
+            return
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run, name="polling_streamer", daemon=True
+            )
+            self._thread.start()
+            LOGGER.info(
+                "🚀 Scout Polling Started. Target Interval: %.1fs",
+                self._interval_s,
+                extra={"event": "polling_started", "interval": self._interval_s},
+            )
+
+    def stop(self) -> None:
+        """Stop the background polling thread."""
+        with self._lock:
+            if not self._thread:
+                return
+            self._stop.set()
+
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+            LOGGER.info(
+                "🛑 Polling Streamer Stopped", extra={"event": "polling_stopped"}
+            )
+
+    def set_kite_streamer(self, kite_streamer) -> None:
+        """Set optional KiteTicker streamer reference for health monitoring."""
+        self._kite_streamer = kite_streamer
+
+    def set_websocket_mode(self, enabled: bool) -> None:
+        """Args: enabled; Returns: none; Raises: none."""
+        self._websocket_mode_enabled = bool(enabled)
+
+    def last_poll_heartbeat(self) -> float:
+        """Return polling loop heartbeat monotonic timestamp."""
+        return float(self._last_poll_heartbeat)
+
+    def subscribe(self, tokens: Sequence[int]) -> None:
+        """Add tokens to the polling list and seed DataHub once before WS session.
+
+        Args:
+            tokens: Sequence of integer instrument tokens.
+                   Strings will be validated and converted if numeric.
+        """
+        # ✅ CRITICAL FIX: Validate and convert tokens to integers
+        valid_tokens = set()
+        for token in tokens or []:
+            try:
+                if isinstance(token, int):
+                    valid_tokens.add(token)
+                elif isinstance(token, str):
+                    stripped = token.strip()
+                    if stripped.isdigit():
+                        valid_tokens.add(int(stripped))
+                    else:
+                        LOGGER.warning(
+                            "PollingStreamer.subscribe: skipping non-numeric token %r",
+                            token,
+                            extra={"event": "polling_subscribe_skip", "token": token},
+                        )
+                elif isinstance(token, float):
+                    valid_tokens.add(int(token))
+                else:
+                    LOGGER.warning(
+                        "PollingStreamer.subscribe: invalid token type %s",
+                        type(token).__name__,
+                        extra={
+                            "event": "polling_subscribe_invalid_type",
+                            "token_type": type(token).__name__,
+                        },
+                    )
+            except (ValueError, TypeError) as e:
+                LOGGER.warning(
+                    "PollingStreamer.subscribe: cannot convert token %r: %s",
+                    token,
+                    e,
+                    extra={
+                        "event": "polling_subscribe_convert_error",
+                        "token": str(token),
+                    },
+                )
+
+        if not valid_tokens:
+            LOGGER.warning(
+                "PollingStreamer.subscribe: no valid tokens provided",
+                extra={"event": "polling_subscribe_empty"},
+            )
+            return
+
+        with self._lock:
+            initial_count = len(self._tokens)
+            self._tokens.update(valid_tokens)
+            new_count = len(self._tokens)
+
+        if new_count > initial_count:
+            LOGGER.info(
+                "✅ Wired %d tokens to PollingStreamer",
+                new_count,
+                extra={"event": "polling_subscribe", "count": new_count},
+            )
+
+        # Seed DataHub only during initial hydration and only once per token.
+        if self._data_hub and not self._websocket_mode_enabled:
+            import time
+
+            tokens_to_seed = sorted(valid_tokens - self._seeded_tokens)
+            for token in tokens_to_seed:
+                symbol = self._resolve_instrument(token)
+                if symbol:
+                    self._data_hub.store_quote(
+                        symbol,
+                        {
+                            "instrument_token": token,
+                            "last_price": None,
+                            "timestamp": int(time.time() * 1000),
+                            "source": "rest",
+                        },
+                        source="rest",
+                        seed=True,
+                    )
+                    self._seeded_tokens.add(token)
+                else:
+                    LOGGER.error(
+                        "PollingStreamer.subscribe: symbol resolution failed",
+                        extra={
+                            "event": "symbol_resolution_failed",
+                            "instrument_token": token,
+                        },
+                    )
+
+    def unsubscribe(self, tokens: Sequence[int]) -> None:
+        """Remove tokens from polling list."""
+        with self._lock:
+            self._tokens.difference_update(tokens)
+
+    def _run(self) -> None:
+        """
+        Main polling loop with unified starvation detection.
+        Executed in a background thread.
+        """
+        backoff = self._interval_s
+
+        # 🟢 Initialize health timestamp (outside loop)
+        # This tracks the last time we saw 'ideal' (NFO) data
+        last_healthy_ts = time.monotonic()
+
+        while not self._stop.is_set():
+            started = time.monotonic()
+            self._last_poll_heartbeat = started
+            try:
+                # Copy token list under lock
+                with self._lock:
+                    tokens = list(self._tokens)
+
+                # Track data quality for this specific poll cycle
+                seen_nfo_this_cycle = False
+                seen_any_tick_this_cycle = False
+
+                should_poll_quotes = (
+                    bool(tokens)
+                    and not self._websocket_mode_enabled
+                    and get_market_state() == MarketState.OPEN
+                )
+                if should_poll_quotes:
+                    # Yield chunks to avoid massive requests
+                    for batch in self._chunks(tokens, self._batch_size):
+                        # Safe Fetch (Uses the corrected _fetch_ticks)
+                        ticks = self._fetch_ticks(batch)
+
+                        # Trace logging for empty batches
+                        if not ticks:
+                            log_throttled(
+                                LOGGER,
+                                "poll_empty_batch",
+                                f"[POLL-TRACE] Empty ticks returned for batch {batch[:5]}...",
+                                level=10,
+                                interval_sec=60.0,
+                            )
+                        else:
+                            # ✅ CRITICAL FIX 1: Mark that we saw *some* data (even if just NSE)
+                            seen_any_tick_this_cycle = True
+
+                        # Check for NFO data in this batch (without resetting timestamp yet)
+                        if not seen_nfo_this_cycle:
+                            for t in ticks:
+                                sym = t.get("symbol")
+                                if sym and str(sym).startswith("NFO:"):
+                                    seen_nfo_this_cycle = True
+                                    break
+
+                        for tick in ticks:
+                            # 1. Validate Payload Structure
+                            if (
+                                "instrument_token" not in tick
+                                or "last_price" not in tick
+                            ):
+                                continue
+
+                            # 2. Tag Source as REST
+                            tick["source"] = "rest"
+
+                            # 3. Get Symbol (Already resolved in _fetch_ticks)
+                            symbol = tick.get("symbol")
+                            if not symbol:
+                                continue
+                            symbol = enforce_canonical(canonical(str(symbol)))
+                            if symbol.count(":") != 1:
+                                raise RuntimeError(f"Malformed canonical symbol: {symbol}")
+                            tick["symbol"] = symbol
+
+                            # 4. Update Metrics
+                            try:
+                                self._m_last_tick.set(int(time.time() * 1000))
+                            except Exception as metric_err:
+                                LOGGER.debug(f"Metric update error: {metric_err}")
+
+                             # 5. TickBus handoff (authoritative pipeline)
+                            try:
+                                self._on_tick(tick)
+                                self._m_ticks_ingested.inc()
+
+                                # ✅ DIAGNOSTIC: Confirm callback was invoked
+                                log_throttled(
+                                    LOGGER,
+                                    f"tick_callback_{symbol}",
+                                    f"✅ CALLBACK INVOKED: {symbol} | LTP={tick.get('last_price')}",
+                                    interval_sec=60.0,
+                                    level=10,  # DEBUG
+                                )
+                            except Exception as callback_err:
+                                # ❌ CRITICAL: Log the actual error instead of suppressing!
+                                LOGGER.error(
+                                    f"❌ TICK CALLBACK FAILED for {symbol}: {callback_err}",
+                                    exc_info=True,
+                                )
+
+                # --------------------------------------------------
+                # 🟢 UPDATE HEALTH METRICS
+                # --------------------------------------------------
+                # We update the 'healthy' timestamp if we saw NFO data.
+                # This keeps the 'starvation timer' low during normal trading.
+                if seen_nfo_this_cycle:
+                    last_healthy_ts = time.monotonic()
+
+                # Check KiteTicker health if available
+                ws_healthy = False
+                if self._kite_streamer is not None:
+                    try:
+                        # WS is healthy if we saw a tick in last 10 seconds
+                        ws_healthy = self._kite_streamer.last_tick_age() < 10.0
+                    except Exception:
+                        ws_healthy = False
+
+                # --------------------------------------------------
+                # 🔴 WS-AWARE STARVATION DETECTION (CORRECTED)
+                # --------------------------------------------------
+                # KILL CONDITION:
+                # 1. We are supposed to be tracking tokens.
+                # 2. We received ZERO ticks this cycle (REST is dead).
+                # 3. WebSocket is NOT healthy (WS is dead).
+                # 4. NFO data has been stale for > 30s (Long term starvation).
+                #
+                # NOTE: If 'seen_any_tick_this_cycle' is True (e.g. NSE Index ticks),
+                # we do NOT kill the bot, even if 'last_healthy_ts' is old.
+                # This prevents "Quiet Market" suicide.
+
+                if tokens and not seen_any_tick_this_cycle and not ws_healthy:
+                    if time.monotonic() - last_healthy_ts > 30.0:
+                        LOGGER.critical(
+                            "💀 FATAL POLLER ERROR: True market data starvation "
+                            "(REST + WS silent for >30s). Escalating to supervisor."
+                        )
+                        self._stop.set()
+                        return
+
+                # Success: Update health metrics & reset backoff
+                with suppress(Exception):
+                    self._m_poll_ok.inc()
+                with suppress(Exception):
+                    self._m_last_success.set(int(time.time() * 1000))
+
+                backoff = self._interval_s
+
+            except Exception as exc:  # noqa: BLE001
+                # Failure: Adaptive Backoff
+                with suppress(Exception):
+                    self._m_poll_fail.inc()
+
+                backoff = min(backoff * 1.5, 10.0)
+                log_throttled(
+                    LOGGER,
+                    "poll_loop_error",
+                    f"Polling loop error: {exc}",
+                    level=40,
+                    interval_sec=10.0,
+                )
+
+            # Smart Sleep
+            elapsed = time.monotonic() - started
+            sleep_time = max(0.1, backoff - elapsed)
+            time.sleep(sleep_time)
+
+    # ----------------------------------------------------------------
+    # ✅ FIX: Thread-Safe Fetch with Timeout (Prevents Zombie Hangs)
+    # ----------------------------------------------------------------
+    def _fetch_ticks(self, batch: list[int]) -> list[dict[str, Any]]:
+        """
+        Fetch quotes using exchange:tradingsymbol format for FULL quote data.
+
+        ✅ CRITICAL FIX: Zerodha returns VWAP/Volume ONLY when symbols are
+        passed as "exchange:tradingsymbol" format, NOT integer tokens!
+
+        When you pass integer tokens like [15018242, 15017730], Zerodha returns:
+        - ✅ last_price
+        - ✅ instrument_token
+        - ❌ average_price = 0 (MISSING!)
+        - ❌ volume = 0 (MISSING!)
+
+        When you pass symbols like ["NFO:NIFTY26JAN25000CE"], Zerodha returns:
+        - ✅ last_price
+        - ✅ instrument_token
+        - ✅ average_price (VWAP!)
+        - ✅ volume
+        - ✅ oi
+        - ✅ depth
+        """
+        try:
+            # Clean Batch: Ensure all items are integers
+            tokens = []
+            for t in batch:
+                try:
+                    tokens.append(int(t))
+                except (ValueError, TypeError):
+                    continue
+
+            if not tokens:
+                return []
+
+            # ✅ CRITICAL FIX: Convert tokens to "exchange:tradingsymbol" format
+            # Zerodha returns average_price (VWAP) ONLY for this format!
+            symbols_for_api = []
+            token_to_symbol_map = {}
+            symbol_to_token_map = {}
+
+            for token in tokens:
+                symbol = self._resolve_instrument(token)
+                if symbol:
+                    # Ensure proper exchange prefix
+                    if ":" not in symbol:
+                        # Determine exchange based on symbol content
+                        if any(x in symbol.upper() for x in ["CE", "PE", "FUT"]):
+                            symbol = f"NFO:{symbol}"
+                        else:
+                            symbol = f"NSE:{symbol}"
+
+                    symbol = enforce_canonical(canonical(symbol))
+                    if symbol.count(":") != 1:
+                        raise RuntimeError(f"Malformed canonical symbol: {symbol}")
+                    symbols_for_api.append(symbol)
+                    token_to_symbol_map[token] = symbol
+                    symbol_to_token_map[symbol] = token
+                else:
+                    if token not in self._symbol_lookup_failed_once:
+                        self._symbol_lookup_failed_once.add(token)
+                    log_throttled(
+                        LOGGER,
+                        f"resolve_fail_{token}",
+                        f"⚠️ Cannot resolve token {token} to symbol",
+                        interval_sec=120.0,
+                    )
+
+            if not symbols_for_api:
+                LOGGER.warning(
+                    "[POLL] No symbols resolved from tokens - check instrument resolver"
+                )
+                return []
+
+            # Diagnostic Log - show what we're sending to API
+            log_throttled(
+                LOGGER,
+                "quote_symbol_fetch",
+                f"📡 Fetching {len(symbols_for_api)} symbols (NOT tokens): {symbols_for_api[:3]}...",
+                interval_sec=60.0,
+            )
+
+            # ✅ API CALL: Pass symbols as "exchange:tradingsymbol" strings
+            # This is the KEY FIX - passing symbols instead of integer tokens
+            quote_map = self._broker.quote(symbols_for_api)
+
+            if not quote_map:
+                LOGGER.warning(
+                    f"[POLL] Empty quote_map returned for symbols: {symbols_for_api[:3]}..."
+                )
+                return []
+
+            # ✅ DIAGNOSTIC: Check if we got VWAP data
+            sample_quote = next(iter(quote_map.values()), {})
+            has_vwap = (
+                sample_quote.get("average_price", 0)
+                and float(sample_quote.get("average_price", 0)) > 0
+            )
+            has_volume = (
+                sample_quote.get("volume", 0) and int(sample_quote.get("volume", 0)) > 0
+            )
+
+            log_throttled(
+                LOGGER,
+                "quote_quality_check",
+                (
+                    "📊 QUOTE QUALITY: VWAP="
+                    f"{'✅' if has_vwap else '❌'} | Volume="
+                    f"{'✅' if has_volume else '❌'} | Keys="
+                    f"{list(sample_quote.keys())[:8]}"
+                ),
+                interval_sec=60.0,
+                level=logging.DEBUG,
+            )
+
+            ticks = []
+            for key, quote in quote_map.items():
+                try:
+                    lp = float(quote.get("last_price") or 0.0)
+                    if lp <= 0:
+                        continue
+
+                    # Get token from our map or from quote
+                    token = quote.get("instrument_token")
+                    if not token:
+                        # Try to find token from our reverse map
+                        token = symbol_to_token_map.get(str(key))
+
+                    if not token:
+                        LOGGER.debug(f"[POLL] Cannot determine token for key: {key}")
+                        continue
+
+                    token_int = int(token)
+
+                    # ✅ CRITICAL: Extract VWAP (average_price) and Volume
+                    avg_price = quote.get("average_price") or quote.get("vwap")
+                    volume = quote.get("volume")
+                    oi = quote.get("oi")
+                    ohlc = quote.get("ohlc") or {}
+
+                    # Convert to proper types with safe defaults
+                    avg_price_float = float(avg_price) if avg_price is not None else 0.0
+                    volume_int = int(volume) if volume is not None else 0
+                    oi_int = int(oi) if oi is not None else 0
+
+                    used_vwap_fallback = False
+                    if avg_price_float <= 0:
+                        ohlc_close = ohlc.get("close")
+                        if ohlc_close is not None:
+                            try:
+                                avg_price_float = float(ohlc_close)
+                                used_vwap_fallback = avg_price_float > 0
+                            except (TypeError, ValueError) as exc:
+                                LOGGER.debug(
+                                    "[POLL] VWAP fallback conversion failed: %s",
+                                    exc,
+                                )
+
+                    if used_vwap_fallback:
+                        log_throttled(
+                            LOGGER,
+                            f"vwap_fallback_{key}",
+                            (
+                                "Condition met: vwap_fallback_ohlc "
+                                f"for {key} (close={avg_price_float:.2f})"
+                            ),
+                            interval_sec=300.0,
+                        )
+                    elif avg_price_float == 0:
+                        # ✅ DIAGNOSTIC: Log if VWAP is missing (but don't spam)
+                        log_throttled(
+                            LOGGER,
+                            f"vwap_zero_{key}",
+                            (
+                                f"⚠️ VWAP=0 for {key} | This prevents VWAP "
+                                "strategy from triggering"
+                            ),
+                            interval_sec=300.0,  # Only log every 5 minutes
+                        )
+
+                    # Handle timestamp
+                    q_ts = quote.get("timestamp")
+                    if q_ts and hasattr(q_ts, "timestamp"):
+                        ts = int(q_ts.timestamp() * 1000)
+                    elif q_ts and isinstance(q_ts, (int, float)):
+                        ts = int(q_ts * 1000) if q_ts < 10000000000 else int(q_ts)
+                    else:
+                        ts = int(time.time() * 1000)
+
+                    # Build tick with ALL available data
+                    tick = {
+                        "instrument_token": token_int,
+                        "last_price": lp,
+                        "timestamp": ts,
+                        "volume": volume_int,
+                        "average_price": avg_price_float,  # ✅ VWAP
+                        "oi": oi_int,
+                        "depth": quote.get("depth"),
+                        "symbol": (
+                            key
+                            if ":" in str(key)
+                            else self._resolve_instrument(token_int)
+                        ),
+                        "source": "rest",
+                    }
+
+                    # ✅ LOG SUCCESS when we have VWAP (throttled)
+                    if avg_price_float > 0:
+                        log_throttled(
+                            LOGGER,
+                            f"full_quote_{key}",
+                            (
+                                f"✅ FULL QUOTE: {key} | LTP={lp:.2f} | "
+                                f"VWAP={avg_price_float:.2f} | Vol={volume_int}"
+                            ),
+                            interval_sec=120.0,
+                            level=logging.DEBUG,
+                        )
+
+                    ticks.append(tick)
+
+                except Exception as e:
+                    LOGGER.debug(f"[POLL] Error processing quote {key}: {e}")
+                    continue
+
+            # ✅ Summary log
+            if ticks:
+                vwap_count = sum(1 for t in ticks if t.get("average_price", 0) > 0)
+                log_throttled(
+                    LOGGER,
+                    "fetch_summary",
+                    f"📈 FETCH COMPLETE: {len(ticks)} ticks | {vwap_count} with VWAP",
+                    interval_sec=60.0,
+                    level=logging.DEBUG,
+                )
+
+            return ticks
+
+        except Exception as e:
+            LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}", exc_info=True)
+            return []
+
+    # ----------------------------------------------------------------
+    # ✅ HELPERS (Inlined to ensure stability)
+    # ----------------------------------------------------------------
+    def _try_quote_bulk(
+        self, batch: list[int], timestamp_ms: int
+    ) -> list[dict[str, Any]]:
+        """Fetch full quotes with proper token handling."""
+        try:
+            if not batch:
+                return []
+
+            # Build symbol list with token mapping
+            symbols_to_fetch = []
+            token_to_symbol_map = {}
+            symbol_to_token_map = (
+                {}
+            )  # Reverse map for extracting tokens from API response
+
+            for token in batch:
+                # ✅ DEFENSIVE: Ensure token is integer
+                try:
+                    token_int = int(token) if not isinstance(token, int) else token
+                except (ValueError, TypeError):
+                    LOGGER.warning(f"[POLL] Skipping non-integer in batch: {token!r}")
+                    continue
+
+                symbol = self._resolve_instrument(token_int)
+                if symbol:
+                    symbols_to_fetch.append(symbol)
+                    token_to_symbol_map[symbol] = token_int
+                    symbol_to_token_map[symbol] = token_int
+                    # Also map variations (Zerodha may return slightly different keys)
+                    symbol_to_token_map[symbol.upper()] = token_int
+                    symbol_to_token_map[symbol.replace(" ", "")] = token_int
+                else:
+                    # Last resort: try numeric token
+                    symbols_to_fetch.append(str(token_int))
+                    token_to_symbol_map[str(token_int)] = token_int
+                    symbol_to_token_map[str(token_int)] = token_int
+
+            if not symbols_to_fetch:
+                LOGGER.warning("[POLL] No symbols resolved from tokens")
+                return []
+
+            log_throttled(
+                LOGGER,
+                "quote_fetch_attempt",
+                f"📡 Fetching quotes for {len(symbols_to_fetch)} symbols: {symbols_to_fetch[:3]}...",
+                interval_sec=60.0,
+            )
+
+            # Call Zerodha API
+            quote_map = self._broker.quote(symbols_to_fetch)
+
+            if not quote_map:
+                LOGGER.warning("[POLL] Empty quote_map returned from broker")
+                return []
+
+            ticks = []
+            for key, quote in quote_map.items():
+                try:
+                    lp = float(quote.get("last_price") or 0.0)
+                    if lp <= 0:
+                        continue
+
+                    # ✅ FIX: Get token from quote data first, then from our map
+                    token = quote.get("instrument_token")
+
+                    if not token:
+                        # Try to find token from our reverse map
+                        token = symbol_to_token_map.get(key)
+                        if not token:
+                            token = symbol_to_token_map.get(str(key).upper())
+                        if not token:
+                            # Try without spaces
+                            token = symbol_to_token_map.get(str(key).replace(" ", ""))
+
+                    # ✅ FIX: DON'T try int(key) if key is a symbol string!
+                    # Only convert if token is still numeric-looking
+                    if token is None:
+                        if str(key).isdigit():
+                            token = int(key)
+                        else:
+                            # Use the first token from our batch as fallback
+                            # (This handles single-symbol case)
+                            if len(batch) == 1:
+                                token = batch[0]
+                            else:
+                                LOGGER.warning(
+                                    f"[POLL] Cannot determine token for key: {key}"
+                                )
+                                continue
+
+                    # Ensure token is integer
+                    token_int = int(token) if token else None
+                    if not token_int:
+                        continue
+
+                    # Build timestamp
+                    q_ts = quote.get("timestamp")
+                    if q_ts and hasattr(q_ts, "timestamp"):
+                        ts = int(q_ts.timestamp() * 1000)
+                    else:
+                        ts = timestamp_ms
+
+                    tick = {
+                        "instrument_token": token_int,
+                        "last_price": lp,
+                        "timestamp": ts,
+                        "volume": quote.get("volume", 0),
+                        "average_price": quote.get("average_price", 0.0),
+                        "oi": quote.get("oi", 0),
+                        "depth": quote.get("depth"),
+                        "symbol": key if ":" in str(key) else None,
+                    }
+                    ticks.append(tick)
+
+                except Exception as e:
+                    LOGGER.debug(f"[POLL] Error processing quote {key}: {e}")
+                    continue
+
+            return ticks
+
+        except Exception as e:
+            LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}")
+            return []
+
+    def _try_ltp_bulk(
+        self, batch: list[int], timestamp_ms: int
+    ) -> list[dict[str, Any]]:
+        """Helper: Fetch LTP only (fallback)."""
+        try:
+            str_tokens = [str(t) for t in batch]
+            ltp_map = self._broker.ltp(str_tokens)
+
+            if not ltp_map:
+                return []
+
+            ticks = []
+            for token_str, data in ltp_map.items():
+                try:
+                    # Normalize nested structure
+                    if isinstance(data, dict):
+                        lp = float(data.get("last_price") or data.get("ltp") or 0.0)
+                    else:
+                        lp = float(data or 0.0)
+
+                    if lp <= 0:
+                        continue
+
+                    # ✅ FIX: API returns keys as "exchange:symbol", need to map back to token
+                    # First check if token_str is actually numeric
+                    if str(token_str).isdigit():
+                        inst_token = int(token_str)
+                    else:
+                        # Look up in our batch - single token case
+                        if len(batch) == 1:
+                            inst_token = batch[0]
+                        else:
+                            # Can't determine token from LTP response key
+                            LOGGER.debug(
+                                f"[POLL-LTP] Cannot map key to token: {token_str}"
+                            )
+                            continue
+
+                    ticks.append(
+                        {
+                            "instrument_token": inst_token,
+                            "last_price": lp,
+                            "timestamp": timestamp_ms,
+                            "volume": 0,
+                            "average_price": 0.0,
+                            "symbol": token_str if ":" in str(token_str) else None,
+                        }
+                    )
+                except Exception:
+                    continue
+            return ticks
+        except Exception:
+            return []
+
+    @staticmethod
+    def _chunks(lst: list[int], n: int) -> Iterable[list[int]]:
+        """Yield successive n-sized chunks from lst."""
+        for i in range(0, len(lst), n):
+            yield lst[i : i + n]
+
+    def _resolve_instrument(self, token: int) -> str | None:
+        """Resolve instrument token to exchange:tradingsymbol format.
+
+        Returns format like 'NSE:NIFTY' or 'NFO:NIFTY2612025700CE'.
+        """
+        if token is None:
+            return None
+
+        try:
+            # ✅ FIX: Handle case where token is already a symbol string
+            if isinstance(token, str):
+                if not token.strip().isdigit():
+                    # It's already a symbol like "NSE:NIFTY", return it directly
+                    return canonical(token) if ":" in token else None
+                token_int = int(token.strip())
+            else:
+                token_int = int(token)
+
+            # 1. Try format_token_as_symbol (best method - uses CANONICAL_TOKENS)
+            if hasattr(self._resolver, "format_token_as_symbol"):
+                result = self._resolver.format_token_as_symbol(token_int)
+                if result and result != str(token_int):
+                    return canonical(result)
+
+            # 2. Try lookup method
+            if hasattr(self._resolver, "lookup"):
+                info = self._resolver.lookup(token_int)
+                if info:
+                    exchange = info.get("exchange", "NSE")
+                    symbol = info.get("symbol") or info.get("tradingsymbol")
+                    if symbol:
+                        # Handle special case: NIFTY 50 / NIFTY BANK
+                        if symbol in ("NIFTY", "NIFTY 50"):
+                            return "NSE:NIFTY"
+                        if symbol in ("BANKNIFTY", "NIFTY BANK"):
+                            return "NSE:BANKNIFTY"
+                        return canonical(f"{exchange}:{symbol}")
+
+            # 3. Try direct cache access with exchange lookup
+            if hasattr(self._resolver, "_symbol_by_token"):
+                symbol = self._resolver._symbol_by_token.get(token_int)
+                if symbol:
+                    # Get exchange from cache
+                    exchange = "NSE"
+                    if hasattr(self._resolver, "_exchange_by_token"):
+                        exchange = self._resolver._exchange_by_token.get(
+                            token_int, "NSE"
+                        )
+
+                    # Handle NIFTY special case
+                    if symbol in ("NIFTY", "NIFTY 50"):
+                        return "NSE:NIFTY"
+                    if symbol in ("BANKNIFTY", "NIFTY BANK"):
+                        return "NSE:BANKNIFTY"
+
+                    return canonical(f"{exchange}:{symbol}")
+
+            # 4. Well-known token fallback
+            WELL_KNOWN_TOKENS = {
+                256265: "NSE:NIFTY",
+                260105: "NSE:BANKNIFTY",
+            }
+            if token_int in WELL_KNOWN_TOKENS:
+                return WELL_KNOWN_TOKENS[token_int]
+
+        except Exception as e:
+            LOGGER.debug(f"[POLL] Symbol resolution error for token {token}: {e}")
+
+        return None
