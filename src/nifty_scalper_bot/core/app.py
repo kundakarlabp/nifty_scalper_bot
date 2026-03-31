@@ -5404,6 +5404,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                     nfo_synced = ctx.instrument_resolver.sync_nfo_from_broker(
                         nfo_payload
                     )
+                    if hasattr(ctx.instrument_resolver, "_finalize_futures"):
+                        ctx.instrument_resolver._finalize_futures()
                     LOGGER.info(
                         f"✅ Synced {nfo_synced} NFO options to resolver._option_contracts"
                     )

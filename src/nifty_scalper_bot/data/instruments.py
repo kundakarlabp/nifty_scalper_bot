@@ -334,6 +334,7 @@ class InstrumentResolver:
         if rows is None:
             return
         with self._lock:
+            self._future_contracts = {}
             for row in rows:
                 if not isinstance(row, Mapping):
                     continue
@@ -341,6 +342,7 @@ class InstrumentResolver:
                     self._ingest_instrument_row(row)
                 except Exception:
                     LOGGER.exception("instrument_resolver_ingest_error for row")
+            self._finalize_futures()
             self._seed_well_known()
             self._warmed = True
         LOGGER.info("resolver_warm_loaded", extra={"event": "resolver_warm_loaded", "symbols": len(self._by_symbol)})
@@ -362,9 +364,9 @@ class InstrumentResolver:
             with self._lock:
                 # Store exchange-prefixed, bare and base-only forms for flexible lookups
                 self._by_symbol[normalized] = token_int
-                self._by_symbol.setdefault(base_symbol, token_int)
+                self._by_symbol[base_symbol] = token_int
                 if exchange_hint:
-                    self._by_symbol.setdefault(f"{exchange_hint}:{base_symbol}", token_int)
+                    self._by_symbol[f"{exchange_hint}:{base_symbol}"] = token_int
                     self._exchange_by_token[token_int] = exchange_hint
                 self._symbol_by_token[token_int] = base_symbol
                 # clear any negative/no-token state
@@ -413,7 +415,7 @@ class InstrumentResolver:
             token = self._search_token_via_broker_or_store(key)
             if token:
                 with self._lock:
-                    self._by_symbol.setdefault(key, int(token))
+                    self._by_symbol[key] = int(token)
                     self._symbol_by_token.setdefault(int(token), key.split(":", 1)[-1])
                 return int(token)
         except Exception:
@@ -621,28 +623,33 @@ class InstrumentResolver:
         'lot_size'|'lot', 'strike', 'expiry', 'instrument_type' etc.
         """
         try:
-            tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").strip()
-            ts_upper = tradingsymbol.upper()
-            if not (ts_upper.startswith("NIFTY") or ts_upper.startswith("BANKNIFTY")):
-                return
-            if not tradingsymbol:
-                return
-            exchange = (row.get("exchange") or "").strip().upper() or None
-            token_value = row.get("instrument_token") or row.get("token")
-            if token_value is None:
-                return
-            try:
-                token_int = int(float(token_value))
-            except (TypeError, ValueError):
-                LOGGER.debug("instrument_resolver_ingest_token_cast_failed", extra={"tradingsymbol": tradingsymbol, "exchange": exchange, "token_value": token_value})
+            tradingsymbol = row.get("tradingsymbol")
+            instrument_token = row.get("instrument_token")
+            exchange = row.get("exchange")
+            itype = (row.get("instrument_type") or "").upper()
+
+            # HARD GUARD — skip invalid rows
+            if not tradingsymbol or not instrument_token:
                 return
 
+            try:
+                token_int = int(instrument_token)
+            except (TypeError, ValueError):
+                return
+
+            key = str(tradingsymbol).upper()
+            ts_upper = key
+            if not (ts_upper.startswith("NIFTY") or ts_upper.startswith("BANKNIFTY")):
+                return
+            tradingsymbol = str(tradingsymbol).strip()
+            exchange = str(exchange).strip().upper() if exchange else None
+
             with self._lock:
-                key = tradingsymbol.upper()
                 # primary keys
                 self._by_symbol[key] = token_int
                 if exchange:
                     self._by_symbol[f"{exchange}:{key}"] = token_int
+                base_key = key.split(":", 1)[-1] if ":" in key else key
                 if base_key:
                     self._by_symbol[base_key] = token_int
 
@@ -676,24 +683,62 @@ class InstrumentResolver:
                         self._option_contracts[base].append(contract)
                 elif itype in ("FUT", "FUTURE"):
                     base = self._base_index_from_tradingsymbol(tradingsymbol)
-                    if base:
-                        self._future_contracts.setdefault(base, [])
-                        contract = {
-                            "instrument_token": token_int,
-                            "tradingsymbol": tradingsymbol,
-                            "instrument_type": "FUT",
-                            "expiry": row.get("expiry"),
-                            "lot_size": row.get("lot_size") or row.get("lot"),
-                            "tick_size": row.get("tick_size") or row.get("ticksize"),
-                            "raw": dict(row),
-                        }
-                        self._future_contracts[base].append(contract)
+                    if not base:
+                        return
+
+                    # HARD RESET — ensures only latest contracts exist per ingestion cycle
+                    if base not in self._future_contracts:
+                        self._future_contracts[base] = []
+
+                    contract = {
+                        "instrument_token": token_int,
+                        "tradingsymbol": tradingsymbol,
+                        "instrument_type": "FUT",
+                        "expiry": row.get("expiry"),
+                        "lot_size": row.get("lot_size") or row.get("lot"),
+                        "tick_size": row.get("tick_size") or row.get("ticksize"),
+                        "raw": dict(row),
+                    }
+
+                    self._future_contracts[base].append(contract)
 
                 # clear negative cache for this symbol
                 self._clear_negative_cache_for_key(tradingsymbol)
-        except Exception:
+                self._clear_negative_cache_for_key(key)
+                self._clear_negative_cache_for_key(f"NFO:{key}")
+        except Exception as e:
+            LOGGER.error(f"INGEST FAIL: {row} | ERROR: {e}")
             LOGGER.exception("Failure in InstrumentResolver._ingest_instrument_row")
             raise
+
+    def _finalize_futures(self) -> None:
+        """
+        Ensure only the nearest valid expiry FUT is retained per index. Args: None. Returns: None. Raises: None.
+        """
+        for base, contracts in list(self._future_contracts.items()):
+            valid: List[Dict[str, Any]] = []
+
+            for contract in contracts:
+                expiry = contract.get("expiry")
+                if not expiry:
+                    continue
+                expiry_dt = self.parse_expiry_string(expiry)
+                if expiry_dt and expiry_dt >= date.today():
+                    valid.append(contract)
+
+            if not valid:
+                continue
+
+            nearest = min(valid, key=lambda value: self.parse_expiry_string(value.get("expiry")) or date.max)
+            self._future_contracts[base] = [nearest]
+
+            ts = str(nearest["tradingsymbol"]).upper()
+            tok = int(nearest["instrument_token"])
+            self._by_symbol[ts] = tok
+            self._by_symbol[f"NFO:{ts}"] = tok
+            self._clear_negative_cache_for_key(ts)
+            self._clear_negative_cache_for_key(f"NFO:{ts}")
+            LOGGER.info("Futures finalized: %s -> %s", base, ts)
 
     def _seed_well_known(self) -> None:
         """Populate resolver caches with baked-in fallbacks (indices etc)."""
@@ -707,10 +752,10 @@ class InstrumentResolver:
                 normalized_key = key.upper()
                 alias_symbol = normalized_key.split(":", 1)[-1]
                 exchange = (normalized_key.split(":", 1)[0] if ":" in normalized_key else "NSE")
-                self._by_symbol.setdefault(normalized_key, token_int)
+                self._by_symbol[normalized_key] = token_int
                 if ":" not in normalized_key:
-                    self._by_symbol.setdefault(f"{exchange}:{alias_symbol}", token_int)
-                self._by_symbol.setdefault(alias_symbol, token_int)
+                    self._by_symbol[f"{exchange}:{alias_symbol}"] = token_int
+                self._by_symbol[alias_symbol] = token_int
                 self._symbol_by_token.setdefault(token_int, alias_symbol)
                 self._exchange_by_token.setdefault(token_int, exchange)
                 self._clear_negative_cache_for_key(alias_symbol)
