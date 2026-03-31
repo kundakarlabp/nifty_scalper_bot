@@ -1422,6 +1422,7 @@ class BotContext:
     risk_manager: RiskManager | None = None
     persistent_state: PersistentStateManager | None = None
     order_manager: OrderManager | None = None
+    order_execution_hub: ExecutionEngine | None = None
     bracket_manager: Any | None = None
     paper_engine: PaperFillEngine | None = None
     safe_order_manager: SafeOrderManager | None = None
@@ -4453,6 +4454,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         strategy_runner=strategy_runner,
         unified_manager=unified_manager,
         order_processor=order_processor,
+        order_execution_hub=execution_engine,
         instrument_resolver=instrument_resolver,
         instrument_db=instrument_conn,
         instrument_universe=instrument_state,
