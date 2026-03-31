@@ -60,9 +60,8 @@ from nifty_scalper_bot.data.source import (
     ensure_ltp,
     is_symbol_valid,
 )
-from nifty_scalper_bot.execution.circuit_breaker import ExecutionCircuitBreaker
 from nifty_scalper_bot.execution.order_execution_hub import ExecutionEngine
-from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
+from nifty_scalper_bot.execution.order_manager import OrderType
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
     OrderStateMachine,
@@ -286,19 +285,11 @@ class TradeRecord:
 class StrategyRunnerConfig:
     """Configuration controlling runner level behaviour."""
 
-    signal_cooldown_seconds: float = 3.0
-    trade_cooldown_seconds: float = 10.0
     min_indicator_bars: int = 20
     max_trade_history: int = 100
     fetch_history_on_startup: bool = True
 
     def __post_init__(self) -> None:
-        if self.signal_cooldown_seconds < 0:
-            msg = "signal_cooldown_seconds must be non-negative"
-            raise ValueError(msg)
-        if self.trade_cooldown_seconds < 0:
-            msg = "trade_cooldown_seconds must be non-negative"
-            raise ValueError(msg)
         if self.min_indicator_bars < 0:
             msg = "min_indicator_bars must be non-negative"
             raise ValueError(msg)
@@ -336,15 +327,12 @@ class SymbolRuntimeState:
     active: bool = True
     last_tick: dict[str, Any] | None = None
     last_signal_at: datetime | None = None
-    last_trade_at: datetime | None = None
-    cooldown_until: datetime | None = None
     strategy_data: dict[str, Any] = field(default_factory=dict)
     vwap: float | None = None
     session_vwap_volume: int = 0
     session_vwap_turnover: float = 0.0
     _last_strategy_eval: datetime | None = None  # [FIX] For Throttling strategy calls
     _last_eval_bar_ts: datetime | None = None
-    last_trade_candle_at: datetime | None = None
     trade_history: Deque[TradeRecord] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -354,9 +342,7 @@ class SymbolRuntimeState:
         """Return a serialisable snapshot of the symbol state."""
         return {
             "active": self.active,
-            "cooldown_until": _format_dt(self.cooldown_until),
             "last_signal_at": _format_dt(self.last_signal_at),
-            "last_trade_at": _format_dt(self.last_trade_at),
             "trade_history": [record.to_dict() for record in self.trade_history],
             "strategy_data": dict(self.strategy_data),
         }
@@ -591,24 +577,13 @@ class StrategyRunner:
         self.orders_in_flight: set[str] = set()
         self.order_lock = asyncio.Lock()
         self._order_timeout_sec = 10
-        self._symbol_last_signal_ts: dict[str, float] = {}
         self._execution_state_lock = threading.RLock()
         self._execution_state_by_symbol: dict[str, OrderStateMachine] = {}
         self._event_bus = EventBus()
-        self._recently_closed: dict[str, float] = (
-            {}
-        )  # ✅ FIX: Track recently exited symbols
         self._entry_lock = threading.Lock()  # Atomic entry lock
-        self._execution_circuit_breaker = ExecutionCircuitBreaker(
-            max_failures=3,
-            cooldown_seconds=60.0,
-        )
         self._last_cumulative_volume: dict[str, int] = {}
         self._last_valid_price: dict[str, float] = {}
         self._last_valid_price_ts: dict[str, datetime] = {}
-        self._post_exit_cooldown_seconds: float = float(
-            os.getenv("POST_EXIT_COOLDOWN_SECONDS", "20.0")
-        )
         # Global risk-halt latch keeps control-plane work quiet once breaker trips.
         # We intentionally keep this sticky so per-symbol loops cannot spam checks/logs.
         self._risk_halt_active = False
@@ -705,12 +680,8 @@ class StrategyRunner:
         # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
         # for each symbol so Railway logs confirm the moment strategies become active.
         self._warmup_complete_logged: set[str] = set()
-        self._max_trades_per_symbol_per_candle = int(
-            os.getenv("MAX_TRADES_PER_SYMBOL_PER_CANDLE", "1")
-        )
-        self._min_trade_interval_seconds = float(
-            os.getenv("MIN_TRADE_INTERVAL_SECONDS", "60")
-        )
+        self._max_trades_per_symbol_per_candle = 1
+        self._min_trade_interval_seconds = 60.0
         self._session_allow_out_of_hours = (
             os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
         )
@@ -727,14 +698,8 @@ class StrategyRunner:
             os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45")
         )
         self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
-        self._exit_reentry_cooldown_sec = float(
-            os.getenv("EXIT_REENTRY_COOLDOWN_SEC", "300")
-        )
-        self._trade_counter_by_symbol_candle: dict[tuple[str, datetime], int] = {}
-        self._trade_counter_lock = threading.RLock()
         self._market_regime_engine = MarketRegimeEngine()
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
-        self.last_trade_time: datetime | None = None
 
         # FIX S10-2: wire bracket-exit callback so direction lock clears on SL/TP
         if self._bracket_manager is not None and hasattr(
@@ -3098,50 +3063,7 @@ class StrategyRunner:
         machine = self._get_execution_state_machine(symbol)
         machine.force_idle()
 
-    def _set_post_exit_cooldown(self, base_symbol: str, timestamp: datetime) -> None:
-        """
-        Set a cooldown period after exiting a position.
-
-        This prevents the classic thrashing pattern:
-        - Close position at T=0
-        - New signal at T=0.1s
-        - Re-enter immediately
-        - Price reverses, close again
-        - Repeat (burning capital on commissions)
-
-        Args:
-            base_symbol: The underlying symbol
-            timestamp: When the exit occurred
-        """
-        # ✅ FIX (6 Feb 2026): Also track in _recently_closed for re-entry prevention
-        import time as _t
-
-        if hasattr(self, "_recently_closed"):
-            self._recently_closed[base_symbol] = _t.time()
-            self._logger.info(
-                f"🛡️ EXIT RECORDED: {base_symbol} | Re-entry blocked for "
-                f"{self._exit_reentry_cooldown_sec:.0f}s"  # FIX S16-2: use cached value not os.getenv on every call
-            )
-
-        with self._lock:
-            state = self._symbol_state.get(base_symbol)
-            if state:
-                cooldown_end = timestamp + timedelta(
-                    seconds=self._post_exit_cooldown_seconds
-                )
-                state.cooldown_until = cooldown_end
-                state.last_signal_at = timestamp
-
-                self._logger.info(
-                    f"🛡️ POST-EXIT COOLDOWN: {base_symbol} | "
-                    f"No new entries until {cooldown_end.strftime('%H:%M:%S')} "
-                    f"({self._post_exit_cooldown_seconds}s)",
-                    extra={
-                        "event": "post_exit_cooldown_set",
-                        "symbol": base_symbol,
-                        "cooldown_seconds": self._post_exit_cooldown_seconds,
-                    },
-                )
+    # Cooldown logic moved to ExecutionEngine
 
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
@@ -3510,12 +3432,6 @@ class StrategyRunner:
                 return
 
             # 2. FALLBACK: Only runs if App.py failed
-            if not self._risk_allows_trading(None):
-                self._logger.warning(
-                    "Condition met: backfill_short_circuited_by_risk",
-                    extra={"event": "backfill_short_circuited_by_risk"},
-                )
-                return
             self._logger.warning(
                 "⚠️ StrategyRunner memory is empty! Triggering fallback backfill..."
             )
@@ -4014,51 +3930,6 @@ class StrategyRunner:
             return False
         return True
 
-    def _risk_allows_trading_with_reason(self, symbol: str | None) -> tuple[bool, str]:
-        """Return whether risk engine allows entering strategy flow with reason."""
-        try:
-            rm = self._risk_manager
-            if rm is None:
-                return True, "risk_manager_unavailable"
-            if hasattr(rm, "is_circuit_breaker_tripped"):
-                tripped, reason = rm.is_circuit_breaker_tripped()
-                if tripped:
-                    return False, str(reason or "circuit_breaker_tripped")
-            if hasattr(rm, "can_trade"):
-                allowed = bool(rm.can_trade(symbol or "GLOBAL"))
-                return allowed, "can_trade" if allowed else "can_trade_blocked"
-            if hasattr(rm, "risk_gate_should_trade"):
-                result = rm.risk_gate_should_trade()
-                allowed = bool(result[0] if isinstance(result, tuple) else result)
-                reason = (
-                    str(result[1])
-                    if isinstance(result, tuple) and len(result) > 1
-                    else ("risk_gate_allowed" if allowed else "risk_gate_blocked")
-                )
-                return allowed, reason
-            if hasattr(rm, "can_trade_now"):
-                result = rm.can_trade_now()
-                allowed = bool(result[0] if isinstance(result, tuple) else result)
-                reason = (
-                    str(result[1])
-                    if isinstance(result, tuple) and len(result) > 1
-                    else (
-                        "can_trade_now_allowed" if allowed else "can_trade_now_blocked"
-                    )
-                )
-                return allowed, reason
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in _risk_allows_trading_with_reason: %s", exc, exc_info=True
-            )
-            return False, "risk_exception"
-        return False, "risk_manager_no_supported_gate"
-
-    def _risk_allows_trading(self, symbol: str | None) -> bool:
-        """Return whether risk engine allows entering strategy flow."""
-        allowed, _ = self._risk_allows_trading_with_reason(symbol)
-        return allowed
-
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
         self._logger.debug(
@@ -4194,17 +4065,6 @@ class StrategyRunner:
             history_ready = bool(self._history_ready_by_symbol.get(symbol, False))
             spot_age: float | None = None
             current_regime = getattr(self, "_current_regime", None)
-            cooldown_ok = True
-            cooldown_map = getattr(self, "_pyramid_reject_cooldown", {})
-            if cooldown_map:
-                now_ts = time_module.time()
-                cooldown_symbol = self._normalize_symbol(symbol)
-                directions = ["BUY"] if self._options_long_only else ["BUY", "SELL"]
-                for direction in directions:
-                    cooldown_until = cooldown_map.get((cooldown_symbol, direction))
-                    if cooldown_until and now_ts < cooldown_until:
-                        cooldown_ok = False
-                        break
             capital_ok = bool(self._risk_manager.available_balance > 0.0)
             self._logger.debug(
                 "EVAL_GATE_STATUS",
@@ -4213,7 +4073,6 @@ class StrategyRunner:
                     "history_ready": history_ready,
                     "spot_age": spot_age,
                     "regime": str(current_regime),
-                    "cooldown_ok": cooldown_ok,
                     "capital_ok": capital_ok,
                 },
             )
@@ -4490,28 +4349,8 @@ class StrategyRunner:
                     )
 
             # =================================================================
-            # PHASE 6: RISK CHECK (Block trading if risk conditions not met)
+            # PHASE 6: RISK CHECK (Moved to ExecutionEngine)
             # =================================================================
-
-            allowed, reason = self._risk_allows_trading_with_reason(symbol)
-            if not allowed:
-                self._logger.info(
-                    "RISK_BLOCKED: %s",
-                    reason,
-                    extra={"event": "risk_block", "symbol": symbol, "reason": reason},
-                )
-                self._logger.warning(
-                    "Trade blocked by risk manager | symbol=%s | reason=%s",
-                    symbol,
-                    reason,
-                    extra={"event": "risk_block"},
-                )
-                manager = getattr(self, "_strategy_manager", None)
-                if manager is not None and hasattr(
-                    manager, "increment_observability_counter"
-                ):
-                    manager.increment_observability_counter("signals_blocked_by_risk")
-                return
             if self._runner_state != RunnerState.EXECUTION_ENABLED:
                 log_throttled(
                     self._logger,
@@ -4661,12 +4500,8 @@ class StrategyRunner:
                         },
                     )
 
-                # Time-based evaluation throttle prevents stalls while limiting CPU.
-                now_eval = time.monotonic()
-                last_eval_ts = self._last_candle_eval.get(symbol, 0.0)
-                if (now_eval - last_eval_ts) < MIN_EVAL_INTERVAL_SECONDS:
-                    return
-                self._last_candle_eval[symbol] = now_eval
+                # Strategy evaluation is now purely event-driven. 
+                # ExecutionEngine handles any timing constraints.
 
                 spot_tick = (
                     self._market_data.get_latest_tick("NSE:NIFTY")
@@ -4811,10 +4646,6 @@ class StrategyRunner:
 
                 # Check if trading is paused
                 if not self._running or getattr(self, "_trading_paused", False):
-                    return
-
-                # Check cooldown
-                if state.cooldown_until and now < state.cooldown_until:
                     return
 
             # =================================================================
@@ -4977,34 +4808,7 @@ class StrategyRunner:
                                     },
                                 )
                                 return
-                        # Limit evaluation frequency (max 2 per second)
-                        if last_eval and (now - last_eval).total_seconds() < 0.5:
-                            return
-                        cooldown_map = getattr(self, "_pyramid_reject_cooldown", {})
-                        if cooldown_map:
-                            now_ts = time_module.time()
-                            cooldown_symbol = self._normalize_symbol(symbol)
-                            directions = (
-                                ["BUY"] if self._options_long_only else ["BUY", "SELL"]
-                            )
-                            for direction in directions:
-                                cooldown_key = (cooldown_symbol, direction)
-                                cooldown_until = cooldown_map.get(cooldown_key)
-                                if cooldown_until and now_ts < cooldown_until:
-                                    self._logger.debug(
-                                        "pyramid_cooldown_active",
-                                        extra={
-                                            "event": "pyramid_cooldown_active",
-                                            "symbol": cooldown_symbol,
-                                            "direction": direction,
-                                            "cooldown_remaining_s": max(
-                                                0.0, cooldown_until - now_ts
-                                            ),
-                                        },
-                                    )
-                                    return
-                                if cooldown_until and now_ts >= cooldown_until:
-                                    cooldown_map.pop(cooldown_key, None)
+                        # Frequency limit moved to ExecutionEngine
                         state._last_strategy_eval = now
                         # ✅ FIX K (continued): store the effective bar_ts so the
                         # same-bar-skip correctly advances each minute for options.
@@ -5815,7 +5619,7 @@ class StrategyRunner:
         """Args: signal, base_symbol, trade_symbol, trade_price, timestamp. Returns: None. Raises: Exception."""
         try:
             self._logger.debug(
-                "Entered StrategyRunner._handle_entry_signal_inner (ExecutionEngine Mode)",
+                "Entered StrategyRunner._handle_entry_signal_inner (Atomic Engine Flow)",
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
             )
 
@@ -5824,7 +5628,7 @@ class StrategyRunner:
                 raise RuntimeError("CRITICAL: ExecutionEngine missing in StrategyRunner. Cannot process signals.")
 
             # 🚀 DELEGATE TO EXECUTION ENGINE (The Single Authority)
-            # Use asyncio.run_coroutine_threadsafe since StrategyRunner callbacks might be sync
+            # Strategy only computes edge; Engine enforces discipline (cooldown, max trades, etc.)
             if self._main_loop and self._main_loop.is_running():
                 future = asyncio.run_coroutine_threadsafe(
                     self._execution_engine.submit_signal(signal),
@@ -5832,949 +5636,19 @@ class StrategyRunner:
                 )
                 order_id = future.result(timeout=10.0)
             else:
-                # Fallback if loop not yet running (e.g. startup tests)
                 order_id = asyncio.run(self._execution_engine.submit_signal(signal))
             
             if order_id:
-                self._logger.info(f"🟢 SIGNAL ACCEPTED: {order_id} | {signal.symbol}")
-                self.last_trade_time = datetime.now(timezone.utc)
-                self._set_trade_cooldown(base_symbol, timestamp)
+                self._logger.info(f"🟢 SIGNAL ACCEPTED BY ENGINE: {order_id} | {signal.symbol}")
             else:
                 self._logger.warning(f"🔴 SIGNAL REJECTED BY ENGINE: {signal.symbol}")
             
             return
-                self._logger.warning(
-                    "Condition met: execution_circuit_breaker_active",
-                    extra={
-                        "event": "execution_circuit_breaker_active",
-                        "symbol": base_symbol,
-                        "remaining_seconds": self._execution_circuit_breaker.remaining_seconds(),
-                    },
-                )
-                return
-
-            state_machine = self._get_execution_state_machine(base_symbol)
-            if not state_machine.can_accept_signal():
-                self._logger.info(
-                    "Condition met: execution_state_reject",
-                    extra={
-                        "event": "execution_state_reject",
-                        "symbol": base_symbol,
-                        "state": state_machine.state.value,
-                    },
-                )
-                return
-            _ = self._transition_execution_state(
-                base_symbol,
-                ExecutionState.SIGNAL_RECEIVED,
-            )
-
-            # ═══════════════════════════════════════════════════════════════
-            # 🛡️ GUARD 0.5: ORDER IN-FLIGHT CHECK
-            # Prevents duplicate submissions before order fills
-            # ═══════════════════════════════════════════════════════════════
-            if not self._acquire_order_in_flight(
-                trade_symbol or base_symbol, base_symbol
-            ):
-                self._logger.info(
-                    f"🛡️ ORDER IN-FLIGHT REJECT: {base_symbol} | "
-                    "Waiting for pending order to complete",
-                    extra={"event": "order_in_flight_reject", "symbol": base_symbol},
-                )
-                return
-            # -----------------------------------------------------------
-            # 🛡️ GUARD 1: Signal Debounce (Anti-Whipsaw)
-            # -----------------------------------------------------------
-            with self._lock:
-                state = self._symbol_state.get(base_symbol)
-                if state:
-                    symbol_now = time.time()
-                    last_signal_ts = self._symbol_last_signal_ts.get(base_symbol, 0.0)
-                    debounce_limit = self._risk_manager.settings.signal_debounce_seconds
-
-                    delta = symbol_now - last_signal_ts
-                    if delta < debounce_limit:
-                        self._logger.info(
-                            f"⏳ DEBOUNCE REJECT: {base_symbol} | "
-                            f"Wait {debounce_limit - delta:.1f}s more | "
-                            f"Action={signal.action}",
-                            extra={
-                                "event": "signal_debounce_reject",
-                                "symbol": base_symbol,
-                            },
-                        )
-                        return
-
-            # -----------------------------------------------------------
-            # 🛡️ GUARD 1.5: Recently Closed Check (Anti Re-Entry)
-            # ✅ FIX (6 Feb 2026): Prevents bot from re-entering manually exited trades
-            # -----------------------------------------------------------
-            import time as _time_mod
-
-            _exit_cooldown_sec = self._exit_reentry_cooldown_sec
-            _last_exit_time = self._recently_closed.get(base_symbol, 0)
-            if (
-                _last_exit_time
-                and (_time_mod.time() - _last_exit_time) < _exit_cooldown_sec
-            ):
-                _remaining = _exit_cooldown_sec - (_time_mod.time() - _last_exit_time)
-                self._logger.info(
-                    f"🛡️ REENTRY COOLDOWN: {base_symbol} | "
-                    f"Exited {_time_mod.time() - _last_exit_time:.0f}s ago | "
-                    f"Wait {_remaining:.0f}s more",
-                    extra={"event": "signal_reentry_cooldown", "symbol": base_symbol},
-                )
-                return
-
-            with self._lock:
-                state = self._symbol_state.get(base_symbol)
-            if state and state.last_trade_at:
-                elapsed = (timestamp - state.last_trade_at).total_seconds()
-                if elapsed < self._min_trade_interval_seconds:
-                    self._logger.info(
-                        "Condition met: min_trade_interval_guard",
-                        extra={
-                            "event": "min_trade_interval_guard",
-                            "symbol": base_symbol,
-                        },
-                    )
-                    return
-
-            candle_minute = timestamp.replace(second=0, microsecond=0)
-            candle_key = (base_symbol, candle_minute)
-            with self._trade_counter_lock:
-                candle_trade_count = self._trade_counter_by_symbol_candle.get(
-                    candle_key, 0
-                )
-            if candle_trade_count >= self._max_trades_per_symbol_per_candle:
-                self._logger.info(
-                    "Condition met: max_trades_per_symbol_per_candle_guard",
-                    extra={
-                        "event": "max_trades_per_symbol_per_candle_guard",
-                        "symbol": base_symbol,
-                    },
-                )
-                return
-
-            if not self._passes_spot_trend_filter(base_symbol, trade_symbol):
-                self._logger.info(
-                    "Condition met: spot_vwap_trend_filter_block",
-                    extra={
-                        "event": "spot_vwap_trend_filter_block",
-                        "symbol": base_symbol,
-                    },
-                )
-                return
-
-            # -----------------------------------------------------------
-            # 🛡️ GUARD 2: Position Check (No Pyramiding + Cross-Strike)
-            # ✅ FIX (6 Feb 2026): Also blocks same-underlying different-strike entries
-            # -----------------------------------------------------------
-            if self._position_manager:
-                active_contract = self._position_manager.get_active_contract(
-                    base_symbol
-                )
-                if active_contract and not self._risk_manager.settings.allow_pyramiding:
-                    self._logger.info(
-                        f"🛡️ PYRAMID REJECT: {base_symbol} | "
-                        f"Already active on {active_contract.symbol} | "
-                        "Pyramiding Disabled",
-                        extra={"event": "signal_pyramid_reject", "symbol": base_symbol},
-                    )
-                    cooldown_seconds = 15.0
-                    cooldown_map = getattr(self, "_pyramid_reject_cooldown", None)
-                    if cooldown_map is None:
-                        cooldown_map = {}
-                        self._pyramid_reject_cooldown = cooldown_map
-                    cooldown_key = (base_symbol, signal.action)
-                    cooldown_map[cooldown_key] = time_module.time() + cooldown_seconds
-                    self._logger.debug(
-                        "Condition met: pyramid_reject_cooldown_set",
-                        extra={
-                            "event": "pyramid_reject_cooldown_set",
-                            "symbol": base_symbol,
-                            "direction": signal.action,
-                            "cooldown_seconds": cooldown_seconds,
-                        },
-                    )
-                    with self._lock:
-                        if state:
-                            state.last_signal_at = timestamp
-                    return
-
-                # ✅ FIX (6 Feb 2026): Cross-strike check — block if ANY NIFTY option is active
-                _max_nifty_positions = self._max_nifty_positions
-                _all_positions = (
-                    list(self._position_manager.get_open_positions())
-                    if hasattr(self._position_manager, "get_open_positions")
-                    else []
-                )
-                _nifty_active = [
-                    p
-                    for p in _all_positions
-                    if "NIFTY" in getattr(p, "symbol", "").upper()
-                    and abs(getattr(p, "quantity", 0) or 0) > 0
-                ]
-                if len(_nifty_active) >= _max_nifty_positions:
-                    candidate_signal_confidence = self._normalize_confidence(
-                        float(getattr(signal, "confidence", 0.0) or 0.0)
-                    )
-                    active_position = _nifty_active[0] if _nifty_active else None
-                    active_position_confidence = 0.0
-                    if active_position is not None:
-                        active_position_confidence = self._normalize_confidence(
-                            float(getattr(active_position, "confidence", 0.0) or 0.0)
-                        )
-                    if (
-                        active_position is not None
-                        and candidate_signal_confidence > active_position_confidence
-                        and hasattr(self._order_manager, "exit_position")
-                    ):
-                        active_qty = int(
-                            abs(getattr(active_position, "quantity", 0) or 0)
-                        )
-                        if active_qty > 0:
-                            self._logger.info(
-                                "signal_cross_strike_replace",
-                                extra={
-                                    "event": "signal_cross_strike_replace",
-                                    "symbol": base_symbol,
-                                    "active_symbol": getattr(
-                                        active_position, "symbol", ""
-                                    ),
-                                    "candidate_confidence": candidate_signal_confidence,
-                                    "active_confidence": active_position_confidence,
-                                },
-                            )
-                            self._order_manager.exit_position(
-                                symbol=getattr(active_position, "symbol", ""),
-                                quantity=active_qty,
-                                tag="cross_strike_replace",
-                            )
-                        else:
-                            self._logger.info(
-                                "signal_cross_strike_reject",
-                                extra={
-                                    "event": "signal_cross_strike_reject",
-                                    "symbol": base_symbol,
-                                    "reason": "active_qty_invalid",
-                                },
-                            )
-                            with self._lock:
-                                if state:
-                                    state.last_signal_at = timestamp
-                            return
-                    else:
-                        self._logger.info(
-                            f"🛡️ CROSS-STRIKE REJECT: {base_symbol} | "
-                            f"Already {len(_nifty_active)} NIFTY positions active "
-                            f"(max={_max_nifty_positions}) | "
-                            f"Active: {[getattr(p, 'symbol', '?') for p in _nifty_active]}",
-                            extra={
-                                "event": "signal_cross_strike_reject",
-                                "symbol": base_symbol,
-                            },
-                        )
-                        with self._lock:
-                            if state:
-                                state.last_signal_at = timestamp
-                        return
-
-            side = "LONG" if signal.action == "BUY" else "SHORT"
-
-            # FIX S16-1: Elite strategies (VWAPPro, etc.) already apply full index-
-            # VWAP bias, spread, and volume gates internally. Re-scoring them using
-            # _calculate_signal_score is wrong because that function measures option-
-            # premium VWAP proximity — e.g. ₹95 vs ₹100 session VWAP — which has
-            # nothing to do with directional edge.  A valid CE signal could be
-            # penalised just because the option drifted 5% from its opening price.
-            # Fix: for signals that carry a strategy-authored confidence (>0), use
-            # it directly. Fall back to _calculate_signal_score only for unscored
-            # legacy signals (confidence == 0 or None).
-            _sig_meta = signal.metadata if isinstance(signal.metadata, dict) else {}
-            _sig_strategy = str(_sig_meta.get("strategy_name", "") or
-                               _sig_meta.get("strategy", "") or
-                               getattr(signal, "strategy_name", "") or "").lower()
-            _is_elite = any(x in _sig_strategy for x in ("vwap", "elite", "gamma", "smc", "orb"))
-            _raw_confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
-
-            if _is_elite and _raw_confidence > 0:
-                confidence = _raw_confidence
-                self._logger.debug(
-                    "elite_signal_confidence_passthrough strategy=%s confidence=%.2f",
-                    _sig_strategy, confidence,
-                    extra={"event": "elite_confidence_passthrough", "symbol": base_symbol},
-                )
-            else:
-                confidence = self._calculate_signal_score(signal.symbol, side, trade_price)
-
-            # Confidence Threshold
-            min_confidence = self._global_min_signal_confidence
-
-            if confidence < min_confidence:
-                self._logger.info(
-                    f"🚫 CONFIDENCE REJECT: {base_symbol} | "
-                    f"Score={confidence:.2f} < min={min_confidence:.2f}",
-                    extra={"event": "signal_confidence_reject", "symbol": base_symbol},
-                )
-                return
-            action = signal.action
-        except Exception as exc:
-            self._logger.error(
-                "Failure in _handle_entry_signal_inner: %s",
-                exc,
-                exc_info=True,
-            )
-            return
-
-        # ===========================================================
-        # ✅ SMART VWAP FILTER (Unshackles Elite Strategies)
-        # ===========================================================
-        should_check_vwap = True
-        if signal.metadata and signal.metadata.get("ignore_vwap"):
-            should_check_vwap = False
-            self._logger.debug(
-                f"ℹ️ VWAP Check Bypassed by Strategy: {signal.metadata.get('strategy', signal.reason)}"
-            )
-
-        current_vwap = None
-        with self._lock:
-            if state := self._symbol_state.get(base_symbol):
-                current_vwap = state.vwap
-
-        # Only block if Strategy did NOT opt-out
-        if should_check_vwap and current_vwap and current_vwap > 0:
-            distance = abs(trade_price - current_vwap) / current_vwap
-            if distance > 0.25:
-                self._logger.info(
-                    "signal_vwap_distance_reject",
-                    extra={
-                        "event": "signal_vwap_distance_reject",
-                        "symbol": base_symbol,
-                        "distance": distance,
-                    },
-                )
-                return
-            vwap_dist = ((trade_price - current_vwap) / current_vwap) * 100
-
-            # SCALP RULE: For BUY (Long), Price must be ABOVE VWAP
-            if action == "BUY" and trade_price < current_vwap:
-                self._logger.info(
-                    f"🛑 VWAP REJECT: {base_symbol} | "
-                    f"Price={trade_price:.2f} < VWAP={current_vwap:.2f} | "
-                    f"Dist={vwap_dist:.2f}%",
-                    extra={"event": "signal_vwap_reject", "symbol": base_symbol},
-                )
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        signal.quantity,
-                        trade_price,
-                        "skipped",
-                        "vwap_filter",
-                    ),
-                )
-                return
-
-            self._logger.info(
-                f"📊 VWAP PASS: Price={trade_price:.2f} > VWAP={current_vwap:.2f} Dist={vwap_dist:.2f}%"
-            )
-
-        # ===========================================================
-        # Contract Selection Logic
-        # ===========================================================
-        selection: SelectedContract | None = None
-        selector = self._strike_selector
-
-        try:
-            # Resolve direction and option type
-            direction = "BULLISH" if action == "BUY" else "BEARISH"
-            metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-            option_type = metadata.get("option_type")
-
-            # Always infer option_type if missing (Legacy Support)
-            if not option_type:
-                option_type = "CE" if direction == "BULLISH" else "PE"
-
-            sell_premium = (
-                bool(metadata.get("sell_premium")) and not self._options_long_only
-            )
-            entry_side: OrderSide = "SELL" if sell_premium else "BUY"
-
-            # Check active contract reuse logic (Scaling In)
-            if self._position_manager:
-                active = self._position_manager.get_active_contract(base_symbol)
-                if active:
-                    if self._position_manager.is_flat(active.symbol):
-                        self._position_manager.clear_active_contract(base_symbol)
-                    else:
-                        reuse = True
-                        if (
-                            active.option_type != option_type
-                            and not self._allow_hedge_entries
-                        ):
-                            reuse = False
-                        if reuse:
-                            selection = SelectedContract(
-                                symbol=active.symbol,
-                                option_type=active.option_type,
-                                strike=active.strike,
-                                expiry=active.expiry,
-                                ltp=trade_price,
-                                delta=None,
-                                metadata={"source": "position_manager"},
-                            )
-                            trade_symbol = selection.symbol
-
-            # Strategy Explicit Bypass (e.g. Signal is already on an Option)
-            if not selection and (
-                base_symbol.endswith("CE") or base_symbol.endswith("PE")
-            ):
-                selection = SelectedContract(
-                    symbol=base_symbol,
-                    option_type="CE" if "CE" in base_symbol else "PE",
-                    strike=0.0,
-                    expiry=timestamp,
-                    ltp=trade_price,
-                    delta=None,
-                    metadata={"source": "explicit"},
-                )
-                trade_symbol = base_symbol
-
-            # -------------------------------------------------------------
-            # 🔎 SELECTOR CALL & PRICE SAFETY
-            # -------------------------------------------------------------
-            if not selection:
-                # Use Safe Resolver (Maps Futures -> Index)
-                selection = self._resolve_contract_safely(
-                    base_symbol=base_symbol,
-                    action=action,
-                    price=trade_price,
-                    option_type=option_type,
-                )
-
-                if selection:
-                    trade_symbol = selection.symbol
-
-                    # ✅ CRITICAL FIX: PRICE SAFETY CHECK
-                    # If we switched from Future/Index to Option, we MUST have the Option Price.
-                    # We cannot use the Underlying Price (e.g. 25000) for an Option (e.g. 200).
-
-                    if selection.ltp and selection.ltp > 0:
-                        trade_price = selection.ltp
-                    elif trade_symbol != base_symbol:
-                        # Fallback: Try fetching live quote for the Option
-                        # This happens if the selector found the symbol but hasn't received a tick yet
-                        q = self._market_data.get_quote(trade_symbol)
-
-                        # Extract price using robust helper (defined in file scope)
-                        safe_price = (
-                            _extract_float(q, "ltp", "last_price", "close")
-                            if q
-                            else 0.0
-                        )
-
-                        if safe_price > 0:
-                            trade_price = safe_price
-                            self._logger.info(
-                                f"🔄 Fetched fresh price for {trade_symbol}: {trade_price}"
-                            )
-                        else:
-                            # CRITICAL: Do not trade if we don't know the Option price
-                            self._logger.error(
-                                f"🔴 PRICE MISSING: Cannot trade {trade_symbol}. "
-                                f"Selection LTP is None and Live Quote failed. "
-                                f"Preventing usage of Underlying Price ({trade_price})."
-                            )
-                            return
-
-            if not selection:
-                self._logger.warning(
-                    f"🔴 CONTRACT REJECT: {base_symbol} | "
-                    f"No option contract selected | "
-                    f"Check option chain data availability",
-                    extra={"event": "signal_contract_reject", "symbol": base_symbol},
-                )
-                return
-
-            # Monthly Lockout Check
-            lockout, _ = self._monthly_lockout_active(selection.expiry, timestamp)
-            if lockout:
-                return
-
-            # Apply Premium Targets & Risk Sizing
-            signal = self._apply_premium_targets(signal, trade_price, entry_side)
-
-            # Use the robust ATR fallback helper
-            atr_val = self._get_atr_with_fallback(
-                symbol=trade_symbol, metadata=metadata, current_price=trade_price
-            )
-
-            # ═══════════════════════════════════════════════════════════════
-            # ✅ CRITICAL FIX: Correct SL/TP for position side
-            # ═══════════════════════════════════════════════════════════════
-            signal = self._correct_sl_tp_for_position_side(
-                signal=signal,
-                entry_price=trade_price,
-                entry_side=entry_side,
-                atr=atr_val,
-            )
-
-            self._logger.info(
-                f"📊 SIZING: {trade_symbol} | Price={trade_price:.2f} | "
-                f"SL={signal.stop_loss:.2f} | ATR={atr_val:.2f}",
-                extra={
-                    "event": "sizing_calculation",
-                    "symbol": trade_symbol,
-                    "price": trade_price,
-                    "stop_loss": signal.stop_loss,
-                    "atr": atr_val,
-                },
-            )
-
-            sized_qty = self._risk_manager.suggest_position_size(
-                side=entry_side,
-                price=trade_price,
-                stop_loss=signal.stop_loss,
-                atr=atr_val,
-                requested_quantity=signal.quantity,
-                confidence=signal.confidence,
-                symbol=trade_symbol,
-            )
-
-            available_margin = 0.0
-            if self._data_hub is not None:
-                try:
-                    available_margin = float(
-                        self._data_hub.get_available_balance() or 0.0
-                    )
-                except Exception as exc:
-                    self._logger.error(
-                        "Failure in StrategyRunner._handle_entry_signal_inner margin fetch: %s",
-                        exc,
-                        extra={"event": "margin_fetch_failed", "symbol": trade_symbol},
-                        exc_info=exc,
-                    )
-            margin_per_unit = max(trade_price, 0.0)
-            if hasattr(self._order_manager, "estimate_margin"):
-                try:
-                    margin_per_unit = float(
-                        self._order_manager.estimate_margin(
-                            trade_symbol, 1, trade_price
-                        )
-                    )
-                except Exception:
-                    margin_per_unit = max(trade_price, 0.0)
-            size_by_margin = (
-                int(available_margin // margin_per_unit) if margin_per_unit > 0 else 0
-            )
-            if size_by_margin > 0:
-                sized_qty = min(int(sized_qty), size_by_margin)
-
-            if sized_qty <= 0:
-                # FIX S13: derive lot_size from risk settings (contract_lot_size=65)
-                # rather than bare hardcoded literal — single source of truth.
-                _cfg_lot = int(getattr(
-                    getattr(self._risk_manager, "settings", None),
-                    "contract_lot_size", 65,
-                ))
-                lot_size = _cfg_lot
-                if hasattr(self._risk_manager, "_resolve_lot_size"):
-                    try:
-                        lot_size = int(
-                            self._risk_manager._resolve_lot_size(trade_symbol)
-                        )
-                    except Exception:
-                        lot_size = _cfg_lot
-                required_margin = float(trade_price) * float(lot_size)
-                if required_margin <= available_margin and entry_side == "BUY":
-                    sized_qty = lot_size
-
-            if sized_qty <= 0:
-                required_capital = float(trade_price) * float(
-                    int(self._risk_manager._resolve_lot_size(trade_symbol))
-                    if hasattr(self._risk_manager, "_resolve_lot_size")
-                    else 0
-                )
-                self._logger.warning(
-                    "POSITION_SIZE_ZERO",
-                    extra={
-                        "symbol": trade_symbol,
-                        "required_capital": required_capital,
-                        "available_capital": available_margin,
-                    },
-                )
-                self._capital_block_counter += 1
-                now_mono = time.monotonic()
-                last_log = self._qty_zero_log_ts.get(trade_symbol, 0.0)
-                if now_mono - last_log > 60.0:
-                    self._logger.warning(
-                        "Position sizing returned zero — insufficient capital or risk blocked",
-                        extra={
-                            "event": "qty_zero",
-                            "symbol": trade_symbol,
-                            "available_balance": self._risk_manager.available_balance,
-                        },
-                    )
-                    self._qty_zero_log_ts[trade_symbol] = now_mono
-                return
-
-            # Validate Position Limits
-            allowed, reason = self._risk_manager.validate_new_position(
-                symbol=trade_symbol,
-                side="LONG" if entry_side == "BUY" else "SHORT",
-                quantity=int(sized_qty),
-                entry_price=trade_price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
-            )
-
-            if not allowed:
-                self._logger.warning(f"🔴 RISK BLOCK: {reason} | {trade_symbol}")
-                self._set_signal_cooldown(base_symbol, timestamp)
-                return
-
-            # ===========================================================
-            # ✅ EXECUTION: Marketable Limit Order
-            # ===========================================================
-            # Send Limit slightly deeper than market to guarantee fill but cap slippage.
-            execution_price = trade_price
-            if self._market_data:
-                q = self._market_data.get_quote(trade_symbol)
-                if q:
-                    # Get the price we need to cross to get filled immediately
-                    base = q.get("ask" if entry_side == "BUY" else "bid", trade_price)
-                    # Add 1% "Freak Trade Protection" buffer
-                    buffer = 1.01 if entry_side == "BUY" else 0.99
-                    execution_price = round(base * buffer, 2)
-            if getattr(settings, "simulate_slippage", False):
-                execution_price += 0.5
-
-            # ✅ FIX 6a: Shift SL/TP when execution_price diverges from trade_price
-            _price_shift = execution_price - trade_price
-            if abs(_price_shift) > 0.01:
-                _new_sl = signal.stop_loss + _price_shift if signal.stop_loss else None
-                _new_tp = (
-                    signal.take_profit + _price_shift if signal.take_profit else None
-                )
-                self._logger.info(
-                    f"📐 SL/TP SHIFTED by {_price_shift:+.2f} | "
-                    f"SL: {signal.stop_loss:.2f}→{_new_sl:.2f} | "
-                    f"TP: {signal.take_profit:.2f}→{_new_tp:.2f}",
-                    extra={"event": "sl_tp_price_shift", "symbol": trade_symbol},
-                )
-                signal = Signal(
-                    action=signal.action,
-                    symbol=signal.symbol,
-                    quantity=signal.quantity,
-                    confidence=signal.confidence,
-                    reason=signal.reason,
-                    stop_loss=_new_sl,
-                    take_profit=_new_tp,
-                    metadata=signal.metadata,
-                )
-
-            signal = self._anchor_sl_tp_to_execution(
-                signal,
-                signal_price=trade_price,
-                execution_price=execution_price,
-                entry_side=entry_side,
-                atr=atr_val,
-            )
-
-            self._logger.info(
-                f"🟡 SUBMITTING ORDER: {trade_symbol} Qty: {sized_qty} Limit: {execution_price}"
-            )
-
-            strat_name = (
-                signal.metadata.get("strategy", "MAN") if signal.metadata else "MAN"
-            )
-            unique_tag = f"{strat_name[:3]}_{int(timestamp.timestamp())}"
-
-            bracket_meta = signal.metadata if isinstance(signal.metadata, dict) else {}
-            bracket_type = str(bracket_meta.get("bracket_type") or "").upper()
-            use_virtual_bracket = (
-                bracket_type == "VIRTUAL"
-                and hasattr(self._order_manager, "place_bracket_order")
-                and signal.stop_loss
-                and signal.take_profit
-            )
-            tp1_price: float | None = None
-            tp1_qty: int | None = None
-            trailing_atr_mult: float | None = None
-            effective_tp: float | None = signal.take_profit
-
-            if use_virtual_bracket:
-                try:
-                    sl_atr_mult = float(bracket_meta.get("sl_atr_mult") or 0.0)
-                    tp1_atr_mult = float(bracket_meta.get("tp1_atr_mult") or 0.0)
-                    tp2_atr_mult = float(bracket_meta.get("tp2_atr_mult") or 0.0)
-                    tp1_qty_pct = float(bracket_meta.get("tp1_qty_pct") or 0.0)
-
-                    if tp1_atr_mult > 0 and atr_val > 0:
-                        if entry_side == "BUY":
-                            tp1_price = execution_price + (atr_val * tp1_atr_mult)
-                        else:
-                            tp1_price = execution_price - (atr_val * tp1_atr_mult)
-
-                    if (
-                        tp2_atr_mult > 0
-                        and atr_val > 0
-                        and (effective_tp is None or effective_tp <= 0)
-                    ):
-                        if entry_side == "BUY":
-                            effective_tp = execution_price + (atr_val * tp2_atr_mult)
-                        else:
-                            effective_tp = execution_price - (atr_val * tp2_atr_mult)
-
-                    if 0 < tp1_qty_pct < 1:
-                        tp1_qty = max(1, int(round(int(sized_qty) * tp1_qty_pct)))
-                        if tp1_qty >= int(sized_qty):
-                            tp1_qty = None
-
-                    runner_trail = bool(bracket_meta.get("runner_trail_after_tp1"))
-                    sl_mode = str(bracket_meta.get("sl_mode") or "")
-                    if runner_trail or sl_mode == "ATR_TRAIL":
-                        trailing_atr_mult = float(
-                            bracket_meta.get("trailing_atr_mult") or sl_atr_mult or 1.5
-                        )
-                        if trailing_atr_mult <= 0:
-                            trailing_atr_mult = None
-
-                    self._logger.info(
-                        "Condition met: virtual_bracket_ready",
-                        extra={
-                            "event": "virtual_bracket_ready",
-                            "symbol": trade_symbol,
-                            "tp1_price": tp1_price,
-                            "tp1_qty": tp1_qty,
-                            "tp2_price": effective_tp,
-                            "trailing_atr_mult": trailing_atr_mult,
-                        },
-                    )
-                except Exception as exc:
-                    self._logger.error(
-                        "Failure in StrategyRunner._handle_entry_signal_inner bracket setup: %s",
-                        exc,
-                        extra={
-                            "event": "virtual_bracket_setup_failed",
-                            "symbol": trade_symbol,
-                        },
-                        exc_info=exc,
-                    )
-                    use_virtual_bracket = False
-
-            order_id = None
-            _ = self._transition_execution_state(
-                base_symbol,
-                ExecutionState.ORDER_PENDING,
-            )
-            if use_virtual_bracket:
-                self._logger.info(
-                    "ORDER_ATTEMPT",
-                    extra={
-                        "symbol": trade_symbol,
-                        "direction": signal.action,
-                        "qty": int(sized_qty),
-                        "price": execution_price,
-                    },
-                )
-                try:
-                    order_id = self._order_manager.place_bracket_order(
-                        symbol=trade_symbol,
-                        side=entry_side,
-                        quantity=int(sized_qty),
-                        entry_price=execution_price,
-                        stop_loss=signal.stop_loss,
-                        take_profit=effective_tp or signal.take_profit,
-                        tp1_price=tp1_price,
-                        tp1_qty=tp1_qty,
-                        trailing_atr_mult=trailing_atr_mult,
-                        tag=unique_tag,
-                    )
-                except Exception as exc:
-                    self._logger.error(
-                        "Failure in StrategyRunner._handle_entry_signal_inner virtual bracket: %s",
-                        exc,
-                        extra={
-                            "event": "virtual_bracket_submit_failed",
-                            "symbol": trade_symbol,
-                        },
-                        exc_info=exc,
-                    )
-                    order_id = None
-
-            if not order_id:
-                self._logger.info(
-                    "ORDER_ATTEMPT",
-                    extra={
-                        "symbol": trade_symbol,
-                        "direction": signal.action,
-                        "qty": int(sized_qty),
-                        "price": execution_price,
-                    },
-                )
-                order_id = self._order_manager.place_order(
-                    symbol=trade_symbol,
-                    side=entry_side,
-                    quantity=int(sized_qty),
-                    order_type=OrderType.LIMIT,
-                    price=execution_price,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
-                    signal_id=unique_tag,
-                    tag=unique_tag,
-                )
-            if order_id:
-                self._execution_circuit_breaker.record_success()
-                self.last_trade_time = datetime.now(timezone.utc)
-                manager = getattr(self, "_strategy_manager", None)
-                if manager is not None and hasattr(
-                    manager, "increment_observability_counter"
-                ):
-                    manager.increment_observability_counter("orders_submitted")
-
-            # ✅ Update State Timers (Debounce)
-            with self._lock:
-                state = self._symbol_state.get(base_symbol)
-                if state:
-                    state.last_signal_at = timestamp
-                    self._symbol_last_signal_ts[base_symbol] = time.time()
-                    # Also debounce the specific option symbol
-                    if trade_symbol != base_symbol:
-                        self._symbol_last_signal_ts[trade_symbol] = time.time()
-                        opt_state = self._symbol_state.get(trade_symbol)
-                        if opt_state:
-                            opt_state.last_signal_at = timestamp
-
-            if order_id:
-                self._reset_execution_state(base_symbol)
-                self._logger.info(f"🟢 ORDER SUBMITTED! ID: {order_id}")
-
-                # Async Verification & Chase Logic
-                if self._main_loop and self._main_loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self._verify_order_status(order_id, trade_symbol, 3.0),
-                        self._main_loop,
-                    )
-
-                self._notify_orchestrator_submission(signal, base_symbol)
-
-                # Update Active Contract Tracking
-                if self._position_manager and selection:
-                    if (
-                        self._allow_hedge_entries
-                        or not self._position_manager.get_active_contract(base_symbol)
-                    ):
-                        self._position_manager.set_active_contract(
-                            base_symbol, selection
-                        )
-
-                if selector:
-                    selector.register_open(base_symbol, selection)
-
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        int(sized_qty),
-                        trade_price,
-                        "submitted",
-                        signal.reason,
-                        order_id,
-                    ),
-                )
-
-                # Set longer cooldown on success
-                self._set_trade_cooldown(base_symbol, timestamp)
-            else:
-                self._clear_order_in_flight(trade_symbol)
-                self._reset_execution_state(base_symbol)
-                if self._execution_circuit_breaker.record_failure():
-                    self._logger.error(
-                        "Condition met: execution_circuit_breaker_opened",
-                        extra={
-                            "event": "execution_circuit_breaker_opened",
-                            "symbol": trade_symbol,
-                            "cooldown_seconds": 60.0,
-                        },
-                    )
-                self._logger.error(f"🔴 Order Execution Failed for {trade_symbol}")
 
         except Exception as exc:
-            self._clear_order_in_flight(trade_symbol)
-            self._reset_execution_state(base_symbol)
-            self._execution_circuit_breaker.record_failure()
             self._logger.error(f"🔴 ENTRY LOGIC CRASH: {exc}", exc_info=True)
-            # Ensure cooldown even on crash
-            self._set_signal_cooldown(base_symbol, timestamp)
 
-    async def _verify_order_status(
-        self, order_id: str, symbol: str, delay_seconds: float
-    ) -> None:
-        """
-        World-Class Verification: Detects STUCK Limit orders and CHASES them.
-        """
-        await asyncio.sleep(delay_seconds)
-
-        try:
-            # Run in thread to avoid blocking main loop
-            if hasattr(self._order_manager, "get_order"):
-                order = await asyncio.to_thread(self._order_manager.get_order, order_id)
-
-                if not order:
-                    return
-
-                status = str(order.status).upper()
-                # ═══════════════════════════════════════════════════════
-                if status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED", "EXPIRED"]:
-                    self._clear_order_in_flight(symbol)
-                    self._reset_execution_state(symbol)
-
-                # 🛡️ ACTIVE CHASE LOGIC
-                # If Limit Order is ignored by market (OPEN) after 3s, we must act.
-                if status in ["OPEN", "PENDING", "SUBMITTED"]:
-                    self._logger.warning(
-                        f"⏳ ORDER {order_id} STUCK ({status}). Initiating Chase..."
-                    )
-
-                    # Strategy: Modify Price to be more aggressive
-                    # Buy: Current LTP + 0.5% | Sell: Current LTP - 0.5%
-                    # This effectively converts it to a Market order without losing queue priority completely
-
-                    # 1. Get Fresh Price
-                    new_price = 0.0
-                    if self._market_data:
-                        q = await asyncio.to_thread(self._market_data.get_quote, symbol)
-                        if q:
-                            # Panic Chase: Cross the spread aggressively
-                            base = q.get("ask" if order.side == "BUY" else "bid", 0)
-                            if base > 0:
-                                buff = 1.005 if order.side == "BUY" else 0.995
-                                new_price = round(base * buff, 2)
-
-                    if new_price > 0:
-                        self._logger.info(
-                            f"🏃 CHASING: Modifying {order_id} to {new_price}"
-                        )
-                        await asyncio.to_thread(
-                            self._order_manager.modify_order,
-                            order_id=order_id,
-                            price=new_price,
-                        )
-                    else:
-                        self._logger.error("❌ Could not get fresh price for Chase.")
-
-                elif status == "COMPLETE":
-                    self._logger.info(f"✅ ORDER {order_id} FILLED.")
-
-        except Exception as exc:
-            self._logger.warning(f"Order verification/chase warning: {exc}")
-
-    def _get_atr_with_fallback(
+    def _get_atr_with_fallback((
         self, symbol: str, metadata: dict, current_price: float
     ) -> float:
         """
@@ -6919,135 +5793,33 @@ class StrategyRunner:
         trade_price: float,
         timestamp: datetime,
     ) -> None:
-        """Handle exit (CLOSE_LONG/CLOSE_SHORT) signals."""
-        action = signal.action
-        selector = self._strike_selector
-        position_manager = self._position_manager
-
-        if selector is not None:
-            selection = selector.resolve_active(base_symbol)
-        else:
-            selection = None
-
-        if selection is None and position_manager is not None:
-            positions = position_manager.get_positions(trade_symbol)
-            if not positions:
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        signal.quantity,
-                        trade_price,
-                        "skipped",
-                        "no_position",
-                    ),
-                )
-                self._set_signal_cooldown(base_symbol, timestamp)
-                return
-
-            position = positions[0]
-            trade_symbol = position.symbol
-
-        elif selection is None:
-            self._logger.warning(f"No active contract found for {base_symbol}")
-            self._record_trade(
-                base_symbol,
-                TradeRecord(
-                    timestamp,
-                    action,
-                    signal.quantity,
-                    trade_price,
-                    "skipped",
-                    "no_active_contract",
-                ),
-            )
-            self._set_signal_cooldown(base_symbol, timestamp)
-            return
-
-        else:
-            trade_symbol = selection.symbol
-            position = (
-                position_manager.get_position(trade_symbol)
-                if position_manager
-                else None
-            )
-
-        if position is None:
-            self._record_trade(
-                base_symbol,
-                TradeRecord(
-                    timestamp,
-                    action,
-                    signal.quantity,
-                    trade_price,
-                    "skipped",
-                    "position_not_found",
-                ),
-            )
-            return
-
-        # Determine exit side
-        exit_side = "SELL" if position.side == "LONG" else "BUY"
-
+        """Handle exit (CLOSE_LONG/CLOSE_SHORT) signals via ExecutionEngine."""
         try:
-            # Create exit intent
-            exit_intent = ExitIntent(
-                symbol=trade_symbol,
-                position_id=getattr(position, "id", None),
-                side=exit_side,
-                quantity=position.quantity,
-                price=trade_price,
-                reason=signal.reason,
+            self._logger.debug(
+                "Entered StrategyRunner._handle_exit_signal (Atomic Engine Flow)",
+                extra={"event": "exit_signal_inner", "symbol": base_symbol},
             )
 
-            # Place reduce-only exit
-            # Blocking call - safe in thread
-            exit_order_id = self._order_manager.place_reduce_only_exit(exit_intent)
+            if self._execution_engine is None:
+                raise RuntimeError("CRITICAL: ExecutionEngine missing in StrategyRunner. Cannot process signals.")
 
-            if exit_order_id:
-                self._logger.info(
-                    f"Submitted reduce-only {exit_side} for {trade_symbol} qty={position.quantity} id={exit_order_id}"
+            # 🚀 DELEGATE TO EXECUTION ENGINE (The Single Authority)
+            if self._main_loop and self._main_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self._execution_engine.submit_signal(signal),
+                    self._main_loop
                 )
+                order_id = future.result(timeout=10.0)
+            else:
+                order_id = asyncio.run(self._execution_engine.submit_signal(signal))
+            
+            if order_id:
+                self._logger.info(f"🟢 EXIT SIGNAL ACCEPTED BY ENGINE: {order_id} | {signal.symbol}")
+            else:
+                self._logger.warning(f"🔴 EXIT SIGNAL REJECTED BY ENGINE: {signal.symbol}")
 
-                self._notify_orchestrator_exit(base_symbol)
-
-                if selector is not None and selection is not None:
-                    selector.clear_active(base_symbol)
-
-                self._record_trade(
-                    base_symbol,
-                    TradeRecord(
-                        timestamp,
-                        action,
-                        position.quantity,
-                        trade_price,
-                        "submitted",
-                        signal.reason or "Close position",
-                        exit_order_id,
-                    ),
-                )
-
-                self._set_trade_cooldown(base_symbol, timestamp)
-
-        except OrderPlacementError as exc:
-            self._logger.error(f"Exit order placement failed: {exc}", exc_info=True)
-            self._record_trade(
-                base_symbol,
-                TradeRecord(
-                    timestamp,
-                    action,
-                    position.quantity,
-                    trade_price,
-                    "error",
-                    str(exc),
-                ),
-            )
-            # ═══════════════════════════════════════════════════════════
-            self._set_post_exit_cooldown(base_symbol, timestamp)
-
-            # Also clear any in-flight status for this symbol
-            self._clear_order_in_flight(trade_symbol)
+        except Exception as exc:
+            self._logger.error(f"🔴 EXIT LOGIC CRASH: {exc}", exc_info=True)
 
     # [PASTE THIS METHOD INTO StrategyRunner CLASS]
     def calculate_portfolio_greeks(self) -> dict[str, float]:
@@ -7112,39 +5884,6 @@ class StrategyRunner:
                 continue
 
         return {"net_delta": net_delta, "net_gamma": net_gamma, "net_theta": net_theta}
-
-    def _set_trade_cooldown(self, symbol: str, timestamp: datetime) -> None:
-        """Set trade-level cooldown after order submission."""
-        cooldown = self._config.trade_cooldown_seconds
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if state is None:
-                return
-
-            state.last_trade_at = timestamp
-            state.last_trade_candle_at = timestamp.replace(second=0, microsecond=0)
-            candle_key = (symbol, state.last_trade_candle_at)
-            with self._trade_counter_lock:
-                self._trade_counter_by_symbol_candle[candle_key] = (
-                    self._trade_counter_by_symbol_candle.get(candle_key, 0) + 1
-                )
-            state.cooldown_until = (
-                timestamp + timedelta(seconds=cooldown) if cooldown > 0 else None
-            )
-            self._symbol_last_signal_ts[symbol] = time.time()
-
-    def _set_signal_cooldown(self, symbol: str, timestamp: datetime) -> None:
-        """Set signal-level cooldown after signal processing."""
-        cooldown = self._config.signal_cooldown_seconds
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if state is None:
-                return
-
-            state.cooldown_until = (
-                timestamp + timedelta(seconds=cooldown) if cooldown > 0 else None
-            )
-            self._symbol_last_signal_ts[symbol] = time.time()
 
     def _record_trade(self, symbol: str, record: TradeRecord) -> None:
         """Record a trade for auditing and persistence."""

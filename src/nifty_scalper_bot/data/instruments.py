@@ -100,6 +100,16 @@ class OptionContract:
     strike: float
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedSymbol:
+    """Authoritative standardized instrument object."""
+    tradingsymbol: str
+    instrument_token: int
+    expiry: Optional[date]
+    lot_size: int
+    instrument_type: str  # FUT, CE, PE, SPOT, INDEX
+
+
 class BrokerError(Exception):
     """Generic broker/resolver error sentinel."""
 
@@ -195,6 +205,7 @@ class InstrumentResolver:
         # Lightweight option contract catalogue: base -> [contracts]
         # Each contract is a dict with minimal fields (instrument_token, tradingsymbol, expiry, strike, option_type, lot_size, tick_size, raw)
         self._option_contracts: Dict[str, List[Dict[str, Any]]] = {}
+        self._future_contracts: Dict[str, List[Dict[str, Any]]] = {}
 
         # Negative cache (key -> expiry_ts) and a warned set to avoid noisy logs
         self._neg_cache: Dict[str, float] = {}
@@ -641,7 +652,7 @@ class InstrumentResolver:
                 if exchange:
                     self._exchange_by_token.setdefault(token_int, exchange)
 
-                # record option contract metadata for lightweight lookups by base
+                # record option and future contract metadata for lightweight lookups by base
                 itype = (row.get("instrument_type") or row.get("instrumentType") or "").strip().upper()
                 if itype in ("CE", "PE", "OPT", "OPTION"):
                     base = self._base_index_from_tradingsymbol(tradingsymbol)
@@ -664,6 +675,20 @@ class InstrumentResolver:
                             "raw": dict(row),
                         }
                         self._option_contracts[base].append(contract)
+                elif itype in ("FUT", "FUTURE"):
+                    base = self._base_index_from_tradingsymbol(tradingsymbol)
+                    if base:
+                        self._future_contracts.setdefault(base, [])
+                        contract = {
+                            "instrument_token": token_int,
+                            "tradingsymbol": tradingsymbol,
+                            "instrument_type": "FUT",
+                            "expiry": row.get("expiry"),
+                            "lot_size": row.get("lot_size") or row.get("lot"),
+                            "tick_size": row.get("tick_size") or row.get("ticksize"),
+                            "raw": dict(row),
+                        }
+                        self._future_contracts[base].append(contract)
 
                 # clear negative cache for this symbol
                 self._clear_negative_cache_for_key(tradingsymbol)
@@ -1170,6 +1195,147 @@ class InstrumentResolver:
         return val
 
     # ------------------------- end InstrumentResolver ---------------------
+
+
+class SymbolResolver:
+    """
+    Authoritative single-source-of-truth for symbol resolution.
+    
+    Translates generic aliases ("NIFTY_FUT", "NIFTY_OPTION") and 
+    explicit symbols into standardized ResolvedSymbol objects.
+    """
+
+    def __init__(self, instrument_resolver: InstrumentResolver) -> None:
+        self._resolver = instrument_resolver
+
+    def resolve(self, query: str) -> ResolvedSymbol:
+        """
+        Resolve query into a standardized ResolvedSymbol.
+        
+        Args:
+            query: Alias ("NIFTY_FUT") or explicit symbol ("NIFTY24MARFUT")
+            
+        Returns:
+            ResolvedSymbol object
+            
+        Raises:
+            BrokerError: If resolution fails
+        """
+        q = query.strip().upper()
+        
+        # 1. Handle Generic Aliases
+        if q == "NIFTY" or q == "NSE:NIFTY":
+            return self._resolve_index("NIFTY")
+        if q == "BANKNIFTY" or q == "NSE:BANKNIFTY":
+            return self._resolve_index("BANKNIFTY")
+            
+        if q == "NIFTY_FUT":
+            return self._resolve_future("NIFTY")
+        if q == "BANKNIFTY_FUT":
+            return self._resolve_future("BANKNIFTY")
+            
+        if q == "NIFTY_OPTION":
+            # Default to Near-Month ATM CE
+            return self._resolve_default_option("NIFTY")
+        if q == "BANKNIFTY_OPTION":
+            return self._resolve_default_option("BANKNIFTY")
+
+        # 2. Handle Explicit Symbols (Lookup)
+        meta = self._resolver.lookup(q)
+        if not meta:
+            raise BrokerError(f"Could not resolve symbol: {query}")
+            
+        ts = str(meta["symbol"])
+        token = int(meta["instrument_token"])
+        
+        # Determine type and details from metadata if possible
+        # We search through the caches to find the full row
+        lot_size = self._resolver.get_lot_size(ts) or 50
+        
+        # Infer instrument type
+        itype = "INDEX"
+        if ts.endswith("FUT"): itype = "FUT"
+        elif ts.endswith("CE"): itype = "CE"
+        elif ts.endswith("PE"): itype = "PE"
+        elif ts in ("NIFTY", "BANKNIFTY"): itype = "INDEX"
+        
+        # Try to find expiry in option/future caches
+        expiry_dt = None
+        base = self._resolver._base_index_from_tradingsymbol(ts)
+        if base:
+            contracts = (self._resolver._option_contracts.get(base, []) + 
+                         self._resolver._future_contracts.get(base, []))
+            for c in contracts:
+                if c["tradingsymbol"] == ts:
+                    expiry_raw = c.get("expiry")
+                    expiry_dt = self._resolver.parse_expiry_string(expiry_raw)
+                    break
+
+        return ResolvedSymbol(
+            tradingsymbol=ts,
+            instrument_token=token,
+            expiry=expiry_dt,
+            lot_size=lot_size,
+            instrument_type=itype
+        )
+
+    def _resolve_index(self, base: str) -> ResolvedSymbol:
+        token = WELL_KNOWN.get(base)
+        if not token:
+            raise BrokerError(f"Unknown index base: {base}")
+        return ResolvedSymbol(
+            tradingsymbol=base,
+            instrument_token=token,
+            expiry=None,
+            lot_size=self._resolver.get_lot_size(base) or 1,
+            instrument_type="INDEX"
+        )
+
+    def _resolve_future(self, base: str) -> ResolvedSymbol:
+        futures = self._resolver._future_contracts.get(base, [])
+        if not futures:
+            raise BrokerError(f"No futures found for {base}")
+            
+        # Sort by expiry to find the near-month
+        def get_expiry(f):
+            return self._resolver.parse_expiry_string(f.get("expiry")) or date.max
+            
+        near_fut = min(futures, key=get_expiry)
+        return ResolvedSymbol(
+            tradingsymbol=near_fut["tradingsymbol"],
+            instrument_token=near_fut["instrument_token"],
+            expiry=get_expiry(near_fut),
+            lot_size=near_fut.get("lot_size") or 50,
+            instrument_type="FUT"
+        )
+
+    def _resolve_default_option(self, base: str) -> ResolvedSymbol:
+        # Heuristic: Near-month ATM CE
+        # This is a fallback; usually StrategyRunner uses StrikeSelector
+        options = self._resolver.option_contracts(base)
+        if not options:
+            raise BrokerError(f"No options found for {base}")
+            
+        # Filter for CE and find near expiry
+        ce_options = [o for o in options if o["tradingsymbol"].endswith("CE")]
+        if not ce_options:
+            ce_options = options # Fallback to whatever is available
+            
+        def get_expiry(o):
+            return self._resolver.parse_expiry_string(o.get("expiry")) or date.max
+            
+        near_expiry = min(ce_options, key=get_expiry)
+        # Narrow to that expiry and find middle strike (crude ATM approx)
+        at_expiry = [o for o in ce_options if get_expiry(o) == near_expiry]
+        middle_opt = sorted(at_expiry, key=lambda o: float(o.get("strike") or 0))[len(at_expiry)//2]
+        
+        return ResolvedSymbol(
+            tradingsymbol=middle_opt["tradingsymbol"],
+            instrument_token=middle_opt["instrument_token"],
+            expiry=get_expiry(middle_opt),
+            lot_size=middle_opt.get("lot_size") or 50,
+            instrument_type=middle_opt.get("option_type", "CE")
+        )
 
 # -------------------------
 # CSV / SQLite helpers

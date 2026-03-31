@@ -12,10 +12,16 @@ from nifty_scalper_bot.data.instrument_loader import (
     upsert_instruments,
     write_instrument_rows_to_csv,
 )
-from nifty_scalper_bot.data.instruments import InstrumentResolver
+from nifty_scalper_bot.data.instruments import (
+    InstrumentResolver,
+    ResolvedSymbol,
+    SymbolResolver,
+)
 
 __all__ = [
     "InstrumentResolver",
+    "ResolvedSymbol",
+    "SymbolResolver",
     "InstrumentUniverseStatus",
     "ensure_sqlite",
     "parse_kite_csv",
