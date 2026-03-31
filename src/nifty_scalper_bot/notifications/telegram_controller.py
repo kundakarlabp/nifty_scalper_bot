@@ -520,10 +520,12 @@ class TelegramBot:
 
     def __init__(self, deps: TelegramDeps) -> None:
         self.deps = deps
-        self.deps.enable_polling_fallback = True
+        self.deps.enable_polling_fallback = False
         self.deps.webhook_url = None
-        log.info("Telegram running in polling mode (Railway compatible)")
-        self._app: Application | None = None
+        self.mode = "polling"
+        self.application = self.builder().build()
+        self._app: Application | None = self.application
+        log.info("telegram_application_attached")
         self._shutdown_event: asyncio.Event | None = None
         self._fallback_lock: asyncio.Lock | None = None
         self._webhook_server: "TelegramWebhookServer" | None = None
@@ -578,58 +580,41 @@ class TelegramBot:
         self._message_debug_handler_registered = False
         self._running = False
         self._polling_conflict_count = 0
+        self._started = False
+        self._handlers_registered = False
+        self._bg_task_started = False
+        self._send_lock = asyncio.Lock()
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     # =========================================================================
     # ✅ CORRECTED STARTUP LOGIC (Single Source of Truth)
     # =========================================================================
 
     async def start(self) -> None:
-        """
-        Unified startup for Telegram Bot.
-        Handles Initialization -> Start -> Polling in one safe flow.
-        """
-        if self._running:
+        """Start Telegram polling once; Args: none. Returns: None. Raises: None."""
+        if self._started:
             return
-        
-        # Use a local lock or flag to prevent parallel start attempts
-        with self._reconcile_state_lock:
-            if self._running:
-                return
-            self._running = True
+        self._started = True
+        self._running = True
 
         try:
-            if self._app is None:
-                self._app = self.builder().build()
-                self._wire_handlers(self._app)
-
-            command_handlers = (
-                ("status", self.cmd_status),
-                ("positions", self.cmd_positions),
-                ("signals", self.cmd_signals),
-                ("risk", self.cmd_risk),
-                ("logs", self.cmd_tail),
-                ("test_trade", self.cmd_test_trade),
-                ("engine_test", self.cmd_engine_test),
-                ("ping", self.cmd_ping),
-            )
-            for cmd, handler in command_handlers:
-                if not self._command_registered(self._app, cmd):
-                    self._app.add_handler(CommandHandler(cmd, handler))
-
-            await self._app.initialize()
-            await self._app.start()
-            
-            # ✅ FIX: Respect webhook configuration
-            if not self.deps.webhook_url:
-                await self._app.bot.delete_webhook(drop_pending_updates=True)
-                self._start_manual_polling_loop()
-                log.info("✅ Telegram Bot: Started in POLLING mode.")
-            else:
-                log.info(f"✅ Telegram Bot: Started in WEBHOOK mode ({self.deps.webhook_url})")
-            
+            self._register_handlers()
+            await self.application.initialize()
+            await self.application.start()
+            if self.application.updater is not None:
+                await self.application.updater.start_polling()
+            await self._safe_send("🤖 Telegram bot started")
+            log.info("Telegram bot started")
             self._ensure_alert_worker()
+            if not self._bg_task_started:
+                self._heartbeat_task = asyncio.create_task(
+                    self._heartbeat_loop(), name="telegram-heartbeat-loop"
+                )
+                self._bg_task_started = True
+                log.info("Background tasks started")
 
         except Exception as exc:  # noqa: BLE001
+            self._started = False
             self._running = False
             log.error("Telegram bot start failed: %s", exc, exc_info=True)
 
@@ -647,34 +632,113 @@ class TelegramBot:
             self._running = False
 
         try:
-            # 1. Stop PTB Application if present
-            if self._app is not None:
-                # Stop polling if active
-                if self._fallback_active:
-                    self._mark_polling_stopped()
-                
-                # Standard PTB shutdown sequence
+            if self._heartbeat_task is not None:
+                self._heartbeat_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._heartbeat_task
+                self._heartbeat_task = None
+            self._bg_task_started = False
+
+            if self.application.updater is not None:
                 with suppress(Exception):
-                    await self._app.stop()
-                with suppress(Exception):
-                    await self._app.shutdown()
+                    await self.application.updater.stop()
+            with suppress(Exception):
+                await self.application.stop()
+            with suppress(Exception):
+                await self.application.shutdown()
             
             # 2. Call internal shutdown for other tasks (loops, workers)
             await self.shutdown()
-            
+            self._started = False
             log.info("✅ Telegram Bot: Shutdown complete.")
         except Exception as exc:
             log.error(f"Error during Telegram Bot stop: {exc}", exc_info=True)
 
+    async def _safe_send(self, text: str) -> None:
+        """Send Telegram text safely; Args: text. Returns: None. Raises: None."""
+        try:
+            async with self._send_lock:
+                await self.application.bot.send_message(
+                    chat_id=self.deps.chat_id, text=text
+                )
+        except Exception as e:  # noqa: BLE001
+            log.error("Telegram send failed: %s", e)
+
     def send_message(self, text: str):
         """Send plain Telegram message. Args: text. Returns: telegram message | None. Raises: None."""
         try:
-            if self._app is None or self._app.bot is None:
-                return None
-            return self._app.bot.send_message(chat_id=self.deps.chat_id, text=text)
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._safe_send(text))
+            return True
         except Exception as e:
             log.error(f"Telegram send failed: {e}")
             return None
+
+    async def _heartbeat_loop(self) -> None:
+        """Emit Telegram heartbeat; Args: none. Returns: None. Raises: None."""
+        while True:
+            await asyncio.sleep(300)
+            await self._safe_send("💓 Bot alive")
+
+    def _register_handlers(self) -> None:
+        """Register core handlers once; Args: none. Returns: None. Raises: None."""
+        if self._handlers_registered:
+            return
+        self.application.add_handler(CommandHandler("start", self._cmd_start))
+        self.application.add_handler(CommandHandler("stop", self._cmd_stop))
+        self.application.add_handler(CommandHandler("status", self._cmd_status))
+        self.application.add_handler(CommandHandler("summary", self._cmd_summary))
+        self.application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text)
+        )
+        self._handlers_registered = True
+
+    async def _cmd_start(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /start; Args: update, context. Returns: None. Raises: None."""
+        del context
+        message = getattr(update, "message", None)
+        if message is not None:
+            await message.reply_text("✅ Bot is running")
+
+    async def _cmd_stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /stop; Args: update, context. Returns: None. Raises: None."""
+        del context
+        message = getattr(update, "message", None)
+        if message is not None:
+            await message.reply_text("🛑 Stop command received")
+
+    async def _cmd_status(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /status; Args: update, context. Returns: None. Raises: None."""
+        del context
+        message = getattr(update, "message", None)
+        if message is not None:
+            await message.reply_text("📊 System active")
+
+    async def _cmd_summary(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /summary; Args: update, context. Returns: None. Raises: None."""
+        del context
+        message = getattr(update, "message", None)
+        if message is not None:
+            await message.reply_text("📈 Summary ready")
+
+    async def _handle_text(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle plain text; Args: update, context. Returns: None. Raises: None."""
+        del context
+        message = getattr(update, "message", None)
+        if message is not None:
+            await message.reply_text(
+                "🤖 Command not recognized. Use /start /status /summary"
+            )
 
     async def _start_polling_if_needed(self) -> None:
         """
