@@ -6726,12 +6726,9 @@ class NiftyScalperApp:
                 except Exception as exc:
                     LOGGER.exception("telegram_application_start_failed")
 
-            # ✅ FIX: Fallback to Polling if Webhook is NOT enabled
             elif self._ctx.telegram_bot:
-                LOGGER.info("🚀 Starting Telegram Polling (Background)...")
-                self._telegram_task = asyncio.create_task(
-                    self._ctx.telegram_bot.start(),
-                    name="telegram-bot-polling",
+                LOGGER.info(
+                    "telegram_bot_start_skipped_in_app_start; already started in startup_sequence"
                 )
 
     async def stop(self) -> None:
