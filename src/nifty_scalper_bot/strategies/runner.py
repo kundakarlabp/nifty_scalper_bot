@@ -282,21 +282,33 @@ class TradeRecord:
 
 
 @dataclass(slots=True)
+
+@dataclass
 class StrategyRunnerConfig:
     """Configuration controlling runner level behaviour."""
 
+    # Existing
     min_indicator_bars: int = 20
     max_trade_history: int = 100
     fetch_history_on_startup: bool = True
 
+    # ✅ REQUIRED FIX (missing fields)
+    signal_cooldown_seconds: float = 3.0
+    trade_cooldown_seconds: float = 10.0
+
     def __post_init__(self) -> None:
         if self.min_indicator_bars < 0:
-            msg = "min_indicator_bars must be non-negative"
-            raise ValueError(msg)
-        if self.max_trade_history <= 0:
-            msg = "max_trade_history must be positive"
-            raise ValueError(msg)
+            raise ValueError("min_indicator_bars must be non-negative")
 
+        if self.max_trade_history <= 0:
+            raise ValueError("max_trade_history must be positive")
+
+        # ✅ Validation for new fields
+        if self.signal_cooldown_seconds < 0:
+            raise ValueError("signal_cooldown_seconds must be >= 0")
+
+        if self.trade_cooldown_seconds < 0:
+            raise ValueError("trade_cooldown_seconds must be >= 0")
 
 class RunnerState(Enum):
     """State machine for strategy runner lifecycle."""
