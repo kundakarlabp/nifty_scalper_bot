@@ -504,7 +504,13 @@ class PreFlightValidator:
                     "current_value": None,
                     "limit": self._settings.quote_max_age_ms,
                 }
-            age_ms = abs(now - float(timestamp)) * 1000.0
+            
+            # Standardize everything to ms
+            now_ms = now * 1000.0
+            ts_val = float(timestamp)
+            ts_ms = ts_val * (1000.0 if ts_val < 1e11 else 1.0)
+            
+            age_ms = abs(now_ms - ts_ms)
             if age_ms <= self._settings.quote_max_age_ms:
                 return None
             return {

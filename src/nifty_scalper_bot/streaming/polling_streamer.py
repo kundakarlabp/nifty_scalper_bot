@@ -38,8 +38,9 @@ class PollingStreamer:
         self._on_tick = on_tick
         self._resolver = instrument_resolver
         self._data_hub = data_hub
-        configured_interval = float(poll_interval_ms) / 1000.0
-        self._interval_s = configured_interval if configured_interval > 0 else 0.0
+        # Ensure minimum polling interval of 500ms to prevent aggressive loops
+        configured_interval = max(0.5, float(poll_interval_ms) / 1000.0)
+        self._interval_s = configured_interval
         self._batch_size = max(1, int(batch_size))
         self._tokens: set[int] = set()
         self._seeded_tokens: set[int] = set()
@@ -231,14 +232,36 @@ class PollingStreamer:
                 seen_nfo_this_cycle = False
                 seen_any_tick_this_cycle = False
 
-                should_poll_quotes = (
-                    bool(tokens)
-                    and not self._websocket_mode_enabled
-                    and get_market_state() == MarketState.OPEN
-                )
+                # 1. Filter and Prioritize tokens by Staleness (Fallback only)
+                candidates = []
+                if tokens and get_market_state() == MarketState.OPEN:
+                    for token in tokens:
+                        symbol = self._resolve_instrument(token)
+                        if not symbol:
+                            continue
+                        
+                        # Get last arrival time to prioritize oldest data
+                        last_arr = 0.0
+                        if self._data_hub:
+                            quote = self._data_hub.get_quote(symbol)
+                            last_arr = (quote.get("arrival_time") or 0.0) if quote else 0.0
+                        
+                        # Only poll if WS is not fresh (local arrival time)
+                        if not (self._data_hub and self._data_hub.is_ws_fresh(symbol)):
+                            candidates.append((token, last_arr))
+
+                # 2. Sort by last_arrival (oldest/missing first)
+                candidates.sort(key=lambda x: x[1])
+                
+                # 3. Batch Smoothing: Take only up to ONE batch per cycle
+                # This prevents API burst spikes by spreading the load across cycles
+                active_tokens = [c[0] for c in candidates[:self._batch_size]]
+
+                should_poll_quotes = bool(active_tokens)
+                
                 if should_poll_quotes:
-                    # Yield chunks to avoid massive requests
-                    for batch in self._chunks(tokens, self._batch_size):
+                    # Single batch processing (self._chunks is now a safety measure)
+                    for batch in self._chunks(active_tokens, self._batch_size):
                         # Safe Fetch (Uses the corrected _fetch_ticks)
                         ticks = self._fetch_ticks(batch)
 

@@ -209,6 +209,13 @@ class DataHub:
         self._message_bus = message_bus or event_bus
         LOGGER.debug("DataHub using MessageBus id=%s", id(self._message_bus))
         
+        # Ingestion Tracking
+        self._last_ws_arrival_time: dict[str, float] = {}
+        self._last_global_ws_arrival_time: float = 0.0
+        self._last_processed_tick_timestamp: dict[str, float] = {}
+        self._last_arrival_time: dict[str, float] = {}
+        self._ws_staleness_threshold_ms = float(os.getenv("WS_STALENESS_THRESHOLD_MS", "2000.0"))
+
         # ✅ CRITICAL FIX: Define symbol_candles to prevent AttributeError in warmup
         self.symbol_candles: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
@@ -262,33 +269,74 @@ class DataHub:
             asyncio.run_coroutine_threadsafe(self.ingest_tick(tick), loop)
 
     async def ingest_tick(self, tick: Tick) -> None:
-        """Process an incoming market tick."""
-        source = str(tick.get("source", "ws") or "ws").lower()
-        if source != "ws":
-            raise DataIntegrityError(f"non-websocket source rejected: {source}")
+        """Process an incoming market tick (Unified Pipeline)."""
         symbol = tick.get("symbol")
         if not symbol:
             return
-        normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
-        canonical_tick = dict(tick)
-        canonical_tick["symbol"] = normalized_symbol
-        if canonical_tick["symbol"].count(":") != 1:
-            raise RuntimeError(
-                f"Malformed canonical symbol in ingest_tick: {canonical_tick['symbol']}"
-            )
 
+        # 1. Standardize Metadata
+        now_ms = time.time() * 1000.0
+        source = str(tick.get("source", "ws") or "ws").lower()
+        if source == "rest":
+            source = "poll"
+            
+        normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        
+        # 2. Timestamp Normalization (Broker Time)
+        ts = tick.get("timestamp")
+        if isinstance(ts, datetime):
+            ts_ms = ts.timestamp() * 1000.0
+        elif isinstance(ts, (int, float)):
+            ts_ms = float(ts) * (1000.0 if ts < 1e11 else 1.0)
+        else:
+            ts_ms = now_ms
+
+        # 3. Source Priority + Hybrid Deduplication (Locked Cache Updates)
         with self._lock:
-            # 1. Update Cache
+            # A. Hybrid Monotonic Ordering
+            # Prevent older broker timestamps or identical broker timestamps arriving later
+            last_ts = self._last_processed_tick_timestamp.get(normalized_symbol, 0.0)
+            last_arr = self._last_arrival_time.get(normalized_symbol, 0.0)
+            
+            if ts_ms < last_ts:
+                return  # Older broker timestamp
+            if ts_ms == last_ts and now_ms <= last_arr:
+                return  # Duplicate or stale arrival for same broker timestamp
+
+            # B. WS Authority Check (Reject Poll if WS is Healthy)
+            if source == "poll":
+                # Reject poll if WS for THIS symbol is fresh
+                last_ws_arr = self._last_ws_arrival_time.get(normalized_symbol, 0.0)
+                if (now_ms - last_ws_arr) < self._ws_staleness_threshold_ms:
+                    return
+                
+                # Reject poll if WS is GLOBALLY healthy
+                if (now_ms - self._last_global_ws_arrival_time) < self._ws_staleness_threshold_ms:
+                    return
+
+            # C. Update Trackers
+            if source == "ws":
+                self._last_ws_arrival_time[normalized_symbol] = now_ms
+                self._last_global_ws_arrival_time = now_ms
+            
+            self._last_processed_tick_timestamp[normalized_symbol] = ts_ms
+            self._last_arrival_time[normalized_symbol] = now_ms
+
+            # Update Cache
+            canonical_tick = dict(tick)
+            canonical_tick["symbol"] = normalized_symbol
+            canonical_tick["source"] = source
+            canonical_tick["timestamp"] = ts_ms
+            canonical_tick["arrival_time"] = now_ms
             self._quotes[normalized_symbol] = canonical_tick
 
-            # 2. Update Metrics (Throttled)
-            try:
-                self._capture_option_metrics(normalized_symbol, tick)
-            except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
-                raise  # Don't let math errors kill the tick
+        # 4. Update Metrics (Outside Lock - Math only)
+        try:
+            self._capture_option_metrics(normalized_symbol, canonical_tick)
+        except Exception:
+            LOGGER.error("Math error in ingest_tick", exc_info=True)
 
-        # 3. Notify Legacy Subscribers (outside lock)
+        # 5. Notify Subscribers (Outside Lock - Callback iteration)
         with self._lock:
             callbacks = list(self._tick_subscribers.get(normalized_symbol, ()))
 
@@ -298,6 +346,18 @@ class DataHub:
             except Exception as exc:
                 LOGGER.error("Tick subscriber failed: %s", exc, exc_info=True)
 
+    def is_ws_fresh(self, symbol: str) -> bool:
+        """Return True if the WebSocket feed for symbol is currently fresh (local time)."""
+        normalized = enforce_canonical(normalize_symbol(str(symbol)))
+        with self._lock:
+            last_ws_arrival = self._last_ws_arrival_time.get(normalized, 0.0)
+        return (time.time() * 1000.0 - last_ws_arrival) < self._ws_staleness_threshold_ms
+
+    def is_ws_globally_fresh(self) -> bool:
+        """Return True if the global WebSocket feed is healthy."""
+        with self._lock:
+            return (time.time() * 1000.0 - self._last_global_ws_arrival_time) < self._ws_staleness_threshold_ms
+
     def store_quote(
         self,
         symbol: str,
@@ -305,32 +365,19 @@ class DataHub:
         source: str = "ws",
         seed: bool = False,
     ) -> None:
-        """
-        Universal entry point.
-        Redirects legacy/polling calls to the ACTIVE ingestion pipeline.
-        """
-        # 1. Defensive Copy & Normalization
-        # Prevents reference bugs if the caller reuses the dict
+        """Universal entry point. Redirects to the active ingestion pipeline."""
         payload = dict(quote_data)
-
-        # 2. Enforce Metadata
+        payload["symbol"] = symbol
         payload["source"] = source
-        payload["seed"] = bool(seed)
-
-        # Ensure symbol presence
-        canonical_symbol = enforce_canonical(normalize_symbol(str(symbol)))
-        if canonical_symbol.count(":") != 1:
-            raise RuntimeError(f"Malformed canonical symbol: {canonical_symbol}")
-        payload["symbol"] = canonical_symbol
-
-        # Ensure timestamp (critical for freshness checks)
+        if seed:
+            payload["seed"] = True
+        
+        # Ensure timestamp exists
         if "timestamp" not in payload:
-            import time
-
             payload["timestamp"] = int(time.time() * 1000)
 
-        with self._lock:
-            self._quotes[canonical_symbol] = dict(payload)
+        # Route through thread-safe sync ingest
+        self.ingest_tick_sync(payload)
 
 
     def replace_positions(self, positions: Iterable[dict[str, Any]]) -> None:
