@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
@@ -32,11 +34,23 @@ from nifty_scalper_bot.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
+class TradeState(str, Enum):
+    """Explicit lifecycle states for a trade managed by ExecutionEngine."""
+    VALIDATING = "VALIDATING"
+    ORDER_PLACED = "ORDER_PLACED"
+    FILLED = "FILLED"
+    SL_PLACED = "SL_PLACED"
+    TP_PLACED = "TP_PLACED"
+    EXITED = "EXITED"
+    FAILED = "FAILED"
+    REJECTED = "REJECTED"
+
+
 class ExecutionError(RuntimeError):
     """Raised when deterministic execution flow fails."""
 
 
-class OrderExecutionHub:
+class ExecutionEngine:
     """Coordinate order intake, validation, routing, and reconciliation."""
 
     def __init__(
@@ -52,29 +66,11 @@ class OrderExecutionHub:
         regime_manager: Any | None = None,
         risk_manager: Any | None = None,
     ) -> None:
-        """Store dependencies and initialise bookkeeping.
-
-        Args:
-            state_tracker: Tracker maintaining execution state and positions.
-            preflight_validator: Validator gating order requests.
-            lifecycle_manager: Manager handling lifecycle transitions.
-            order_queue: Shared priority queue for execution requests.
-            execution_router: Router dispatching orders to executors.
-            post_fill_monitor: Monitor reconciling broker state.
-            data_hub: Optional data hub reference for diagnostics.
-            regime_manager: Optional regime manager used for gating context.
-            risk_manager: Optional risk manager providing circuit breaker state.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Store dependencies and initialise bookkeeping."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub.__init__",
-            extra={"event": "order_execution_hub_init"},
+            "Entered ExecutionEngine.__init__",
+            extra={"event": "execution_engine_init"},
         )
         self._state_tracker = state_tracker
         self._preflight_validator = preflight_validator
@@ -94,6 +90,7 @@ class OrderExecutionHub:
             else getattr(preflight_validator, "_risk_manager", None)
         )
         self._worker_task: asyncio.Task[None] | None = None
+        self._reconcile_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._stats: dict[str, int] = {
             "submitted": 0,
@@ -102,26 +99,235 @@ class OrderExecutionHub:
             "executed": 0,
             "failed": 0,
             "circuit_breaker_pauses": 0,
-            "stale_rejects": 0,  # Added for new Stale Quote metric
+            "stale_rejects": 0,
         }
         self._circuit_pause_interval = 5.0
         self._last_circuit_log = 0.0
         self._order_log = Path("data/order_submissions.jsonl")
+        self._trades_log = Path("data/active_trades.json")
+        
+        # ✅ SINGLE AUTHORITY: Track active trades and their lifecycle
+        self.active_trades: dict[str, dict[str, Any]] = {}
+        self._trade_id_counter = int(time.time())
+        self._lock = asyncio.Lock()
+        
+        # Load persisted state before starting
+        self._load_trades()
         self._restore_pending_orders()
 
-    def execute(self, signal: Signal) -> str | None:
-        """Execute a validated strategy signal via the single deterministic path.
+    async def submit_signal(self, signal: Signal) -> str | None:
+        """Unified entry point for all strategy trades (Single Authority)."""
+        symbol = signal.symbol
+        action = signal.action
+        
+        # Extract Strategy ID for granular tracking
+        strategy_id = str(
+            signal.metadata.get("strategy_id") or 
+            signal.metadata.get("strategy_name") or 
+            "UNKNOWN"
+        )
 
-        Args:
-            signal: Strategy signal emitted on a closed candle.
+        async with self._lock:
+            # Granular Duplicate check:
+            for tid, trade in self.active_trades.items():
+                if trade["status"] in {TradeState.VALIDATING, TradeState.ORDER_PLACED, TradeState.FILLED, TradeState.SL_PLACED, TradeState.TP_PLACED}:
+                    if trade["symbol"] == symbol and trade["action"] == action:
+                        LOGGER.warning(f"🛡️ SINGLE AUTHORITY: Duplicate entry rejected for {symbol} {action}")
+                        return None
 
-        Returns:
-            str | None: Broker order id when execution succeeds.
+            # 1. Assign Trade ID
+            self._trade_id_counter += 1
+            trade_id = f"TRD_{self._trade_id_counter}"
+            
+            # 2. Basic Validation
+            if not getattr(signal, "tradable", True):
+                return None
+                
+            # 3. Create Initial Trade State (VALIDATING)
+            now = time.time()
+            self.active_trades[trade_id] = {
+                "trade_id": trade_id,
+                "symbol": symbol,
+                "action": action,
+                "strategy_id": strategy_id,
+                "status": TradeState.VALIDATING,
+                "timestamps": {TradeState.VALIDATING: now},
+                "signal": signal,
+                "metadata": dict(signal.metadata or {}),
+            }
+            self._save_trades()
 
-        Raises:
-            ExecutionError: If broker execution fails after retries.
-            Exception: Re-raises critical integration failures.
-        """
+        LOGGER.info(f"🚀 ExecutionEngine: Processing Signal {trade_id} | {symbol} {action}")
+        
+        # 4. Authority over Risk & Execution
+        # Pass trade_id through metadata to enable state transitions down the pipeline
+        signal.metadata["execution_trade_id"] = trade_id
+        order_id = await self.execute(signal)
+        
+        async with self._lock:
+            if not order_id and self.active_trades[trade_id]["status"] == TradeState.VALIDATING:
+                self._transition_trade_state_inner(trade_id, TradeState.REJECTED)
+                
+        return order_id
+
+    async def _transition_trade_state(self, trade_id: str, new_state: TradeState) -> None:
+        """Atomically update trade state and record timestamp."""
+        async with self._lock:
+            self._transition_trade_state_inner(trade_id, new_state)
+
+    def _transition_trade_state_inner(self, trade_id: str, new_state: TradeState) -> None:
+        """Internal synchronous helper for state transition. MUST BE CALLED UNDER LOCK."""
+        if trade_id not in self.active_trades:
+            return
+        trade = self.active_trades[trade_id]
+        trade["status"] = new_state
+        trade["timestamps"][new_state] = time.time()
+        LOGGER.info(f"🔁 Trade {trade_id} transitioned to {new_state}")
+        self._save_trades()
+
+    async def reconcile_trades(self) -> None:
+        """Synchronize local active_trades with broker positions and orders."""
+        LOGGER.debug("🚀 ExecutionEngine: Starting Trade Reconciliation...")
+        
+        try:
+            # 1. Fetch Broker Ground Truth
+            # Use to_thread for blocking broker calls
+            broker_positions = await asyncio.to_thread(self._execution_router._live_executor.broker.positions)
+            broker_orders = await asyncio.to_thread(self._execution_router._live_executor.broker.orders)
+            
+            # Extract net positions (qty > 0)
+            live_positions = {}
+            if isinstance(broker_positions, dict):
+                for p in broker_positions.get("net", []):
+                    if abs(p.get("quantity", 0)) > 0:
+                        live_positions[p["tradingsymbol"]] = p
+            
+            # Extract active exit orders (SL/TP)
+            active_orders = {}
+            for o in broker_orders:
+                if o.get("status") in {"OPEN", "TRIGGER PENDING"}:
+                    active_orders[o["tradingsymbol"]] = active_orders.get(o["tradingsymbol"], [])
+                    active_orders[o["tradingsymbol"]].append(o)
+
+            async with self._lock:
+                # Case A: Local trade exists but broker is flat -> Mark EXITED
+                for tid, trade in list(self.active_trades.items()):
+                    if trade["status"] in {TradeState.FILLED, TradeState.SL_PLACED, TradeState.TP_PLACED}:
+                        symbol = trade["symbol"]
+                        if symbol not in live_positions:
+                            LOGGER.warning(f"⚠️ Reconcile: Trade {tid} ({symbol}) missing at broker. Marking EXITED.")
+                            self._transition_trade_state_inner(tid, TradeState.EXITED)
+
+                # Case B: Broker has position but local missing -> Recreate Trade
+                for symbol, pos in live_positions.items():
+                    local_active = any(t["symbol"] == symbol and t["status"] in {TradeState.FILLED, TradeState.SL_PLACED, TradeState.TP_PLACED} for t in self.active_trades.values())
+                    if not local_active:
+                        LOGGER.info(f"✨ Reconcile: Found orphan position {symbol}. Recreating local trade state.")
+                        self._trade_id_counter += 1
+                        tid = f"TRD_{self._trade_id_counter}"
+                        self.active_trades[tid] = {
+                            "trade_id": tid,
+                            "symbol": symbol,
+                            "action": "BUY" if pos.get("quantity", 0) > 0 else "SELL",
+                            "status": TradeState.FILLED,
+                            "timestamps": {TradeState.FILLED: time.time()},
+                            "metadata": {"reconciled": True},
+                        }
+                        self._save_trades()
+
+                # Case C: SL missing for active trade -> Trigger SL placement
+                for tid, trade in self.active_trades.items():
+                    if trade["status"] == TradeState.FILLED:
+                        symbol = trade["symbol"]
+                        symbol_orders = active_orders.get(symbol, [])
+                        has_sl = any(o.get("transaction_type") != trade["action"] for o in symbol_orders)
+                        if not has_sl:
+                            LOGGER.warning(f"🛡️ Reconcile: SL missing for {symbol}. Triggering protective exit placement.")
+                            # Note: We trigger trigger_lifecycle_on_entry to let LifecycleManager handle it
+                            # We create a dummy result based on position price
+                            pos = live_positions.get(symbol, {})
+                            request = OrderRequest(symbol=symbol, side=trade["action"], quantity=abs(pos.get("quantity", 0)), intent="ENTRY", metadata=trade.get("metadata", {}))
+                            request.metadata["execution_trade_id"] = tid
+                            result = ExecutionResult(order_id=trade.get("order_id", "RECON"), status="FILLED", fill_price=pos.get("average_price", 0.0), fill_quantity=abs(pos.get("quantity", 0)))
+                            await self.trigger_lifecycle_on_entry(request, result)
+
+            LOGGER.debug("✅ ExecutionEngine: Trade Reconciliation Complete.")
+        except Exception as exc:
+            LOGGER.error(f"❌ Reconcile: Reconciliation failed: {exc}", exc_info=True)
+
+    async def _reconciliation_loop(self) -> None:
+        """Run reconciliation every 5 seconds."""
+        while not self._stop_event.is_set():
+            try:
+                await self.reconcile_trades()
+            except Exception as exc:
+                LOGGER.error(f"Reconciliation loop error: {exc}")
+            await asyncio.sleep(5.0)
+
+    def _save_trades(self) -> None:
+        """Persist active trades to disk."""
+        try:
+            serializable = {}
+            for tid, trade in self.active_trades.items():
+                t_copy = dict(trade)
+                if isinstance(t_copy.get("signal"), Signal):
+                    t_copy["signal"] = dataclasses.asdict(t_copy["signal"])
+                # Ensure TradeState is string
+                t_copy["status"] = str(t_copy["status"])
+                serializable[tid] = t_copy
+            
+            self._trades_log.parent.mkdir(parents=True, exist_ok=True)
+            with self._trades_log.open("w", encoding="utf-8") as f:
+                json.dump(serializable, f, indent=2)
+        except Exception as exc:
+            LOGGER.error(f"Failed to save active trades: {exc}", exc_info=True)
+
+    def _load_trades(self) -> None:
+        """Load active trades from disk on startup."""
+        if not self._trades_log.exists():
+            return
+        try:
+            with self._trades_log.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            for tid, trade in data.items():
+                if "status" in trade:
+                    trade["status"] = TradeState(trade["status"])
+                
+                # Reconstruct Signal object
+                if "signal" in trade and isinstance(trade["signal"], dict):
+                    s_data = trade["signal"]
+                    trade["signal"] = Signal(
+                        action=s_data.get("action", "HOLD"),
+                        symbol=s_data.get("symbol", ""),
+                        quantity=s_data.get("quantity", 0),
+                        confidence=s_data.get("confidence", 0.0),
+                        reason=s_data.get("reason", ""),
+                        stop_loss=s_data.get("stop_loss"),
+                        take_profit=s_data.get("take_profit"),
+                        metadata=s_data.get("metadata", {}),
+                        tradable=s_data.get("tradable", True),
+                        source=s_data.get("source", "runner")
+                    )
+                self.active_trades[tid] = trade
+            
+            # Synchronize ID counter to avoid collisions
+            if self.active_trades:
+                max_id = 0
+                for tid in self.active_trades:
+                    if tid.startswith("TRD_"):
+                        try:
+                            val = int(tid.split("_")[1])
+                            max_id = max(max_id, val)
+                        except (IndexError, ValueError):
+                            continue
+                self._trade_id_counter = max(self._trade_id_counter, max_id)
+            
+            LOGGER.info(f"📂 Restored {len(self.active_trades)} trades from persistence.")
+        except Exception as exc:
+            LOGGER.error(f"Failed to load active trades: {exc}", exc_info=True)
+
+    async def execute(self, signal: Signal) -> str | None:
+        """Execute a validated strategy signal via the single deterministic path."""
         if not hasattr(signal, "source") or getattr(signal, "source", "") != "runner":
             LOGGER.warning("Blocked non-runner execution call")
             return None
@@ -198,7 +404,7 @@ class OrderExecutionHub:
                 take_profit=signal.take_profit,
                 metadata=dict(signal.metadata or {}),
             )
-            validation = self._run_preflight(request)
+            validation = await self._run_preflight(request)
             if validation is None:
                 LOGGER.info(
                     {
@@ -208,10 +414,10 @@ class OrderExecutionHub:
                     }
                 )
                 return None
-            result = self._execution_router.execute(request)
+            result = await asyncio.to_thread(self._execution_router.execute, request)
             if not result.order_id:
                 raise ExecutionError("Order placement failed")
-            self._handle_execution_result(request, result)
+            await self._handle_execution_result(request, result)
             LOGGER.info(
                 {
                     "event": "SIGNAL_EXECUTED",
@@ -223,27 +429,17 @@ class OrderExecutionHub:
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception(
                 "[CRITICAL FAILURE]",
-                extra={"event": "order_execution_hub_execute_error"},
+                extra={"event": "execution_engine_execute_error"},
                 exc_info=True,
             )
             raise
 
     async def start(self) -> None:
-        """Start lifecycle dependencies and queue worker.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None. Errors are logged and the worker is not started.
-        """
+        """Start lifecycle dependencies and queue worker."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub.start",
-            extra={"event": "order_execution_hub_start"},
+            "Entered ExecutionEngine.start",
+            extra={"event": "execution_engine_start"},
         )
         if self._worker_task is not None and not self._worker_task.done():
             return
@@ -254,32 +450,32 @@ class OrderExecutionHub:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub.start: %s",
+                "Failure in ExecutionEngine.start: %s",
                 exc,
-                extra={"event": "order_execution_hub_loop_missing"},
+                extra={"event": "execution_engine_loop_missing"},
                 exc_info=exc,
             )
             return
         self._worker_task = loop.create_task(self._worker_loop())
+        # ✅ Start reconciliation loop
+        self._reconcile_task = loop.create_task(self._reconciliation_loop())
 
     async def shutdown(self) -> None:
-        """Shutdown worker and dependent subsystems.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None. Exceptions are logged during teardown.
-        """
+        """Shutdown worker and dependent subsystems."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub.shutdown",
-            extra={"event": "order_execution_hub_shutdown"},
+            "Entered ExecutionEngine.shutdown",
+            extra={"event": "execution_engine_shutdown"},
         )
         self._stop_event.set()
+        
+        # Stop reconciliation
+        if self._reconcile_task:
+            self._reconcile_task.cancel()
+            with asyncio.suppress(asyncio.CancelledError):
+                await self._reconcile_task
+            self._reconcile_task = None
+
         task = self._worker_task
         if task is not None:
             task.cancel()
@@ -292,22 +488,12 @@ class OrderExecutionHub:
         await self._post_fill_monitor.stop()
 
     def submit_order_request(self, request: OrderRequest) -> str:
-        """Submit ``request`` to the shared queue for processing.
-
-        Args:
-            request: OrderRequest instance produced by strategies.
-
-        Returns:
-            str: Generated identifier for tracing the submission.
-
-        Raises:
-            RuntimeError: When enqueueing fails unexpectedly.
-        """
+        """Submit ``request`` to the shared queue for processing."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub.submit_order_request",
+            "Entered ExecutionEngine.submit_order_request",
             extra={
-                "event": "order_execution_hub_submit",
+                "event": "execution_engine_submit",
                 "symbol": request.symbol,
                 "intent": request.intent,
             },
@@ -318,9 +504,9 @@ class OrderExecutionHub:
             self._persist_order(request, status="pending")
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub.submit_order_request: %s",
+                "Failure in ExecutionEngine.submit_order_request: %s",
                 exc,
-                extra={"event": "order_execution_hub_submit_error"},
+                extra={"event": "execution_engine_submit_error"},
                 exc_info=exc,
             )
             self._stats["failed"] += 1
@@ -328,23 +514,12 @@ class OrderExecutionHub:
         return f"req_{int(request.created_ts * 1000)}"
 
     def _persist_order(self, request: OrderRequest, status: str) -> None:
-        """Persist order submission metadata for recovery.
-
-        Args:
-            request: Order request being persisted.
-            status: Lifecycle status persisted alongside the submission.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Persist order submission metadata for recovery."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._persist_order",
+            "Entered ExecutionEngine._persist_order",
             extra={
-                "event": "order_execution_hub_persist_order",
+                "event": "execution_engine_persist_order",
                 "symbol": request.symbol,
                 "status": status,
             },
@@ -367,31 +542,21 @@ class OrderExecutionHub:
                 handle.write("\n")
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._persist_order: %s",
+                "Failure in ExecutionEngine._persist_order: %s",
                 exc,
                 extra={
-                    "event": "order_execution_hub_persist_error",
+                    "event": "execution_engine_persist_error",
                     "symbol": request.symbol,
                 },
                 exc_info=exc,
             )
 
     def _restore_pending_orders(self) -> None:
-        """Reload pending order submissions from the persistence log.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Reload pending order submissions from the persistence log."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._restore_pending_orders",
-            extra={"event": "order_execution_hub_restore_enter"},
+            "Entered ExecutionEngine._restore_pending_orders",
+            extra={"event": "execution_engine_restore_enter"},
         )
         if not self._order_log.exists():
             return
@@ -407,12 +572,12 @@ class OrderExecutionHub:
                     except json.JSONDecodeError as exc:
                         LOGGER.error(
                             (
-                                "Failure in OrderExecutionHub._restore_pending_orders "
+                                "Failure in ExecutionEngine._restore_pending_orders "
                                 "parse: %s"
                             ),
                             exc,
                             extra={
-                                "event": "order_execution_hub_restore_parse_error",
+                                "event": "execution_engine_restore_parse_error",
                                 "line": line_number,
                             },
                             exc_info=exc,
@@ -436,7 +601,7 @@ class OrderExecutionHub:
                         LOGGER.warning(
                             "order_restore_skipped_invalid_entry",
                             extra={
-                                "event": "order_execution_hub_restore_skipped",
+                                "event": "execution_engine_restore_skipped",
                                 "request_id": entry.get("request_id"),
                             },
                         )
@@ -445,7 +610,7 @@ class OrderExecutionHub:
                         LOGGER.warning(
                             "order_restore_skipped_invalid_side",
                             extra={
-                                "event": "order_execution_hub_restore_invalid_side",
+                                "event": "execution_engine_restore_invalid_side",
                                 "side": side,
                                 "request_id": entry.get("request_id"),
                             },
@@ -462,7 +627,7 @@ class OrderExecutionHub:
                         LOGGER.warning(
                             "order_restore_skipped_invalid_intent",
                             extra={
-                                "event": "order_execution_hub_restore_invalid_intent",
+                                "event": "execution_engine_restore_invalid_intent",
                                 "intent": intent,
                                 "request_id": entry.get("request_id"),
                             },
@@ -480,7 +645,7 @@ class OrderExecutionHub:
                     LOGGER.info(
                         "Condition met: restored pending order",
                         extra={
-                            "event": "order_execution_hub_restored_order",
+                            "event": "execution_engine_restored_order",
                             "symbol": request.symbol,
                             "intent": request.intent,
                             "request_id": entry.get("request_id"),
@@ -489,12 +654,12 @@ class OrderExecutionHub:
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.error(
                         (
-                            "Failure in OrderExecutionHub._restore_pending_orders "
+                            "Failure in ExecutionEngine._restore_pending_orders "
                             "enqueue: %s"
                         ),
                         exc,
                         extra={
-                            "event": "order_execution_hub_restore_enqueue_error",
+                            "event": "execution_engine_restore_enqueue_error",
                             "request_id": entry.get("request_id"),
                         },
                         exc_info=exc,
@@ -503,53 +668,33 @@ class OrderExecutionHub:
                 LOGGER.info(
                     "Condition met: restored_pending_orders",
                     extra={
-                        "event": "order_execution_hub_restore_complete",
+                        "event": "execution_engine_restore_complete",
                         "restored": restored,
                     },
                 )
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._restore_pending_orders: %s",
+                "Failure in ExecutionEngine._restore_pending_orders: %s",
                 exc,
-                extra={"event": "order_execution_hub_restore_error"},
+                extra={"event": "execution_engine_restore_error"},
                 exc_info=exc,
             )
 
-    def get_position_state(self, symbol: str) -> dict[str, Any] | None:
-        """Return position state stored for ``symbol``.
-
-        Args:
-            symbol: Trading symbol to query.
-
-        Returns:
-            Optional dictionary describing tracked position state.
-
-        Raises:
-            None.
-        """
+    async def get_position_state(self, symbol: str) -> dict[str, Any] | None:
+        """Return position state stored for ``symbol``."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub.get_position_state",
-            extra={"event": "order_execution_hub_get_position", "symbol": symbol},
+            "Entered ExecutionEngine.get_position_state",
+            extra={"event": "execution_engine_get_position", "symbol": symbol},
         )
         return self._state_tracker.get_position_state(symbol)
 
     def emergency_stop(self) -> dict[str, Any]:
-        """Pause queue processing and submit market exits for open positions.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, Any]: Results including paused flag and closed symbols.
-
-        Raises:
-            None. Failures are logged per position.
-        """
+        """Pause queue processing and submit market exits for open positions."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub.emergency_stop",
-            extra={"event": "order_execution_hub_emergency_stop"},
+            "Entered ExecutionEngine.emergency_stop",
+            extra={"event": "execution_engine_emergency_stop"},
         )
         snapshot: dict[str, Any] = {
             "timestamp": time.monotonic(),
@@ -561,9 +706,9 @@ class OrderExecutionHub:
             snapshot["queue_paused"] = True
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub.emergency_stop pause: %s",
+                "Failure in ExecutionEngine.emergency_stop pause: %s",
                 exc,
-                extra={"event": "order_execution_hub_emergency_pause_error"},
+                extra={"event": "execution_engine_emergency_pause_error"},
                 exc_info=exc,
             )
         try:
@@ -579,40 +724,29 @@ class OrderExecutionHub:
                         positions_closed.append(symbol)
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.error(
-                        "Failure in OrderExecutionHub.emergency_stop exit: %s",
+                        "Failure in ExecutionEngine.emergency_stop exit: %s",
                         exc,
                         extra={
-                            "event": "order_execution_hub_emergency_exit_error",
+                            "event": "execution_engine_emergency_exit_error",
                             "symbol": symbol,
                         },
                         exc_info=exc,
                     )
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub.emergency_stop iterate: %s",
+                "Failure in ExecutionEngine.emergency_stop iterate: %s",
                 exc,
-                extra={"event": "order_execution_hub_emergency_iter_error"},
+                extra={"event": "execution_engine_emergency_iter_error"},
                 exc_info=exc,
             )
         return snapshot
 
     def get_stats(self) -> dict[str, Any]:
-        """Return execution statistics.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, Any]: Aggregated execution and reconciliation metrics.
-
-        Raises:
-            None.
-        """
+        """Return execution statistics."""
 
         queue_depth = len(self._order_queue.get_queue_snapshot())
         router_stats = self._execution_router.get_stats()
         monitor_stats = self._post_fill_monitor.get_stats()
-        # Note: self._stats now includes 'stale_rejects'
         return {
             **self._stats,
             "queue_depth": queue_depth,
@@ -621,21 +755,11 @@ class OrderExecutionHub:
         }
 
     async def _worker_loop(self) -> None:
-        """Process queued requests until shutdown signal.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None. Exceptions are logged and the loop exits gracefully.
-        """
+        """Process queued requests until shutdown signal."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._worker_loop",
-            extra={"event": "order_execution_hub_worker_start"},
+            "Entered ExecutionEngine._worker_loop",
+            extra={"event": "execution_engine_worker_start"},
         )
         try:
             while not self._stop_event.is_set():
@@ -647,7 +771,7 @@ class OrderExecutionHub:
                 )
                 if request is None:
                     continue
-                validation = self._run_preflight(request)
+                validation = await self._run_preflight(request)
                 if validation is None:
                     continue
                 await self._dispatch_request(request)
@@ -655,33 +779,25 @@ class OrderExecutionHub:
             raise
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._worker_loop: %s",
+                "Failure in ExecutionEngine._worker_loop: %s",
                 exc,
-                extra={"event": "order_execution_hub_worker_error"},
+                extra={"event": "execution_engine_worker_error"},
                 exc_info=exc,
             )
 
-    def _run_preflight(self, request: OrderRequest) -> ValidationResult | None:
-        """Run preflight validation returning the result when allowed.
-
-        Args:
-            request: OrderRequest pending validation.
-
-        Returns:
-            ValidationResult when allowed; otherwise ``None``.
-
-        Raises:
-            None. Errors are logged and ``None`` is returned.
-        """
+    async def _run_preflight(self, request: OrderRequest) -> ValidationResult | None:
+        """Run preflight validation returning the result when allowed."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._run_preflight",
+            "Entered ExecutionEngine._run_preflight",
             extra={
-                "event": "order_execution_hub_preflight",
+                "event": "execution_engine_preflight",
                 "symbol": request.symbol,
             },
         )
         try:
+            # Note: PreflightValidator.validate is currently synchronous.
+            # If it performs I/O in the future, we should await it.
             outcome = self._preflight_validator.validate(
                 request.symbol,
                 context={"intent": request.intent, "quantity": request.quantity},
@@ -689,20 +805,21 @@ class OrderExecutionHub:
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception(
                 "[CRITICAL FAILURE]",
-                extra={"event": "order_execution_hub_preflight_error"},
+                extra={"event": "execution_engine_preflight_error"},
                 exc_info=True,
             )
             VALIDATION_FAILURES.labels(
                 symbol=request.symbol, gate="preflight", level="ERROR"
             ).inc()
-            self._stats["rejected"] += 1
+            async with self._lock:
+                self._stats["rejected"] += 1
             self._persist_order(request, status="rejected")
             raise
         if not outcome.allowed:
             LOGGER.info(
                 "Condition met: order rejected by preflight",
                 extra={
-                    "event": "order_execution_hub_preflight_block",
+                    "event": "execution_engine_preflight_block",
                     "symbol": request.symbol,
                     "reasons": outcome.reasons,
                 },
@@ -714,27 +831,16 @@ class OrderExecutionHub:
                     gate=gate_name,
                     level=str(outcome.blocking_level or "UNKNOWN"),
                 ).inc()
-            self._stats["rejected"] += 1
+            async with self._lock:
+                self._stats["rejected"] += 1
             self._persist_order(request, status="rejected")
             return None
-        self._stats["validated"] += 1
+        async with self._lock:
+            self._stats["validated"] += 1
         return outcome
 
     async def _dispatch_request(self, request: OrderRequest) -> None:
-        """Route ``request`` through the execution router.
-
-        Implements an aggressive check for stale market data before proceeding
-        with execution to optimize low-latency scalping.
-
-        Args:
-            request: OrderRequest to dispatch via the router.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Route ``request`` through the execution router."""
 
         stale_threshold_ms = 3000
         if self._data_hub is not None:
@@ -748,20 +854,21 @@ class OrderExecutionHub:
                         LOGGER.info(
                             'Condition met: stale quote rejected',
                             extra={
-                                'event': 'order_execution_hub_stale_quote_reject',
+                                'event': 'execution_engine_stale_quote_reject',
                                 'symbol': request.symbol,
                                 'threshold_ms': stale_threshold_ms,
                             },
                         )
-                        self._stats['stale_rejects'] += 1
-                        self._stats['rejected'] += 1
+                        async with self._lock:
+                            self._stats['stale_rejects'] += 1
+                            self._stats['rejected'] += 1
                         self._persist_order(request, status='rejected')
                         return
                 else:
                     LOGGER.debug(
-                        'order_execution_hub_stale_check_unavailable',
+                        'execution_engine_stale_check_unavailable',
                         extra={
-                            'event': 'order_execution_hub_stale_check_unavailable',
+                            'event': 'execution_engine_stale_check_unavailable',
                             'symbol': request.symbol,
                         },
                     )
@@ -769,7 +876,7 @@ class OrderExecutionHub:
                 LOGGER.exception(
                     '[CRITICAL FAILURE]',
                     extra={
-                        'event': 'order_execution_hub_stale_check_error',
+                        'event': 'execution_engine_stale_check_error',
                         'symbol': request.symbol,
                     },
                     exc_info=True,
@@ -777,9 +884,9 @@ class OrderExecutionHub:
                 raise
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._dispatch_request",
+            "Entered ExecutionEngine._dispatch_request",
             extra={
-                "event": "order_execution_hub_dispatch",
+                "event": "execution_engine_dispatch",
                 "symbol": request.symbol,
             },
         )
@@ -790,31 +897,22 @@ class OrderExecutionHub:
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception(
                 "[CRITICAL FAILURE]",
-                extra={"event": "order_execution_hub_dispatch_error"},
+                extra={"event": "execution_engine_dispatch_error"},
                 exc_info=True,
             )
-            self._stats["failed"] += 1
+            async with self._lock:
+                self._stats["failed"] += 1
             self._persist_order(request, status="failed")
             raise
-        self._handle_execution_result(request, result)
+        await self._handle_execution_result(request, result)
 
     def _enrich_request_metadata(self, request: OrderRequest) -> None:
-        """Populate resolver metadata on ``request`` when available.
-
-        Args:
-            request: OrderRequest subject to enrichment.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
+        """Populate resolver metadata on ``request`` when available."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._enrich_request_metadata",
+            "Entered ExecutionEngine._enrich_request_metadata",
             extra={
-                "event": "order_execution_hub_enrich_metadata",
+                "event": "execution_engine_enrich_metadata",
                 "symbol": request.symbol,
             },
         )
@@ -846,10 +944,10 @@ class OrderExecutionHub:
                         )
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.debug(
-                            "order_execution_hub_enrich_tradingsymbol_failed",
+                            "execution_engine_enrich_tradingsymbol_failed",
                             extra={
                                 "event": (
-                                    "order_execution_hub_enrich_tradingsymbol_failed"
+                                    "execution_engine_enrich_tradingsymbol_failed"
                                 ),
                                 "symbol": request.symbol,
                             },
@@ -860,9 +958,9 @@ class OrderExecutionHub:
                         exchange = resolver.exchange_for_symbol(request.symbol)  # type: ignore[attr-defined]
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.debug(
-                            "order_execution_hub_enrich_exchange_failed",
+                            "execution_engine_enrich_exchange_failed",
                             extra={
-                                "event": "order_execution_hub_enrich_exchange_failed",
+                                "event": "execution_engine_enrich_exchange_failed",
                                 "symbol": request.symbol,
                             },
                             exc_info=exc,
@@ -878,9 +976,9 @@ class OrderExecutionHub:
                             instrument_token = int(resolved_token)
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.debug(
-                            "order_execution_hub_enrich_token_failed",
+                            "execution_engine_enrich_token_failed",
                             extra={
-                                "event": "order_execution_hub_enrich_token_failed",
+                                "event": "execution_engine_enrich_token_failed",
                                 "symbol": request.symbol,
                             },
                             exc_info=exc,
@@ -897,64 +995,72 @@ class OrderExecutionHub:
                 request.metadata = metadata
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._enrich_request_metadata: %s",
+                "Failure in ExecutionEngine._enrich_request_metadata: %s",
                 exc,
                 extra={
-                    "event": "order_execution_hub_enrich_metadata_error",
+                    "event": "execution_engine_enrich_metadata_error",
                     "symbol": request.symbol,
                 },
                 exc_info=exc,
             )
 
-    def _handle_execution_result(
+    async def _handle_execution_result(
         self, request: OrderRequest, result: ExecutionResult
     ) -> None:
-        """Record execution results and trigger lifecycle transitions.
-
-        Args:
-            request: OrderRequest that produced the result.
-            result: ExecutionResult returned by the router.
-
-        Returns:
-            None.
-
-        Raises:
-            None. Failures are logged without raising.
-        """
+        """Record execution results and trigger lifecycle transitions."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._handle_execution_result",
+            "Entered ExecutionEngine._handle_execution_result",
             extra={
-                "event": "order_execution_hub_handle_result",
+                "event": "execution_engine_handle_result",
                 "symbol": request.symbol,
                 "status": result.status,
             },
         )
+        
+        # ✅ Extract trade_id for state tracking
+        trade_id = request.metadata.get("execution_trade_id")
+        
         final_status = (result.status or "unknown").lower()
         if result.status in {"FILLED", "SUBMITTED"} and result.order_id:
-            self._stats["executed"] += 1
-            self._record_order(request, result)
+            async with self._lock:
+                self._stats["executed"] += 1
+            await self._record_order(request, result)
             
-            # --- FIX: CALL CORRECT FUNCTION NAME (trigger_lifecycle_on_entry) ---
+            # Transition State
+            if trade_id:
+                new_state = TradeState.FILLED if result.status == "FILLED" else TradeState.ORDER_PLACED
+                await self._transition_trade_state(trade_id, new_state)
+                async with self._lock:
+                    if trade_id in self.active_trades:
+                        self.active_trades[trade_id]["order_id"] = result.order_id
+                        self._save_trades()
+
+            # Trigger Lifecycle
             if request.intent == "ENTRY":
-                self.trigger_lifecycle_on_entry(request, result)
-            # --- END FIX ---
+                await self.trigger_lifecycle_on_entry(request, result)
             
             LOGGER.info(
                 "Condition met: order execution recorded",
                 extra={
-                    "event": "order_execution_hub_executed",
+                    "event": "execution_engine_executed",
                     "symbol": request.symbol,
                     "status": result.status,
                 },
             )
             self._persist_order(request, status=final_status or "completed")
             return
-        self._stats["failed"] += 1
+            
+        # Failed/Rejected
+        async with self._lock:
+            self._stats["failed"] += 1
+        if trade_id:
+            await self._transition_trade_state(trade_id, TradeState.FAILED)
+            
         LOGGER.warning(
             "Order execution failed",
             extra={
-                "event": "order_execution_hub_failed",
+                "event": "execution_engine_failed",
                 "symbol": request.symbol,
                 "status": result.status,
                 "reason": result.rejection_reason,
@@ -962,25 +1068,17 @@ class OrderExecutionHub:
         )
         self._persist_order(request, status=final_status or "failed")
 
-    def _execute_entry_exits_safely(
+    async def _execute_entry_exits_safely(
         self, request: OrderRequest, result: ExecutionResult
     ) -> tuple[str | None, str | None]:
-        """Register entry fills with the lifecycle manager for exit automation.
-
-        Args:
-            request: Original OrderRequest that was executed.
-            result: ExecutionResult containing fill details.
-
-        Returns:
-            tuple[str | None, str | None]: Placeholder identifiers for legacy
-                callers; lifecycle management handles exits internally.
-
-        Raises:
-            None. Exceptions are logged and re-raised to signal failure.
-        """
+        """Register entry fills with the lifecycle manager for exit automation."""
 
         entry_id = result.order_id or f"entry_{int(time.time() * 1000)}"
         symbol = request.symbol
+        
+        # ✅ Extract trade_id
+        trade_id = request.metadata.get("execution_trade_id")
+        
         filled_qty = result.fill_quantity
         if filled_qty <= 0:
             filled_qty = request.quantity
@@ -1007,7 +1105,7 @@ class OrderExecutionHub:
         LOGGER.info(
             "Condition met: entry fill registered for lifecycle",
             extra={
-                "event": "order_execution_hub_entry_fill",
+                "event": "execution_engine_entry_fill",
                 "symbol": symbol,
                 "order_id": entry_id,
                 "fill_price": fill_price,
@@ -1019,6 +1117,7 @@ class OrderExecutionHub:
             },
         )
         try:
+            # LifecycleManager.on_fill is synchronous
             self._lifecycle_manager.on_fill(
                 symbol=symbol,
                 entry_price=fill_price,
@@ -1027,12 +1126,17 @@ class OrderExecutionHub:
                 regime=regime,
                 iv=iv_value,
             )
+            # Record SL/TP Placement
+            if trade_id:
+                await self._transition_trade_state(trade_id, TradeState.SL_PLACED)
+                await self._transition_trade_state(trade_id, TradeState.TP_PLACED)
+                
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._execute_entry_exits_safely: %s",
+                "Failure in ExecutionEngine._execute_entry_exits_safely: %s",
                 exc,
                 extra={
-                    "event": "order_execution_hub_entry_lifecycle_error",
+                    "event": "execution_engine_entry_lifecycle_error",
                     "symbol": symbol,
                     "order_id": entry_id,
                 },
@@ -1041,19 +1145,8 @@ class OrderExecutionHub:
             raise
         return None, None
 
-    def _record_order(self, request: OrderRequest, result: ExecutionResult) -> None:
-        """Persist execution details to the state tracker.
-
-        Args:
-            request: OrderRequest that was executed.
-            result: ExecutionResult describing fills and status.
-
-        Returns:
-            None.
-
-        Raises:
-            None. Errors are logged for observability.
-        """
+    async def _record_order(self, request: OrderRequest, result: ExecutionResult) -> None:
+        """Persist execution details to the state tracker."""
 
         fill_price = self._safe_float(
             result.fill_price, self._safe_float(request.price)
@@ -1073,9 +1166,9 @@ class OrderExecutionHub:
             self._state_tracker.add_order(payload)
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._record_order: %s",
+                "Failure in ExecutionEngine._record_order: %s",
                 exc,
-                extra={"event": "order_execution_hub_record_order_error"},
+                extra={"event": "execution_engine_record_order_error"},
                 exc_info=exc,
             )
         quantity_signed = int(request.quantity)
@@ -1107,47 +1200,36 @@ class OrderExecutionHub:
             self._state_tracker.update_position(request.symbol, updates)
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._record_order update: %s",
+                "Failure in ExecutionEngine._record_order update: %s",
                 exc,
                 extra={
-                    "event": "order_execution_hub_record_position_error",
+                    "event": "execution_engine_record_position_error",
                     "symbol": request.symbol,
                 },
                 exc_info=exc,
             )
 
-    def trigger_lifecycle_on_entry(
+    async def trigger_lifecycle_on_entry(
         self, request: OrderRequest, result: ExecutionResult
     ) -> None:
-        """Initialise lifecycle manager and place protective exits safely.
-
-        Args:
-            request: Filled entry request payload.
-            result: ExecutionResult describing the entry fill.
-
-        Returns:
-            None.
-
-        Raises:
-            None. Exceptions are logged and re-raised for visibility.
-        """
+        """Initialise lifecycle manager and place protective exits safely."""
 
         try:
-            self._execute_entry_exits_safely(request, result)
+            await self._execute_entry_exits_safely(request, result)
             LOGGER.info(
                 "Condition met: entry protection activated",
                 extra={
-                    "event": "order_execution_hub_entry_protection",
+                    "event": "execution_engine_entry_protection",
                     "symbol": request.symbol,
                     "order_id": result.order_id,
                 },
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.critical(
-                "Failure in OrderExecutionHub.trigger_lifecycle_on_entry: %s",
+                "Failure in ExecutionEngine.trigger_lifecycle_on_entry: %s",
                 exc,
                 extra={
-                    "event": "order_execution_hub_entry_protection_failed",
+                    "event": "execution_engine_entry_protection_failed",
                     "symbol": request.symbol,
                     "order_id": result.order_id,
                 },
@@ -1156,21 +1238,11 @@ class OrderExecutionHub:
             raise
 
     def _should_halt_processing(self) -> bool:
-        """Return ``True`` when queue processing should pause.
-
-        Args:
-            None.
-
-        Returns:
-            bool: ``True`` when a circuit breaker or pause condition is active.
-
-        Raises:
-            None.
-        """
+        """Return ``True`` when queue processing should pause."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._should_halt_processing",
-            extra={"event": "order_execution_hub_should_halt"},
+            "Entered ExecutionEngine._should_halt_processing",
+            extra={"event": "execution_engine_should_halt"},
         )
         try:
             risk_manager = self._risk_manager
@@ -1205,42 +1277,35 @@ class OrderExecutionHub:
                     LOGGER.info(
                         "Condition met: circuit breaker active",
                         extra={
-                            "event": "order_execution_hub_circuit_open",
+                            "event": "execution_engine_circuit_open",
                             "reason": reason or "circuit_breaker",
                         },
                     )
                     self._last_circuit_log = now
-                self._stats["circuit_breaker_pauses"] += 1
+                asyncio.run_coroutine_threadsafe(self._inc_circuit_pauses(), asyncio.get_event_loop())
                 return True
             return False
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._should_halt_processing: %s",
+                "Failure in ExecutionEngine._should_halt_processing: %s",
                 exc,
-                extra={"event": "order_execution_hub_circuit_check_error"},
+                extra={"event": "execution_engine_circuit_check_error"},
                 exc_info=exc,
             )
             return False
 
+    async def _inc_circuit_pauses(self) -> None:
+        async with self._lock:
+            self._stats["circuit_breaker_pauses"] += 1
+
     def _get_atr_for_symbol(
         self, symbol: str, metadata: Mapping[str, Any] | None = None
     ) -> float:
-        """Return the ATR value for ``symbol`` from metadata or trackers.
-
-        Args:
-            symbol: Instrument identifier for lookup.
-            metadata: Optional execution metadata payload.
-
-        Returns:
-            float: Discovered ATR value or symbol-specific default.
-
-        Raises:
-            None.
-        """
+        """Return the ATR value for ``symbol`` from metadata or trackers."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._get_atr_for_symbol",
-            extra={"event": "order_execution_hub_resolve_atr", "symbol": symbol},
+            "Entered ExecutionEngine._get_atr_for_symbol",
+            extra={"event": "execution_engine_resolve_atr", "symbol": symbol},
         )
         default_atr = 10.0
         symbol_upper = symbol.upper()
@@ -1267,10 +1332,10 @@ class OrderExecutionHub:
                         return self._safe_float(atr_value, default_atr)
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._get_atr_for_symbol: %s",
+                "Failure in ExecutionEngine._get_atr_for_symbol: %s",
                 exc,
                 extra={
-                    "event": "order_execution_hub_resolve_atr_error",
+                    "event": "execution_engine_resolve_atr_error",
                     "symbol": symbol,
                 },
                 exc_info=exc,
@@ -1278,7 +1343,7 @@ class OrderExecutionHub:
         LOGGER.info(
             "Condition met: default ATR applied",
             extra={
-                "event": "order_execution_hub_default_atr",
+                "event": "execution_engine_default_atr",
                 "symbol": symbol,
                 "atr": default_atr,
             },
@@ -1293,13 +1358,7 @@ class OrderExecutionHub:
         bid: float | None,
         ask: float | None,
     ) -> float:
-        """Return spread-aware ATR floor for execution safety.
-        
-        ATR floor ensures SL/TP is never smaller than bid-ask spread × 1.5.
-        Previously used execution_price * 0.012 which incorrectly fired on strike-price
-        values (₹25000 → ₹300 floor, overriding a valid ₹12.5 ATR from data_hub).
-        Option premiums (₹30–₹500) need a spread-based floor, not a price-pct floor.
-        """
+        """Return spread-aware ATR floor for execution safety."""
         spread = 0.0
         if bid is not None and ask is not None and ask >= bid:
             spread = float(ask - bid)
@@ -1309,22 +1368,11 @@ class OrderExecutionHub:
     def _get_current_regime(
         self, symbol: str, metadata: Mapping[str, Any] | None = None
     ) -> str:
-        """Return the most recent regime label with safe fallbacks.
-
-        Args:
-            symbol: Instrument identifier for lookup.
-            metadata: Optional execution metadata payload.
-
-        Returns:
-            str: Regime label when available; defaults to ``"NEUTRAL"``.
-
-        Raises:
-            None.
-        """
+        """Return the most recent regime label with safe fallbacks."""
 
         LOGGER.debug(
-            "Entered OrderExecutionHub._get_current_regime",
-            extra={"event": "order_execution_hub_resolve_regime"},
+            "Entered ExecutionEngine._get_current_regime",
+            extra={"event": "execution_engine_resolve_regime"},
         )
         try:
             if metadata and metadata.get("regime"):
@@ -1345,15 +1393,15 @@ class OrderExecutionHub:
                 return str(state_snapshot["regime"])
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Failure in OrderExecutionHub._get_current_regime: %s",
+                "Failure in ExecutionEngine._get_current_regime: %s",
                 exc,
-                extra={"event": "order_execution_hub_resolve_regime_error"},
+                extra={"event": "execution_engine_resolve_regime_error"},
                 exc_info=exc,
             )
         LOGGER.info(
             "Condition met: default regime applied",
             extra={
-                "event": "order_execution_hub_default_regime",
+                "event": "execution_engine_default_regime",
                 "symbol": symbol,
                 "regime": "NEUTRAL",
             },
@@ -1362,18 +1410,7 @@ class OrderExecutionHub:
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
-        """Return ``value`` as float with ``default`` fallback.
-
-        Args:
-            value: Potential float-like input.
-            default: Fallback value when coercion fails.
-
-        Returns:
-            float: Coerced float or the provided default.
-
-        Raises:
-            None.
-        """
+        """Return ``value`` as float with ``default`` fallback."""
 
         try:
             return float(value)
@@ -1381,4 +1418,4 @@ class OrderExecutionHub:
             return float(default)
 
 
-__all__ = ["OrderExecutionHub"]
+__all__ = ["ExecutionEngine"]

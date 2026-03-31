@@ -61,7 +61,7 @@ from nifty_scalper_bot.data.source import (
     is_symbol_valid,
 )
 from nifty_scalper_bot.execution.circuit_breaker import ExecutionCircuitBreaker
-from nifty_scalper_bot.execution.order_execution_hub import OrderExecutionHub
+from nifty_scalper_bot.execution.order_execution_hub import ExecutionEngine
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
@@ -470,6 +470,7 @@ class StrategyRunner:
         data_hub: "DataHub | None" = None,
         strike_selector: StrikeSelector | None = None,
         bracket_manager: Any | None = None,
+        execution_engine: ExecutionEngine | None = None,
     ) -> None:
         self._market_data = market_data_manager
         self._indicator_engine = indicator_engine
@@ -479,6 +480,7 @@ class StrategyRunner:
         self._position_manager = position_manager
         self._message_bus = message_bus
         self._config = config or StrategyRunnerConfig()
+        self._execution_engine = execution_engine
         self._logger = get_logger(__name__)
         self._logger.debug(
             "StrategyRunner using MessageBus id=%s", id(self._message_bus)
@@ -5813,26 +5815,34 @@ class StrategyRunner:
         """Args: signal, base_symbol, trade_symbol, trade_price, timestamp. Returns: None. Raises: Exception."""
         try:
             self._logger.debug(
-                "Entered StrategyRunner._handle_entry_signal_inner",
+                "Entered StrategyRunner._handle_entry_signal_inner (ExecutionEngine Mode)",
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
             )
 
-            settings = self._settings if hasattr(self, "_settings") else get_settings()
-            cooldown_seconds = int(getattr(settings, "cooldown_seconds", 0) or 0)
-            if (
-                cooldown_seconds > 0
-                and self.last_trade_time is not None
-                and (datetime.now(timezone.utc) - self.last_trade_time).total_seconds()
-                < cooldown_seconds
-            ):
-                return
-            if self._risk_kill_switch_triggered():
-                return
-            if not self.verify_state():
-                self._logger.warning("Skipping trade due to state mismatch")
-                return
+            # --- SINGLE AUTHORITY ENFORCEMENT ---
+            if self._execution_engine is None:
+                raise RuntimeError("CRITICAL: ExecutionEngine missing in StrategyRunner. Cannot process signals.")
 
-            if self._execution_circuit_breaker.is_open():
+            # 🚀 DELEGATE TO EXECUTION ENGINE (The Single Authority)
+            # Use asyncio.run_coroutine_threadsafe since StrategyRunner callbacks might be sync
+            if self._main_loop and self._main_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self._execution_engine.submit_signal(signal),
+                    self._main_loop
+                )
+                order_id = future.result(timeout=10.0)
+            else:
+                # Fallback if loop not yet running (e.g. startup tests)
+                order_id = asyncio.run(self._execution_engine.submit_signal(signal))
+            
+            if order_id:
+                self._logger.info(f"🟢 SIGNAL ACCEPTED: {order_id} | {signal.symbol}")
+                self.last_trade_time = datetime.now(timezone.utc)
+                self._set_trade_cooldown(base_symbol, timestamp)
+            else:
+                self._logger.warning(f"🔴 SIGNAL REJECTED BY ENGINE: {signal.symbol}")
+            
+            return
                 self._logger.warning(
                     "Condition met: execution_circuit_breaker_active",
                     extra={

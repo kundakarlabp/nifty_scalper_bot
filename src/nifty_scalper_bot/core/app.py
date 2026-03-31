@@ -95,7 +95,7 @@ from nifty_scalper_bot.execution.execution_router import (
     ExecutionRouterSettings,
 )
 from nifty_scalper_bot.execution.lifecycle_manager import LifecycleManager
-from nifty_scalper_bot.execution.order_execution_hub import OrderExecutionHub
+from nifty_scalper_bot.execution.order_execution_hub import ExecutionEngine
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.execution.order_processor import OrderProcessor
 from nifty_scalper_bot.execution.order_queue import OrderQueue
@@ -1347,72 +1347,7 @@ def get_http_app() -> FastAPI:
                         extra=extra_payload,
                     )
 
-    # ----------------------------------------------------------------
-    # ✅ FIX: Explicit Telegram Startup for Python-Telegram-Bot v20+
-    # ----------------------------------------------------------------
-    @app.on_event("startup")
-    async def _start_telegram_bot_service() -> None:
-        """
-        Start Telegram Bot and send a rich startup notification.
-        """
-        # No import needed here; get_latest_bot_context is defined globally in app.py
-
-        try:
-            ctx = get_latest_bot_context()
-            if ctx and ctx.telegram_bot:
-                LOGGER.info("🚀 Triggering TelegramBot explicit startup...")
-
-                # 1. Start the Bot (Connects to API)
-                await ctx.telegram_bot.start()
-
-                # 2. Wait for connection stability (Critical for preventing send errors)
-                await asyncio.sleep(2.0)
-
-                # 3. Determine Bot State details for the message
-                mode_icon = "🔴" if ctx.settings.enable_live else "🟡"
-                mode_text = (
-                    "LIVE TRADING" if ctx.settings.enable_live else "PAPER / SHADOW"
-                )
-
-                # 4. Construct Rich HTML Message
-                startup_msg = (
-                    f"<b>{mode_icon} Nifty Scalper Bot Online</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🕒 <b>Time:</b> <code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-                    f"⚙️ <b>Mode:</b> <code>{mode_text}</code>\n"
-                    f"📡 <b>System:</b> <code>Initialized & Monitoring</code>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"<i>Waiting for market data...</i>"
-                )
-
-                # 5. Send Message using the internal application
-                if ctx.telegram_bot._app:
-                    await ctx.telegram_bot._app.bot.send_message(
-                        chat_id=ctx.settings.notifications.chat_id,
-                        text=startup_msg,
-                        parse_mode="HTML",
-                    )
-                    LOGGER.info("✅ Startup message sent to Telegram.")
-
-        except Exception as exc:
-            # We log this but don't crash the app if Telegram fails
-            LOGGER.error(
-                f"❌ Failed to start Telegram/Send Message: {exc}", exc_info=True
-            )
-
-    @app.on_event("shutdown")
-    async def _stop_telegram_bot_service() -> None:
-        """Ensure clean shutdown of Telegram Bot."""
-        try:
-            ctx = get_latest_bot_context()
-            if ctx and ctx.telegram_bot:
-                LOGGER.info("🛑 Shutting down Telegram Bot...")
-                await ctx.telegram_bot.stop()
-        except Exception as e:
-            __import__("logging").getLogger(__name__).exception(
-                "[CRITICAL] unhandled exception", exc_info=True
-            )
-            raise
+    # Telegram lifecycle is now managed in startup_sequence and NiftyScalperApp.stop()
 
     # ----------------------------------------------------------------
 
@@ -1496,7 +1431,7 @@ class BotContext:
     lifecycle_manager: LifecycleManager | None = None
     execution_router: ExecutionRouter | None = None
     post_fill_monitor: PostFillMonitor | None = None
-    order_execution_hub: OrderExecutionHub | None = None
+    execution_engine: ExecutionEngine | None = None
     strategy_manager: StrategyManager | None = None
     strategy_runner: StrategyRunner | None = None
     unified_manager: UnifiedManager | None = None
@@ -4145,7 +4080,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         interval_sec=int(reconciliation_interval),
         alert_on_mismatch=bool(reconciliation_alert),
     )
-    order_execution_hub = OrderExecutionHub(
+    execution_engine = ExecutionEngine(
         state_tracker=state_tracker,
         preflight_validator=preflight_validator,
         lifecycle_manager=lifecycle_manager,
@@ -4229,82 +4164,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         },
     )
 
-    # Reconcile positions on startup: schedule if loop running, otherwise run synchronously.
-    async def _reconcile_with_timeout():
-        """Wrapper to add timeout protection"""
-        try:
-            await asyncio.wait_for(
-                reconcile_positions_on_startup(
-                    broker_client=broker_client,
-                    position_manager=position_manager,
-                    order_manager=order_manager,
-                    logger=LOGGER,
-                ),
-                timeout=30.0,  # 30 second timeout
-            )
-        except asyncio.TimeoutError:
-            LOGGER.error(
-                "Position reconciliation timed out after 30s",
-                extra={"event": "reconcile_timeout"},
-            )
-        except Exception as exc:
-            LOGGER.error(
-                f"Position reconciliation failed: {exc}",
-                extra={"event": "reconcile_failed"},
-                exc_info=True,
-            )
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(_reconcile_with_timeout())  # ✅ USE WRAPPED VERSION
-
-            LOGGER.info(
-                "Scheduled reconcile_positions_on_startup as background task",
-                extra={"event": "reconcile_positions_scheduled"},
-            )
-        else:
-            # No running loop: run the coroutine to completion (blocking).
-            asyncio.run(
-                reconcile_positions_on_startup(
-                    broker_client=broker_client,
-                    position_manager=position_manager,
-                    order_manager=order_manager,
-                    logger=LOGGER,
-                )
-            )
-            LOGGER.info(
-                "Completed reconcile_positions_on_startup (blocking run)",
-                extra={"event": "reconcile_positions_completed"},
-            )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning(
-            "Startup reconciliation failed - will retry in background",
-            extra={
-                "event": "startup.reconcile.error",
-                "error": str(exc),
-                "severity": "warning",
-            },
-            exc_info=False,
-        )
-        # If you want to attempt a background retry, schedule a noop wrapper that will call reconcile later.
-        with suppress(Exception):
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(
-                        reconcile_positions_on_startup(
-                            broker_client=broker_client,
-                            position_manager=position_manager,
-                            order_manager=order_manager,
-                            logger=LOGGER,
-                        )
-                    )
-            except Exception as e:
-                __import__("logging").getLogger(__name__).exception(
-                    "[CRITICAL] unhandled exception", exc_info=True
-                )
-                raise
+    # Position reconciliation is now handled safely in startup_sequence and _health_loop.
 
     background_tasks: list[asyncio.Task[Any]] = []
     try:
@@ -4588,7 +4448,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         lifecycle_manager=lifecycle_manager,
         execution_router=execution_router,
         post_fill_monitor=post_fill_monitor,
-        order_execution_hub=order_execution_hub,
+        execution_engine=execution_engine,
         strategy_manager=strategy_manager,
         strategy_runner=strategy_runner,
         unified_manager=unified_manager,
@@ -5862,6 +5722,8 @@ async def startup_sequence(ctx: BotContext) -> None:
             # =========================================================
 
             await ctx.market_regime_manager.refresh_from_indicators()
+            # ✅ FIX: Explicitly start the regime background loop
+            await ctx.market_regime_manager.start()
             # -------------------------------------------------
             # MARK INDICATORS AS WARM / READY
             # -------------------------------------------------
@@ -6109,10 +5971,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                     await ctx.telegram_bot.start()
                     LOGGER.info("✅ Telegram Bot polling active — commands now live.")
 
-                # ✅ FIX: Explicitly start MarketRegimeManager async task
-                if ctx.market_regime_manager:
-                    await ctx.market_regime_manager.start()
-                
                 # ✅ FIX: Mark indicators as warmed up now that hydration is complete
                 if ctx.indicator_engine and hasattr(ctx.indicator_engine, "atr_provider"):
                     atr_prov = ctx.indicator_engine.atr_provider
@@ -6869,7 +6727,10 @@ class NiftyScalperApp:
             # ✅ FIX: Fallback to Polling if Webhook is NOT enabled
             elif self._ctx.telegram_bot:
                 LOGGER.info("🚀 Starting Telegram Polling (Background)...")
-                await self._ctx.telegram_bot.start()
+                self._telegram_task = asyncio.create_task(
+                    self._ctx.telegram_bot.start(),
+                    name="telegram-bot-polling",
+                )
 
     async def stop(self) -> None:
         """Stop the trading stack gracefully."""
@@ -6901,12 +6762,16 @@ class NiftyScalperApp:
             with suppress(Exception):
                 await self._ctx.telegram_application.shutdown()
             self._telegram_application_started = False
-        if self._telegram_task and self._ctx.telegram_bot is not None:
-            await self._ctx.telegram_bot.shutdown()
-            self._telegram_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._telegram_task
-            self._telegram_task = None
+        
+        # ✅ FIX: Properly call telegram_bot.stop() and cancel the task
+        if self._ctx.telegram_bot is not None:
+            await self._ctx.telegram_bot.stop()
+            if self._telegram_task:
+                self._telegram_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._telegram_task
+                self._telegram_task = None
+                
         await shutdown_sequence(self._ctx)
         self._running = False
 

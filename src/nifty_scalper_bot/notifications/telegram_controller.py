@@ -619,17 +619,52 @@ class TelegramBot:
             await self._app.initialize()
             await self._app.start()
             
-            await self._app.bot.delete_webhook(drop_pending_updates=True)
+            # ✅ FIX: Respect webhook configuration
+            if not self.deps.webhook_url:
+                await self._app.bot.delete_webhook(drop_pending_updates=True)
+                self._start_manual_polling_loop()
+                log.info("✅ Telegram Bot: Started in POLLING mode.")
+            else:
+                log.info(f"✅ Telegram Bot: Started in WEBHOOK mode ({self.deps.webhook_url})")
             
-            # Start polling loop only once
-            self._start_manual_polling_loop()
-            
-            log.info("✅ Telegram Bot: Started in polling mode.")
             self._ensure_alert_worker()
 
         except Exception as exc:  # noqa: BLE001
             self._running = False
             log.error("Telegram bot start failed: %s", exc, exc_info=True)
+
+    async def stop(self) -> None:
+        """
+        Gracefully stop the Telegram Bot and its underlying application.
+        """
+        if not self._running:
+            return
+            
+        # Use a local lock or flag to prevent parallel stop attempts
+        with self._reconcile_state_lock:
+            if not self._running:
+                return
+            self._running = False
+
+        try:
+            # 1. Stop PTB Application if present
+            if self._app is not None:
+                # Stop polling if active
+                if self._fallback_active:
+                    self._mark_polling_stopped()
+                
+                # Standard PTB shutdown sequence
+                with suppress(Exception):
+                    await self._app.stop()
+                with suppress(Exception):
+                    await self._app.shutdown()
+            
+            # 2. Call internal shutdown for other tasks (loops, workers)
+            await self.shutdown()
+            
+            log.info("✅ Telegram Bot: Shutdown complete.")
+        except Exception as exc:
+            log.error(f"Error during Telegram Bot stop: {exc}", exc_info=True)
 
     def send_message(self, text: str):
         """Send plain Telegram message. Args: text. Returns: telegram message | None. Raises: None."""
