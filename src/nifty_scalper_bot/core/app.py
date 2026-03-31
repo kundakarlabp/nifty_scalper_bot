@@ -6109,6 +6109,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                     await ctx.telegram_bot.start()
                     LOGGER.info("✅ Telegram Bot polling active — commands now live.")
 
+                # ✅ FIX: Explicitly start MarketRegimeManager async task
+                if ctx.market_regime_manager:
+                    await ctx.market_regime_manager.start()
+                
+                # ✅ FIX: Mark indicators as warmed up now that hydration is complete
+                if ctx.indicator_engine and hasattr(ctx.indicator_engine, "atr_provider"):
+                    atr_prov = ctx.indicator_engine.atr_provider
+                    if hasattr(atr_prov, "mark_warmed_up"):
+                        atr_prov.mark_warmed_up()
+
                 ctx.subsystems_started = True
                 LOGGER.info("✅ All subsystems started.")
         except Exception as e:

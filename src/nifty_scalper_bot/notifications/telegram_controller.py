@@ -590,9 +590,12 @@ class TelegramBot:
         """
         if self._running:
             return
-        if self._app is not None and self._app.running:
-            log.warning("TelegramBot start requested but already running. Ignoring.")
-            return
+        
+        # Use a local lock or flag to prevent parallel start attempts
+        with self._reconcile_state_lock:
+            if self._running:
+                return
+            self._running = True
 
         try:
             if self._app is None:
@@ -615,15 +618,18 @@ class TelegramBot:
 
             await self._app.initialize()
             await self._app.start()
-            self._running = True
+            
             await self._app.bot.delete_webhook(drop_pending_updates=True)
+            
+            # Start polling loop only once
             self._start_manual_polling_loop()
-            log.info("Telegram polling loop starting")
+            
+            log.info("✅ Telegram Bot: Started in polling mode.")
             self._ensure_alert_worker()
 
         except Exception as exc:  # noqa: BLE001
             self._running = False
-            log.error("Telegram polling failed: %s", exc, exc_info=True)
+            log.error("Telegram bot start failed: %s", exc, exc_info=True)
 
     def send_message(self, text: str):
         """Send plain Telegram message. Args: text. Returns: telegram message | None. Raises: None."""
@@ -637,15 +643,16 @@ class TelegramBot:
 
     async def _start_polling_if_needed(self) -> None:
         """
-        Starts polling with explicit initialization to fix RuntimeError.
+        Starts polling only if not already running.
         """
-        if not self.deps.enable_polling_fallback or self._app is None:
+        if self._running or not self.deps.enable_polling_fallback or self._app is None:
             return
+        
         try:
             await self._app.bot.delete_webhook(drop_pending_updates=True)
+            self._start_manual_polling_loop()
         except Exception as exc:  # noqa: BLE001
             log.error("Failure in _start_polling_if_needed: %s", exc)
-        self._start_manual_polling_loop()
 
     def _start_manual_polling_loop(self) -> None:
         """Start async update polling loop. Args: none. Returns: None. Raises: None."""

@@ -147,17 +147,24 @@ class MarketRegimeManager:
         self._register_listener()
         self._bootstrap_state()
 
-        # ✅ FIXED: Start the refresh loop if indicators are available
+    # ✅ FIXED: New explicit start method
+    async def start(self) -> None:
+        """Explicitly start the background refresh loop."""
         if self.indicators is not None and self._indicator_update_interval > 0.0:
+            with self._lock:
+                if self._refresh_task_started:
+                    return
+                self._refresh_task_started = True
+            
             try:
-                # Attempt to get running loop (may fail if called outside async context)
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._run_indicator_refresh_loop())
-                self._refresh_task_started = True
-                logger.info("✅ MarketRegimeManager: Refresh loop started in __post_init__.")
-            except RuntimeError:
-                # Loop not running yet; will be started lazily in can_trade
-                pass
+                logger.info("✅ MarketRegimeManager: Refresh loop started via start().")
+            except Exception as exc:
+                with self._lock:
+                    self._refresh_task_started = False
+                logger.error(f"❌ Failed to start regime refresh loop: {exc}", exc_info=True)
+                raise
 
     # ------------------------------------------------------------------
     def build_diagnostics(self) -> dict[str, object]:
@@ -523,26 +530,6 @@ class MarketRegimeManager:
             "Entered MarketRegimeManager.can_trade",
             extra={"event": "regime_manager_can_trade"},
         )
-
-        # --- Ensure regime refresh loop is running (lazy start) ---
-        if (
-            self.indicators is not None
-            and self._indicator_update_interval > 0.0
-            and not self._refresh_task_started
-        ):
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._run_indicator_refresh_loop())
-                self._refresh_task_started = True
-                logger.info(
-                    "MarketRegimeManager indicator refresh loop started (lazy)",
-                    extra={"event": "regime_refresh_loop_started"},
-                )
-            except RuntimeError:
-                # No loop running, fail or bypass
-                if self.fail_closed:
-                    return False
-                return True
 
         try:
             snapshot: RegimeSnapshot | None

@@ -44,6 +44,17 @@ class SafeATRProvider:
         # ✅ FIX: Rate limiting for error logs
         self._error_log_times: dict[str, float] = {}
         self._error_log_interval = 60.0  # Log errors once per minute per symbol
+        self._is_warmed_up = False
+
+    @property
+    def is_warmed_up(self) -> bool:
+        """Return True if indicators are ready for evaluation."""
+        return self._is_warmed_up
+
+    def mark_warmed_up(self) -> None:
+        """Mark the provider as ready for trading."""
+        self._is_warmed_up = True
+        self._logger.info("✅ SafeATRProvider: Indicators marked as WARMED UP.")
 
     def get_atr(
         self, symbol: str, *, fallback: float | None = None
