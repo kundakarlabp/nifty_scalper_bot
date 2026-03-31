@@ -640,12 +640,11 @@ class InstrumentResolver:
             with self._lock:
                 key = tradingsymbol.upper()
                 # primary keys
-                self._by_symbol.setdefault(key, token_int)
+                self._by_symbol[key] = token_int
                 if exchange:
-                    self._by_symbol.setdefault(f"{exchange}:{key}", token_int)
-                # base symbol fallback (no prefix)
-                base_key = key.split(":", 1)[-1]
-                self._by_symbol.setdefault(base_key, token_int)
+                    self._by_symbol[f"{exchange}:{key}"] = token_int
+                if base_key:
+                    self._by_symbol[base_key] = token_int
 
                 # map token back to symbol and exchange if absent
                 self._symbol_by_token.setdefault(token_int, tradingsymbol)
