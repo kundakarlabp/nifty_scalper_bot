@@ -5648,7 +5648,7 @@ class StrategyRunner:
         except Exception as exc:
             self._logger.error(f"🔴 ENTRY LOGIC CRASH: {exc}", exc_info=True)
 
-    def _get_atr_with_fallback((
+    def _get_atr_with_fallback(
         self, symbol: str, metadata: dict, current_price: float
     ) -> float:
         """
