@@ -148,6 +148,7 @@ class WebSocketManager:
         self._fallback_start_callback: Callable[[], None] | None = None
         self._fallback_stop_callback: Callable[[], None] | None = None
         self._fallback_active = False
+        self._first_tick_logged = False
 
     @property
     def on_tick(self) -> TickCallback | None:
@@ -644,6 +645,17 @@ class WebSocketManager:
                     len(self._tokens),
                     len(symbol_map),
                 )
+                if len(symbol_map) == 0:
+                    self._logger.warning(
+                        "Token map is EMPTY after subscribe — ticks will be dropped. "
+                        "Ensure register_symbol() is called before WebSocket connect.",
+                    )
+                elif len(symbol_map) < 5:
+                    self._logger.warning(
+                        "Token map has only %d entries — expected >=5. "
+                        "Some ticks may be unmapped.",
+                        len(symbol_map),
+                    )
             if self._on_connect_callback is not None:
                 self._on_connect_callback()
             self._schedule_async(self._resubscribe_if_connected())
@@ -691,6 +703,15 @@ class WebSocketManager:
         if not callable(callback):
             self._logger.error("Tick callback not set — dropping ticks")
             return
+
+        # Log first tick received — confirms pipeline is alive
+        if not self._first_tick_logged and ticks:
+            first_token = ticks[0].get("instrument_token", "?")
+            self._first_tick_logged = True
+            self._logger.info(
+                "FIRST_TICK_RECEIVED instrument_token=%s — pipeline is live",
+                first_token,
+            )
 
         for tick in ticks:
             try:
