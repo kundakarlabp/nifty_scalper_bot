@@ -438,3 +438,24 @@ def get_pipeline(store_maxlen: int = 1500) -> MarketDataPipeline:
             if _PIPELINE is None:
                 _PIPELINE = MarketDataPipeline(store_maxlen=store_maxlen)
     return _PIPELINE
+
+
+def pipeline_health() -> dict:
+    """Return a snapshot of pipeline health for logging and /status endpoints.
+
+    Returns:
+        dict with dropped_ticks, dropped_candles, per-symbol candle counts,
+        ready_symbols (>= MIN_REQUIRED_CANDLES), total_symbols.
+    """
+    pl = get_pipeline()
+    syms = pl.store.symbols()
+    candle_counts = {sym: len(pl.store.get(sym)) for sym in syms}
+    ready = [sym for sym, cnt in candle_counts.items() if cnt >= MIN_REQUIRED_CANDLES]
+    return {
+        "dropped_ticks": get_dropped_ticks(),
+        "dropped_candles": get_dropped_candles(),
+        "total_symbols": len(syms),
+        "ready_symbols": len(ready),
+        "candle_counts": candle_counts,
+        "ready": ready,
+    }

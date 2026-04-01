@@ -2270,6 +2270,26 @@ class MarketDataManager:
         if candle:
             self._ohlc[symbol].append(candle)
 
+        # ── PIPELINE FEED ─────────────────────────────────────────────────────
+        # Feed the deterministic MarketDataPipeline so pipeline.candles_ready()
+        # and pipeline.get_candles() reflect live data.  Lazy import avoids
+        # circular dependency.  Errors are caught so MDM consumer loop never dies.
+        try:
+            from nifty_scalper_bot.data.pipeline import get_pipeline  # noqa: PLC0415
+            _pipeline_candle = get_pipeline().on_tick(raw)
+            if _pipeline_candle is not None:
+                self._logger.debug(
+                    "CANDLE_FORMED symbol=%s ts=%s open=%.2f high=%.2f low=%.2f close=%.2f",
+                    _pipeline_candle.symbol,
+                    _pipeline_candle.timestamp,
+                    _pipeline_candle.open,
+                    _pipeline_candle.high,
+                    _pipeline_candle.low,
+                    _pipeline_candle.close,
+                )
+        except Exception as _pipe_exc:  # pragma: no cover
+            self._logger.debug("pipeline.on_tick feed failed: %s", _pipe_exc)
+
     def _get_engine(self, symbol: str) -> CandleEngine:
         """Return or create candle engine for symbol."""
         if symbol not in self._engines:
