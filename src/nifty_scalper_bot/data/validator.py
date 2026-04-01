@@ -1,7 +1,8 @@
-"""Strict market-data tick validation."""
+"""Strict market-data tick validation — Zerodha KiteTicker compatible."""
 
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
@@ -31,23 +32,48 @@ class Tick:
 
 
 def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
-    """Validate tick payload without fallbacks. Args: raw_tick. Returns: Tick. Raises: DataIntegrityError."""
+    """Validate and normalise a raw broker tick.
+
+    Accepts both internal format (symbol/ltp/timestamp) and the raw
+    Zerodha KiteTicker format (instrument_token/last_price/exchange_timestamp).
+    The caller must inject ``symbol`` from the token→symbol map before calling
+    this function if it is absent.
+
+    Args: raw_tick. Returns: Tick. Raises: DataIntegrityError.
+    """
+    # ── 1. SYMBOL ────────────────────────────────────────────────────────────
     symbol_raw = raw_tick.get('symbol')
     if symbol_raw is None or str(symbol_raw).strip() == '':
         raise DataIntegrityError('Missing symbol')
-    timestamp_raw = raw_tick.get('timestamp')
+
+    # ── 2. TIMESTAMP — accept exchange_timestamp fallback, then wall-clock ───
+    # Zerodha sends 'exchange_timestamp'; internal ticks use 'timestamp'.
+    # If neither is present (e.g. pre-open auction), use current UTC time so
+    # the candle engine can still process the tick rather than silently dropping it.
+    timestamp_raw = (
+        raw_tick.get('timestamp')
+        or raw_tick.get('exchange_timestamp')
+    )
     if timestamp_raw is None:
-        raise DataIntegrityError('Missing timestamp')
+        timestamp_raw = _dt.datetime.now(_dt.timezone.utc)
     timestamp = pd.to_datetime(timestamp_raw, utc=True, errors='coerce')
     if pd.isna(timestamp):
         raise DataIntegrityError('Invalid timestamp')
-    if isinstance(timestamp_raw, datetime):
-        pass
-    ltp_raw = raw_tick.get('ltp')
+
+    # ── 3. LTP — accept last_price (Zerodha field name) as alias ─────────────
+    ltp_raw = raw_tick.get('ltp') or raw_tick.get('last_price')
     if ltp_raw is None:
-        raise DataIntegrityError('Missing ltp')
+        raise DataIntegrityError('Missing ltp/last_price')
     ltp = float(ltp_raw)
     if ltp <= 0:
         raise DataIntegrityError('Invalid price')
-    volume = float(raw_tick.get('volume') or 0.0)
-    return Tick(symbol=str(symbol_raw), timestamp=pd.Timestamp(timestamp), ltp=ltp, volume=volume)
+
+    # ── 4. VOLUME ────────────────────────────────────────────────────────────
+    volume = float(raw_tick.get('volume') or raw_tick.get('volume_traded') or 0.0)
+
+    return Tick(
+        symbol=str(symbol_raw),
+        timestamp=pd.Timestamp(timestamp),
+        ltp=ltp,
+        volume=volume,
+    )

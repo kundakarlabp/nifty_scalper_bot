@@ -2225,12 +2225,44 @@ class MarketDataManager:
             self._process_queued_tick(raw)
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
-        """Process one queued tick deterministically."""
-        tick = validate_tick(raw)
+        """Process one queued tick deterministically.
+
+        Zerodha KiteTicker delivers ticks with ``instrument_token`` (int) and
+        ``last_price`` but NO ``symbol`` field.  We resolve the symbol from the
+        pre-built ``_symbol_by_token`` map and inject it before calling
+        ``validate_tick()``, which requires a ``symbol`` key.
+        """
+        # ── TOKEN → SYMBOL INJECTION ─────────────────────────────────────────
+        # If symbol is missing (raw Zerodha tick), inject it from the map.
+        if not raw.get("symbol"):
+            token = raw.get("instrument_token")
+            if token is None:
+                self._logger.debug("Tick has no symbol and no instrument_token — dropped")
+                return
+            symbol_from_map = self._symbol_by_token.get(int(token))
+            if not symbol_from_map:
+                self._logger.debug(
+                    "Unmapped instrument_token=%s — dropped (subscribe pending?)", token
+                )
+                return
+            raw = {**raw, "symbol": symbol_from_map}
+
+        try:
+            tick = validate_tick(raw)
+        except DataIntegrityError as exc:
+            self._logger.debug("Tick validation failed: %s — dropped", exc)
+            return
+
         symbol = tick.symbol
         last_ts = self._last_tick_ts.get(symbol)
         if last_ts is not None and tick.timestamp <= last_ts:
-            raise DataIntegrityError(f"non-monotonic tick for {symbol}")
+            # Non-monotonic tick — skip silently (common during reconnects /
+            # duplicate delivery) rather than crashing the consumer loop.
+            self._logger.debug(
+                "Non-monotonic tick dropped for %s ts=%s last=%s",
+                symbol, tick.timestamp, last_ts,
+            )
+            return
         self._last_tick_ts[symbol] = tick.timestamp
         engine = self._get_engine(symbol)
         candle = engine.on_tick(tick)
