@@ -1353,9 +1353,41 @@ class StrategyRunner:
             status = {
                 "running": self._running,
                 "trading_paused": self._trading_paused,
+                "runner_state": str(self._runner_state),
                 "active_symbols": sorted(self._active_symbols),
                 "symbols": symbols,
+                "signal_count": getattr(self, "_signal_counter", 0),
+                "tick_count": getattr(self, "_eval_counter", 0),
+                "last_tick_age_sec": round(
+                    time.monotonic() - self._last_tick_seen_ts, 1
+                ) if getattr(self, "_last_tick_seen_ts", 0) > 0 else None,
+                "last_eval_age_sec": round(
+                    time.monotonic() - self._last_global_eval_ts, 1
+                ) if getattr(self, "_last_global_eval_ts", 0) > 0 else None,
             }
+
+        # ── Pipeline health (non-blocking, best-effort) ──────────────────────
+        try:
+            from nifty_scalper_bot.data.pipeline import (  # noqa: PLC0415
+                get_pipeline,
+                get_dropped_ticks,
+                get_dropped_candles,
+            )
+            _pl = get_pipeline()
+            _pl_syms = _pl.store.symbols()
+            status["pipeline"] = {
+                "dropped_ticks": get_dropped_ticks(),
+                "dropped_candles": get_dropped_candles(),
+                "candle_counts": {
+                    sym: len(_pl.store.get(sym)) for sym in _pl_syms
+                },
+                "symbols_tracked": len(_pl_syms),
+                "ready_symbols": sum(
+                    1 for sym in _pl_syms if _pl.candles_ready(sym, 50)
+                ),
+            }
+        except Exception as _exc:
+            status["pipeline"] = {"error": str(_exc)}
 
         return status
 
@@ -3222,6 +3254,29 @@ class StrategyRunner:
                 engine.on_tick(tick)
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
+
+            # ── PIPELINE FEED + OBSERVABILITY ────────────────────────────────
+            # Feed deterministic pipeline so candles_ready() stays current.
+            # Also log TICK_RECEIVED (debug) and CANDLE_FORMED (info) events.
+            try:
+                _pl_candle = self._pipeline.on_tick(dict(tick))
+                self._logger.debug(
+                    "TICK_RECEIVED symbol=%s ltp=%s",
+                    normalized_symbol,
+                    tick.get("ltp") or tick.get("last_price", "?"),
+                )
+                if _pl_candle is not None:
+                    _pl_count = len(self._pipeline.store.get(normalized_symbol))
+                    self._logger.info(
+                        "CANDLE_FORMED symbol=%s ts=%s close=%.2f candles=%d ready=%s",
+                        normalized_symbol,
+                        _pl_candle.timestamp,
+                        _pl_candle.close,
+                        _pl_count,
+                        _pl_count >= 50,
+                    )
+            except Exception as _pl_exc:
+                self._logger.debug("Runner pipeline feed failed: %s", _pl_exc)
             # ✅ FIX: Throttle stall warning to 30s — same-bar-skip causes expected
             # gaps between _last_global_eval_ts updates (one eval per bar ≈ 60s cycle).
             # ✅ FIX D: Raise stall threshold to 120s. Options tick once per ~13min;
@@ -4479,14 +4534,30 @@ class StrategyRunner:
                 # the first live minute bar completed (up to 59 seconds after startup).
                 # Use indicator_engine.has_min_bars() which counts hydrated bars too.
                 min_bars_needed = self._required_candles or 20
-                # FIX 3: Hard gate to prevent evaluation before warmup is complete
-                if not self._indicator_engine.has_min_bars(symbol, min_bars_needed):
+                # FIX 3: Hard gate — both indicator engine AND pipeline store must be ready.
+                # indicator_engine.has_min_bars() counts hydrated + live bars.
+                # pipeline.candles_ready() counts live closed candles in CandleStore.
+                # If pipeline store was seeded during hydration, it passes immediately;
+                # otherwise it fills within the first 50 live minutes.
+                _indic_ready = self._indicator_engine.has_min_bars(symbol, min_bars_needed)
+                _pipeline_ready = self._pipeline.candles_ready(symbol, min(min_bars_needed, 50))
+                if not _indic_ready:
                     log_throttled(
                         self._logger,
                         f"p7_warmup_{symbol}",
-                        f"⏳ Warmup active: {symbol} waiting for {min_bars_needed} bars",
+                        f"⏳ Warmup active: {symbol} waiting for {min_bars_needed} indicator bars",
                         interval_sec=60.0,
-                        level=logging.DEBUG,  # Changed to DEBUG to stop log flooding
+                        level=logging.DEBUG,
+                    )
+                    return
+                if not _pipeline_ready:
+                    _have = len(self._pipeline.store.get(symbol))
+                    log_throttled(
+                        self._logger,
+                        f"p7_pipeline_{symbol}",
+                        f"⏳ Pipeline warming: {symbol} has {_have}/50 candles",
+                        interval_sec=60.0,
+                        level=logging.DEBUG,
                     )
                     return
 
@@ -5106,9 +5177,17 @@ class StrategyRunner:
                         }
 
                 self._logger.info(
-                    f"🚀 SIGNAL EXECUTING: {symbol} | Action={signal.action} | Reason={signal.reason}"
+                    "SIGNAL_EXECUTING symbol=%s action=%s reason=%s price=%.2f",
+                    symbol, signal.action, signal.reason, price,
+                    extra={"event": "signal_executing", "symbol": symbol,
+                           "action": signal.action},
                 )
                 self._handle_signal(signal, price, now)
+                self._logger.info(
+                    "SIGNAL_HANDLED symbol=%s action=%s — check execution logs for ORDER_PLACED",
+                    symbol, signal.action,
+                    extra={"event": "signal_handled", "symbol": symbol},
+                )
         except Exception as e:
             self._logger.error("Failure in _on_tick: %s", e, exc_info=True)
             return
