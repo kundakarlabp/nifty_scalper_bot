@@ -2740,9 +2740,9 @@ class MarketDataManager:
             loop_start = time.time()
 
             # --- Objective 7: WebSocket + Polling Sync Guard ---
-            # Skip high-frequency polling if WebSocket is healthy and active
-            # (within 5 seconds of last tick)
-            if self._ws_connected and (loop_start - self.last_tick_time < 5.0):
+            # Skip high-frequency polling ONLY if WebSocket is actively delivering ticks.
+            # We check if we've received ANY tick (last_tick_time > 0) and if it's fresh (< 5s).
+            if self._ws_connected and self.last_tick_time > 0 and (loop_start - self.last_tick_time < 5.0):
                 if self._rest_poll_stop.wait(1.0):
                     break
                 continue

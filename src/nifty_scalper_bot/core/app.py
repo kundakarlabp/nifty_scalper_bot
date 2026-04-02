@@ -5874,12 +5874,12 @@ async def startup_sequence(ctx: BotContext) -> None:
             # --- Objective 5: Fail-fast Validation ---
             min_tokens = 10 # Enforce institutional-grade minimum
             if len(tokens_to_poll) < min_tokens:
-                LOGGER.critical(
-                    f"❌ FAIL-FAST: Subscribed tokens ({len(tokens_to_poll)}) < MIN_TOKEN_COUNT ({min_tokens})",
-                    extra={"event": "fail_fast_token_count", "count": len(tokens_to_poll), "min": min_tokens}
-                )
+                msg = f"⚠️ WARNING: Subscribed tokens ({len(tokens_to_poll)}) < MIN_TOKEN_COUNT ({min_tokens})"
                 if not settings.enable_paper:
+                    LOGGER.critical(f"❌ FAIL-FAST: {msg}")
                     raise RuntimeError(f"❌ CRITICAL: Insufficient tokens for trading ({len(tokens_to_poll)} < {min_tokens})")
+                else:
+                    LOGGER.warning(f"{msg} (Continuing due to PAPER_MODE=true)")
 
             LOGGER.info(
                 "Market data integrity verified: tokens=%d (min=%d)",
