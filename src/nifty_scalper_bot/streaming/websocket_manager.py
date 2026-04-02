@@ -293,6 +293,11 @@ class WebSocketManager:
         except Exception as e:
             self._logger.error("WebSocket resubscribe failed: %s", e, exc_info=True)
 
+    def unsubscribe(self, tokens: Sequence[int]) -> None:
+        """Args: tokens; Returns: none; Raises: none."""
+
+        self.unsubscribe_tokens(tokens)
+
     def unsubscribe_tokens(self, tokens: Sequence[int]) -> None:
         """Args: tokens; Returns: none; Raises: none."""
 

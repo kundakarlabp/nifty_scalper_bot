@@ -5847,8 +5847,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.critical("⛔ STRATEGY SUBSCRIPTION LIST IS EMPTY")
 
             if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
-                streamer.subscribe(tokens_to_poll)
-                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
+                res = streamer.subscribe(tokens_to_poll)
+                if asyncio.iscoroutine(res):
+                    await res
+                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to Streamer")
             if polling_fallback_streamer is not None and tokens_to_poll:
                 polling_fallback_streamer.subscribe(tokens_to_poll)
 
@@ -5919,7 +5921,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 and ctx.streamer
                                 and hasattr(ctx.streamer, "subscribe")
                             ):
-                                ctx.streamer.subscribe([tok])
+                                res = ctx.streamer.subscribe([tok])
+                                if asyncio.iscoroutine(res):
+                                    await res
                             if (
                                 tok
                                 and ctx.websocket_manager is not None
@@ -5940,7 +5944,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 and ctx.streamer
                                 and hasattr(ctx.streamer, "unsubscribe")
                             ):
-                                ctx.streamer.unsubscribe([tok])
+                                res = ctx.streamer.unsubscribe([tok])
+                                if asyncio.iscoroutine(res):
+                                    await res
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.remove_symbol(sym)
 
