@@ -3606,7 +3606,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     except Exception as exc:  # noqa: BLE001
         LOGGER.error("risk_manager_attach_mdm_failed: %s", exc)
 
-    # 4. Attach Data Hub once to avoid duplicate listeners across warm restarts.
     if not risk_manager_data_hub_attached:
         try:
             risk_manager.attach_data_hub(data_hub)
@@ -3614,8 +3613,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             LOGGER.info("✅ Wired DataHub to Risk Manager")
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("risk_manager_attach_data_hub_failed: %s", exc)
-    else:
-        LOGGER.info("ℹ️ Risk Manager already attached to DataHub")
 
     # 5. [FIX] Wire Lot Size Provider (Unconditional)
     # We define this logic regardless of resolver state to ensure sizing always works.
@@ -4526,7 +4523,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         instrument_resolver=instrument_resolver,
         instrument_db=instrument_conn,
         instrument_universe=instrument_state,
-        instrument_refresh_task=ctx_refresh_task,
+        instrument_refresh_task=instrument_refresh_task,
         websocket_enabled=websocket_enabled,
         shadow_mode_enabled=shadow_enabled,
         shadow_trader=shadow_trader,
