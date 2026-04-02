@@ -1,3 +1,4 @@
+--- README.md
 # Nifty Scalper Bot
 
 A modular, typed template for building intraday trading strategies for the Nifty index.
@@ -191,3 +192,367 @@ export NIFTY_FALLBACK_LTP=24000        # optional: fallback spot for off-hours s
 ## License
 
 MIT License.
+
++++ README.md (修改后)
+# Nifty Scalper Bot
+
+A production-grade, modular intraday trading system for Nifty index options with regime-adaptive strategies, multi-layer risk management, and real-time observability.
+
+## Architecture Overview
+
+The bot is built on a **layered architecture** with clear separation of concerns:
+
+```
++------------------------------------------------------------------+
+|                    FastAPI HTTP Layer                            |
+|  (Health checks, Telegram webhooks, Admin endpoints)             |
++------------------------------------------------------------------+
+                              |
++------------------------------------------------------------------+
+|                   NiftyScalperApp (Core Orchestrator)            |
+|  - Lifecycle management (start/stop/reconcile)                   |
+|  - Component wiring & dependency injection                       |
+|  - Background task supervision                                   |
++------------------------------------------------------------------+
+                              |
+        +---------------------+---------------------+
+        |                     |                     |
++-------v--------+   +-------v--------+   +-------v--------+
+|  Data Layer    |   | Strategy Layer |   | Execution Layer|
+|  - WebSocket   |   | - Elite Strat  |   | - Order Queue  |
+|  - Polling     |   | - ORB          |   | - Pre-flight   |
+|  - Instruments |   | - Regime Adapt |   | - Lifecycle Mgr|
+|  - Cache       |   | - Signal Gen   |   | - Position Mgr |
++----------------+   +----------------+   +----------------+
+        |                     |                     |
+        +---------------------+---------------------+
+                              |
++------------------------------------------------------------------+
+|                    Broker Abstraction Layer                      |
+|  - Zerodha Kite REST Client                                      |
+|  - Instrument Resolution                                         |
+|  - Margin & Position Sync                                        |
++------------------------------------------------------------------+
+```
+
+## Core Features
+
+### Market Data Infrastructure
+- **Dual-mode streaming**: WebSocket (Zerodha Kite Connect) with automatic fallback to REST polling
+- **Resilient streamer**: Watchdog-based health monitoring, exponential backoff reconnection
+- **Quote cache**: TTL-based LRU cache with staleness guards (QUOTE_STALE_THRESHOLD_MS)
+- **Instrument resolver**: On-demand symbol-to-token resolution with SQLite-backed caching
+- **Data freshness validation**: Automated assessment of tick latency and gap detection
+
+### Strategy Engine
+- **Multi-strategy orchestrator**: Concurrent execution of multiple alpha models
+- **Elite Strategies**: Production-ready implementations including:
+  - Opening Range Breakout (ORB) with volume confirmation
+  - Regime-Adaptive Mean Reversion (VWAP-based)
+  - Tuesday Gamma Buyer (expiry-day theta decay capture)
+  - Premium Decay Scanner (IV percentile filtering)
+- **Signal arbitration**: Confidence-weighted signal fusion with conflict resolution
+- **Market regime detection**: Hidden Markov Model + heuristic classification (TREND/RANGE/TRANSITION)
+- **Indicator engine**: RSI, ATR, VWAP, Bollinger Bands, SuperTrend with bar-building
+
+### Risk Management Stack
+- **Pre-trade validation**: Multi-gate preflight checks before order submission
+  - Capital adequacy verification
+  - Daily trade count limits
+  - Notional exposure caps
+  - Short-selling permissions
+  - Concentration limits per symbol
+- **Position sizing**: Dynamic sizing based on:
+  - Volatility-adjusted position sizing (ATR-based)
+  - Time-of-day scaling (reduced size in afternoon session)
+  - Regime-aware allocation (larger size in TREND, smaller in RANGE)
+  - Per-trade capital cap percentage (RISK_PER_TRADE_CAP_PCT)
+- **Circuit breakers**:
+  - Max drawdown halt (daily loss threshold)
+  - Consecutive loss limiter
+  - Rate-limit exhaustion protection
+- **Session gates**: Market hours enforcement with optional test overrides
+
+### Execution System
+- **Order queue**: Priority-based FIFO with age tracking and source attribution
+- **Lifecycle manager**: Bracket-order orchestration with:
+  - TP1 partial exit (configurable fraction at 1R)
+  - TP2 full exit (regime-dependent: 1.8R trend / 1.4R range)
+  - ATR-based trailing stop activation post-TP1
+  - Time-based stop (auto-exit after LIFECYCLE_TIME_STOP_MIN)
+  - Gamma-scaling on expiry Tuesdays
+- **Shadow paper trader**: Real-time PnL simulation against live fills for drift detection
+- **Post-fill monitor**: Reconciliation loop comparing internal state vs broker snapshot
+- **Safe order manager**: Idempotent order submission with retry logic and reject handling
+- **Execution modes**:
+  - LIVE: Real money routing (requires ENABLE_LIVE=true)
+  - PAPER: Simulated fills with realistic slippage
+  - SHADOW: Parallel tracking without execution
+
+### Notifications & Observability
+- **Telegram integration**:
+  - Enhanced notifier with multi-chat support (ALLOWED_CHAT_IDS)
+  - Webhook mode for cloud deployments (push-based, low latency)
+  - Polling fallback for development/testing
+  - Command interface: /tick, /ws_status, /execstate, /emergency_stop
+- **Structured logging**: JSON-formatted logs with correlation IDs for traceability
+- **Prometheus metrics**: 50+ exported metrics (latency, fill rates, PnL, error counters)
+- **Health endpoint**: /health with degraded-mode detection
+- **Diagnostic snapshots**: YAML-based state dumps for post-mortem analysis
+
+## Project Structure
+
+```
+src/nifty_scalper_bot/
+├── main.py                 # FastAPI entrypoint with lifespan management
+├── core/
+│   ├── app.py              # Main orchestrator (NiftyScalperApp)
+│   ├── strategy_manager.py # Strategy registration & lifecycle
+│   ├── market_regime.py    # Regime detection HMM + heuristics
+│   ├── unified_manager.py  # Cross-component coordination
+│   └── option_universe.py  # Option chain filtering & selection
+├── strategies/
+│   ├── runner.py           # Strategy execution harness
+│   ├── elite_strategies/   # Production alpha models
+│   ├── signal_generator.py # Micro-structure signal generation
+│   ├── indicators.py       # Technical indicator library
+│   └── base_strategy.py    # Abstract strategy interface
+├── execution/
+│   ├── lifecycle_manager.py    # TP/SL/trailing logic
+│   ├── order_manager.py        # Order creation & modification
+│   ├── preflight_validator.py  # Pre-trade risk gates
+│   ├── position_manager.py     # Active position tracking
+│   ├── bracket_manager.py      # Bracket order orchestration
+│   └── shadow_paper.py         # Paper trading simulator
+├── risk/
+│   ├── risk_manager.py     # Portfolio-level risk aggregation
+│   ├── session_gate.py     # Market hours enforcement
+│   ├── position_sizing.py  # Dynamic sizing algorithms
+│   └── volatility_sizer.py # ATR-based position scaling
+├── data/
+│   ├── data_hub.py         # Centralized market data access
+│   ├── instruments.py      # Token resolution & caching
+│   ├── market_data_manager.py # OHLCV aggregation
+│   ├── persistent_state.py # SQLite state persistence
+│   └── rest/zerodha_client.py # Broker REST API wrapper
+├── streaming/
+│   ├── websocket_manager.py    # Kite WS protocol handler
+│   ├── polling_streamer.py     # REST-based fallback streamer
+│   ├── resilient_streamer.py   # Auto-reconnect with backoff
+│   └── stream_supervisor.py    # Health monitoring & failover
+├── notifications/
+│   ├── telegram_webhook_enhanced.py # Push notification server
+│   ├── telegram_commands.py         # Slash command handlers
+│   └── telegram_service.py          # Message dispatch
+├── infra/
+│   ├── metrics.py          # Prometheus exporters
+│   ├── health.py           # Health check implementation
+│   ├── watchdog.py         # Process liveness monitoring
+│   └── scheduled_tasks.py  # Cron-like background jobs
+├── config/
+│   ├── base.py             # Pydantic configuration models
+│   ├── settings.py         # Environment variable loading
+│   └── paths.py            # Data directory resolution
+└── utils/
+    ├── rate_limiter.py     # Token bucket implementation
+    ├── circuit_breaker.py  # Failure isolation
+    ├── logging.py          # Structured logger factory
+    └── pricing.py          # Options pricing utilities
+```
+
+## Getting Started
+
+### Prerequisites
+- Python 3.10+
+- Zerodha Kite Connect account (or dummy broker for testing)
+- Telegram Bot Token (optional, for alerts)
+
+### Installation
+
+1. **Create virtual environment**:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # Linux/macOS
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -e ".[dev]"
+   ```
+
+3. **Configure environment**:
+
+   Create `.env` file with required variables:
+   ```bash
+   # Broker credentials (Zerodha)
+   export ZERODHA_API_KEY=your_api_key
+   export ZERODHA_ACCESS_TOKEN=your_access_token
+   export ZERODHA_WS_ORIGIN=https://kite.zerodha.com
+
+   # Execution mode
+   export ENABLE_LIVE=false          # Set to 'true' for real trading
+   export EXECUTION_MODE=SHADOW      # LIVE | PAPER | SHADOW
+
+   # Telegram notifications
+   export TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+   export TELEGRAM_CHAT_ID=987654321
+
+   # Risk parameters
+   export RISK_MAX_DAILY_TRADES=20
+   export RISK_MAX_ORDER_NOTIONAL=200000
+   export RISK_PER_TRADE_CAP_PCT=1.0
+   ```
+
+4. **Run the bot**:
+   ```bash
+   # Development mode (dummy broker)
+   python -m nifty_scalper_bot.app
+
+   # Production mode (FastAPI server)
+   uvicorn nifty_scalper_bot.main:app --host 0.0.0.0 --port 8000
+   ```
+
+## Configuration Reference
+
+### Critical Environment Variables
+
+| Category | Variable | Description | Default |
+|----------|----------|-------------|---------|
+| **Broker** | ZERODHA_API_KEY | Kite Connect API key | *required* |
+| | ZERODHA_ACCESS_TOKEN | Session access token | *required* |
+| | ZERODHA_WS_ORIGIN | WebSocket origin header | https://kite.zerodha.com |
+| **Execution** | ENABLE_LIVE | Master switch for live orders | false |
+| | EXECUTION_MODE | Routing mode | SHADOW |
+| **Risk** | RISK_MAX_DAILY_TRADES | Maximum trades per day | 20 |
+| | RISK_MAX_ORDER_NOTIONAL | Max order value (INR) | 200000 |
+| | RISK_PER_TRADE_CAP_PCT | Capital allocation per trade | 1.0 |
+| **Lifecycle** | LIFECYCLE_TP1_R | TP1 risk-reward multiple | 1.0 |
+| | LIFECYCLE_TP1_PARTIAL | Fraction exited at TP1 | 0.6 |
+| | LIFECYCLE_TP2_R_TREND | TP2 multiple in TREND regime | 1.8 |
+| | LIFECYCLE_TP2_R_RANGE | TP2 multiple in RANGE regime | 1.4 |
+| | LIFECYCLE_TRAIL_ATR_MULT | ATR multiplier for trailing | 0.8 |
+| | LIFECYCLE_TIME_STOP_MIN | Auto-exit after minutes | 12 |
+| **Streaming** | STREAM__MODE | Data transport mode | websocket |
+| | POLL_INTERVAL_MS | REST polling interval | 700 |
+| | POLL_BATCH_SIZE | Tokens per batch request | 200 |
+
+## Operational Commands (Telegram)
+
+| Command | Description |
+|---------|-------------|
+| `/tick <token>` | Real-time quote for instrument |
+| `/ws_status` | WebSocket connection health |
+| `/execstate <symbol>` | Position lifecycle state |
+| `/execqueue` | Pending order queue |
+| `/execlast` | Recent execution decisions |
+| `/execwhy <symbol>` | Preflight gate diagnostics |
+| `/emergency_stop` | Immediate position square-off |
+| `/pause_trading` | Halt new order intake |
+| `/resume_trading` | Resume order processing |
+| `/pnl` | Realized/unrealized PnL summary |
+| `/regime` | Current market regime |
+
+## Deployment Guide
+
+### Railway/Cloud Deployment
+
+**Recommended configuration for ephemeral environments**:
+
+```bash
+# Force polling mode (WebSocket unreliable on dynamic IPs)
+export WEBSOCKET__DISABLED=true
+export STREAM__MODE=poll
+export POLL_INTERVAL_MS=700
+export POLL_BATCH_SIZE=50
+
+# Disable webhook (use polling for Telegram)
+export TELEGRAM__WEBHOOK_ENABLED=false
+```
+
+**Environment variables required**:
+- ZERODHA_API_KEY
+- ZERODHA_ACCESS_TOKEN
+- TELEGRAM_BOT_TOKEN
+- TELEGRAM_CHAT_ID
+- ENABLE_LIVE (set carefully!)
+
+**Deployment steps**:
+1. Push code to Git-connected Railway project
+2. Configure all environment variables in Railway dashboard
+3. Check `/health` endpoint returns `{"status": "running", "bot_loaded": true}`
+4. Test Telegram commands: `/tick 256265` (NIFTY spot token)
+
+### Troubleshooting WebSocket Issues
+
+**Error 1006 (Abnormal Closure)**:
+- **Cause 1**: Expired access token - Regenerate via login flow
+- **Cause 2**: Multiple concurrent sockets - Terminate other instances (one socket per token)
+- **Cause 3**: Network instability - Switch to polling mode temporarily
+
+**Verification**:
+```bash
+curl -H "Authorization: token <API_KEY>:<ACCESS_TOKEN>" \
+  https://api.kite.trade/user/profile
+```
+
+## Testing
+
+### Unit Tests
+```bash
+pytest tests/unit/ -v
+```
+
+### Integration Tests (Paper Trading)
+```bash
+export EXECUTION_MODE=PAPER
+export SESSION_ALLOW_OUT_OF_HOURS=true
+pytest tests/integration/ -v
+```
+
+### Tick Replay Backtesting
+```bash
+python -m nifty_scalper_bot.testing.run_tick_replay \
+  --date 2024-12-10 \
+  --strategy elite_orb \
+  --initial-capital 500000
+```
+
+## Diagnostics & Debugging
+
+### Key Log Patterns
+- `preflight_block_*`: Order rejected by risk gate
+- `shadow_drift_bps`: Simulated vs actual fill divergence
+- `reconcile_mismatch`: Internal state != broker snapshot
+- `regime_change`: Market regime transition detected
+- `lifecycle_exit_*`: Position closed (TP/SL/trailing/time-stop)
+
+### Metric Dashboards (Prometheus)
+- `orders_submitted_total{mode="LIVE"}`: Live order count
+- `order_fill_latency_seconds`: Time from submission to acknowledgment
+- `position_pnl_unrealized`: Current open PnL
+- `stream_tick_lag_ms`: WebSocket/polling latency
+- `risk_circuit_breaker_trips`: Safety mechanism activations
+
+## Risk Warnings
+
+1. **Never enable ENABLE_LIVE=true without thorough paper-trading validation**
+2. **Monitor shadow drift daily** - Persistent >20bps drift indicates model-broker mismatch
+3. **Respect rate limits** - Exceeding broker API limits triggers temporary bans
+4. **Test emergency procedures** - Regularly practice `/emergency_stop` in paper mode
+5. **Review reconciliation logs** - Unresolved mismatches may indicate missed fills
+
+## License
+
+MIT License - See LICENSE file for details.
+
+## Contributing
+
+1. Fork the repository
+2. Create feature branch (`git checkout -b feat/awesome-strategy`)
+3. Run type checking: `mypy src/nifty_scalper_bot`
+4. Ensure test coverage: `pytest --cov=nifty_scalper_bot`
+5. Submit PR with detailed description of changes
+
+---
+
+**Built for systematic traders** - [Documentation](docs/) - [Production Playbook](docs/production_playbook.md)
