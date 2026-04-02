@@ -2303,7 +2303,9 @@ def _data_ready(mdm: MarketDataManager | None) -> bool:
     """Check live tick readiness. Args: mdm. Returns: bool. Raises: None."""
     if mdm is None:
         return False
-    required = ["NSE:NIFTY", "NFO:NIFTY26FEBFUT"]
+    # Only require the spot index tick — futures symbol rolls monthly
+    # and a hardcoded value causes perpetual False returns after expiry.
+    required = ["NSE:NIFTY"]
     for sym in required:
         if not mdm.get_latest_tick(sym):
             return False
