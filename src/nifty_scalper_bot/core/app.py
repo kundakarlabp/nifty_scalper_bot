@@ -5951,14 +5951,17 @@ async def startup_sequence(ctx: BotContext) -> None:
             if not subscribed_symbols:
                 LOGGER.critical("⛔ STRATEGY SUBSCRIPTION LIST IS EMPTY")
 
-            # FIX: Use sync subscribe_tokens + resubscribe for WebSocket mode.
-            # streamer.subscribe() is async on WebSocketManager; calling it
-            # without await silently drops the coroutine — zero option tokens
-            # reach the WebSocket and strategies are starved of data.
+            # FIX: Use subscribe_tokens() for WebSocket mode instead of the
+            # async subscribe() (which was called without await, silently
+            # dropping the coroutine). subscribe_tokens() merges tokens into
+            # the tracked set and schedules _resubscribe_if_connected() via
+            # asyncio.to_thread() — non-blocking and safe in async context.
+            # resubscribe() was avoided: it calls ticker.subscribe() directly
+            # (blocking) which can stall the event loop when connected.
             if tokens_to_poll:
                 ws = ctx.websocket_manager
                 if ws is not None:
-                    ws.resubscribe(list(tokens_to_poll))
+                    ws.subscribe_tokens(list(tokens_to_poll))
                     LOGGER.info(
                         "✅ Wired %d tokens to WebSocket", len(tokens_to_poll)
                     )
@@ -6052,7 +6055,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if tok and ctx.market_data_manager:
                                 ctx.market_data_manager.register_symbol(sym, tok)
                             if tok and ctx.websocket_manager is not None:
-                                ctx.websocket_manager.resubscribe([tok])
+                                ctx.websocket_manager.subscribe_tokens([tok])
                             elif (
                                 tok
                                 and ctx.streamer
