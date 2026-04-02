@@ -2212,6 +2212,27 @@ class MarketDataManager:
         """Legacy tick-bus hook routed to queue ingestion."""
         self._enqueue_tick_threadsafe(tick)
 
+    def process_ticks(self, ticks: list[dict[str, Any]]) -> None:
+        """Batch-enqueue WS ticks from KiteTicker callback.
+
+        Called by WebSocketManager._on_ticks() for every tick batch.
+        Enqueues each tick onto the async queue so _consume_ticks() can
+        resolve token→symbol, validate, and call _emit_tick() (which
+        updates _last_tick_time used by the zombie checker).
+
+        Args:
+            ticks: Raw tick dicts from KiteTicker (instrument_token + last_price).
+        Returns: None. Raises: None.
+        """
+        if not ticks:
+            return
+        for tick in ticks:
+            try:
+                if isinstance(tick, dict):
+                    self._enqueue_tick_threadsafe(tick)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("process_ticks enqueue failed: %s", exc)
+
     def update_authoritative_ticks(self, ticks: list[dict[str, Any]]) -> None:
         """Update authoritative wall-clock tick snapshot. Args: ticks. Returns: None. Raises: None."""
 
