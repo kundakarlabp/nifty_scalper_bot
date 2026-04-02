@@ -5846,9 +5846,24 @@ async def startup_sequence(ctx: BotContext) -> None:
             if not subscribed_symbols:
                 LOGGER.critical("⛔ STRATEGY SUBSCRIPTION LIST IS EMPTY")
 
-            if streamer and hasattr(streamer, "subscribe") and tokens_to_poll:
-                streamer.subscribe(tokens_to_poll)
-                LOGGER.info(f"✅ Wired {len(tokens_to_poll)} tokens to PollingStreamer")
+            # FIX: Use sync subscribe_tokens + resubscribe for WebSocket mode.
+            # streamer.subscribe() is async on WebSocketManager; calling it
+            # without await silently drops the coroutine — zero option tokens
+            # reach the WebSocket and strategies are starved of data.
+            if tokens_to_poll:
+                ws = ctx.websocket_manager
+                if ws is not None:
+                    ws.subscribe_tokens(tokens_to_poll)
+                    ws.resubscribe(list(tokens_to_poll))
+                    LOGGER.info(
+                        "✅ Wired %d tokens to WebSocket", len(tokens_to_poll)
+                    )
+                elif streamer and hasattr(streamer, "subscribe"):
+                    streamer.subscribe(tokens_to_poll)
+                    LOGGER.info(
+                        "✅ Wired %d tokens to PollingStreamer",
+                        len(tokens_to_poll),
+                    )
             if polling_fallback_streamer is not None and tokens_to_poll:
                 polling_fallback_streamer.subscribe(tokens_to_poll)
 
@@ -5914,18 +5929,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 continue
                             if tok and ctx.market_data_manager:
                                 ctx.market_data_manager.register_symbol(sym, tok)
-                            if (
+                            if tok and ctx.websocket_manager is not None:
+                                ctx.websocket_manager.subscribe_tokens([tok])
+                                ctx.websocket_manager.resubscribe([tok])
+                            elif (
                                 tok
                                 and ctx.streamer
                                 and hasattr(ctx.streamer, "subscribe")
                             ):
                                 ctx.streamer.subscribe([tok])
-                            if (
-                                tok
-                                and ctx.websocket_manager is not None
-                                and ctx.websocket_manager.is_connected()
-                            ):
-                                ctx.websocket_manager.resubscribe([tok])
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.add_symbol(sym)
 
