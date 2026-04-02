@@ -159,6 +159,9 @@ class MarketDataManager:
         self._last_margin_refresh: float = 0.0
         self.latest_ticks: list[dict[str, Any]] = []
         self.last_tick_time = time.time()
+        # Pre-seed zombie symbol so the 60s threshold isn't measured
+        # from process start (before WS can deliver first tick).
+        self._last_tick_time[self._zombie_symbol] = time.time()
         self._stale_threshold_seconds = self._parse_float_env(
             "MDM_STALE_THRESHOLD_SECONDS", default=10.0, minimum=1.0
         )
@@ -203,6 +206,11 @@ class MarketDataManager:
         self._health_monitor_stop = threading.Event()
         self._health_monitor_thread: threading.Thread | None = None
         self._zombie_symbol = "NSE:NIFTY"
+        # Pre-seed _last_tick_time for zombie symbol so the 60-second
+        # threshold is measured from MDM construction, not from epoch-0.
+        # Without this, any startup taking > 60s before first WS tick
+        # triggers spurious zombie restarts.
+        self._last_tick_time[self._zombie_symbol] = time.time()
         self._zombie_tick_threshold_sec = self._parse_float_env(
             "ZOMBIE_TICK_THRESHOLD_SEC", default=60.0, minimum=10.0
         )
