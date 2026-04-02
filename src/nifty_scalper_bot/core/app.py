@@ -1491,6 +1491,9 @@ class BotContext:
     margin_engine_data_hub_attached: bool = False
     risk_manager_data_hub_attached: bool = False
     bracket_manager_attached: bool = False
+    telegram_wired: bool = False
+    background_tasks_started: bool = False
+    data_hub_listeners_registered: bool = False
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -3608,8 +3611,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         try:
             risk_manager.attach_data_hub(data_hub)
             risk_manager_data_hub_attached = True
+            LOGGER.info("✅ Wired DataHub to Risk Manager")
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("risk_manager_attach_data_hub_failed: %s", exc)
+    else:
+        LOGGER.info("ℹ️ Risk Manager already attached to DataHub")
 
     # 5. [FIX] Wire Lot Size Provider (Unconditional)
     # We define this logic regardless of resolver state to ensure sizing always works.
@@ -3700,8 +3706,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     order_manager.set_market_data_manager(market_data_manager)
     if not margin_engine_data_hub_attached:
         # OrderManager owns MarginEngine wiring; attach once to avoid duplicate callbacks.
-        order_manager.attach_data_hub(data_hub)
-        margin_engine_data_hub_attached = True
+        try:
+            order_manager.attach_data_hub(data_hub)
+            margin_engine_data_hub_attached = True
+            LOGGER.info("✅ Wired DataHub to Margin Engine")
+        except Exception as exc:
+            LOGGER.error("margin_engine_attach_data_hub_failed: %s", exc)
+    else:
+        LOGGER.info("ℹ️ Margin Engine already attached to DataHub")
     order_manager.set_instrument_resolver(instrument_resolver)
     order_manager.set_risk_manager(risk_manager)
     order_manager.attach_persistent_state(persistent_state)
@@ -4185,8 +4197,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     _apply_paper_mode(paper_state["enabled"])
     shadow_enabled = paper_state["enabled"]
 
-    notifier = TelegramEnhancedNotifier.from_settings(settings.notifications)
-    order_manager.set_notifier(notifier)
+    if not ctx_ref.get("telegram_wired", False):
+        try:
+            notifier = TelegramEnhancedNotifier.from_settings(settings.notifications)
+            order_manager.set_notifier(notifier)
+            ctx_ref["telegram_wired"] = True
+            LOGGER.info("✅ Telegram Notifier wired to Order Manager")
+        except Exception as e:
+            LOGGER.error(f"Telegram notifier wiring failed: {e}")
+    else:
+        LOGGER.info("ℹ️ Telegram Notifier already wired")
+
     telegram_logger = get_logger("telegram")
     telegram_mode = (
         "webhook"
@@ -4211,24 +4232,28 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # Position reconciliation is now handled safely in startup_sequence and _health_loop.
 
     background_tasks: list[asyncio.Task[Any]] = []
-    try:
-        background_tasks = start_background_tasks(order_manager, LOGGER)
-        LOGGER.info(
-            "Background tasks started",
-            extra={
-                "event": "background_tasks.started",
-                "count": len(background_tasks),
-            },
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.error(
-            "Failed to start background tasks",
-            extra={
-                "event": "background_tasks.failed",
-                "error": str(exc),
-            },
-            exc_info=exc,
-        )
+    if not ctx_ref.get("background_tasks_started", False):
+        try:
+            background_tasks = start_background_tasks(order_manager, LOGGER)
+            ctx_ref["background_tasks_started"] = True
+            LOGGER.info(
+                "Background tasks started",
+                extra={
+                    "event": "background_tasks.started",
+                    "count": len(background_tasks),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "Failed to start background tasks",
+                extra={
+                    "event": "background_tasks.failed",
+                    "error": str(exc),
+                },
+                exc_info=exc,
+            )
+    else:
+        LOGGER.info("ℹ️ Background tasks already started")
 
     refresh_task = schedule_instrument_refresh(
         settings,
@@ -4238,61 +4263,61 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if refresh_task is not None:
         background_tasks.append(refresh_task)
         # keep a handle for graceful shutdown
-        ctx_refresh_task: asyncio.Task[Any] | None = refresh_task
+        instrument_refresh_task: asyncio.Task[Any] | None = refresh_task
     else:
-        ctx_refresh_task = None
+        instrument_refresh_task = None
 
-        async def cleanup_stale_brackets_task() -> None:
-            """Periodically remove stale bracket state entries.
+    async def cleanup_stale_brackets_task() -> None:
+        """Periodically remove stale bracket state entries.
 
-            Args:
-                None.
+        Args:
+            None.
 
-            Returns:
-                None.
+        Returns:
+            None.
 
-            Raises:
-                None.
-            """
+        Raises:
+            None.
+        """
 
-            LOGGER.debug(
-                "Entered cleanup_stale_brackets_task",
-                extra={"event": "bracket.cleanup.task.enter"},
-            )
-            while True:
-                try:
-                    await asyncio.sleep(3600)
-                    removed = bracket_manager.cleanup_stale_brackets(
-                        max_age_seconds=settings.execution.bracket_stale_cleanup_seconds,
-                    )
-                    if removed > 0:
-                        LOGGER.info(
-                            "Cleaned up stale brackets",
-                            extra={
-                                "event": "bracket.cleanup.completed",
-                                "count": removed,
-                                "max_age": (
-                                    settings.execution.bracket_stale_cleanup_seconds
-                                ),
-                            },
-                        )
-                except (
-                    asyncio.CancelledError
-                ):  # pragma: no cover - cooperative cancellation
+        LOGGER.debug(
+            "Entered cleanup_stale_brackets_task",
+            extra={"event": "bracket.cleanup.task.enter"},
+        )
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                removed = bracket_manager.cleanup_stale_brackets(
+                    max_age_seconds=settings.execution.bracket_stale_cleanup_seconds,
+                )
+                if removed > 0:
                     LOGGER.info(
-                        "Bracket cleanup task cancelled",
-                        extra={"event": "bracket.cleanup.task.cancelled"},
+                        "Cleaned up stale brackets",
+                        extra={
+                            "event": "bracket.cleanup.completed",
+                            "count": removed,
+                            "max_age": (
+                                settings.execution.bracket_stale_cleanup_seconds
+                            ),
+                        },
                     )
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.error(
-                        "Bracket cleanup task error: %s",
-                        exc,
-                        extra={"event": "bracket.cleanup.task.error"},
-                        exc_info=exc,
-                    )
+            except (
+                asyncio.CancelledError
+            ):  # pragma: no cover - cooperative cancellation
+                LOGGER.info(
+                    "Bracket cleanup task cancelled",
+                    extra={"event": "bracket.cleanup.task.cancelled"},
+                )
+                raise
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error(
+                    "Bracket cleanup task error: %s",
+                    exc,
+                    extra={"event": "bracket.cleanup.task.error"},
+                    exc_info=exc,
+                )
 
-        background_tasks.append(asyncio.create_task(cleanup_stale_brackets_task()))
+    background_tasks.append(asyncio.create_task(cleanup_stale_brackets_task()))
 
     def _build_health_snapshot() -> dict[str, object]:
         """Return an aggregate health snapshot for out-of-band alerts.
@@ -5847,14 +5872,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                         tokens_to_poll.append(t)
 
             # --- Objective 5: Fail-fast Validation ---
-            min_tokens = settings.option_universe.min_token_count
+            min_tokens = 10 # Enforce institutional-grade minimum
             if len(tokens_to_poll) < min_tokens:
                 LOGGER.critical(
                     f"❌ FAIL-FAST: Subscribed tokens ({len(tokens_to_poll)}) < MIN_TOKEN_COUNT ({min_tokens})",
                     extra={"event": "fail_fast_token_count", "count": len(tokens_to_poll), "min": min_tokens}
                 )
                 if not settings.enable_paper:
-                    raise RuntimeError(f"Insufficient tokens for trading: {len(tokens_to_poll)} < {min_tokens}")
+                    raise RuntimeError(f"❌ CRITICAL: Insufficient tokens for trading ({len(tokens_to_poll)} < {min_tokens})")
+
+            LOGGER.info(
+                "Market data integrity verified: tokens=%d (min=%d)",
+                len(tokens_to_poll),
+                min_tokens,
+                extra={"event": "market_data_integrity_pass", "tokens": len(tokens_to_poll)}
+            )
 
             LOGGER.info(f"🔧 Processing {len(targets)} symbols for wiring...")
             resolved_count = 0

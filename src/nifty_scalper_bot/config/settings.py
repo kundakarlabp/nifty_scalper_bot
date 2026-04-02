@@ -879,8 +879,10 @@ class OptionUniverseSettings:
     exchange: str = "NFO"
     strike_step: int = 50
     strikes_around_atm: int = 2
-    min_token_count: int = 5
+    min_token_count: int = 10
     expiry_roll_hours: float = 12.0
+    instrument_refresh: bool = True
+    refresh_interval_minutes: int = 60
     market_close_hour: int = 15
     market_close_minute: int = 30
 
@@ -909,7 +911,7 @@ class InstrumentSettings(BaseSettings):
 
     csv_path: Path | None = Field(default_factory=_default_instruments_csv_path)
     db_path: Path | None = Field(default_factory=_default_instruments_db_path)
-    refresh_cron_enabled: bool = False
+    refresh_cron_enabled: bool = True
     refresh_interval_hours: float = 24.0
     sync_only_index_options: bool = True
     sync_instruments_filter: str = "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY"
@@ -1404,10 +1406,14 @@ def _build_option_universe_settings() -> OptionUniverseSettings:
             "OPTION_UNIVERSE__STRIKES_AROUND_ATM", default=2, minimum=0
         ),
         min_token_count=_env_int(
-            "OPTION_UNIVERSE__MIN_TOKEN_COUNT", default=5, minimum=1
+            "OPTION_UNIVERSE__MIN_TOKEN_COUNT", default=10, minimum=1
         ),
         expiry_roll_hours=_env_float(
             "OPTION_UNIVERSE__EXPIRY_ROLL_HOURS", default=12.0, minimum=0.0
+        ),
+        instrument_refresh=_env_bool("OPTION_UNIVERSE__INSTRUMENT_REFRESH", default=True),
+        refresh_interval_minutes=_env_int(
+            "OPTION_UNIVERSE__REFRESH_INTERVAL_MINUTES", default=60, minimum=15
         ),
         market_close_hour=_env_int(
             "OPTION_UNIVERSE__MARKET_CLOSE_HOUR", default=15, minimum=0
@@ -1438,6 +1444,8 @@ def _build_instrument_settings() -> InstrumentSettings:
                 resolve_env("SYNC_INSTRUMENTS_FILTER")
                 or "NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY"
             ),
+            refresh_cron_enabled=_env_bool("INSTRUMENTS_REFRESH_CRON_ENABLED", default=True),
+            refresh_interval_hours=_env_float("INSTRUMENTS_REFRESH_INTERVAL_HOURS", default=24.0),
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(

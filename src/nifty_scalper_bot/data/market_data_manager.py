@@ -2739,6 +2739,14 @@ class MarketDataManager:
         while not self._rest_poll_stop.is_set():
             loop_start = time.time()
 
+            # --- Objective 7: WebSocket + Polling Sync Guard ---
+            # Skip high-frequency polling if WebSocket is healthy and active
+            # (within 5 seconds of last tick)
+            if self._ws_connected and (loop_start - self.last_tick_time < 5.0):
+                if self._rest_poll_stop.wait(1.0):
+                    break
+                continue
+
             try:
                 # 1. Throttled Margin Refresh (Non-Blocking Priority)
                 if (loop_start - last_margin_refresh) > margin_interval:

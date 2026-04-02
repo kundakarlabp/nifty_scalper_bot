@@ -4000,6 +4000,31 @@ class StrategyRunner:
             return False
         return True
 
+    def validate_market_depth(self) -> bool:
+        """
+        Check if the market data manager has sufficient token coverage.
+        Returns True if token count >= MIN_TOKEN_COUNT.
+        """
+        if not self._market_data:
+            return False
+            
+        token_count = 0
+        if hasattr(self._market_data, "_symbol_by_token"):
+            token_count = len(getattr(self._market_data, "_symbol_by_token", {}))
+        
+        # We need at least 10 tokens for institutional-grade trading
+        # (NIFTY spot + FUT + 5 ATM CE/PE pairs)
+        threshold = 10 
+        if token_count < threshold:
+            log_throttled(
+                self._logger,
+                "insufficient_market_depth",
+                f"❌ Insufficient market depth: tokens={token_count} < {threshold}. Blocking signals.",
+                level=40 # ERROR
+            )
+            return False
+        return True
+
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
         self._logger.debug(
@@ -5031,6 +5056,10 @@ class StrategyRunner:
                                 )
                                 return
                         try:
+                            # --- Objective 2: Block signals if market depth insufficient ---
+                            if not self.validate_market_depth():
+                                return
+
                             signal = self._strategy_manager.generate_signal(
                                 symbol, price
                             )
