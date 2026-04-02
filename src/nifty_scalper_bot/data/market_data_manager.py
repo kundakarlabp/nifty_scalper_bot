@@ -830,24 +830,6 @@ class MarketDataManager:
         except Exception:  # pragma: no cover - optional metrics
             pass
 
-        resolved_token: int | None = None
-        resolver = getattr(self, "_resolver", None)
-        if resolver is not None:
-            for attr in ("resolve_token", "resolve"):
-                if not hasattr(resolver, attr):
-                    continue
-                try:
-                    candidate = getattr(resolver, attr)(symbol)
-                except Exception:  # noqa: BLE001
-                    candidate = None
-                if candidate is not None:
-                    resolved_token = candidate
-                    break
-        if resolved_token is None:
-            with self._lock:
-                resolved_token = self._token_by_symbol.get(symbol)
-        self._seed_mapping(symbol, resolved_token)
-
     def unsubscribe(self, symbol: str, callback: TickCallback) -> None:
         """Remove *callback* from subscribers of *symbol*."""
 
@@ -2407,11 +2389,12 @@ class MarketDataManager:
         symbol = normalize_symbol(symbol)
 
         cached_tick = dict(tick)
-        self._latest_ticks[symbol] = cached_tick
-        self._tick_cache[symbol] = cached_tick
-        self._last_tick_time[symbol] = time.time()
-        self._history[symbol].append(cached_tick)
-        self._last_tick_wallclock[symbol] = float(wallclock)
+        with self._lock:
+            self._latest_ticks[symbol] = cached_tick
+            self._tick_cache[symbol] = cached_tick
+            self._last_tick_time[symbol] = time.time()
+            self._history[symbol].append(cached_tick)
+            self._last_tick_wallclock[symbol] = float(wallclock)
         staleness_seconds = 0.0
         try:
             staleness_seconds = max(time.time() - float(wallclock), 0.0)
@@ -2438,20 +2421,25 @@ class MarketDataManager:
         self._store_tick(symbol, tick)
         callbacks: list[TickCallback]
         tick_payload = dict(tick)
-        self._last_tick_source[symbol] = source
-        callbacks = list(self._subscribers.get(symbol, ()))
-        self._tick_counter += 1
+        with self._lock:
+            self._last_tick_source[symbol] = source
+            callbacks = list(self._subscribers.get(symbol, ()))
+            self._tick_counter += 1
         self.bump_heartbeat()
         now_mono = time.monotonic()
         tick_stats_interval = float(os.getenv("TICK_STATS_INTERVAL", "5.0"))
         if now_mono - self._last_tick_log_time >= tick_stats_interval:
+            with self._lock:
+                if now_mono - self._last_tick_log_time >= tick_stats_interval:
+                    self._last_tick_log_time = now_mono
+                    cached_count = len(self._tick_cache)
+                    tick_count = self._tick_counter
+                    self._tick_counter = 0
             self._logger.debug(
                 "EVENT|tick_stats|cached=%d|ticks_last_5s=%d",
-                len(self._tick_cache),
-                self._tick_counter,
+                cached_count,
+                tick_count,
             )
-            self._tick_counter = 0
-            self._last_tick_log_time = now_mono
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
@@ -2467,8 +2455,9 @@ class MarketDataManager:
                             lambda _cb=callback, _tp=tick_payload: safe_task(_cb(dict(_tp)))
                         )
                     else:
-                        self._async_dispatch_drops += 1
-                        async_dispatch_drops = self._async_dispatch_drops
+                        with self._lock:
+                            self._async_dispatch_drops += 1
+                            async_dispatch_drops = self._async_dispatch_drops
                         now = time.monotonic()
                         if now - self._last_async_drop_log > 5.0:
                             self._logger.warning(
