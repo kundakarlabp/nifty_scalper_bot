@@ -254,8 +254,32 @@ class MarketDataManager:
         self._started = False
 
     def ingest_rest_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
-        """Reject non-websocket feed ingestion for deterministic tick path."""
-        raise DataIntegrityError("REST quote ingestion disabled; websocket only")
+        """Ingest a REST/polling quote for symbol.
+
+        Used by _rest_poll_loop as a WebSocket fallback.  DataHub.ingest_tick
+        deduplicates poll ticks against live WS ticks, so this will be
+        suppressed automatically when WebSocket is healthy.
+
+        Args: symbol, quote. Returns: None. Raises: None.
+        """
+        if not symbol or not quote:
+            return
+        try:
+            symbol = normalize_symbol(str(symbol))
+            with self._lock:
+                previous = self._latest_ticks.get(symbol)
+            normalized = self._normalize_tick(symbol, dict(quote), previous)
+            if normalized is None:
+                return
+            # Ensure timestamp present for downstream validator
+            if "timestamp" not in normalized:
+                normalized["timestamp"] = time.time()
+            normalized.setdefault("source", "poll")
+            self._emit_tick(symbol, normalized, source="poll")
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "ingest_rest_quote failed for %s: %s", symbol, exc
+            )
 
     def set_unified_manager(self, manager: Any | None) -> None:
         """Retain compatibility hook. Args: manager. Returns: None. Raises: None."""
@@ -2266,7 +2290,17 @@ class MarketDataManager:
         self._last_tick_ts[symbol] = tick.timestamp
         engine = self._get_engine(symbol)
         candle = engine.on_tick(tick)
-        self._store_tick(symbol, tick.to_dict())
+        # ── EMIT TICK: replaces bare _store_tick call ─────────────────────────
+        # _emit_tick calls _store_tick internally AND dispatches to _subscribers.
+        # Before this fix: DataHub.subscribe_ticks() callbacks (including
+        # StrategyRunner's per-symbol callbacks) were registered in _subscribers
+        # but NEVER called from the WS path — _store_tick only cached the tick.
+        # _emit_tick is the correct call; it was defined but never invoked.
+        tick_dict = tick.to_dict()
+        # Ensure ltp field is present so downstream DataHub/Runner can read price
+        if "ltp" not in tick_dict:
+            tick_dict["ltp"] = tick.ltp
+        self._emit_tick(symbol, tick_dict, source="ws")
         if candle:
             self._ohlc[symbol].append(candle)
 
@@ -2383,8 +2417,10 @@ class MarketDataManager:
                 if asyncio.iscoroutinefunction(callback):
                     loop = self._main_loop
                     if loop is not None and loop.is_running():
+                        # Default-argument capture prevents closure bug where
+                        # all lambdas in the for-loop share the last `callback`.
                         loop.call_soon_threadsafe(
-                            lambda: safe_task(callback(dict(tick_payload)))
+                            lambda _cb=callback, _tp=tick_payload: safe_task(_cb(dict(_tp)))
                         )
                     else:
                         self._async_dispatch_drops += 1
