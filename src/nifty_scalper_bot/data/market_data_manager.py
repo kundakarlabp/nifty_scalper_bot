@@ -94,6 +94,10 @@ class MarketDataManager:
         self._settings = settings or {}
         self._resolver = resolver
         self._logger = get_logger(__name__)
+        # Initialise _zombie_symbol early so any partially-constructed object
+        # never raises AttributeError if the health monitor or a callback fires
+        # before __init__ completes.
+        self._zombie_symbol = "NSE:NIFTY"
 
         # FIX: Initialize cache_len before it is used
         self._cache_len = cache_len
@@ -161,8 +165,6 @@ class MarketDataManager:
         self._last_margin_refresh: float = 0.0
         self.latest_ticks: list[dict[str, Any]] = []
         self.last_tick_time = time.time()
-        # NOTE: _zombie_symbol is defined below; _last_tick_time is already
-        # seeded with "NSE:NIFTY" at initialization above — no re-seed needed here.
         self._stale_threshold_seconds = self._parse_float_env(
             "MDM_STALE_THRESHOLD_SECONDS", default=10.0, minimum=1.0
         )
@@ -206,7 +208,6 @@ class MarketDataManager:
         self._rest_poll_thread: threading.Thread | None = None
         self._health_monitor_stop = threading.Event()
         self._health_monitor_thread: threading.Thread | None = None
-        self._zombie_symbol = "NSE:NIFTY"
         # Pre-seed _last_tick_time for zombie symbol so the 60-second
         # threshold is measured from MDM construction, not from epoch-0.
         # Without this, any startup taking > 60s before first WS tick
