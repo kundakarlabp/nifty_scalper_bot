@@ -142,6 +142,7 @@ from nifty_scalper_bot.streaming import (
 )
 from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 from nifty_scalper_bot.utils.config_validation import validate_execution_config
+from nifty_scalper_bot.utils.metrics import critical_errors_total
 from nifty_scalper_bot.utils.env import (
     coalesce_bool,
     coalesce_float,
@@ -5341,7 +5342,9 @@ async def startup_sequence(ctx: BotContext) -> None:
     try:
         get_data_dir()
     except Exception as e:
-        LOGGER.critical(f"❌ Failed to create data directory: {e}")
+        critical_errors_total.labels(component="startup", error_type=type(e).__name__).inc()
+        LOGGER.critical(f"❌ Startup sequence failed: {e}", exc_info=True)
+        raise
 
     _validate_config(ctx.config)
     instrument_cache_ready.clear()

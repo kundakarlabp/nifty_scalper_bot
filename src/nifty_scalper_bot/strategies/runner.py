@@ -88,7 +88,7 @@ from nifty_scalper_bot.utils.market_hours import (
     get_market_state,
     is_market_hours_cached,
 )
-from nifty_scalper_bot.utils.metrics import Counter
+from nifty_scalper_bot.utils.metrics import Counter, signals_generated_total
 from nifty_scalper_bot.utils.symbols import (
     canonical,
     enforce_canonical,
@@ -5081,6 +5081,13 @@ class StrategyRunner:
                         if signal is not None:
                             self._signal_counter += 1
                             self._strategy_window_signals += 1
+                            
+                            # --- Objective 8: Prometheus metrics ---
+                            signals_generated_total.labels(
+                                symbol=symbol,
+                                strategy=str(signal.metadata.get("strategy") if signal.metadata else "unknown")
+                            ).inc()
+
                             self._logger.info(
                                 "SIGNAL_GENERATED",
                                 extra={
