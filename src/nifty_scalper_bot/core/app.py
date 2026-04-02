@@ -5263,6 +5263,22 @@ async def startup_sequence(ctx: BotContext) -> None:
     ):
         ctx.market_data_manager.set_event_loop(loop)
 
+    # ── START MDM (CRITICAL) ─────────────────────────────────────────────────
+    # MDM.start() does two things:
+    #   1. Launches _consume_ticks() coroutine on the running event loop —
+    #      without this, ticks queued by _enqueue_tick_threadsafe() sit in
+    #      _tick_queue forever and _process_queued_tick() never runs.
+    #   2. Calls ws.start() — connects the WebSocket (unless stream_supervisor
+    #      already did so, in which case the guard `if self._started: return`
+    #      makes this a no-op).
+    # Must come AFTER set_event_loop so _main_loop is set before create_task.
+    if ctx.market_data_manager is not None and hasattr(ctx.market_data_manager, "start"):
+        try:
+            ctx.market_data_manager.start()
+            LOGGER.info("✅ MarketDataManager started — tick consumer active")
+        except Exception as _mdm_start_exc:
+            LOGGER.error("MarketDataManager.start() failed: %s", _mdm_start_exc)
+
     # =========================================================
     # Create Data Directory
     # =========================================================
