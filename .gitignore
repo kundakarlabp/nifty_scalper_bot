@@ -6,3 +6,13 @@ data/order_submissions.jsonl
 .vscode/
 .idea/
 *.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
