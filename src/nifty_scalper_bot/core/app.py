@@ -1217,6 +1217,38 @@ def get_http_app() -> FastAPI:
             media_type = "text/plain; charset=utf-8"
         return PlainTextResponse(payload, media_type=media_type)
 
+    @app.get("/health/dataflow", response_class=JSONResponse)
+    async def health_dataflow() -> JSONResponse:
+        """Check market data flow and strategy execution status."""
+        ctx = get_latest_bot_context()
+        if not ctx:
+            return JSONResponse({"status": "error", "reason": "No active BotContext"})
+
+        mdm = ctx.market_data_manager
+        runner = ctx.strategy_runner
+
+        mdm_status = mdm.transport_status if mdm else {}
+        runner_ready = runner.is_ready() if runner else False
+
+        symbols = []
+        if mdm:
+            symbols = list(getattr(mdm, "_symbol_by_token", {}).values())
+
+        return JSONResponse({
+            "status": "ok" if mdm_status.get("ws_connected") and runner_ready else "degraded",
+            "market_data": {
+                "ws_connected": mdm_status.get("ws_connected", False),
+                "active_symbols_count": len(symbols),
+                "active_symbols": symbols[:20],
+                "last_tick_age": mdm_status.get("last_tick_age", -1),
+            },
+            "strategy": {
+                "ready": runner_ready,
+                "required_candles": getattr(runner, "_required_candles", 0),
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
     @app.get("/health", response_class=JSONResponse)
     async def http_health() -> JSONResponse:
         ctx = get_latest_bot_context()
@@ -5783,6 +5815,47 @@ async def startup_sequence(ctx: BotContext) -> None:
             streamer = ctx.streamer
             tokens_to_poll = []
 
+            # --- Objective 1: Enhanced Token Selection ---
+            if ctx.instrument_resolver:
+                # Add Spot and mandatory targets
+                for sym in targets:
+                    tok = ctx.instrument_resolver.resolve(sym)
+                    if tok and tok not in tokens_to_poll:
+                        tokens_to_poll.append(tok)
+
+                # Add ATM Options and Futures
+                # Try to get current spot price for better ATM selection
+                spot_price = 0.0
+                if mdm:
+                    last_tick = mdm.get_last_tick("NSE:NIFTY")
+                    if last_tick:
+                        spot_price = last_tick.get("ltp", 0.0)
+                
+                # Fallback if no tick yet
+                if spot_price <= 0:
+                    # Try a one-off fetch if possible, or use a reasonable default for NIFTY
+                    spot_price = 25600.0 
+
+                extra_tokens = ctx.instrument_resolver.select_tokens_for_universe(
+                    base="NIFTY",
+                    spot_price=spot_price,
+                    strikes_around_atm=settings.option_universe.strikes_around_atm,
+                    strike_step=settings.option_universe.strike_step
+                )
+                for t in extra_tokens:
+                    if t and t not in tokens_to_poll:
+                        tokens_to_poll.append(t)
+
+            # --- Objective 5: Fail-fast Validation ---
+            min_tokens = settings.option_universe.min_token_count
+            if len(tokens_to_poll) < min_tokens:
+                LOGGER.critical(
+                    f"❌ FAIL-FAST: Subscribed tokens ({len(tokens_to_poll)}) < MIN_TOKEN_COUNT ({min_tokens})",
+                    extra={"event": "fail_fast_token_count", "count": len(tokens_to_poll), "min": min_tokens}
+                )
+                if not settings.enable_paper:
+                    raise RuntimeError(f"Insufficient tokens for trading: {len(tokens_to_poll)} < {min_tokens}")
+
             LOGGER.info(f"🔧 Processing {len(targets)} symbols for wiring...")
             resolved_count = 0
             unresolved_symbols = []
@@ -5885,19 +5958,39 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if ctx.market_data_manager
                             else None
                         )
+                        
+                        # --- Objective 7: Auto ATM Resubscription ---
                         if spot and spot > 0:
-                            latest_symbols = set(
-                                ctx.option_universe.get_filtered_universe(float(spot))
+                            # Use the new selection logic to find desired tokens
+                            target_tokens = ctx.instrument_resolver.select_tokens_for_universe(
+                                base="NIFTY",
+                                spot_price=float(spot),
+                                strikes_around_atm=settings.option_universe.strikes_around_atm,
+                                strike_step=settings.option_universe.strike_step
                             )
+                            latest_symbols = set()
+                            for t in target_tokens:
+                                s = ctx.instrument_resolver.get_symbol(t)
+                                if s and s.startswith("NFO:NIFTY"):
+                                    latest_symbols.add(s)
                         else:
                             latest_symbols = set(
                                 ctx.option_universe.get_current_universe()
                             )
+
                         added, removed = option_universe_controller.update(
                             latest_symbols
                         )
                         add_symbols = sorted(added)
                         drop_symbols = sorted(removed)
+
+                        if add_symbols or drop_symbols:
+                            LOGGER.info(
+                                "UNIVERSE_SYNC: added=%d removed=%d",
+                                len(add_symbols),
+                                len(drop_symbols),
+                                extra={"event": "universe_sync", "added": list(add_symbols), "removed": list(drop_symbols)}
+                            )
 
                         for sym in add_symbols:
                             if ctx.market_data_manager:
@@ -5908,8 +6001,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 else None
                             )
                             if tok is None:
-                                # Skip without raising — a missing token for one
-                                # new option must not crash the sync loop for all.
                                 LOGGER.warning(
                                     f"⚠️ Universe sync: no token for {sym}, skipping"
                                 )
@@ -5957,7 +6048,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             exc,
                             exc_info=exc,
                         )
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(60) # Objective 7: 60s interval
 
             asyncio.create_task(_option_universe_sync_loop())
         except Exception as e:

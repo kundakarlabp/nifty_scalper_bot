@@ -502,7 +502,10 @@ class StrategyRunner:
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
-        self._logger.info("Tick message-bus subscription disabled; using market-data manager callbacks")
+        
+        self._logger.info(
+            "StrategyRunner initialized with MessageBus: ticks=MDM-callback signals=MessageBus"
+        )
 
         hedge_env = os.getenv("NSB__ALLOW_HEDGE_ENTRIES", "false").strip().lower()
         self._allow_hedge_entries = hedge_env in {"1", "true", "yes", "on"}
@@ -5030,6 +5033,16 @@ class StrategyRunner:
                         try:
                             signal = self._strategy_manager.generate_signal(
                                 symbol, price
+                            )
+                            self._logger.info(
+                                "STRATEGY_EVALUATED",
+                                extra={
+                                    "event": "strategy_evaluated",
+                                    "symbol": symbol,
+                                    "price": price,
+                                    "has_signal": signal is not None,
+                                    "signal_action": signal.action if signal else None
+                                }
                             )
                             self._last_strategy_versions[symbol] = current_version
                         except Exception:

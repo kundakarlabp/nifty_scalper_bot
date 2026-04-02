@@ -2328,9 +2328,22 @@ class MarketDataManager:
         # but NEVER called from the WS path — _store_tick only cached the tick.
         # _emit_tick is the correct call; it was defined but never invoked.
         tick_dict = tick.to_dict()
-        # Ensure ltp field is present so downstream DataHub/Runner can read price
+        # ensure ltp field is present so downstream DataHub/Runner can read price
         if "ltp" not in tick_dict:
             tick_dict["ltp"] = tick.ltp
+
+        # Structured Logging for tick received (Objective 6)
+        self._logger.debug(
+            "TICK_RECEIVED",
+            extra={
+                "event": "tick_received",
+                "symbol": symbol,
+                "price": tick.ltp,
+                "source": "ws",
+                "token": tick.instrument_token,
+            },
+        )
+
         self._emit_tick(symbol, tick_dict, source="ws")
         if candle:
             self._ohlc[symbol].append(candle)
