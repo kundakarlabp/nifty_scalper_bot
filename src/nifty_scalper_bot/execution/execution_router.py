@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from nifty_scalper_bot.execution.metrics import EXECUTION_LATENCY, SHADOW_DRIFT
+from nifty_scalper_bot.utils.metrics import trades_executed_total
 from nifty_scalper_bot.execution.order_manager import OrderType
 from nifty_scalper_bot.execution.order_queue import OrderRequest
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
@@ -280,6 +281,13 @@ class ExecutionRouter:
                 EXECUTION_LATENCY.labels(executor="LIVE", status="SUBMITTED").observe(
                     latency
                 )
+                
+                # --- Objective 8: Prometheus metrics ---
+                trades_executed_total.labels(
+                    symbol=request.symbol,
+                    strategy=str(request.metadata.get("strategy") if request.metadata else "unknown")
+                ).inc()
+
                 self._stats["live_orders"] += 1
                 return ExecutionResult(
                     status="SUBMITTED",
@@ -397,6 +405,14 @@ class ExecutionRouter:
         elif status in {"rejected", "cancelled"}:
             exec_status = "REJECTED"
             rejection_reason = str(result.get("message") or "paper_rejected")
+
+        # --- Objective 8: Prometheus metrics ---
+        if exec_status in {"SUBMITTED", "FILLED"}:
+            trades_executed_total.labels(
+                symbol=request.symbol,
+                strategy=str(request.metadata.get("strategy") if request.metadata else "unknown")
+            ).inc()
+
         self._stats["paper_orders"] += 1
         fill_price_value: float | None
         if avg_price is not None:

@@ -2310,9 +2310,22 @@ class MarketDataManager:
         # but NEVER called from the WS path — _store_tick only cached the tick.
         # _emit_tick is the correct call; it was defined but never invoked.
         tick_dict = tick.to_dict()
-        # Ensure ltp field is present so downstream DataHub/Runner can read price
+        # ensure ltp field is present so downstream DataHub/Runner can read price
         if "ltp" not in tick_dict:
             tick_dict["ltp"] = tick.ltp
+
+        # Structured Logging for tick received (Objective 6)
+        self._logger.debug(
+            "TICK_RECEIVED",
+            extra={
+                "event": "tick_received",
+                "symbol": symbol,
+                "price": tick.ltp,
+                "source": "ws",
+                "token": tick.instrument_token,
+            },
+        )
+
         self._emit_tick(symbol, tick_dict, source="ws")
         if candle:
             self._ohlc[symbol].append(candle)
@@ -2714,6 +2727,14 @@ class MarketDataManager:
 
         while not self._rest_poll_stop.is_set():
             loop_start = time.time()
+
+            # --- Objective 7: WebSocket + Polling Sync Guard ---
+            # Skip high-frequency polling ONLY if WebSocket is actively delivering ticks.
+            # We check if we've received ANY tick (last_tick_time > 0) and if it's fresh (< 5s).
+            if self._ws_connected and self.last_tick_time > 0 and (loop_start - self.last_tick_time < 5.0):
+                if self._rest_poll_stop.wait(1.0):
+                    break
+                continue
 
             try:
                 # 1. Throttled Margin Refresh (Non-Blocking Priority)

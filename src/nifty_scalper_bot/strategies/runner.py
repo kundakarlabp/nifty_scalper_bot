@@ -88,7 +88,7 @@ from nifty_scalper_bot.utils.market_hours import (
     get_market_state,
     is_market_hours_cached,
 )
-from nifty_scalper_bot.utils.metrics import Counter
+from nifty_scalper_bot.utils.metrics import Counter, signals_generated_total
 from nifty_scalper_bot.utils.symbols import (
     canonical,
     enforce_canonical,
@@ -502,7 +502,10 @@ class StrategyRunner:
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
-        self._logger.info("Tick message-bus subscription disabled; using market-data manager callbacks")
+        
+        self._logger.info(
+            "StrategyRunner initialized with MessageBus: ticks=MDM-callback signals=MessageBus"
+        )
 
         hedge_env = os.getenv("NSB__ALLOW_HEDGE_ENTRIES", "false").strip().lower()
         self._allow_hedge_entries = hedge_env in {"1", "true", "yes", "on"}
@@ -3999,6 +4002,31 @@ class StrategyRunner:
             return False
         return True
 
+    def validate_market_depth(self) -> bool:
+        """
+        Check if the market data manager has sufficient token coverage.
+        Returns True if token count >= MIN_TOKEN_COUNT.
+        """
+        if not self._market_data:
+            return False
+            
+        token_count = 0
+        if hasattr(self._market_data, "_symbol_by_token"):
+            token_count = len(getattr(self._market_data, "_symbol_by_token", {}))
+        
+        # We need at least 10 tokens for institutional-grade trading
+        # (NIFTY spot + FUT + 5 ATM CE/PE pairs)
+        threshold = 10 
+        if token_count < threshold:
+            log_throttled(
+                self._logger,
+                "insufficient_market_depth",
+                f"❌ Insufficient market depth: tokens={token_count} < {threshold}. Blocking signals.",
+                level=40 # ERROR
+            )
+            return False
+        return True
+
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
         self._logger.debug(
@@ -5030,8 +5058,22 @@ class StrategyRunner:
                                 )
                                 return
                         try:
+                            # --- Objective 2: Block signals if market depth insufficient ---
+                            if not self.validate_market_depth():
+                                return
+
                             signal = self._strategy_manager.generate_signal(
                                 symbol, price
+                            )
+                            self._logger.info(
+                                "STRATEGY_EVALUATED",
+                                extra={
+                                    "event": "strategy_evaluated",
+                                    "symbol": symbol,
+                                    "price": price,
+                                    "has_signal": signal is not None,
+                                    "signal_action": signal.action if signal else None
+                                }
                             )
                             self._last_strategy_versions[symbol] = current_version
                         except Exception:
@@ -5041,6 +5083,13 @@ class StrategyRunner:
                         if signal is not None:
                             self._signal_counter += 1
                             self._strategy_window_signals += 1
+                            
+                            # --- Objective 8: Prometheus metrics ---
+                            signals_generated_total.labels(
+                                symbol=symbol,
+                                strategy=str(signal.metadata.get("strategy") if signal.metadata else "unknown")
+                            ).inc()
+
                             self._logger.info(
                                 "SIGNAL_GENERATED",
                                 extra={

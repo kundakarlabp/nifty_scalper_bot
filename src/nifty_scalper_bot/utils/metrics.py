@@ -278,5 +278,28 @@ if "strategy_skips_total" not in globals():
         "strategy_skips_total", "Strategy skips by reason", ["reason"]
     )
 
+if "signals_generated_total" not in globals():
+    signals_generated_total = Counter(
+        "signals_generated_total", "Total signals generated", ["symbol", "strategy"]
+    )
 
-__all__ = ["Counter", "Gauge", "Histogram", "ensure_multiproc_dir"]
+if "trades_executed_total" not in globals():
+    trades_executed_total = Counter(
+        "trades_executed_total", "Total trades executed", ["symbol", "strategy"]
+    )
+
+if "critical_errors_total" not in globals():
+    critical_errors_total = Counter(
+        "critical_errors_total", "Total critical errors", ["component", "error_type"]
+    )
+
+
+__all__ = [
+    "Counter",
+    "Gauge",
+    "Histogram",
+    "ensure_multiproc_dir",
+    "signals_generated_total",
+    "trades_executed_total",
+    "critical_errors_total",
+]

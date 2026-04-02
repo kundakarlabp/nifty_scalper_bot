@@ -142,6 +142,7 @@ from nifty_scalper_bot.streaming import (
 )
 from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 from nifty_scalper_bot.utils.config_validation import validate_execution_config
+from nifty_scalper_bot.utils.metrics import critical_errors_total
 from nifty_scalper_bot.utils.env import (
     coalesce_bool,
     coalesce_float,
@@ -1217,6 +1218,38 @@ def get_http_app() -> FastAPI:
             media_type = "text/plain; charset=utf-8"
         return PlainTextResponse(payload, media_type=media_type)
 
+    @app.get("/health/dataflow", response_class=JSONResponse)
+    async def health_dataflow() -> JSONResponse:
+        """Check market data flow and strategy execution status."""
+        ctx = get_latest_bot_context()
+        if not ctx:
+            return JSONResponse({"status": "error", "reason": "No active BotContext"})
+
+        mdm = ctx.market_data_manager
+        runner = ctx.strategy_runner
+
+        mdm_status = mdm.transport_status if mdm else {}
+        runner_ready = runner.is_ready() if runner else False
+
+        symbols = []
+        if mdm:
+            symbols = list(getattr(mdm, "_symbol_by_token", {}).values())
+
+        return JSONResponse({
+            "status": "ok" if mdm_status.get("ws_connected") and runner_ready else "degraded",
+            "market_data": {
+                "ws_connected": mdm_status.get("ws_connected", False),
+                "active_symbols_count": len(symbols),
+                "active_symbols": symbols[:20],
+                "last_tick_age": mdm_status.get("last_tick_age", -1),
+            },
+            "strategy": {
+                "ready": runner_ready,
+                "required_candles": getattr(runner, "_required_candles", 0),
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
     @app.get("/health", response_class=JSONResponse)
     async def http_health() -> JSONResponse:
         ctx = get_latest_bot_context()
@@ -1459,6 +1492,9 @@ class BotContext:
     margin_engine_data_hub_attached: bool = False
     risk_manager_data_hub_attached: bool = False
     bracket_manager_attached: bool = False
+    telegram_wired: bool = False
+    background_tasks_started: bool = False
+    data_hub_listeners_registered: bool = False
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -3571,11 +3607,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     except Exception as exc:  # noqa: BLE001
         LOGGER.error("risk_manager_attach_mdm_failed: %s", exc)
 
-    # 4. Attach Data Hub once to avoid duplicate listeners across warm restarts.
     if not risk_manager_data_hub_attached:
         try:
             risk_manager.attach_data_hub(data_hub)
             risk_manager_data_hub_attached = True
+            LOGGER.info("✅ Wired DataHub to Risk Manager")
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("risk_manager_attach_data_hub_failed: %s", exc)
 
@@ -3668,8 +3704,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     order_manager.set_market_data_manager(market_data_manager)
     if not margin_engine_data_hub_attached:
         # OrderManager owns MarginEngine wiring; attach once to avoid duplicate callbacks.
-        order_manager.attach_data_hub(data_hub)
-        margin_engine_data_hub_attached = True
+        try:
+            order_manager.attach_data_hub(data_hub)
+            margin_engine_data_hub_attached = True
+            LOGGER.info("✅ Wired DataHub to Margin Engine")
+        except Exception as exc:
+            LOGGER.error("margin_engine_attach_data_hub_failed: %s", exc)
+    else:
+        LOGGER.info("ℹ️ Margin Engine already attached to DataHub")
     order_manager.set_instrument_resolver(instrument_resolver)
     order_manager.set_risk_manager(risk_manager)
     order_manager.attach_persistent_state(persistent_state)
@@ -4153,8 +4195,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     _apply_paper_mode(paper_state["enabled"])
     shadow_enabled = paper_state["enabled"]
 
-    notifier = TelegramEnhancedNotifier.from_settings(settings.notifications)
-    order_manager.set_notifier(notifier)
+    if not ctx_ref.get("telegram_wired", False):
+        try:
+            notifier = TelegramEnhancedNotifier.from_settings(settings.notifications)
+            order_manager.set_notifier(notifier)
+            ctx_ref["telegram_wired"] = True
+            LOGGER.info("✅ Telegram Notifier wired to Order Manager")
+        except Exception as e:
+            LOGGER.error(f"Telegram notifier wiring failed: {e}")
+    else:
+        LOGGER.info("ℹ️ Telegram Notifier already wired")
+
     telegram_logger = get_logger("telegram")
     telegram_mode = (
         "webhook"
@@ -4179,24 +4230,28 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # Position reconciliation is now handled safely in startup_sequence and _health_loop.
 
     background_tasks: list[asyncio.Task[Any]] = []
-    try:
-        background_tasks = start_background_tasks(order_manager, LOGGER)
-        LOGGER.info(
-            "Background tasks started",
-            extra={
-                "event": "background_tasks.started",
-                "count": len(background_tasks),
-            },
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.error(
-            "Failed to start background tasks",
-            extra={
-                "event": "background_tasks.failed",
-                "error": str(exc),
-            },
-            exc_info=exc,
-        )
+    if not ctx_ref.get("background_tasks_started", False):
+        try:
+            background_tasks = start_background_tasks(order_manager, LOGGER)
+            ctx_ref["background_tasks_started"] = True
+            LOGGER.info(
+                "Background tasks started",
+                extra={
+                    "event": "background_tasks.started",
+                    "count": len(background_tasks),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "Failed to start background tasks",
+                extra={
+                    "event": "background_tasks.failed",
+                    "error": str(exc),
+                },
+                exc_info=exc,
+            )
+    else:
+        LOGGER.info("ℹ️ Background tasks already started")
 
     refresh_task = schedule_instrument_refresh(
         settings,
@@ -4206,61 +4261,61 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if refresh_task is not None:
         background_tasks.append(refresh_task)
         # keep a handle for graceful shutdown
-        ctx_refresh_task: asyncio.Task[Any] | None = refresh_task
+        instrument_refresh_task: asyncio.Task[Any] | None = refresh_task
     else:
-        ctx_refresh_task = None
+        instrument_refresh_task = None
 
-        async def cleanup_stale_brackets_task() -> None:
-            """Periodically remove stale bracket state entries.
+    async def cleanup_stale_brackets_task() -> None:
+        """Periodically remove stale bracket state entries.
 
-            Args:
-                None.
+        Args:
+            None.
 
-            Returns:
-                None.
+        Returns:
+            None.
 
-            Raises:
-                None.
-            """
+        Raises:
+            None.
+        """
 
-            LOGGER.debug(
-                "Entered cleanup_stale_brackets_task",
-                extra={"event": "bracket.cleanup.task.enter"},
-            )
-            while True:
-                try:
-                    await asyncio.sleep(3600)
-                    removed = bracket_manager.cleanup_stale_brackets(
-                        max_age_seconds=settings.execution.bracket_stale_cleanup_seconds,
-                    )
-                    if removed > 0:
-                        LOGGER.info(
-                            "Cleaned up stale brackets",
-                            extra={
-                                "event": "bracket.cleanup.completed",
-                                "count": removed,
-                                "max_age": (
-                                    settings.execution.bracket_stale_cleanup_seconds
-                                ),
-                            },
-                        )
-                except (
-                    asyncio.CancelledError
-                ):  # pragma: no cover - cooperative cancellation
+        LOGGER.debug(
+            "Entered cleanup_stale_brackets_task",
+            extra={"event": "bracket.cleanup.task.enter"},
+        )
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                removed = bracket_manager.cleanup_stale_brackets(
+                    max_age_seconds=settings.execution.bracket_stale_cleanup_seconds,
+                )
+                if removed > 0:
                     LOGGER.info(
-                        "Bracket cleanup task cancelled",
-                        extra={"event": "bracket.cleanup.task.cancelled"},
+                        "Cleaned up stale brackets",
+                        extra={
+                            "event": "bracket.cleanup.completed",
+                            "count": removed,
+                            "max_age": (
+                                settings.execution.bracket_stale_cleanup_seconds
+                            ),
+                        },
                     )
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.error(
-                        "Bracket cleanup task error: %s",
-                        exc,
-                        extra={"event": "bracket.cleanup.task.error"},
-                        exc_info=exc,
-                    )
+            except (
+                asyncio.CancelledError
+            ):  # pragma: no cover - cooperative cancellation
+                LOGGER.info(
+                    "Bracket cleanup task cancelled",
+                    extra={"event": "bracket.cleanup.task.cancelled"},
+                )
+                raise
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error(
+                    "Bracket cleanup task error: %s",
+                    exc,
+                    extra={"event": "bracket.cleanup.task.error"},
+                    exc_info=exc,
+                )
 
-        background_tasks.append(asyncio.create_task(cleanup_stale_brackets_task()))
+    background_tasks.append(asyncio.create_task(cleanup_stale_brackets_task()))
 
     def _build_health_snapshot() -> dict[str, object]:
         """Return an aggregate health snapshot for out-of-band alerts.
@@ -4469,7 +4524,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         instrument_resolver=instrument_resolver,
         instrument_db=instrument_conn,
         instrument_universe=instrument_state,
-        instrument_refresh_task=ctx_refresh_task,
+        instrument_refresh_task=instrument_refresh_task,
         websocket_enabled=websocket_enabled,
         shadow_mode_enabled=shadow_enabled,
         shadow_trader=shadow_trader,
@@ -5287,7 +5342,9 @@ async def startup_sequence(ctx: BotContext) -> None:
     try:
         get_data_dir()
     except Exception as e:
-        LOGGER.critical(f"❌ Failed to create data directory: {e}")
+        critical_errors_total.labels(component="startup", error_type=type(e).__name__).inc()
+        LOGGER.critical(f"❌ Startup sequence failed: {e}", exc_info=True)
+        raise
 
     _validate_config(ctx.config)
     instrument_cache_ready.clear()
@@ -5783,6 +5840,54 @@ async def startup_sequence(ctx: BotContext) -> None:
             streamer = ctx.streamer
             tokens_to_poll = []
 
+            # --- Objective 1: Enhanced Token Selection ---
+            if ctx.instrument_resolver:
+                # Add Spot and mandatory targets
+                for sym in targets:
+                    tok = ctx.instrument_resolver.resolve(sym)
+                    if tok and tok not in tokens_to_poll:
+                        tokens_to_poll.append(tok)
+
+                # Add ATM Options and Futures
+                # Try to get current spot price for better ATM selection
+                spot_price = 0.0
+                if mdm:
+                    last_tick = mdm.get_last_tick("NSE:NIFTY")
+                    if last_tick:
+                        spot_price = last_tick.get("ltp", 0.0)
+                
+                # Fallback if no tick yet
+                if spot_price <= 0:
+                    # Try a one-off fetch if possible, or use a reasonable default for NIFTY
+                    spot_price = 25600.0 
+
+                extra_tokens = ctx.instrument_resolver.select_tokens_for_universe(
+                    base="NIFTY",
+                    spot_price=spot_price,
+                    strikes_around_atm=settings.option_universe.strikes_around_atm,
+                    strike_step=settings.option_universe.strike_step
+                )
+                for t in extra_tokens:
+                    if t and t not in tokens_to_poll:
+                        tokens_to_poll.append(t)
+
+            # --- Objective 5: Fail-fast Validation ---
+            min_tokens = 10 # Enforce institutional-grade minimum
+            if len(tokens_to_poll) < min_tokens:
+                msg = f"⚠️ WARNING: Subscribed tokens ({len(tokens_to_poll)}) < MIN_TOKEN_COUNT ({min_tokens})"
+                if not settings.enable_paper:
+                    LOGGER.critical(f"❌ FAIL-FAST: {msg}")
+                    raise RuntimeError(f"❌ CRITICAL: Insufficient tokens for trading ({len(tokens_to_poll)} < {min_tokens})")
+                else:
+                    LOGGER.warning(f"{msg} (Continuing due to PAPER_MODE=true)")
+
+            LOGGER.info(
+                "Market data integrity verified: tokens=%d (min=%d)",
+                len(tokens_to_poll),
+                min_tokens,
+                extra={"event": "market_data_integrity_pass", "tokens": len(tokens_to_poll)}
+            )
+
             LOGGER.info(f"🔧 Processing {len(targets)} symbols for wiring...")
             resolved_count = 0
             unresolved_symbols = []
@@ -5897,19 +6002,39 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if ctx.market_data_manager
                             else None
                         )
+                        
+                        # --- Objective 7: Auto ATM Resubscription ---
                         if spot and spot > 0:
-                            latest_symbols = set(
-                                ctx.option_universe.get_filtered_universe(float(spot))
+                            # Use the new selection logic to find desired tokens
+                            target_tokens = ctx.instrument_resolver.select_tokens_for_universe(
+                                base="NIFTY",
+                                spot_price=float(spot),
+                                strikes_around_atm=settings.option_universe.strikes_around_atm,
+                                strike_step=settings.option_universe.strike_step
                             )
+                            latest_symbols = set()
+                            for t in target_tokens:
+                                s = ctx.instrument_resolver.get_symbol(t)
+                                if s and s.startswith("NFO:NIFTY"):
+                                    latest_symbols.add(s)
                         else:
                             latest_symbols = set(
                                 ctx.option_universe.get_current_universe()
                             )
+
                         added, removed = option_universe_controller.update(
                             latest_symbols
                         )
                         add_symbols = sorted(added)
                         drop_symbols = sorted(removed)
+
+                        if add_symbols or drop_symbols:
+                            LOGGER.info(
+                                "UNIVERSE_SYNC: added=%d removed=%d",
+                                len(add_symbols),
+                                len(drop_symbols),
+                                extra={"event": "universe_sync", "added": list(add_symbols), "removed": list(drop_symbols)}
+                            )
 
                         for sym in add_symbols:
                             if ctx.market_data_manager:
@@ -5920,8 +6045,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 else None
                             )
                             if tok is None:
-                                # Skip without raising — a missing token for one
-                                # new option must not crash the sync loop for all.
                                 LOGGER.warning(
                                     f"⚠️ Universe sync: no token for {sym}, skipping"
                                 )
@@ -5950,7 +6073,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 and ctx.streamer
                                 and hasattr(ctx.streamer, "unsubscribe")
                             ):
-                                ctx.streamer.unsubscribe([tok])
+                                res = ctx.streamer.unsubscribe([tok])
+                                if asyncio.iscoroutine(res):
+                                    await res
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.remove_symbol(sym)
 
@@ -5961,7 +6086,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             exc,
                             exc_info=exc,
                         )
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(60) # Objective 7: 60s interval
 
             asyncio.create_task(_option_universe_sync_loop())
         except Exception as e:

@@ -711,6 +711,78 @@ class InstrumentResolver:
             LOGGER.exception("Failure in InstrumentResolver._ingest_instrument_row")
             raise
 
+    def select_tokens_for_universe(
+        self,
+        base: str = "NIFTY",
+        spot_price: float | None = None,
+        strikes_around_atm: int = 2,
+        strike_step: int = 50,
+    ) -> list[int]:
+        """
+        Select a comprehensive list of tokens for the trading universe.
+        Includes:
+        - Index Spot (from WELL_KNOWN)
+        - Nearest Future
+        - ATM Option Strikes (+/- strikes_around_atm) for nearest expiry
+        """
+        tokens: set[int] = set()
+        symbols_selected: list[str] = []
+
+        # 1. Spot Token
+        spot_token = WELL_KNOWN.get(base)
+        if spot_token:
+            tokens.add(spot_token)
+            symbols_selected.append(f"{base} Spot")
+
+        # 2. Nearest Future
+        with self._lock:
+            futures = self._future_contracts.get(base, [])
+            if futures:
+                # _finalize_futures already ensures only the nearest is kept
+                fut_tok = futures[0]["instrument_token"]
+                tokens.add(fut_tok)
+                symbols_selected.append(f"{base} Future")
+
+        # 3. ATM Options
+        if spot_price and spot_price > 0:
+            atm_strike = atm_strike_for_spot(spot_price, strike_step)
+            # Ensure at least 5 strikes are selected (2 around ATM = 5 total strikes)
+            actual_around = max(2, strikes_around_atm)
+            strikes = [
+                atm_strike + (i * strike_step)
+                for i in range(-actual_around, actual_around + 1)
+            ]
+
+            all_options = self.option_contracts(base)
+            if all_options:
+                # Find nearest expiry
+                expiries = sorted({
+                    self.parse_expiry_string(o["expiry"])
+                    for o in all_options
+                    if self.parse_expiry_string(o["expiry"]) and self.parse_expiry_string(o["expiry"]) >= date.today()
+                })
+                
+                if expiries:
+                    nearest_expiry = expiries[0]
+                    option_count = 0
+                    for o in all_options:
+                        o_expiry = self.parse_expiry_string(o["expiry"])
+                        if o_expiry == nearest_expiry and o["strike"] in strikes:
+                            tokens.add(o["instrument_token"])
+                            symbols_selected.append(o["tradingsymbol"])
+                            option_count += 1
+                    
+                    LOGGER.info(
+                        "Universe selection: spot=%.2f expiry=%s strikes=%d options=%d",
+                        spot_price,
+                        nearest_expiry,
+                        len(strikes),
+                        option_count,
+                        extra={"event": "universe_selection", "tokens": list(tokens), "symbols": symbols_selected}
+                    )
+
+        return sorted(list(tokens))
+
     def _finalize_futures(self) -> None:
         """
         Ensure only the nearest valid expiry FUT is retained per index. Args: None. Returns: None. Raises: None.
