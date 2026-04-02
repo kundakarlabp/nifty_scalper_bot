@@ -161,9 +161,8 @@ class MarketDataManager:
         self._last_margin_refresh: float = 0.0
         self.latest_ticks: list[dict[str, Any]] = []
         self.last_tick_time = time.time()
-        # Pre-seed zombie symbol so the 60s threshold isn't measured
-        # from process start (before WS can deliver first tick).
-        self._last_tick_time[self._zombie_symbol] = time.time()
+        # NOTE: _zombie_symbol is defined below; _last_tick_time is already
+        # seeded with "NSE:NIFTY" at initialization above — no re-seed needed here.
         self._stale_threshold_seconds = self._parse_float_env(
             "MDM_STALE_THRESHOLD_SECONDS", default=10.0, minimum=1.0
         )
