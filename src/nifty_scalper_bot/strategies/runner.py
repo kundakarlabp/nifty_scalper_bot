@@ -1941,7 +1941,7 @@ class StrategyRunner:
         with self._lock:
             runtime_state = self._symbol_state.get(symbol)
             vwap_value = runtime_state.vwap if runtime_state is not None else None
-        vwap_state = self._vwap_state.get(symbol, {})
+            vwap_state = dict(self._vwap_state.get(symbol, {}))
         indicators = {
             symbol: {
                 "vwap": vwap_value,
@@ -1958,15 +1958,17 @@ class StrategyRunner:
         falls back to indicator_engine bar count (which includes the 1125 hydrated
         bars loaded at startup) so the bar-count gate does not falsely return HYDRATING.
         """
-        bars = self._symbol_history.get(symbol, [])
+        with self._lock:
+            bars = list(self._symbol_history.get(symbol, []))
+            state = self._symbol_state.get(symbol)
+            vwap_snapshot = dict(self._vwap_state.get(symbol, {}))
         vol_sum = sum(float(getattr(bar, "volume", 0)) for bar in bars)
-        state = self._symbol_state.get(symbol)
         vwap_val = float(state.vwap) if state and state.vwap else 0.0
 
         # When no live bars exist yet, try to supplement VWAP/volume from the
         # tick-based accumulator so the hydration check has real numbers to work with.
         if not bars:
-            vwap_state = self._vwap_state.get(symbol, {})
+            vwap_state = vwap_snapshot
             cum_vol = float(vwap_state.get("cum_vol", 0.0))
             cum_pv = float(vwap_state.get("cum_pv", 0.0))
             vol_sum = cum_vol
