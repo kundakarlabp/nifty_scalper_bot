@@ -5853,7 +5853,6 @@ async def startup_sequence(ctx: BotContext) -> None:
             if tokens_to_poll:
                 ws = ctx.websocket_manager
                 if ws is not None:
-                    ws.subscribe_tokens(tokens_to_poll)
                     ws.resubscribe(list(tokens_to_poll))
                     LOGGER.info(
                         "✅ Wired %d tokens to WebSocket", len(tokens_to_poll)
@@ -5930,7 +5929,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if tok and ctx.market_data_manager:
                                 ctx.market_data_manager.register_symbol(sym, tok)
                             if tok and ctx.websocket_manager is not None:
-                                ctx.websocket_manager.subscribe_tokens([tok])
                                 ctx.websocket_manager.resubscribe([tok])
                             elif (
                                 tok

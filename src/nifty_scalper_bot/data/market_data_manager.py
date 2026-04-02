@@ -2417,13 +2417,16 @@ class MarketDataManager:
         tick_stats_interval = float(os.getenv("TICK_STATS_INTERVAL", "5.0"))
         if now_mono - self._last_tick_log_time >= tick_stats_interval:
             with self._lock:
-                self._logger.debug(
-                    "EVENT|tick_stats|cached=%d|ticks_last_5s=%d",
-                    len(self._tick_cache),
-                    self._tick_counter,
-                )
-                self._tick_counter = 0
-            self._last_tick_log_time = now_mono
+                if now_mono - self._last_tick_log_time >= tick_stats_interval:
+                    self._last_tick_log_time = now_mono
+                    cached_count = len(self._tick_cache)
+                    tick_count = self._tick_counter
+                    self._tick_counter = 0
+            self._logger.debug(
+                "EVENT|tick_stats|cached=%d|ticks_last_5s=%d",
+                cached_count,
+                tick_count,
+            )
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
