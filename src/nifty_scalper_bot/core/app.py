@@ -3272,6 +3272,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             settings=settings,
             resolver=instrument_resolver,
         )
+
+        # ── INJECT MDM REFERENCE INTO WEBSOCKET MANAGER ──────────────────────
+        # WebSocketManager._on_ticks calls:
+        #   getattr(self, "_market_data_manager", None).process_ticks(ticks)
+        #   getattr(self, "_market_data_manager", None).update_authoritative_ticks()
+        # Without this injection both branches are dead — update_authoritative_ticks
+        # never fires, so is_data_stale() always reads stale wall-clock (last_tick_time=0).
+        websocket_manager._market_data_manager = market_data_manager
+        LOGGER.info("✅ WS: MDM reference injected into WebSocketManager")
         data_hub = DataHub(
             market_data_manager,
             instrument_resolver,
@@ -5747,8 +5756,11 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
             mdm = ctx.market_data_manager
+            # NOTE: _data_ready() is always False at startup (no ticks yet).
+            # Logging INFO here floods Railway with a false alarm on every boot.
+            # Demoted to DEBUG so it only appears during deep diagnostics.
             if not _data_ready(mdm):
-                LOGGER.info("waiting_for_live_ticks")
+                LOGGER.debug("startup_tick_gate: waiting_for_live_ticks (expected at boot)")
 
             streamer = ctx.streamer
             tokens_to_poll = []
@@ -5936,11 +5948,26 @@ async def startup_sequence(ctx: BotContext) -> None:
     if broker_ready:
         try:
             if not ctx.subsystems_started:
-                # 🚨 CRITICAL FIX: Start MessageBus Dispatchers FIRST 🚨
-                # Without this, ingested ticks sit in the queue forever.
+                # ── Subscribe handlers BEFORE starting the bus so dispatchers
+                # are created for all registered message types.
+                # OrderProcessor registers the SIGNAL handler; without calling
+                # start() here, MessageBus.start() sees 0 subscribers and logs
+                # "started with 0 active dispatchers" — signals never execute.
+                if ctx.order_processor is not None:
+                    try:
+                        await ctx.order_processor.start()
+                        LOGGER.info("✅ OrderProcessor started — SIGNAL handler registered")
+                    except Exception as _op_exc:
+                        LOGGER.error("OrderProcessor.start() failed: %s", _op_exc)
+
+                # 🚨 CRITICAL: Start MessageBus AFTER subscribers are registered 🚨
                 if ctx.message_bus:
                     LOGGER.info("🚀 Starting MessageBus Dispatchers...")
                     ctx.message_bus.start()
+                    LOGGER.info(
+                        "✅ MessageBus running with %d active dispatchers",
+                        len(ctx.message_bus._tasks),
+                    )
 
                 if ctx.order_manager:
                     ctx.order_manager.start_monitoring()
@@ -5967,7 +5994,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                 if ctx.strategy_runner:
                     if not _data_ready(ctx.market_data_manager):
-                        LOGGER.info("waiting_for_live_ticks")
+                        LOGGER.debug("startup_tick_gate: waiting_for_live_ticks (expected at boot)")
                     ctx.strategy_runner.start()
 
                 if ctx.telegram_bot:
