@@ -124,7 +124,9 @@ class MarketDataManager:
         self._tick_cache: dict[str, dict[str, Any]] = {}
         self._tick_counter = 0
         self._last_tick_log_time = time.monotonic()
-        self._last_tick_time: dict[str, float] = {}
+        self._last_tick_time: dict[str, float] = {
+            "NSE:NIFTY": time.time()   # seed: prevent false zombie alarm at startup
+        }
         self._tick_bus: Any | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._async_dispatch_drops = 0
