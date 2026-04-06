@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import time
 from typing import Any, Iterable
+from unittest.mock import patch
 
 import pytest
 
@@ -465,7 +466,25 @@ def test_zombie_detection_uses_active_symbols_with_ticks_only(
 
 
 @pytest.mark.asyncio
-async def test_wait_until_ready_requires_min_bars(
+async def test_wait_until_ready_enters_degraded_during_market_hours(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws, cache_len=5)
+    manager._min_required_bars = 2
+    manager._active_subscribed_symbols = {"NSE:NIFTY23"}
+
+    with patch(
+        "nifty_scalper_bot.data.market_data_manager.is_market_hours_cached",
+        return_value=True,
+    ):
+        await manager.wait_until_ready(timeout=0.1)
+
+    assert manager.ready is False
+    assert manager.degraded is True
+
+
+@pytest.mark.asyncio
+async def test_wait_until_ready_bypasses_off_market(
     broker: DummyBroker, ws: DummyWebSocket
 ) -> None:
     manager = MarketDataManager(broker, ws, cache_len=5)
@@ -473,11 +492,19 @@ async def test_wait_until_ready_requires_min_bars(
     manager._active_subscribed_symbols = {"NSE:NIFTY23"}
     manager._history["NSE:NIFTY23"].append({"ltp": 100.0, "timestamp": time.time()})
 
-    with pytest.raises(TimeoutError):
+    with patch(
+        "nifty_scalper_bot.data.market_data_manager.is_market_hours_cached",
+        return_value=False,
+    ):
         await manager.wait_until_ready(timeout=0.1)
+
+    assert manager.ready is True
+    assert manager.degraded is True
 
     manager._history["NSE:NIFTY23"].append({"ltp": 101.0, "timestamp": time.time()})
     await manager.wait_until_ready(timeout=0.2)
+    assert manager.ready is True
+    assert manager.degraded is False
 
 
 @pytest.mark.asyncio
