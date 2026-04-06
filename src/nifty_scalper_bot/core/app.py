@@ -5823,7 +5823,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             if ctx.data_hub is not None:
                 ctx.data_hub.indicators_ready = bool(ready_symbols)
             if ready_symbols:
-                LOGGER.info("🧠 Indicators fully hydrated and READY at startup")
+                LOGGER.info(
+                    "Indicators hydration pre-check complete; waiting for live readiness gate"
+                )
             else:
                 LOGGER.error(
                     "Indicators remain unready because no symbols passed hydration barrier"
@@ -6149,6 +6151,27 @@ async def startup_sequence(ctx: BotContext) -> None:
                         ctx.stream_supervisor_started = True
 
                 if ctx.strategy_runner:
+                    if ctx.market_data_manager is not None:
+                        try:
+                            await ctx.market_data_manager.wait_until_ready(timeout=30.0)
+                            LOGGER.info(
+                                "Condition met: startup_pipeline_ready",
+                                extra={
+                                    "event": "startup_pipeline_ready",
+                                    "ws_connected": bool(
+                                        ctx.websocket_manager.is_connected()
+                                        if ctx.websocket_manager is not None
+                                        else False
+                                    ),
+                                },
+                            )
+                        except Exception as ready_exc:
+                            LOGGER.critical(
+                                "Startup readiness gate failed: %s",
+                                ready_exc,
+                                exc_info=ready_exc,
+                            )
+                            raise
                     if not _data_ready(ctx.market_data_manager):
                         LOGGER.debug("startup_tick_gate: waiting_for_live_ticks (expected at boot)")
                     ctx.strategy_runner.start()

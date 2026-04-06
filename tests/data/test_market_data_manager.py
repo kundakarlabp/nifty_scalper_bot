@@ -444,6 +444,42 @@ def test_zombie_restart_circuit_opens_after_failed_reconnects(
     assert manager._zombie_breaker_open_until == 162.0
 
 
+def test_zombie_detection_uses_active_symbols_with_ticks_only(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.utils.market_hours.is_market_open",
+        lambda: True,
+    )
+    manager = MarketDataManager(broker, ws)
+    manager._zombie_tick_threshold_sec = 1.0
+    manager._ws_connected = True
+    manager._active_subscribed_symbols = {"NSE:NIFTY23", "NSE:NIFTY24"}
+    manager._symbols_with_tick = {"NSE:NIFTY23"}
+    manager._last_tick_time["NSE:NIFTY23"] = time.time()
+
+    calls: list[int] = []
+    manager._trigger_zombie_ws_restart = lambda: calls.append(1)  # type: ignore[method-assign]
+    manager._check_zombie_ticks()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_wait_until_ready_requires_min_bars(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws, cache_len=5)
+    manager._min_required_bars = 2
+    manager._active_subscribed_symbols = {"NSE:NIFTY23"}
+    manager._history["NSE:NIFTY23"].append({"ltp": 100.0, "timestamp": time.time()})
+
+    with pytest.raises(TimeoutError):
+        await manager.wait_until_ready(timeout=0.1)
+
+    manager._history["NSE:NIFTY23"].append({"ltp": 101.0, "timestamp": time.time()})
+    await manager.wait_until_ready(timeout=0.2)
+
+
 @pytest.mark.asyncio
 async def test_warmup_history_primes_cache_without_emitting_callbacks(
     broker: DummyBroker, ws: DummyWebSocket

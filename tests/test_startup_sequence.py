@@ -75,6 +75,10 @@ class DummyMarketDataManager:
     def get_latest_price(self, _symbol: str) -> None:  # pragma: no cover - defensive
         return None
 
+    async def wait_until_ready(self, timeout: float = 30.0) -> None:
+        del timeout
+        return None
+
 
 class DummyOrderManager:
     def __init__(self) -> None:

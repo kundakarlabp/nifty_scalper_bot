@@ -94,11 +94,6 @@ class MarketDataManager:
         self._settings = settings or {}
         self._resolver = resolver
         self._logger = get_logger(__name__)
-        # Initialise _zombie_symbol early so any partially-constructed object
-        # never raises AttributeError if the health monitor or a callback fires
-        # before __init__ completes.
-        self._zombie_symbol = "NSE:NIFTY"
-
         # FIX: Initialize cache_len before it is used
         self._cache_len = cache_len
 
@@ -128,9 +123,7 @@ class MarketDataManager:
         self._tick_cache: dict[str, dict[str, Any]] = {}
         self._tick_counter = 0
         self._last_tick_log_time = time.monotonic()
-        self._last_tick_time: dict[str, float] = {
-            "NSE:NIFTY": time.time()   # seed: prevent false zombie alarm at startup
-        }
+        self._last_tick_time: dict[str, float] = {}
         self._tick_bus: Any | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._async_dispatch_drops = 0
@@ -153,8 +146,13 @@ class MarketDataManager:
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
+        self._active_subscribed_symbols: set[str] = set()
+        self._symbols_with_tick: set[str] = set()
+        self._ticks_received_per_symbol: dict[str, int] = defaultdict(int)
         self._tick_stats: dict[str, int] = defaultdict(int)
         self._last_tick_stats_log = time.monotonic()
+        self._last_tick_rate_snapshot_at = time.monotonic()
+        self._last_tick_rate_snapshot: dict[str, int] = {}
         self._account_cache_ttl = self._parse_float_env(
             "MDM_ACCOUNT_CACHE_TTL", default=60.0, minimum=1.0
         )
@@ -208,15 +206,11 @@ class MarketDataManager:
         self._rest_poll_thread: threading.Thread | None = None
         self._health_monitor_stop = threading.Event()
         self._health_monitor_thread: threading.Thread | None = None
-        # Pre-seed _last_tick_time for zombie symbol so the 60-second
-        # threshold is measured from MDM construction, not from epoch-0.
-        # Without this, any startup taking > 60s before first WS tick
-        # triggers spurious zombie restarts.
-        self._last_tick_time[self._zombie_symbol] = time.time()
         self._zombie_tick_threshold_sec = self._parse_float_env(
             "ZOMBIE_TICK_THRESHOLD_SEC", default=60.0, minimum=10.0
         )
         self._zombie_restart_failures = 0
+        self._zombie_restart_attempts: Deque[float] = deque()
         self._zombie_restart_window = self._parse_float_env(
             "ZOMBIE_RESTART_WINDOW_SEC", default=120.0, minimum=1.0
         )
@@ -233,8 +227,9 @@ class MarketDataManager:
         self._tick_stale_threshold_ms = self._parse_int_env(
             "TICK_STALE_MS", default=2_000, minimum=0
         )
-        if self._rest_poll_enabled:
-            self._tracked_symbols.add("NSE:NIFTY")
+        self._min_required_bars = self._parse_int_env(
+            "MIN_INDICATOR_BARS", default=20, minimum=1
+        )
 
         # Load optional settings overrides
         if settings is not None:
@@ -262,6 +257,22 @@ class MarketDataManager:
         self._m_ticks = Counter("mdm_ticks_total", "Normalized ticks processed")
         self._last_balance_log_time = 0.0
         self._started = False
+
+    def validate_token_symbol_mappings(self) -> None:
+        """Args: none; Returns: None; Raises: RuntimeError on mapping mismatch."""
+
+        with self._lock:
+            symbol_by_token = dict(self._symbol_by_token)
+            token_by_symbol = dict(self._token_by_symbol)
+        mismatches: list[str] = []
+        for token, symbol in symbol_by_token.items():
+            reverse = token_by_symbol.get(symbol)
+            if reverse != token:
+                mismatches.append(f"{symbol}:{token}->{reverse}")
+        if mismatches:
+            raise RuntimeError(
+                f"Token/symbol mapping mismatch detected ({len(mismatches)}): {mismatches[:5]}"
+            )
 
     def ingest_rest_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
         """Ingest a REST/polling quote for symbol.
@@ -803,6 +814,7 @@ class MarketDataManager:
             subscribers.add(callback)
             latest = self._latest_ticks.get(symbol)
             cached_token = self._token_by_symbol.get(symbol)
+            self._active_subscribed_symbols.add(symbol)
 
         if latest is not None:
             try:
@@ -844,6 +856,7 @@ class MarketDataManager:
             callbacks.discard(callback)
             if not callbacks:
                 self._subscribers.pop(symbol, None)
+                self._active_subscribed_symbols.discard(symbol)
                 should_unsubscribe = True
 
         if should_unsubscribe:
@@ -1930,9 +1943,10 @@ class MarketDataManager:
         try:
             normalized = normalize_symbol(str(symbol or ""))
             bar_count = len(list(bars))
-            if bar_count >= 20:
+            if bar_count >= self._min_required_bars:
                 self._hydration_status[normalized] = "READY"
             else:
+                self._hydration_status[normalized] = "HYDRATING"
                 self._logger.error(
                     "insufficient_bars_for_strategy",
                     extra={
@@ -1941,10 +1955,61 @@ class MarketDataManager:
                         "bars": bar_count,
                     },
                 )
+            self._logger.info(
+                "Condition met: mdm_hydration_progress",
+                extra={
+                    "event": "mdm_hydration_progress",
+                    "symbol": normalized,
+                    "bars": bar_count,
+                    "required": self._min_required_bars,
+                    "status": self._hydration_status.get(normalized, "HYDRATING"),
+                },
+            )
         except Exception as exc:
             self._logger.error(
                 "Failure in update_hydration_status: %s", exc, exc_info=exc
             )
+
+    def is_symbol_ready(self, symbol: str) -> bool:
+        """Args: symbol; Returns: bool; Raises: none."""
+        normalized = normalize_symbol(str(symbol or ""))
+        with self._lock:
+            return len(self._history.get(normalized, ())) >= self._min_required_bars
+
+    def is_ready(self) -> bool:
+        """Args: none; Returns: bool; Raises: none."""
+        with self._lock:
+            active = sorted(self._active_subscribed_symbols)
+            if not active:
+                return False
+            return all(
+                len(self._history.get(symbol, ())) >= self._min_required_bars
+                for symbol in active
+            )
+
+    async def wait_until_ready(self, timeout: float = 30.0) -> None:
+        """Args: timeout; Returns: None; Raises: TimeoutError."""
+
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while time.monotonic() <= deadline:
+            if self.is_ready():
+                with self._lock:
+                    ready_symbols = sorted(self._active_subscribed_symbols)
+                self._logger.info(
+                    "Condition met: mdm_ready",
+                    extra={"event": "mdm_ready", "symbols": ready_symbols},
+                )
+                return
+            await asyncio.sleep(0.1)
+        with self._lock:
+            snapshot = {
+                symbol: len(self._history.get(symbol, ()))
+                for symbol in sorted(self._active_subscribed_symbols)
+            }
+        raise TimeoutError(
+            "MarketDataManager did not reach READY state within "
+            f"{timeout:.1f}s (min_bars={self._min_required_bars}, bars={snapshot})"
+        )
 
     def get_hydration_status(self, symbol: str) -> str:
         """Return hydration status. Args: symbol. Returns: status string. Raises: None."""
@@ -2278,8 +2343,12 @@ class MarketDataManager:
                 return
             symbol_from_map = self._symbol_by_token.get(int(token))
             if not symbol_from_map:
-                self._logger.debug(
-                    "Unmapped instrument_token=%s — dropped (subscribe pending?)", token
+                self._logger.error(
+                    "Condition met: mdm_unmapped_token_drop",
+                    extra={
+                        "event": "mdm_unmapped_token_drop",
+                        "token": int(token),
+                    },
                 )
                 return
             raw = {**raw, "symbol": symbol_from_map}
@@ -2393,7 +2462,15 @@ class MarketDataManager:
             self._latest_ticks[symbol] = cached_tick
             self._tick_cache[symbol] = cached_tick
             self._last_tick_time[symbol] = time.time()
+            if "ltp" not in cached_tick or cached_tick.get("timestamp") is None:
+                self._logger.debug(
+                    "Condition met: mdm_history_append_rejected",
+                    extra={"event": "mdm_history_append_rejected", "symbol": symbol},
+                )
+                return
             self._history[symbol].append(cached_tick)
+            self._ticks_received_per_symbol[symbol] += 1
+            self._symbols_with_tick.add(symbol)
             self._last_tick_wallclock[symbol] = float(wallclock)
         staleness_seconds = 0.0
         try:
@@ -2435,10 +2512,38 @@ class MarketDataManager:
                     cached_count = len(self._tick_cache)
                     tick_count = self._tick_counter
                     self._tick_counter = 0
+                    rate_interval = max(
+                        now_mono - self._last_tick_rate_snapshot_at,
+                        1e-6,
+                    )
+                    rates = {
+                        sym: (
+                            count - self._last_tick_rate_snapshot.get(sym, 0)
+                        )
+                        / rate_interval
+                        for sym, count in self._ticks_received_per_symbol.items()
+                        if sym in self._active_subscribed_symbols
+                    }
+                    history_lengths = {
+                        sym: len(self._history.get(sym, ()))
+                        for sym in sorted(self._active_subscribed_symbols)
+                    }
+                    self._last_tick_rate_snapshot = dict(
+                        self._ticks_received_per_symbol
+                    )
+                    self._last_tick_rate_snapshot_at = now_mono
             self._logger.debug(
                 "EVENT|tick_stats|cached=%d|ticks_last_5s=%d",
                 cached_count,
                 tick_count,
+            )
+            self._logger.info(
+                "Condition met: mdm_tick_health",
+                extra={
+                    "event": "mdm_tick_health",
+                    "ticks_per_second_by_symbol": rates,
+                    "history_length_by_symbol": history_lengths,
+                },
             )
         try:
             self._m_ticks.inc()
@@ -2564,9 +2669,11 @@ class MarketDataManager:
                         self._ohlc[self._bar_symbol_key(canonical_symbol)].append(
                             finalized
                         )
-                    self._last_historical_ts[canonical_symbol] = float(
-                        validated["timestamp"].timestamp()
-                    )
+                    validated_ts = getattr(validated, "timestamp", None)
+                    if validated_ts is not None:
+                        self._last_historical_ts[canonical_symbol] = float(
+                            validated_ts.timestamp()
+                        )
 
             self._logger.info("WARMUP_COMPLETE")
         except Exception as e:
@@ -2605,6 +2712,14 @@ class MarketDataManager:
         while not self._health_monitor_stop.wait(1.0):
             try:
                 self._check_zombie_ticks()
+            except RuntimeError as exc:
+                self._logger.critical(
+                    "Failure in _health_monitor_loop: %s",
+                    exc,
+                    extra={"event": "mdm_health_monitor_circuit_break"},
+                    exc_info=exc,
+                )
+                os._exit(1)
             except Exception as exc:  # noqa: BLE001
                 self._logger.error(
                     "Failure in _health_monitor_loop: %s",
@@ -2625,21 +2740,47 @@ class MarketDataManager:
             self._zombie_stale_logged = False
             return
 
-        tick_age = self.time_since_last_tick(self._zombie_symbol)
-        if tick_age is None or tick_age <= self._zombie_tick_threshold_sec:
+        now = time.time()
+        with self._lock:
+            candidate_symbols = sorted(
+                sym
+                for sym in self._active_subscribed_symbols
+                if sym in self._symbols_with_tick
+            )
+            stale_symbols = [
+                sym
+                for sym in candidate_symbols
+                if (now - self._last_tick_time.get(sym, now))
+                > self._zombie_tick_threshold_sec
+            ]
+        if not candidate_symbols:
             self._zombie_stale_logged = False
             return
 
-        if not self._zombie_stale_logged:
+        stale_ratio = len(stale_symbols) / max(len(candidate_symbols), 1)
+        self._logger.info(
+            "Condition met: mdm_zombie_summary",
+            extra={
+                "event": "mdm_zombie_summary",
+                "active_symbols": len(candidate_symbols),
+                "stale_symbols": len(stale_symbols),
+                "stale_ratio": round(stale_ratio, 3),
+                "threshold_seconds": self._zombie_tick_threshold_sec,
+            },
+        )
+        if stale_ratio < 0.70:
+            self._zombie_stale_logged = False
+            return
+
+        if not self._zombie_stale_logged and stale_symbols:
             self._logger.critical(
-                "CRITICAL zombie_tick_detected symbol=%s age=%.2fs threshold=%.2fs",
-                self._zombie_symbol,
-                tick_age,
+                "CRITICAL zombie_tick_detected symbols=%s threshold=%.2fs",
+                stale_symbols[:8],
                 self._zombie_tick_threshold_sec,
                 extra={
                     "event": "mdm_zombie_tick_detected",
-                    "symbol": self._zombie_symbol,
-                    "age_seconds": tick_age,
+                    "symbols": stale_symbols,
+                    "stale_ratio": stale_ratio,
                 },
             )
             self._zombie_stale_logged = True
@@ -2669,6 +2810,11 @@ class MarketDataManager:
             try:
                 reconnect()
                 self._zombie_restart_failures = 0
+                self._zombie_restart_attempts.append(now)
+                while self._zombie_restart_attempts and (
+                    now - self._zombie_restart_attempts[0]
+                ) > 120.0:
+                    self._zombie_restart_attempts.popleft()
                 self._logger.warning(
                     "Condition met: mdm_zombie_ws_restart",
                     extra={
@@ -2684,6 +2830,16 @@ class MarketDataManager:
                     extra={"event": "mdm_zombie_ws_restart_error"},
                     exc_info=exc,
                 )
+
+        if len(self._zombie_restart_attempts) > 5:
+            self._logger.critical(
+                "Failure in _trigger_zombie_ws_restart: restart circuit breaker tripped",
+                extra={
+                    "event": "mdm_zombie_restart_circuit_breaker",
+                    "attempts_in_2m": len(self._zombie_restart_attempts),
+                },
+            )
+            raise RuntimeError("WebSocket restart circuit breaker exceeded: >5 in 120s")
 
         if self._zombie_restart_failures > self._zombie_restart_limit:
             self._zombie_breaker_open_until = now + self._zombie_restart_window
@@ -3704,6 +3860,7 @@ class MarketDataManager:
                     "WS subscribe skipped (no token)", extra={"symbol": symbol}
                 )
                 return
+            self.validate_token_symbol_mappings()
             self._logger.debug(
                 "EVENT|subscribe|%s|token=%s|mode=full",
                 symbol,
