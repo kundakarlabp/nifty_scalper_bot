@@ -635,6 +635,10 @@ class WebSocketManager:
             )
             if self._tokens:
                 token_list = sorted(self._tokens)
+                mdm = getattr(self, "_market_data_manager", None)
+                validate_mapping = getattr(mdm, "validate_token_symbol_mappings", None)
+                if callable(validate_mapping):
+                    validate_mapping()
                 ws.subscribe(token_list)
                 ws.set_mode(ws.MODE_FULL, token_list)
                 self._logger.info(
