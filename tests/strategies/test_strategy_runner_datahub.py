@@ -29,6 +29,7 @@ class _StubMDM:
         self.subscribed: list[str] = []
         self.unsubscribed: list[str] = []
         self.started = False
+        self.degraded = False
 
     def subscribe(self, symbol: str, callback) -> None:
         self.subscribed.append(symbol)
@@ -127,3 +128,14 @@ def test_runner_subscribes_message_bus_tick_when_hub_missing() -> None:
 
     assert runner is not None
     message_bus.subscribe.assert_called_once()
+
+
+def test_runner_start_skips_when_market_data_degraded() -> None:
+    runner, mdm = _make_runner(None)
+    mdm.degraded = True
+    runner.add_symbol("NIFTY25SEP25000CE")
+
+    runner.start()
+
+    assert mdm.started is False
+    assert mdm.subscribed == []

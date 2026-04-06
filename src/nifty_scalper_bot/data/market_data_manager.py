@@ -172,6 +172,8 @@ class MarketDataManager:
         self._seed_attempt_last: dict[str, float] = {}
         self._seed_completed = False
         self._seeded_symbols: set[str] = set()
+        self.ready: bool = False
+        self.degraded: bool = False
         self._margin_cache_ttl = self._parse_float_env(
             "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
         )
@@ -1988,28 +1990,54 @@ class MarketDataManager:
             )
 
     async def wait_until_ready(self, timeout: float = 30.0) -> None:
-        """Args: timeout; Returns: None; Raises: TimeoutError."""
+        """Args: timeout; Returns: None; Raises: None."""
 
         deadline = time.monotonic() + max(timeout, 0.0)
+        self.ready = False
+        self.degraded = False
+        min_bars = self._min_required_bars
+        bars: dict[str, int] = {}
         while time.monotonic() <= deadline:
-            if self.is_ready():
-                with self._lock:
-                    ready_symbols = sorted(self._active_subscribed_symbols)
+            with self._lock:
+                subscribed_symbols = sorted(self._active_subscribed_symbols)
+                min_bars = self._min_required_bars
+                bars = {
+                    symbol: max(
+                        len(self._history.get(symbol, ())),
+                        len(self._ohlc.get(self._bar_symbol_key(symbol), ())),
+                    )
+                    for symbol in subscribed_symbols
+                }
+            valid_symbols = [s for s, count in bars.items() if count >= min_bars]
+            if valid_symbols:
+                self.ready = True
+                self.degraded = False
                 self._logger.info(
                     "Condition met: mdm_ready",
-                    extra={"event": "mdm_ready", "symbols": ready_symbols},
+                    extra={"event": "mdm_ready", "symbols": valid_symbols},
                 )
                 return
             await asyncio.sleep(0.1)
-        with self._lock:
-            snapshot = {
-                symbol: len(self._history.get(symbol, ()))
-                for symbol in sorted(self._active_subscribed_symbols)
-            }
-        raise TimeoutError(
-            "MarketDataManager did not reach READY state within "
-            f"{timeout:.1f}s (min_bars={self._min_required_bars}, bars={snapshot})"
+
+        is_market_hours = is_market_hours_cached()
+        if not is_market_hours:
+            self._logger.warning(
+                "Off-market -> bypassing readiness gate (historical data active)"
+            )
+            self.ready = True
+            self.degraded = True
+            return
+
+        self._logger.warning(
+            "Entering DEGRADED mode due to insufficient live data "
+            "(timeout=%.1fs, min_bars=%d, bars=%s)",
+            timeout,
+            min_bars,
+            bars,
         )
+        self.ready = False
+        self.degraded = True
+        return
 
     def get_hydration_status(self, symbol: str) -> str:
         """Return hydration status. Args: symbol. Returns: status string. Raises: None."""

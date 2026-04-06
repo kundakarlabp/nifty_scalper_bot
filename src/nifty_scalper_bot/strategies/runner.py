@@ -728,6 +728,9 @@ class StrategyRunner:
 
     def start(self) -> None:
         """Start processing market data events."""
+        if bool(getattr(self._market_data, "degraded", False)):
+            LOGGER.warning("DEGRADED mode: trading disabled")
+            return
         with self._lock:
             if self._running:
                 return
