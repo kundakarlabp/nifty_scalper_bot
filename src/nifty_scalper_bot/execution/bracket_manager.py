@@ -1177,21 +1177,49 @@ class BracketManager:
                     time.sleep(0.2)
 
                 if not confirmed:
-                    confirmed = self._market_fallback_exit(
+                    # Route through your Slippage-Protected logic instead of raw Market
+                    is_partial = action.get('type') == 'PARTIAL_TP'
+                    confirmed = self._execute_exit(
                         bracket=bracket,
                         qty=qty,
-                        exit_side='SELL' if bracket.side == 'BUY' else 'BUY',
                         reason=reason,
+                        is_partial=is_partial
                     )
 
                 with self._lock:
                     bracket.pending_exit_order_id = exit_order_id
                     bracket.exit_in_progress = False
                     if confirmed:
-                        bracket.exit_executed = True
-                        bracket.active = False
                         bracket.remaining_quantity = max(0, bracket.remaining_quantity - qty)
+                        is_partial = action.get('type') == 'PARTIAL_TP'
+                        
+                        if bracket.remaining_quantity <= 0:
+                            # Full exit complete
+                            bracket.exit_executed = True
+                            bracket.active = False
+                        else:
+                            # Partial exit - Keep bracket alive!
+                            bracket.exit_executed = False
+                            bracket.active = True
+                            
+                            if is_partial:
+                                target_obj = action.get('target')
+                                if target_obj:
+                                    target_obj.executed = True
+                                    # Move SL to Breakeven automatically
+                                    if target_obj.name == "TP1":
+                                        if bracket.side == "BUY" and bracket.entry_price > bracket.sl_trigger_price:
+                                            bracket.sl_trigger_price = bracket.entry_price
+                                            LOGGER.info(f"🔒 {symbol}: TP1 Hit. SL Moved to Breakeven.")
+                                        elif bracket.side == "SELL" and bracket.entry_price < bracket.sl_trigger_price:
+                                            bracket.sl_trigger_price = bracket.entry_price
+                                            LOGGER.info(f"🔒 {symbol}: TP1 Hit. SL Moved to Breakeven.")
+                        
                         bracket.updated_at = time.time()
+                        try:
+                            self.save_state() # Persist the partial fill
+                        except Exception:
+                            pass
                     else:
                         bracket.exit_executed = False
                         bracket.active = True
@@ -1635,23 +1663,23 @@ class BracketManager:
         """
         Adjust ATR multiplier based on momentum.
         
-        Strong momentum = tighter trail (capture the move)
-        Weak momentum = looser trail (avoid noise)
+        Strong momentum = wider trail (avoid whipsaws in fast breakouts)
+        Weak momentum = tighter trail (lock profits in chop)
         """
         abs_momentum = abs(momentum)
         
         if abs_momentum > 1.0:
-            # Very strong momentum: tight trail
-            return base_mult * 0.8
+            # Very strong momentum: give it room to breathe
+            return base_mult * 1.3
         elif abs_momentum > 0.5:
-            # Strong momentum: slightly tighter
-            return base_mult * 0.9
+            # Strong momentum: slightly wider
+            return base_mult * 1.1
         elif abs_momentum > 0.2:
             # Moderate momentum: standard
             return base_mult
         else:
-            # Weak/choppy: looser trail
-            return base_mult * 1.3
+            # Weak/choppy: tighten the trail to lock in whatever profit exists
+            return base_mult * 0.8
             
 
     def _check_stop_loss(self, bracket: BracketState, ltp: float) -> bool:
