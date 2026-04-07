@@ -4300,18 +4300,10 @@ class StrategyRunner:
                 )
                 skip_strategy = True
 
+            # 🚨 RELAXED LATENCY GUARD: Polling APIs have natural latency.
+            # We allow ticks up to 5 seconds old to ensure strategies evaluate.
             tick_latency_ms = tick_age * 1000.0
-            if tick_latency_ms > 250.0:
-                log_throttled(
-                    self._logger,
-                    f"tick_latency_guard_{symbol}",
-                    (
-                        f"Condition met: tick_latency_guard_reject symbol={symbol} "
-                        f"latency_ms={tick_latency_ms:.1f}"
-                    ),
-                    interval_sec=30.0,
-                    level=logging.DEBUG,
-                )
+            if tick_latency_ms > 5000.0:
                 skip_strategy = True
 
             # Stale tick: NFO options/futures carry the exchange last-trade timestamp
@@ -4522,8 +4514,10 @@ class StrategyRunner:
                 )
                 if spot_ts is not None and spot_ts > 1_000_000_000_000:
                     spot_ts = spot_ts / 1000.0
+                # 🚨 RELAXED SPOT GUARD: Allow up to 90 seconds of staleness
+                # Options can still trade even if the index tick is slightly delayed.
                 spot_age = time.time() - float(spot_ts) if spot_ts is not None else None
-                spot_max_age = float(os.environ.get("SPOT_STALENESS_SEC", "30.0"))
+                spot_max_age = float(os.environ.get("SPOT_STALENESS_SEC", "90.0")) 
                 if spot_age is not None and spot_age > spot_max_age:
                     spot_stale = True
 
