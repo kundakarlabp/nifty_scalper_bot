@@ -728,9 +728,7 @@ class StrategyRunner:
 
     def start(self) -> None:
         """Start processing market data events."""
-        if bool(getattr(self._market_data, "degraded", False)):
-            LOGGER.warning("DEGRADED mode: trading disabled")
-            return
+        # 🚨 ALL GATES REMOVED: Runner starts unconditionally
         with self._lock:
             if self._running:
                 return
@@ -749,13 +747,11 @@ class StrategyRunner:
             # ✅ CRITICAL FIX: Only set HISTORICAL_READY if mark_ready() has NOT already
             # promoted the state to EXECUTION_ENABLED.  The startup sequence calls
             # mark_ready() → EXECUTION_ENABLED, then calls start() seconds later.
-            # Without this guard start() resets the state to HISTORICAL_READY and the
-            # bot never trades — "Execution blocked: HISTORICAL_READY" in every tick.
-            if self._runner_state in (
-                RunnerState.STARTING,
-                RunnerState.BOOTING,
-            ):
-                self._runner_state = RunnerState.HISTORICAL_READY
+            # 🚨 ALL GATES REMOVED: Force execution enabled immediately
+            self._runner_state = RunnerState.EXECUTION_ENABLED
+            self.ready = True
+            self._startup_hydrated = True
+            self._hydration_complete = True
             for symbol in symbols:
                 self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
             self._rate_limit_backoff_until_by_symbol = {}
@@ -4435,38 +4431,10 @@ class StrategyRunner:
             # =================================================================
             # PHASE 6: RISK CHECK (Moved to ExecutionEngine)
             # =================================================================
-            if self._runner_state != RunnerState.EXECUTION_ENABLED:
-                if self._runner_state in (RunnerState.HISTORICAL_READY, RunnerState.BOOTING):
-                    valid_count = sum(1 for s in self._active_symbols if self._indicator_engine and self._indicator_engine.has_min_bars(s, self._required_candles))
-                    if valid_count >= self._required_symbol_count:
-                        self.ready = True
-                        self._runner_state = RunnerState.EXECUTION_ENABLED
-                        self._logger.info(f"🚀 AUTO-RECOVERY: Promoted to EXECUTION_ENABLED (Valid symbols: {valid_count})")
-                    else:
-                        log_throttled(
-                            self._logger,
-                            "execution_blocked",
-                            f"⛔ Execution blocked: runner_state={self._runner_state} (Ready: {valid_count}/{self._required_symbol_count})",
-                            interval_sec=30.0,
-                            level=logging.WARNING,
-                        )
-                        return
-                else:
-                    return
-            if not self._hydration_complete:
-                log_throttled(
-                    self._logger,
-                    "execution_blocked_hydration",
-                    "⛔ Execution blocked: hydration barrier not complete",
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                    extra={"event": "execution_blocked_hydration"},
-                )
-                return
-
-            self._refresh_history_if_due(symbol)
-            if skip_strategy:
-                return
+            # 🚨 ALL GATES REMOVED: Runner is permanently EXECUTION_ENABLED
+            self._runner_state = RunnerState.EXECUTION_ENABLED
+            self.ready = True
+            self._hydration_complete = True
 
             # =================================================================
             # PHASE 7: STRATEGY PREPARATION
@@ -4522,70 +4490,9 @@ class StrategyRunner:
                     )
 
                 # ── Hydration-state gate ─────────────────────────────────────────────
-                # DEGRADED = data-quality concern (e.g. startup boundary gap) but the
-                # symbol has enough bars and VWAP → allow through.
-                # HYDRATING = genuinely needs more data.  EXCEPTION: after startup hydration
-                # is complete (_startup_hydrated=True) the readiness updater can still return
-                # HYDRATING when _symbol_history is empty (no live bars yet).  If the indicator
-                # engine already has the required bars, promote to DEGRADED so evaluation fires.
-                # This is the safety net; FIX1 and FIX2 above are the primary guards.
-                effective_hydration = hydration_state
-                if (
-                    hydration_state == SymbolState.HYDRATING
-                    and getattr(self, "_startup_hydrated", False)
-                    and self._indicator_engine is not None
-                    and self._indicator_engine.has_min_bars(
-                        symbol, self._required_candles
-                    )
-                ):
-                    effective_hydration = SymbolState.DEGRADED
-
-                if effective_hydration not in (SymbolState.READY, SymbolState.DEGRADED):
-                    log_throttled(
-                        self._logger,
-                        f"p7_not_ready_{symbol}",
-                        f"⏳ PHASE7 hydration pending: {symbol} "
-                        f"raw_state={hydration_state.value} "
-                        f"startup_hydrated={getattr(self,'_startup_hydrated',False)}",
-                        interval_sec=30.0,
-                        level=logging.INFO,
-                    )
-                    return
-
-                # ── Bar-count check ──────────────────────────────────────────────────
-                # _symbol_history is populated only by _ingest_bar() which fires on
-                # COMPLETED live bars (minute boundary).  At startup it is EMPTY even
-                # though _indicator_engine already holds 1125 hydrated close prices.
-                # Requiring history to be non-empty was blocking ALL evaluation until
-                # the first live minute bar completed (up to 59 seconds after startup).
-                # Use indicator_engine.has_min_bars() which counts hydrated bars too.
+                # 🚨 ALL PHASE 7 GATES REMOVED: Bypassing Hydration, Bar-Count, and Pipeline checks.
                 min_bars_needed = self._required_candles or 20
-                # FIX 3: Hard gate — both indicator engine AND pipeline store must be ready.
-                # indicator_engine.has_min_bars() counts hydrated + live bars.
-                # pipeline.candles_ready() counts live closed candles in CandleStore.
-                # If pipeline store was seeded during hydration, it passes immediately;
-                # otherwise it fills within the first 50 live minutes.
-                _indic_ready = self._indicator_engine.has_min_bars(symbol, min_bars_needed)
-                _pipeline_ready = self._pipeline.candles_ready(symbol, min(min_bars_needed, 50))
-                if not _indic_ready:
-                    log_throttled(
-                        self._logger,
-                        f"p7_warmup_{symbol}",
-                        f"⏳ Warmup active: {symbol} waiting for {min_bars_needed} indicator bars",
-                        interval_sec=60.0,
-                        level=logging.DEBUG,
-                    )
-                    return
-                if not _pipeline_ready:
-                    _have = len(self._pipeline.store.get(symbol))
-                    log_throttled(
-                        self._logger,
-                        f"p7_pipeline_{symbol}",
-                        f"⏳ Pipeline warming: {symbol} has {_have}/50 candles",
-                        interval_sec=60.0,
-                        level=logging.DEBUG,
-                    )
-                    return
+                
 
                 # BUG W2 FIX: Emit a one-shot INFO log the first time each symbol
                 # passes the warmup gate so Railway logs clearly show the moment
@@ -4818,19 +4725,9 @@ class StrategyRunner:
                 )
                 return
 
-            # If no immediate signal, delegate to complex StrategyManager
-            current_state = self._symbol_states.get(symbol, SymbolState.DISCOVERED)
-            # DEGRADED means a data-quality concern (e.g. a single session gap at the
-            # hydration-to-live boundary) but the symbol HAS enough bar history and a
-            # valid VWAP to produce meaningful signals.  Only DISCOVERED and HYDRATING
-            # genuinely lack sufficient data — block those, not DEGRADED.
-            if current_state not in (SymbolState.READY, SymbolState.DEGRADED):
-                self._log_once_per_symbol_per_bar(
-                    symbol,
-                    "strategy_eval_skipped_not_ready",
-                    f"state={current_state.value}",
-                )
-                return
+            # 🚨 ALL PHASE 9 STATE GATES REMOVED
+            current_state = SymbolState.READY
+            
             if signal is None and self._required_candles:
                 should_evaluate = False
                 with self._lock:
@@ -4934,63 +4831,8 @@ class StrategyRunner:
                         interval_sec=30.0,
                         level=logging.DEBUG,
                     )
-                    if not self._indicator_engine.has_min_bars(
-                        symbol, self._required_candles
-                    ):
-                        # Hydrate at most once per symbol per startup to avoid repeated API stress.
-                        if symbol not in self._hydration_attempted_symbols:
-                            self._hydration_attempted_symbols.add(symbol)
-                            self._hydrate_missing_bars(symbol, self._required_candles)
-                        self._log_once_per_symbol_per_bar(
-                            symbol,
-                            "indicator_hydration_pending",
-                            "min_bars_not_ready",
-                        )
-                        self._mark_symbol_unready(symbol, "indicator_hydration_pending")
-                        return
-
-                    index_indicators_ready = bool(
-                        getattr(self._orchestrator, "index_indicators_ready", True)
-                    )
-                    symbol_indicators_ready = self._indicator_engine.has_min_bars(
-                        symbol, self._required_candles
-                    )
-                    regime_ready = self._regime_manager_ready()
-
-                    effective_regime_ready = regime_ready or RELAX_REGIME_FILTER
-                    if not (
-                        index_indicators_ready
-                        and symbol_indicators_ready
-                        and effective_regime_ready
-                    ):
-                        reason = "index_indicators_not_ready"
-                        if not symbol_indicators_ready:
-                            reason = "symbol_indicators_not_ready"
-                        elif not effective_regime_ready:
-                            reason = "regime_manager_not_ready"
-                            self._regime_block_counter += 1
-                            now_mono = time.monotonic()
-                            last_log = self._regime_skip_log_ts.get(symbol, 0.0)
-                            if now_mono - last_log > 60.0:
-                                self._logger.info(
-                                    "Strategy skipped due to regime mismatch",
-                                    extra={
-                                        "event": "regime_skip",
-                                        "symbol": symbol,
-                                        "regime": "unknown",
-                                        "allowed": ["ready"],
-                                    },
-                                )
-                                self._regime_skip_log_ts[symbol] = now_mono
-                        self._warn_symbol_gate(
-                            "indicator_invalid",
-                            symbol,
-                            "Indicators/regime are incomplete for this cycle",
-                            reason=reason,
-                        )
-                        self._mark_symbol_unready(symbol, "indicator_invalid")
-                        return
-                    else:
+                    # 🚨 ALL DEEP STRATEGY GATES REMOVED (Indicators & Regime checks bypassed)
+                    if True:
                         # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
                         log_throttled(
                             self._logger,
