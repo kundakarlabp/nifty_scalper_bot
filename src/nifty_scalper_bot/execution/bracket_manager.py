@@ -1823,13 +1823,14 @@ class BracketManager:
         
         if exit_side == "SELL":
             # SELL exit: Accept price up to 2% BELOW current
-            limit_price = round(current_ltp * (1 - max_slippage_pct / 100), 2)
+            raw_limit = current_ltp * (1 - max_slippage_pct / 100)
         else:
             # BUY exit (short cover): Accept price up to 2% ABOVE current
-            limit_price = round(current_ltp * (1 + max_slippage_pct / 100), 2)
+            raw_limit = current_ltp * (1 + max_slippage_pct / 100)
         
-        # Ensure limit price is positive
-        limit_price = max(limit_price, 0.05)
+        # 🚨 FIX: Force exchange-valid tick size (multiples of 0.05)
+        # Prevents Zerodha "Invalid Price" instant rejections
+        limit_price = _round_to_tick(max(raw_limit, 0.05), tick_size=0.05)
         
         LOGGER.warning(
             f"⚡ EXECUTING EXIT: {bracket.symbol} | {exit_side} {qty} | "
