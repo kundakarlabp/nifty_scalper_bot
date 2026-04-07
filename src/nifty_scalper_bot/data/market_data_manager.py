@@ -192,9 +192,11 @@ class MarketDataManager:
             margin_segment = "equity"
         self._margin_segment = margin_segment
 
-        self._rest_poll_enabled = False
+        ws_disabled = os.getenv("WEBSOCKET__DISABLED", "false").lower() == "true"
+        poll_src = os.getenv("DATA_READINESS_SOURCE", "").upper() == "POLL"
+        self._rest_poll_enabled = ws_disabled or poll_src or True # Force enable fallback
         self._rest_poll_interval = self._parse_float_env(
-            "MDM_POLL_INTERVAL_SECONDS", default=3.0, minimum=0.5
+            "MDM_POLL_INTERVAL_SECONDS", default=1.5, minimum=0.5
         )
         configured_poll_max = self._parse_int_env(
             "MDM_POLL_MAX_SYMBOLS", default=50, minimum=1
@@ -203,7 +205,6 @@ class MarketDataManager:
             configured_poll_max if self._rest_poll_enabled else 0
         )
         self._fallback_enabled = self._rest_poll_enabled
-        self._fallback_enabled = False
         self._rest_poll_stop = threading.Event()
         self._rest_poll_thread: threading.Thread | None = None
         self._health_monitor_stop = threading.Event()
@@ -466,6 +467,8 @@ class MarketDataManager:
         if self._main_loop is not None and self._tick_consumer_task is None:
             self._tick_consumer_task = self._main_loop.create_task(self._consume_ticks())
         self._start_health_monitor()
+        if self._rest_poll_enabled:
+            self._start_rest_poll()
 
     def stop(self) -> None:
         if not self._started:
