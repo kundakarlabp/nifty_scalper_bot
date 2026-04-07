@@ -3161,23 +3161,7 @@ class StrategyRunner:
             else "UNKNOWN"
         )
         self._logger.debug("RUNNER_RECEIVED_TICK %s", symbol)
-        if not self.ready:
-            log_throttled(
-                self._logger,
-                "runner_not_ready",
-                f"Dropping tick during warmup for {symbol}",
-                interval_sec=5.0,
-                level=logging.DEBUG,
-            )
-            return
-
-        if self._runner_state != RunnerState.EXECUTION_ENABLED:
-            self._logger.debug(
-                "Execution blocked: runner_state=%s",
-                self._runner_state,
-                extra={"event": "execution_blocked_state"},
-            )
-            return
+        
         try:
             # Offload heavy synchronous processing (and blocking broker calls) to a thread
             await asyncio.to_thread(self._on_tick_safe, tick)
@@ -4452,14 +4436,23 @@ class StrategyRunner:
             # PHASE 6: RISK CHECK (Moved to ExecutionEngine)
             # =================================================================
             if self._runner_state != RunnerState.EXECUTION_ENABLED:
-                log_throttled(
-                    self._logger,
-                    "execution_blocked",
-                    f"⛔ Execution blocked: runner_state={self._runner_state}",
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                )
-                return
+                if self._runner_state in (RunnerState.HISTORICAL_READY, RunnerState.BOOTING):
+                    valid_count = sum(1 for s in self._active_symbols if self._indicator_engine and self._indicator_engine.has_min_bars(s, self._required_candles))
+                    if valid_count >= self._required_symbol_count:
+                        self.ready = True
+                        self._runner_state = RunnerState.EXECUTION_ENABLED
+                        self._logger.info(f"🚀 AUTO-RECOVERY: Promoted to EXECUTION_ENABLED (Valid symbols: {valid_count})")
+                    else:
+                        log_throttled(
+                            self._logger,
+                            "execution_blocked",
+                            f"⛔ Execution blocked: runner_state={self._runner_state} (Ready: {valid_count}/{self._required_symbol_count})",
+                            interval_sec=30.0,
+                            level=logging.WARNING,
+                        )
+                        return
+                else:
+                    return
             if not self._hydration_complete:
                 log_throttled(
                     self._logger,
