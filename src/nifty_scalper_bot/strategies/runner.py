@@ -3298,28 +3298,12 @@ class StrategyRunner:
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
             )
-            safe_df = ensure_valid_data(
-                normalized_symbol,
-                engine,
-                fetch_historical=lambda sym: pd.DataFrame(
-                    self._hydrate_missing_bars(sym, max(self._required_candles, 50))
-                ),
-                fetch_recent_rest=lambda sym: pd.DataFrame(
-                    self._hydrate_missing_bars(sym, max(self._required_candles, 50))
-                ),
-                min_required=max(self._required_candles, 50),
-            )
-            if safe_df is None:
-                self._invalid_data_skip_counter += 1
-                self._logger.error(
-                    "data_invalid_tick_dropped",
-                    extra={
-                        "event": "data_invalid_tick_dropped",
-                        "symbol": normalized_symbol,
-                        "total_dropped": self._invalid_data_skip_counter,
-                    },
-                )
-                return
+            
+            # 🚨 FIX: Legacy ensure_valid_data() block completely removed.
+            # We no longer pause live tick processing to attempt blocking historical 
+            # backfills. Ticks will now flow directly into Phase 0/1/4 so the 
+            # OneMinuteBarBuilder can construct live candles autonomously.
+            
             with self._eval_gate_lock:
                 if normalized_symbol in self._eval_in_progress_symbols:
                     return
