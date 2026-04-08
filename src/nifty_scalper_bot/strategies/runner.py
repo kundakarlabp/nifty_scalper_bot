@@ -3115,6 +3115,7 @@ class StrategyRunner:
 
     async def _handle_tick_message(self, message: Message) -> None:
         """Process incoming TICK messages from the MessageBus."""
+        # [MODIFIED] Using defined helper correctly
         log_throttled(
             self._logger,
             "msg_bus_tick",
@@ -3125,6 +3126,7 @@ class StrategyRunner:
         if not self._running or self._trading_paused:
             return
 
+        # FIX #1: Capture the running loop for thread callbacks
         if self._main_loop is None:
             self._main_loop = asyncio.get_running_loop()
 
@@ -3136,13 +3138,17 @@ class StrategyRunner:
             (now_ts - tick_timestamp.astimezone(timezone.utc).timestamp()) * 1000.0,
         )
         
-        # CRITICAL FIX 1: Relaxed Stale Data Guard from 3000ms to 15000ms
-        # OTM options often don't tick for 3+ seconds. Don't drop good data!
-        if tick_age_ms > 15000.0:
+        # CRITICAL FIX 1: Relax stale data guard to 15 seconds.
+        # Options do not tick as fast as the spot index. 3 seconds is too tight
+        # and will cause perfectly valid entry signals to be dropped.
+        if tick_age_ms > 15000.0:  
             log_throttled(
                 self._logger,
                 "stale_reconnect_tick_drop",
-                f"Condition met: stale_reconnect_tick_drop age_ms={tick_age_ms:.1f}",
+                (
+                    "Condition met: stale_reconnect_tick_drop "
+                    f"age_ms={tick_age_ms:.1f}"
+                ),
                 interval_sec=15.0,
                 level=logging.DEBUG,
             )
@@ -3154,27 +3160,27 @@ class StrategyRunner:
             if symbol_value
             else "UNKNOWN"
         )
+        self._logger.debug("RUNNER_RECEIVED_TICK %s", symbol)
         
-        # CRITICAL FIX 2: The Concurrency Throttle
-        # Prevent ThreadPool Exhaustion by ensuring we only evaluate strategy math
-        # maximum ONCE per second, per symbol.
+        # CRITICAL FIX 2: Throttling to prevent ThreadPool Exhaustion and 90s deadlocks
         if not hasattr(self, "_last_eval_time"):
             self._last_eval_time = {}
-            
-        last_time = self._last_eval_time.get(symbol, 0.0)
         
-        # If less than 1.0 second has passed since we last ran math for this symbol, DROP the tick evaluation.
-        if now_ts - last_time < 1.0:
-            return 
+        last_eval = self._last_eval_time.get(symbol, 0.0)
+        
+        # Limit processing to 1 tick per symbol per second to unblock the event loop
+        # The DataHub still records the tick price, but we skip the heavy strategy math
+        if now_ts - last_eval < 1.0:
+            return
             
-        # Update the throttle timer
         self._last_eval_time[symbol] = now_ts
-        self._logger.debug("RUNNER_RECEIVED_TICK %s", symbol)
-
+        
         try:
-            # Now it is safe to offload. We are only spawning max 1 thread per symbol per second.
+            # Offload heavy synchronous processing (and blocking broker calls) to a thread
+            # We are now safely spawning a maximum of 1 thread per symbol, per second.
             await asyncio.to_thread(self._on_tick_safe, tick)
         except Exception as exc:
+            # Fixed variable reference: Ensure we use self._logger instead of undefined LOGGER
             self._logger.error(f"Error in async tick processing: {exc}", exc_info=True)
 
     def _strategy_worker(self) -> None:
