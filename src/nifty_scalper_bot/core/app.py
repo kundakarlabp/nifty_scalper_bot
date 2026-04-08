@@ -875,24 +875,28 @@ class TradingSessionGuard:
                 now - self._session_validated_at < self._session_max_age
             )
 
-            # [FIX] Auto-refresh stale session
+            # [FIX] Auto-refresh stale session (Throttled to prevent Event Loop block)
             if not broker_session_valid:
-                LOGGER.warning(
-                    f"⚠️ Broker session stale (Age: {now - self._session_validated_at}). Attempting auto-refresh..."
-                )
-                try:
-                    # Attempt to fetch profile to validate connectivity
-                    ctx = get_latest_bot_context()
-                    if ctx and ctx.broker_client:
-                        # Use internal broker reference if wrapped
-                        client = getattr(ctx.broker_client, "client", ctx.broker_client)
-                        if hasattr(client, "get_profile"):
-                            client.get_profile()  # Will raise if failed
-                            self.mark_session_valid()
-                            broker_session_valid = True
-                            LOGGER.info("✅ Session auto-refreshed successfully.")
-                except Exception as e:
-                    LOGGER.error(f"❌ Session auto-refresh failed: {e}")
+                _now_ts = time_module.monotonic()
+                if not hasattr(self, "_last_profile_refresh") or _now_ts - getattr(self, "_last_profile_refresh", 0.0) > 60.0:
+                    self._last_profile_refresh = _now_ts
+                    LOGGER.warning(
+                        f"⚠️ Broker session stale (Age: {now - self._session_validated_at}). Attempting auto-refresh..."
+                    )
+                    try:
+                        # Attempt to fetch profile to validate connectivity
+                        ctx = get_latest_bot_context()
+                        if ctx and ctx.broker_client:
+                            # Use internal broker reference if wrapped
+                            client = getattr(ctx.broker_client, "client", ctx.broker_client)
+                            if hasattr(client, "get_profile"):
+                                client.get_profile()  # Will raise if failed
+                                self.mark_session_valid()
+                                broker_session_valid = True
+                                LOGGER.info("✅ Session auto-refreshed successfully.")
+                    except Exception as e:
+                        LOGGER.error(f"❌ Session auto-refresh failed: {e}")
+                if not broker_session_valid:
                     reasons.append("Broker session stale")
 
         budgets_ok = True
