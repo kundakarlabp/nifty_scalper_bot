@@ -3388,8 +3388,12 @@ class StrategyRunner:
         # Only warn if stall > 90s (longer than one full bar cycle) to avoid spam.
         genuine_stall = (now - self._last_global_eval_ts) > 90.0
         if self.ready and tick_flowing and eval_stalled and genuine_stall:
-            self._logger.warning(
+            log_throttled(
+                self._logger,
+                "health_watchdog_genuine_stall",
                 "Strategy eval genuinely stalled while ticks flowing (>90s)",
+                interval_sec=120.0,
+                level=logging.WARNING,
                 extra={
                     "event": "strategy_eval_stall",
                     "stall_sec": round(now - self._last_global_eval_ts, 1),
@@ -4312,9 +4316,9 @@ class StrategyRunner:
             if not self._is_market_open(now):
                 log_throttled(
                     self._logger,
-                    f"market_closed_{symbol}",
+                    "market_closed_global",
                     "Condition met: market_closed",
-                    interval_sec=30.0,
+                    interval_sec=300.0,
                     level=logging.INFO,
                 )
                 skip_strategy = True
