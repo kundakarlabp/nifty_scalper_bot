@@ -3926,25 +3926,25 @@ class MarketDataManager:
             )
 
     def _resolve_token(self, symbol: str) -> int | None:
-    # 1. Check local cache
-    token = self._token_by_symbol.get(symbol)
-    if token:
-        return token
+        # 1. Check local cache
+        token = self._token_by_symbol.get(symbol)
+        if token:
+            return token
 
-    # 2. Robust fallback: Ask broker for this specific instrument
-    try:
-        # We strip exchange prefixes if present for the search
-        clean_symbol = symbol.split(":")[-1]
-        instruments = self._broker.get_instruments("NFO")
-        for ins in instruments:
-            if ins["tradingsymbol"] == clean_symbol:
-                t = int(ins["instrument_token"])
-                self.register_symbol(symbol, t) # Cache it
-                return t
-    except Exception as e:
-        self._logger.error(f"Failed live token resolution for {symbol}: {e}")
+        # 2. Robust fallback: Ask broker for this specific instrument
+        try:
+            # We strip exchange prefixes if present for the search
+            clean_symbol = symbol.split(":")[-1]
+            instruments = self._broker.get_instruments("NFO")
+            for ins in instruments:
+                if ins["tradingsymbol"] == clean_symbol:
+                    t = int(ins["instrument_token"])
+                    self.register_symbol(symbol, t) # Cache it
+                    return t
+        except Exception as e:
+            self._logger.error(f"Failed live token resolution for {symbol}: {e}")
     
-    return None
+        return None
 
     # ------------------------------------------------------------------
     # Helpers
