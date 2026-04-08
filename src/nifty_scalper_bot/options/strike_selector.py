@@ -386,7 +386,10 @@ class StrikeSelector:
         # Note: Assumes _contract_cache and _cache_ttl_seconds are defined in __init__
 
         # --- START CRITICAL FIX: CACHE CHECK (Latency Optimization) ---
-        cache_key = f"{underlying}_{option_type}_{self._selector_settings.expiry}"
+        step = int(getattr(self._selector_settings, "strike_step", 50) or 50)
+        cache_price = round(underlying_price / step) * step 
+        
+        cache_key = f"{underlying}_{option_type}_{cache_price}_{self._selector_settings.expiry}"
         current_time = self._clock().timestamp()
 
         if cache_key in self._contract_cache:
