@@ -424,14 +424,17 @@ class InstrumentResolver:
         # negative cache miss
         with self._lock:
             self._neg_cache[key] = now_ts + self._neg_ttl
-            self._warned_no_token.add(key.split(":", 1)[-1])
-        if token is None:
+            base_key = key.split(":", 1)[-1]
+            already_warned = base_key in self._warned_no_token
+            self._warned_no_token.add(base_key)
+            
+        if token is None and not already_warned:
             # Log at WARNING in both live and paper mode.
             # In live mode we previously raised RuntimeError which propagated as an
             # unhandled exception during startup symbol resolution, crashing the
             # instrument-load loop and leaving some symbols without tokens.
             # Callers already handle None return (skip or fallback) — raising here
-            # is overly destructive.  The negative cache prevents log spam.
+            # is overly destructive. The warned set prevents log spam.
             LOGGER.warning(
                 "instrument_resolver_no_token",
                 extra={
