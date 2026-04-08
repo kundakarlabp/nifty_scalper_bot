@@ -534,66 +534,43 @@ class DataHub:
             "reason": None if is_fresh else "stale",
         }
 
-    async def warmup_indicators(
-        self, symbol: str, interval: str = "minute", bars: int = 100
-    ) -> None:
-        """
-        Optimized warmup: Fetches history, primes the live cache, 
-        and pre-calculates indicators to ensure zero-lag startup.
-        """
-        self._logger.info(f"🚀 Warming up indicators for {symbol} ({bars} bars)")
-
+    async def warmup_indicators(self, symbol: str, interval: str = "minute", bars: int = 100) -> None:
+        self._logger.info(f"Starting true history warmup for {symbol}")
+        
         try:
-            # 1. Fetch historical candles from the broker
-            # We use 'bars + 20' to ensure enough data for indicators like 20-period SMA/VWAP
-            candles = await self.fetch_historical_data(
-                symbol=symbol, 
-                interval=interval, 
-                limit=bars + 20
+            # FIX: Ensure this is explicitly awaited. If this is a blocking HTTP request,
+            # it must be wrapped in asyncio.to_thread() or use an async client (aiohttp).
+            # If your client is synchronous (e.g., standard requests):
+            candles = await asyncio.to_thread(
+                self._source.get_historical_data, 
+                symbol, 
+                interval, 
+                bars + 20
             )
-
-            if not candles or len(candles) == 0:
-                self._logger.warning(f"⚠️ No historical data found for {symbol} warmup")
+            
+            if not candles:
+                self._logger.warning(f"No history returned for {symbol}. Warmup aborted.")
                 return
 
-            # 2. SEED THE LIVE CACHE (CRITICAL FIX)
-            # This prevents "mdm_unmapped_token_drop" by forcing the MDM 
-            # to acknowledge the symbol's current state before the first WS tick arrives.
+            # FIX: Prime the Live Quote Cache so the bot doesn't think data is "Stale"
             last_candle = candles[-1]
-            last_price = float(last_candle.get("close", 0.0))
+            last_close = float(last_candle.get("close", 0.0))
             
+            # Prime the quote cache
             self.store_quote(
                 symbol=symbol,
-                quote_data={
-                    "ltp": last_price,
-                    "ohlc": {
-                        "open": last_candle.get("open"),
-                        "high": last_candle.get("high"),
-                        "low": last_candle.get("low"),
-                        "close": last_price
-                    },
-                    "timestamp": last_candle.get("date") or last_candle.get("timestamp"),
-                    "source": "warmup_prime"
-                },
-                seed=True  # Internal flag to override freshness checks during startup
+                quote_data={"ltp": last_close, "timestamp": time.time(), "source": "warmup"},
+                seed=True
             )
 
-            # 3. Batch process candles into the Indicator Engine
-            # This builds the historical 'memory' for VWAP, RSI, and ATR
+            # Feed to CandleEngine
             for candle in candles:
-                await self._indicator_engine.update(symbol, candle)
-
-            # 4. Verify readiness
-            health = self._indicator_engine.get_health(symbol)
-            if health.get("ready"):
-                self._logger.info(f"✅ Warmup complete for {symbol}. Price primed at {last_price}")
-                self.indicators_ready = True
-            else:
-                self._logger.warning(f"⚠️ Indicators for {symbol} partially ready: {health}")
-
+                self._candle_engine.update(symbol, candle)
+                
+            self._logger.info(f"✅ True warmup complete for {symbol}. {len(candles)} bars loaded.")
+            
         except Exception as e:
-            self._logger.error(f"❌ Critical failure during warmup for {symbol}: {str(e)}", exc_info=True)
-            self.indicators_ready = False
+            self._logger.error(f"Warmup critically failed for {symbol}: {e}")
 
     # ----------------------------------------------------------------
     # Subscription Management
