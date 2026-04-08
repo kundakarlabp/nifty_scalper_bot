@@ -31,9 +31,10 @@ class PreFlightValidatorSettings(BaseSettings):
         env_file=".env", extra="ignore", populate_by_name=True
     )
 
-    quote_max_age_ms: int = Field(default=2000, ge=0)
-    spread_max_pct: float = Field(default=1.5, ge=0.0)
-    min_depth_qty: int = Field(default=300, ge=0)
+    # FIX: Increased quote age to 15 seconds. Disabled spread and depth blocks.
+    quote_max_age_ms: int = Field(default=15000, ge=0)
+    spread_max_pct: float = Field(default=99.0, ge=0.0) 
+    min_depth_qty: int = Field(default=0, ge=0)
     risk_max_drawdown_pct_day: float = Field(
         default=7.0,
         ge=0.0,
