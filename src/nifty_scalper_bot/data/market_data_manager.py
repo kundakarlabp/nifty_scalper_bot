@@ -3923,34 +3923,25 @@ class MarketDataManager:
             )
 
     def _resolve_token(self, symbol: str) -> int | None:
-        try:
-            if hasattr(self._broker, "get_instrument_token"):
-                instrument_token = self._broker.get_instrument_token(symbol)
-                if instrument_token is not None:
-                    token_int = int(instrument_token)
-                    with self._lock:
-                        self._token_by_symbol[symbol] = token_int
-                        self._symbol_by_token[token_int] = symbol
-                    return token_int
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "Broker get_instrument_token failed", extra={"error": str(exc)}
-            )
+    # 1. Check local cache
+    token = self._token_by_symbol.get(symbol)
+    if token:
+        return token
 
-        if self._resolver is not None:
-            resolved_token = self._resolver.resolve(symbol)
-            if resolved_token is not None:
-                with self._lock:
-                    self._token_by_symbol[symbol] = resolved_token
-                    self._symbol_by_token[resolved_token] = symbol
-                return resolved_token
-
-        self._logger.error(
-            "Failed to resolve instrument token for %s",
-            symbol,
-            extra={"symbol": symbol},
-        )
-        return None
+    # 2. Robust fallback: Ask broker for this specific instrument
+    try:
+        # We strip exchange prefixes if present for the search
+        clean_symbol = symbol.split(":")[-1]
+        instruments = self._broker.get_instruments("NFO")
+        for ins in instruments:
+            if ins["tradingsymbol"] == clean_symbol:
+                t = int(ins["instrument_token"])
+                self.register_symbol(symbol, t) # Cache it
+                return t
+    except Exception as e:
+        self._logger.error(f"Failed live token resolution for {symbol}: {e}")
+    
+    return None
 
     # ------------------------------------------------------------------
     # Helpers
