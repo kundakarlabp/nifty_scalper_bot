@@ -535,40 +535,65 @@ class DataHub:
         }
 
     async def warmup_indicators(
-        self, symbol: str, interval: str = "minute", bars: int = 50
+        self, symbol: str, interval: str = "minute", bars: int = 100
     ) -> None:
-        """Warm indicator state from broker candles. Args: symbol/interval/bars. Returns: None. Raises: None."""
+        """
+        Optimized warmup: Fetches history, primes the live cache, 
+        and pre-calculates indicators to ensure zero-lag startup.
+        """
+        self._logger.info(f"🚀 Warming up indicators for {symbol} ({bars} bars)")
+
         try:
-            broker = self.broker
-            if broker is None:
-                LOGGER.warning("indicator_warmup_skipped_no_broker", extra={"symbol": symbol})
-                return
-            getter = getattr(broker, "get_historical_candles", None)
-            if not callable(getter):
-                LOGGER.warning(
-                    "indicator_warmup_skipped_no_historical_api",
-                    extra={"symbol": symbol},
-                )
-                return
-            candles = await asyncio.to_thread(
-                getter,
-                symbol=symbol,
-                interval=interval,
-                count=bars,
+            # 1. Fetch historical candles from the broker
+            # We use 'bars + 20' to ensure enough data for indicators like 20-period SMA/VWAP
+            candles = await self.fetch_historical_data(
+                symbol=symbol, 
+                interval=interval, 
+                limit=bars + 20
             )
-            candle_rows = list(candles or [])
-            for candle in candle_rows:
-                if self.bar_aggregator and hasattr(self.bar_aggregator, "process_bar"):
-                    self.bar_aggregator.process_bar(candle)
-                try:
-                    normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
-                    self.symbol_candles[normalized_symbol].append(dict(candle))
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.error("Failure in DataHub.warmup_indicators candle ingest: %s", exc)
-            self.indicators_ready = True
-            LOGGER.info("indicator_warmup_complete", extra={"bars": len(candle_rows)})
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error("Failure in DataHub.warmup_indicators: %s", exc, exc_info=exc)
+
+            if not candles or len(candles) == 0:
+                self._logger.warning(f"⚠️ No historical data found for {symbol} warmup")
+                return
+
+            # 2. SEED THE LIVE CACHE (CRITICAL FIX)
+            # This prevents "mdm_unmapped_token_drop" by forcing the MDM 
+            # to acknowledge the symbol's current state before the first WS tick arrives.
+            last_candle = candles[-1]
+            last_price = float(last_candle.get("close", 0.0))
+            
+            self.store_quote(
+                symbol=symbol,
+                quote_data={
+                    "ltp": last_price,
+                    "ohlc": {
+                        "open": last_candle.get("open"),
+                        "high": last_candle.get("high"),
+                        "low": last_candle.get("low"),
+                        "close": last_price
+                    },
+                    "timestamp": last_candle.get("date") or last_candle.get("timestamp"),
+                    "source": "warmup_prime"
+                },
+                seed=True  # Internal flag to override freshness checks during startup
+            )
+
+            # 3. Batch process candles into the Indicator Engine
+            # This builds the historical 'memory' for VWAP, RSI, and ATR
+            for candle in candles:
+                await self._indicator_engine.update(symbol, candle)
+
+            # 4. Verify readiness
+            health = self._indicator_engine.get_health(symbol)
+            if health.get("ready"):
+                self._logger.info(f"✅ Warmup complete for {symbol}. Price primed at {last_price}")
+                self.indicators_ready = True
+            else:
+                self._logger.warning(f"⚠️ Indicators for {symbol} partially ready: {health}")
+
+        except Exception as e:
+            self._logger.error(f"❌ Critical failure during warmup for {symbol}: {str(e)}", exc_info=True)
+            self.indicators_ready = False
 
     # ----------------------------------------------------------------
     # Subscription Management
