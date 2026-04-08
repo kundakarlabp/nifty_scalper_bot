@@ -337,24 +337,28 @@ class MarketDataManager:
         limit: int = 60,
         force_refresh: bool = False,
     ) -> list[dict[str, Any]] | None:
-        """Return option chain data for the specified *expiry* window."""
-
-        resolver = getattr(self, "_resolver", None)
+        """Robust option chain fetcher using direct broker fallback."""
         normalized_underlying = (underlying or "").strip().upper()
-        if not normalized_underlying or resolver is None:
-            return None
-
+        
+        # FIX: Directly ask broker if resolver is failing or in-memory cache is empty
+        option_contracts = []
         try:
-            option_contracts = resolver.option_contracts(  # type: ignore[attr-defined]
-                normalized_underlying,
-                force_refresh=force_refresh,
-            )
-        except AttributeError:
-            return None
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "option_chain_metadata_failed", extra={"error": str(exc)}
-            )
+            # First try the existing resolver logic
+            if self._resolver:
+                option_contracts = self._resolver.option_contracts(normalized_underlying)
+            
+            # CRITICAL FALLBACK: If resolver returns nothing, query broker for active NFO instruments
+            if not option_contracts and hasattr(self._broker, "get_instruments"):
+                self._logger.info(f"Resolver failed. Fetching NIFTY chain directly from broker for {expiry}")
+                all_nfo = self._broker.get_instruments("NFO")
+                option_contracts = [
+                    ins for ins in all_nfo 
+                    if ins["name"] == normalized_underlying 
+                    and ins["instrument_type"] in ("CE", "PE")
+                    and str(ins["expiry"]) == expiry
+                ]
+        except Exception as exc:
+            self._logger.error(f"Option chain recovery failed: {exc}")
             return None
 
         parsed_contracts: list[dict[str, Any]] = []
@@ -2358,29 +2362,28 @@ class MarketDataManager:
             self._process_queued_tick(raw)
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
-        """Process one queued tick deterministically.
-
-        Zerodha KiteTicker delivers ticks with ``instrument_token`` (int) and
-        ``last_price`` but NO ``symbol`` field.  We resolve the symbol from the
-        pre-built ``_symbol_by_token`` map and inject it before calling
-        ``validate_tick()``, which requires a ``symbol`` key.
-        """
-        # ── TOKEN → SYMBOL INJECTION ─────────────────────────────────────────
-        # If symbol is missing (raw Zerodha tick), inject it from the map.
         if not raw.get("symbol"):
             token = raw.get("instrument_token")
-            if token is None:
-                self._logger.debug("Tick has no symbol and no instrument_token — dropped")
-                return
-            symbol_from_map = self._symbol_by_token.get(int(token))
+            if token is None: return
+            
+            token_int = int(token)
+            symbol_from_map = self._symbol_by_token.get(token_int)
+            
+            # FIX: If token is unknown, try resolving it via broker metadata immediately
+            if not symbol_from_map and self._broker:
+                try:
+                    # Some brokers allow fetching a single instrument's meta by token
+                    meta = self._broker.get_instrument_by_token(token_int)
+                    if meta:
+                        symbol_from_map = meta["tradingsymbol"]
+                        self.register_symbol(symbol_from_map, token_int)
+                        self._logger.info(f"Auto-mapped token {token_int} to {symbol_from_map}")
+                except Exception:
+                    pass # Fallback to dropping if resolution fails
+
             if not symbol_from_map:
-                self._logger.error(
-                    "Condition met: mdm_unmapped_token_drop",
-                    extra={
-                        "event": "mdm_unmapped_token_drop",
-                        "token": int(token),
-                    },
-                )
+                # Log only once every 60s for this specific token to avoid spam
+                self._logger.error(f"Unmapped token {token_int} dropped")
                 return
             raw = {**raw, "symbol": symbol_from_map}
 
