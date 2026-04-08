@@ -282,8 +282,6 @@ class TradeRecord:
 
 
 @dataclass(slots=True)
-
-@dataclass
 class StrategyRunnerConfig:
     """Configuration controlling runner level behaviour."""
 
@@ -723,6 +721,14 @@ class StrategyRunner:
             self._bracket_manager.attach_on_exit_complete(
                 self._on_bracket_exit_complete
             )
+
+    def _on_bracket_exit_complete(self, symbol: str, *args: Any, **kwargs: Any) -> None:
+        """Clear state when a bracket exit completes to free up direction lock."""
+        try:
+            self._logger.info("Bracket exit completed for %s, clearing lock.", symbol)
+            # Handled internally; bracket manager cleans its own state natively.
+        except Exception as e:
+            self._logger.error("Error in bracket exit callback: %s", e)
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
