@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 
 from nifty_scalper_bot.utils.logging import get_logger
-from nifty_scalper_bot.utils.smart_symbol import WEEKLY_EXPIRY_WEEKDAY
+from nifty_scalper_bot.utils.smart_symbol import WEEKLY_EXPIRY_WEEKDAY, get_actual_expiry_date
+
 
 LOGGER = get_logger(__name__)
 
@@ -87,7 +88,11 @@ class TimeBasedSizer:
             extra={"event": "time_sizer_expiry_check"},
         )
         try:
-            result = datetime.now().weekday() == WEEKLY_EXPIRY_WEEKDAY
+            today = datetime.now().date()
+            # Calculate the true holiday-adjusted expiry. 
+            # If today IS the adjusted expiry day, trigger 0DTE risk rules.
+            actual_expiry = get_actual_expiry_date(today, WEEKLY_EXPIRY_WEEKDAY)
+            result = (today == actual_expiry)
             LOGGER.debug(
                 "Condition met: expiry_day_flag",
                 extra={"event": "expiry_day_flag", "value": result},
