@@ -108,30 +108,62 @@ def resolve_symbol_from_master(candidates: List[str], instrument_map: Dict[str, 
 def get_next_valid_symbols(strikes: List[int], opt_types=("CE", "PE"), instrument_map: Dict[str, dict] = None) -> List[dict]:
     """
     Primary convenience function used by runner: return list of instrument metadata
-    for the NEXT weekly expiry matching the requested strikes & option types.
-
-    - strikes: list of strike integers (e.g., [24000, 24100])
-    - opt_types: tuple/list of "CE"/"PE"
-    - instrument_map: the instrument master mapping loaded by the resolver/datahub; it's okay if None
+    for the NEXT available expiry matching the requested strikes & option types.
+    (Dynamically scans available options instead of guessing dates).
     """
+    if not instrument_map:
+        return []
+        
     today = now_ist().date()
-    expiry = next_weekday(today, WEEKLY_EXPIRY_WEEKDAY)
-    month_map = infer_month_code_from_master(instrument_map or {})
+    
+    # 1. Gather all valid future NIFTY options matching our strikes & types
+    available_options = []
+    for key, inst in instrument_map.items():
+        ts = str(inst.get("tradingsymbol", "")).upper()
+        if not ts.startswith(UNDERLYING): continue
+        if not any(ts.endswith(ot) for ot in opt_types): continue
+        
+        # Safely parse and match strike
+        strike_val = inst.get("strike")
+        if strike_val is None: continue
+        try:
+            if int(float(strike_val)) not in strikes: continue
+        except (ValueError, TypeError):
+            continue
+            
+        # Safely parse expiry date
+        exp_str = inst.get("expiry")
+        if not exp_str: continue
+        try:
+            # Handle standard YYYY-MM-DD formats from broker dumps
+            raw_date = str(exp_str).split("T")[0][:10]
+            exp_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except Exception:
+            continue
+            
+        # Keep if the expiry is today or in the future
+        if exp_date >= today:
+            available_options.append((exp_date, inst))
+            
+    if not available_options:
+        logger.debug(f"No available {UNDERLYING} options found for strikes {strikes} >= {today}")
+        return []
+        
+    # 2. Sort by date and find the absolute closest expiry
+    available_options.sort(key=lambda x: x[0])
+    nearest_expiry_date = available_options[0][0]
+    
+    # 3. Return only the unique options that match this nearest date
     valid = []
-    for strike in strikes:
-        for ot in (opt_types or ("CE", "PE")):
-            cands = generate_candidate_symbols(expiry, strike, ot, month_map)
-            inst = resolve_symbol_from_master(cands, instrument_map or {})
-            if inst:
+    seen_tokens = set() # Prevents duplicates if map has NFO:SYMBOL and SYMBOL keys
+    
+    for exp_date, inst in available_options:
+        if exp_date == nearest_expiry_date:
+            token = inst.get("instrument_token")
+            if token not in seen_tokens:
                 valid.append(inst)
-            else:
-                logger.debug(
-                    "No instrument match for expiry=%s strike=%s opt=%s candidates=%s",
-                    expiry,
-                    strike,
-                    ot,
-                    cands,
-                )
+                seen_tokens.add(token)
+                
     return valid
 
 
