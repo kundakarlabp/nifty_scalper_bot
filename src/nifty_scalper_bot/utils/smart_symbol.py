@@ -11,16 +11,37 @@ WEEKLY_EXPIRY_WEEKDAY = 1  # Tuesday (0=Mon)
 
 IST = ZoneInfo("Asia/Kolkata")
 
+# Add NSE market holidays (Update yearly)
+NSE_HOLIDAYS = {
+    date(2026, 1, 26),   # Republic Day
+    date(2026, 3, 20),   # Id-ul-Fitr 
+    date(2026, 4, 14),   # Dr. Baba Saheb Ambedkar Jayanti (TUESDAY HOLIDAY)
+    date(2026, 5, 1),    # Maharashtra Day
+    date(2026, 10, 2),   # Gandhi Jayanti
+    date(2026, 12, 25),  # Christmas
+}
 
 def now_ist() -> datetime:
     return datetime.now(IST)
 
-
-def next_weekday(start_date: date, target_weekday: int) -> date:
+def get_actual_expiry_date(start_date: date, target_weekday: int) -> date:
+    """Calculates expiry date, shifting backwards if it falls on a holiday or weekend."""
     days_ahead = target_weekday - start_date.weekday()
     if days_ahead < 0:
         days_ahead += 7
-    return start_date + timedelta(days=days_ahead)
+    expiry = start_date + timedelta(days=days_ahead)
+    
+    # Shift to previous trading day if the planned expiry is a holiday or weekend
+    while expiry in NSE_HOLIDAYS or expiry.weekday() >= 5:
+        expiry -= timedelta(days=1)
+        
+    return expiry
+
+def next_weekday(start_date: date, target_weekday: int) -> date:
+    # Overriding the original function to use the holiday-adjusted date
+    # so all downstream symbol generation functions automatically get the right day.
+    return get_actual_expiry_date(start_date, target_weekday)
+
 
 
 def infer_month_code_from_master(instrument_map: Dict[str, dict]) -> Dict[int, str]:
