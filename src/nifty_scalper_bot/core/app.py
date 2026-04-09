@@ -1450,7 +1450,7 @@ class BotContext:
     streamer: Any
     stream_supervisor: StreamSupervisor | None
     message_bus: MessageBus
-    order_processor: OrderProcessor | None = None
+    order_processor: None
     data_hub: DataHub | None = None
     market_data_manager: MarketDataManager | None = None
     market_regime: MarketRegimeDetector | None = None
@@ -1461,11 +1461,11 @@ class BotContext:
     persistent_state: PersistentStateManager | None = None
     order_manager: OrderManager | None = None
     trade_journal: TradeJournal | None = None
-    order_execution_hub: ExecutionEngine | None = None
+    order_execution_hub: None
     bracket_manager: Any | None = None
     paper_engine: PaperFillEngine | None = None
     safe_order_manager: SafeOrderManager | None = None
-    order_queue: OrderQueue | None = None
+    order_queue: None
     state_tracker: StateTracker | None = None
     preflight_validator: PreFlightValidator | None = None
     lifecycle_manager: LifecycleManager | None = None
@@ -4102,7 +4102,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             liquidity_settings=settings.liquidity,
         )
 
-    order_queue = OrderQueue()
+    order_queue = None
 
     state_tracker = StateTracker()
     lifecycle_tracker_adapter = _LifecycleTrackerAdapter(state_tracker)
@@ -4115,7 +4115,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     lifecycle_manager = LifecycleManager(
         data_hub=data_hub,
-        order_queue=order_queue,
+        order_queue=none,
         state_tracker=lifecycle_tracker_adapter,
     )
     execution_mode_env = (
@@ -4128,12 +4128,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             coalesce_float("SHADOW_DRIFT_THRESHOLD_BPS", default=20.0)
         ),
     )
-    execution_router = ExecutionRouter(
-        live_executor=safe_order_manager,
-        paper_executor=paper_engine,
-        mode=execution_mode_env,
-        settings=router_settings,
-    )
+    execution_router = None
     reconciliation_interval = coalesce_int("RECONCILIATION_INTERVAL_SEC", default=30)
     reconciliation_alert = coalesce_bool(
         "RECONCILIATION_ALERT_ON_MISMATCH", default=True
@@ -4148,20 +4143,14 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         state_tracker=state_tracker,
         preflight_validator=preflight_validator,
         lifecycle_manager=lifecycle_manager,
-        order_queue=order_queue,
-        execution_router=execution_router,
+        order_queue=none,
+        execution_router=None,
         post_fill_monitor=post_fill_monitor,
         data_hub=data_hub,
         regime_manager=market_regime_manager,
         risk_manager=risk_manager,
     )
-    order_processor = OrderProcessor(
-        message_bus=message_bus,
-        safe_order_manager=safe_order_manager,
-        risk_manager=risk_manager,
-        position_manager=position_manager,
-        data_hub=data_hub,
-    )
+    order_processor = None
 
     strategy_runner = StrategyRunner(
         market_data_manager=market_data_manager,
@@ -4520,7 +4509,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         bracket_manager=bracket_manager,
         paper_engine=paper_engine,
         safe_order_manager=safe_order_manager,
-        order_queue=order_queue,
+        order_queue=none,
         state_tracker=state_tracker,
         preflight_validator=preflight_validator,
         lifecycle_manager=lifecycle_manager,
@@ -4531,7 +4520,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         strategy_runner=strategy_runner,
         unified_manager=unified_manager,
         order_processor=order_processor,
-        order_execution_hub=execution_engine,
+        order_execution_hub=none,
         instrument_resolver=instrument_resolver,
         instrument_db=instrument_conn,
         instrument_universe=instrument_state,
