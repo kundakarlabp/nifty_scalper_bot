@@ -4148,7 +4148,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ctx_obj = ctx_ref.get("ctx")
         if ctx_obj is not None:
             ctx_obj.shadow_mode_enabled = next_state
-        target_mode = "PAPER" if next_state else execution_mode_env
+        target_mode = "PAPER" if next_state else ("LIVE" if ctx.settings.enable_live else "PAPER")
         return paper_state["enabled"]
 
     def _paper_mode_enabled() -> bool:
