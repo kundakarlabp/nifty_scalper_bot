@@ -540,7 +540,7 @@ class StrategyRunner:
         self._execution_totals: Dict[str, Dict[str, int]] = defaultdict(
             lambda: {"success": 0, "error": 0}
         )
-
+        self._trade_counter_by_symbol_candle: Dict[str, dict] = {}
         self._settings = get_settings()
         try:
             settings = self._settings
