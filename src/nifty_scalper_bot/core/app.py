@@ -3086,7 +3086,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             pass
 
     # 2. The Corrected & Optimized Tick Handler (Bulletproof Normalization)
-        def _on_poll_tick(tick: dict[str, Any]) -> None:
+    def _on_poll_tick(tick: dict[str, Any]) -> None:
             """ 
             Handle incoming poll tick with Zero-Allocation Fast Paths & Robust Recovery. 
             Optimized for low-latency execution.
