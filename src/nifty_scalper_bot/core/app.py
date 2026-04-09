@@ -3093,88 +3093,34 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         except Exception:
             # Failsafe: Never crash the trading bot just because logging failed
             pass
-
-    # 2. The Corrected & Optimized Tick Handler (Bulletproof Normalization)
-    def _on_poll_tick(tick: dict[str, Any]) -> None:
-            """ 
-            Handle incoming poll tick with Zero-Allocation Fast Paths & Robust Recovery. 
-            Optimized for low-latency execution.
-            """
-            # 1. Fast-fail: type() is slightly faster than isinstance() for exact dict matches
-            if not tick or type(tick) is not dict:
-                return
-
-            # 2. Extract mandatory keys first to avoid processing junk data
-            token = tick.get("instrument_token")
-            if not token:
-                return 
-
-            # 3. FIX: Use local `instrument_resolver` (No 'ctx' lookup overhead)
-            symbol = instrument_resolver.get_symbol(token, default="unknown")
-
-            # 4. Optimization: Prevent string interpolation overhead if DEBUG is off
-            if LOGGER.isEnabledFor(logging.DEBUG):
-                LOGGER.debug(
-                    "tick_received token=%s ltp=%s src=%s",
-                    token,
-                    tick.get("last_price"),
-                    tick.get("source", "polling")
-                )
-
-            # 5. Fast shallow copy (tick.copy() is faster than dict(tick))
-            t = tick.copy()
             
-            # Direct assignment is faster than setdefault()
-            t["source"] = "polling"
-            t["symbol"] = symbol
-
-            # 6. Bulletproof Depth Normalization (VWAP)
-            # Handle 0.0, None, and strings gracefully without crashing
-            if "average_price" in t:
-                avg_price = t["average_price"]
-                try:
-                    t["vwap"] = float(avg_price) if avg_price else 0.0
-                except (ValueError, TypeError):
-                    t["vwap"] = 0.0
-
-            # 7. Thread-safe enqueue
-            if market_data_manager is not None:
-                try:
-                    market_data_manager._enqueue_tick_threadsafe(t)
-                except Exception as exc:
-                    # Prevent a single bad queue insertion from killing the poller thread
-                    LOGGER.error("Tick enqueue failed for token %s: %s", token, exc)
-
-
         # ------------------------------------------------------------------
         # Streamer Selection Logic (Polling vs WebSocket)
         # ------------------------------------------------------------------
-        def _on_poll_tick(tick: dict[str, Any]) -> None:
-            if not tick or type(tick) is not dict: return
-            token = tick.get("instrument_token")
-            if not token: return
+
+    
+    def _on_poll_tick(tick: dict[str, Any]) -> None:
+        if not tick or type(tick) is not dict: return
+        token = tick.get("instrument_token")
+        if not token: return
             
-            symbol = instrument_resolver.get_symbol(token, default="unknown")
-            t = tick.copy()
-            t["source"] = "stream"
-            t["symbol"] = symbol
+        symbol = instrument_resolver.get_symbol(token, default="unknown")
+        t = tick.copy()
+        t["source"] = "stream"
+        t["symbol"] = symbol
 
-            if "average_price" in t:
-                avg_price = t["average_price"]
-                try:
-                    t["vwap"] = float(avg_price) if avg_price else 0.0
-                except (ValueError, TypeError):
-                    t["vwap"] = 0.0
+        if "average_price" in t:
+            avg_price = t["average_price"]
+            try:
+                t["vwap"] = float(avg_price) if avg_price else 0.0
+            except (ValueError, TypeError):
+                t["vwap"] = 0.0
 
-            if market_data_manager is not None:
-                try:
-                    market_data_manager._enqueue_tick_threadsafe(t)
-                except Exception as exc:
-                    LOGGER.error("Tick enqueue failed: %s", exc)
-
-        use_websockets = not use_polling
-        if use_websockets:
-            LOGGER.info("Initializing WebSocket Streamer...")       
+        if market_data_manager is not None:
+            try:
+                market_data_manager._enqueue_tick_threadsafe(t)
+            except Exception as exc:
+                LOGGER.error("Tick enqueue failed: %s", exc)      
                     
     use_websockets = not use_polling
     if use_websockets:
