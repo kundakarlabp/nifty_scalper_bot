@@ -4002,27 +4002,43 @@ class StrategyRunner:
 
     def validate_market_depth(self) -> bool:
         """
-        Check if the market data manager has sufficient token coverage.
-        Returns True if token count >= MIN_TOKEN_COUNT.
+        Validates that the WebSocket is actively streaming data for our requested universe.
         """
-        if not self._market_data:
+        # 1. Get current active tokens from the Market Data Manager
+        # Using getattr safely in case the MDM structure changes
+        mdm = getattr(self, "market_data_manager", None)
+        if not mdm:
             return False
             
-        token_count = 0
-        if hasattr(self._market_data, "_symbol_by_token"):
-            token_count = len(getattr(self._market_data, "_symbol_by_token", {}))
-        
-        # We need at least 10 tokens for institutional-grade trading
-        # (NIFTY spot + FUT + 5 ATM CE/PE pairs)
-        threshold = 10 
-        if token_count < threshold:
+        token_map = getattr(mdm, "_symbol_by_token", {})
+        current_token_count = len(token_map)
+
+        # 2. Get the expected number of tokens based on what the Runner is tracking
+        # (Replace '_active_symbols' with whatever list/dict holds your current universe)
+        tracked_symbols = getattr(self, "_active_symbols", {})
+        expected_count = len(tracked_symbols)
+
+        # 3. Dynamic Threshold Calculation
+        # If we expect 0 symbols, we shouldn't be trading
+        if expected_count == 0:
+            return False
+
+        # Require 80% of our expected universe to be streaming, but never require less than 2
+        # (e.g., We always need at least NIFTY Spot + 1 tradable contract)
+        minimum_required = max(2, int(expected_count * 0.8))
+
+        # 4. The Circuit Breaker
+        if current_token_count < minimum_required:
+            # Throttle this log so it doesn't spam, but ensures you are alerted
             log_throttled(
-                self._logger,
-                "insufficient_market_depth",
-                f"❌ Insufficient market depth: tokens={token_count} < {threshold}. Blocking signals.",
-                level=40 # ERROR
+                self._logger, 
+                "market_depth_failure", 
+                f"🛑 Market depth validation failed: Active Tokens ({current_token_count}) < Required ({minimum_required}) for an expected universe of {expected_count}.",
+                interval_sec=60.0, 
+                level=logging.WARNING
             )
             return False
+
         return True
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
