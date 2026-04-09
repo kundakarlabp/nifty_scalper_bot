@@ -16,11 +16,7 @@ from nifty_scalper_bot.data.option_chain import _round_to_tick
 import yaml  # type: ignore[import]
 
 from nifty_scalper_bot.execution.metrics import LIFECYCLE_EXITS
-from nifty_scalper_bot.execution.order_queue import (
-    OrderIntent,
-    OrderQueue,
-    OrderRequest,
-)
+
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -263,7 +259,6 @@ class LifecycleManager:
         self,
         *,
         data_hub: Any | None,
-        order_queue: OrderQueue,
         state_tracker: StateTrackerProtocol | None = None,
         config_path: Path | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -272,7 +267,6 @@ class LifecycleManager:
 
         Args:
             data_hub: Data hub instance for market access.
-            order_queue: Shared queue used for exit and adjustment orders.
             state_tracker: Optional state tracker for persistence.
             config_path: Optional path to strategy configuration.
             clock: Optional callable returning current UTC time.
@@ -289,7 +283,6 @@ class LifecycleManager:
             extra={"event": "lifecycle_manager_init"},
         )
         self._data_hub = data_hub
-        self._order_queue = order_queue
         self._state_tracker = state_tracker
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._config = _resolve_lifecycle_config(
@@ -794,7 +787,6 @@ class LifecycleManager:
                 parent_id=None,
                 source="LifecycleManager",
             )
-            self._order_queue.submit_order_request(request)
             position.tp1_taken = True
             position.quantity = max(position.quantity - partial_qty, 0)
             position.sl = position.entry_price
@@ -851,7 +843,6 @@ class LifecycleManager:
                 parent_id=None,
                 source="LifecycleManager",
             )
-            self._order_queue.submit_order_request(request)
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "Failure in LifecycleManager.exit_at_market: %s",
