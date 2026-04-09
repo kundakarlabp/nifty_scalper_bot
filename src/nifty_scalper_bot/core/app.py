@@ -879,12 +879,21 @@ class TradingSessionGuard:
                         f"⚠️ Broker session stale (Age: {now - self._session_validated_at}). Attempting auto-refresh..."
                     )
                     try:
-                        # Attempt to fetch profile to validate connectivity
+                        # [FIX] Safely locate the broker client through the MDM or OrderManager
                         ctx = get_latest_bot_context()
-                        if ctx and ctx.broker_client:
-                            # Use internal broker reference if wrapped
-                            client = getattr(ctx.broker_client, "client", ctx.broker_client)
-                            if hasattr(client, "get_profile"):
+                        if ctx:
+                            # Try to extract the raw broker client from known context locations
+                            raw_client = None
+                            if hasattr(ctx, "market_data_manager") and ctx.market_data_manager:
+                                raw_client = getattr(ctx.market_data_manager, "_provider", None)
+                            elif hasattr(ctx, "order_manager") and ctx.order_manager:
+                                raw_client = getattr(ctx.order_manager, "_broker", None)
+
+                            # Unwrap if it's a RobustDataProvider or similar wrapper
+                            client = getattr(raw_client, "client", raw_client)
+                            
+                            # Validate and execute
+                            if client and hasattr(client, "get_profile"):
                                 client.get_profile()  # Will raise if failed
                                 self.mark_session_valid()
                                 broker_session_valid = True
@@ -7104,11 +7113,16 @@ async def _run_atr_feed_task(ctx: BotContext) -> None:
     LOGGER.info("🚀 Starting ATR Feed to BracketManager...")
     while True:
         try:
-            if ctx.bracket_manager and ctx.indicator_engine:
+            # [FIX] Safely route through the runner to access the indicator engine
+            runner = getattr(ctx, "runner", getattr(ctx, "strategy_runner", None))
+            if ctx.bracket_manager and runner and hasattr(runner, "_indicator_engine"):
                 # Access protected member safely for internal core logic
                 active_symbols = list(ctx.bracket_manager._symbol_map.keys())
                 for symbol in active_symbols:
-                    atr = ctx.indicator_engine.compute_atr(symbol, period=14)
+                    # Safely fetch ATR using the runner's engine
+                    atr = runner._indicator_engine.compute_atr(symbol, period=14)
+                    if atr and atr > 0:
+                        ctx.bracket_manager.update_market_stats(symbol, atr=atr)
                     if atr and atr > 0:
                         ctx.bracket_manager.update_market_stats(symbol, atr=atr)
             await asyncio.sleep(30)
