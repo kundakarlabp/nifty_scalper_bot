@@ -14,6 +14,7 @@ from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
+from nifty_scalper_bot.execution.execution_engine import ExecutionEngine
 from importlib import import_module
 import inspect
 import logging
