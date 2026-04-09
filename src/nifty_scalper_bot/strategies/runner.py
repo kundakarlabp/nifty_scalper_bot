@@ -4688,10 +4688,11 @@ class StrategyRunner:
                 level=logging.DEBUG,
             )
 
+            self._last_global_eval_ts = time.monotonic()
             signal = generated_signal
             current_version = int(self._candle_versions.get(symbol, 0))
             last_version = int(self._last_strategy_versions.get(symbol, 0))
-            self._last_global_eval_ts = time.monotonic()
+            
             if current_version <= last_version:
                 return
             upper_symbol = symbol.upper()
