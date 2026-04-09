@@ -3139,6 +3139,31 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # ------------------------------------------------------------------
     # Streamer Selection Logic (Polling vs WebSocket)
     # ------------------------------------------------------------------
+    # 🚨 ROBUST FIX: Define the handler unconditionally right before it's needed
+        # This guarantees the WebSocket manager can find it, avoiding NameErrors.
+        def _on_poll_tick(tick: dict[str, Any]) -> None:
+            if not tick or type(tick) is not dict: return
+            token = tick.get("instrument_token")
+            if not token: return
+            
+            symbol = instrument_resolver.get_symbol(token, default="unknown")
+            t = tick.copy()
+            t["source"] = "stream"
+            t["symbol"] = symbol
+
+            if "average_price" in t:
+                avg_price = t["average_price"]
+                try:
+                    t["vwap"] = float(avg_price) if avg_price else 0.0
+                except (ValueError, TypeError):
+                    t["vwap"] = 0.0
+
+            if market_data_manager is not None:
+                try:
+                    market_data_manager._enqueue_tick_threadsafe(t)
+                except Exception as exc:
+                    LOGGER.error("Tick enqueue failed: %s", exc)
+                    
     use_websockets = not use_polling
     if use_websockets:
         LOGGER.info("Initializing WebSocket Streamer...")
