@@ -571,6 +571,8 @@ class StrategyRunner:
             )
 
         self._lock = threading.RLock()
+        self._eval_lock = threading.Lock()
+        self._trade_counter_lock = threading.Lock()
         self._running = False
         self._trading_paused = False
         self.ready = False
