@@ -18,6 +18,7 @@ from typing import (
     cast,
 )
 
+from nifty_scalper_bot.options.resolver import OptionResolver
 from nifty_scalper_bot.utils.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checking only
@@ -354,6 +355,7 @@ class StrikeSelector:
         self._active: MutableMapping[str, SelectedContract] = {}
         self._contract_cache = {}  # {symbol: (timestamp, contract_details)}
         self._cache_ttl_seconds = 1
+        self._deterministic_resolver: OptionResolver | None = None
 
     @property
     def settings(self) -> "SelectorSettings":
@@ -371,6 +373,46 @@ class StrikeSelector:
         )
         # Removed the cast() calls that triggered the NameError
         return mdm, resolver
+
+    def _get_broker_client(self) -> Any | None:
+        """Resolve broker client from data hub context. Args: none. Returns: broker|None. Raises: none."""
+
+        broker = getattr(self._data_hub, "broker", None)
+        if broker is not None:
+            return broker
+        mdm = getattr(self._data_hub, "market_data_manager", None) or getattr(
+            self._data_hub, "_mdm", None
+        )
+        return getattr(mdm, "broker", None) if mdm is not None else None
+
+    def _resolve_deterministic_contract(
+        self,
+        *,
+        option_type: str,
+        underlying_price: float,
+    ) -> SelectedContract | None:
+        """Resolve ATM contract from broker instrument dump. Args: option_type/underlying_price. Returns: contract|None. Raises: none."""
+
+        broker = self._get_broker_client()
+        if broker is None:
+            return None
+        if self._deterministic_resolver is None:
+            self._deterministic_resolver = OptionResolver(broker)
+        try:
+            pair = self._deterministic_resolver.resolve_atm_pair(underlying_price)
+        except Exception as e:
+            LOGGER.exception("Failure in deterministic option resolver: %s", e)
+            return None
+        instrument = pair.ce if option_type == "CE" else pair.pe
+        return SelectedContract(
+            symbol=f"NFO:{instrument.tradingsymbol}",
+            option_type=instrument.option_type,
+            strike=float(instrument.strike),
+            expiry=datetime.combine(instrument.expiry, datetime.min.time(), tzinfo=timezone.utc),
+            ltp=0.0,
+            delta=None,
+            metadata={"instrument_token": int(instrument.instrument_token)},
+        )
 
     def select_contract(
         self,
@@ -432,6 +474,13 @@ class StrikeSelector:
         if requested_option_type is None:
             LOGGER.info("Condition met: selector_missing_option_type")
             return None
+
+        deterministic = self._resolve_deterministic_contract(
+            option_type=requested_option_type,
+            underlying_price=underlying_price,
+        )
+        if deterministic is not None:
+            return deterministic
 
         # --- TRACE 1: FETCH CHAIN ---
         LOGGER.info(f"🟡 Fetching option chain for {normalized}...")

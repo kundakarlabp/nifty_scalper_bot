@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from datetime import datetime, timezone
+from typing import Any, Callable, Mapping, Sequence
+
+import time
 
 import pandas as pd
 
@@ -108,3 +111,72 @@ class HistoricalLiveOHLCProvider:
                 raise DataIntegrityError("Invalid timestamps after live candle merge")
 
         return cleaned
+
+
+class MarketDataSource:
+    """Read LTP/OHLC with WS-first, polling fallback hierarchy."""
+
+    def __init__(self, kite: Any, market_state: Any) -> None:
+        """Initialize source with kite + market state. Args: kite/market_state. Returns: none. Raises: none."""
+
+        self._kite = kite
+        self._state = market_state
+
+    def get_ltp_poll(self, tokens: Sequence[int]) -> dict[int, float]:
+        """Fetch LTP by polling API. Args: tokens. Returns: token->price. Raises: none."""
+
+        if not tokens:
+            return {}
+        query = [f'NFO:{int(token)}' for token in tokens]
+        try:
+            payload = self._kite.ltp(query)
+        except Exception as e:
+            raise DataIntegrityError(f'Polling LTP failed: {e}') from e
+        parsed: dict[int, float] = {}
+        for token in tokens:
+            key = f'NFO:{int(token)}'
+            entry = payload.get(key) if isinstance(payload, Mapping) else None
+            if not isinstance(entry, Mapping):
+                continue
+            ltp = entry.get('last_price')
+            if ltp is None:
+                continue
+            parsed[int(token)] = float(ltp)
+        return parsed
+
+    def get_ltp(self, tokens: Sequence[int], *, stale_after_seconds: int = 5) -> dict[int, float]:
+        """Get token LTPs using WS first and polling fallback. Args: tokens/stale_after_seconds. Returns: token->price. Raises: none."""
+
+        snapshot = self._state.get_snapshot()
+        now = time.time()
+        ws_fresh = snapshot.last_ws_update is not None and (now - snapshot.last_ws_update) <= float(stale_after_seconds)
+        resolved = {int(token): float(snapshot.option_ltps[int(token)]) for token in tokens if int(token) in snapshot.option_ltps}
+        if ws_fresh and len(resolved) == len(tokens):
+            return resolved
+        polled = self.get_ltp_poll(tokens)
+        for token, price in polled.items():
+            self._state.update_tick(token, price, source='poll')
+        merged = dict(resolved)
+        merged.update(polled)
+        return merged
+
+    def get_ohlc(self, token: int, interval: str, ttl: int = 60) -> list[dict[str, Any]]:
+        """Get token OHLC with TTL cache. Args: token/interval/ttl. Returns: rows. Raises: DataIntegrityError."""
+
+        cached = self._state.get_ohlc_cache(token, interval, ttl=ttl)
+        if cached is not None:
+            return cached
+        try:
+            rows = self._kite.historical_data(
+                int(token),
+                datetime.now(timezone.utc).replace(hour=3, minute=45, second=0, microsecond=0),
+                datetime.now(timezone.utc),
+                interval,
+            )
+        except Exception as e:
+            raise DataIntegrityError(f'OHLC fetch failed for token {token}: {e}') from e
+        if len(rows) < 30:
+            raise DataIntegrityError(f'Insufficient OHLC candles for token {token}: {len(rows)}')
+        normalized = [dict(row) for row in rows]
+        self._state.set_ohlc_cache(int(token), interval, normalized)
+        return normalized
