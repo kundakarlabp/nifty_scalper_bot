@@ -97,7 +97,6 @@ from nifty_scalper_bot.execution.execution_router import (
 )
 from nifty_scalper_bot.execution.lifecycle_manager import LifecycleManager
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
-from nifty_scalper_bot.execution.order_queue import OrderQueue
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.execution.position_manager import ActiveContract, PositionManager
 from nifty_scalper_bot.execution.post_fill_monitor import PostFillMonitor
@@ -1461,7 +1460,6 @@ class BotContext:
     bracket_manager: Any | None = None
     paper_engine: PaperFillEngine | None = None
     safe_order_manager: SafeOrderManager | None = None
-    order_queue: None
     state_tracker: StateTracker | None = None
     preflight_validator: PreFlightValidator | None = None
     lifecycle_manager: LifecycleManager | None = None
@@ -4098,8 +4096,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             liquidity_settings=settings.liquidity,
         )
 
-    order_queue = None
-
     state_tracker = StateTracker()
     lifecycle_tracker_adapter = _LifecycleTrackerAdapter(state_tracker)
 
@@ -4111,7 +4107,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     lifecycle_manager = LifecycleManager(
         data_hub=data_hub,
-        order_queue=none,
         state_tracker=lifecycle_tracker_adapter,
     )
     execution_mode_env = (
@@ -4139,7 +4134,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         state_tracker=state_tracker,
         preflight_validator=preflight_validator,
         lifecycle_manager=lifecycle_manager,
-        order_queue=none,
         execution_router=None,
         post_fill_monitor=post_fill_monitor,
         data_hub=data_hub,
@@ -4505,7 +4499,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         bracket_manager=bracket_manager,
         paper_engine=paper_engine,
         safe_order_manager=safe_order_manager,
-        order_queue=none,
         state_tracker=state_tracker,
         preflight_validator=preflight_validator,
         lifecycle_manager=lifecycle_manager,
@@ -5198,7 +5191,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         journal=None,
                         metrics=None,
                         market_regime=ctx.market_regime,
-                        order_queue=ctx.order_queue,
                         state_tracker=ctx.state_tracker,
                         preflight_validator=ctx.preflight_validator,
                         version_info=version_info,
