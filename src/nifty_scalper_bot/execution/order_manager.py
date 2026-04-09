@@ -36,7 +36,6 @@ from nifty_scalper_bot.data.persistent_state import (
     BracketDict,
     PersistentStateManager,
 )
-from nifty_scalper_bot.data.trade_store import TradeIntent, TradeStore
 from nifty_scalper_bot.execution import exceptions as execution_exceptions
 from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController
 from nifty_scalper_bot.execution.broker_rejects import BrokerReject
@@ -88,6 +87,7 @@ OrderModificationError = execution_exceptions.OrderModificationError
 RiskBlockError = execution_exceptions.RiskBlockError
 
 if TYPE_CHECKING:
+    from journal.trade_journal import TradeJournal
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
     from nifty_scalper_bot.data.rest.client import BaseBrokerClient
     from nifty_scalper_bot.execution.bracket_manager import BracketManager
@@ -604,6 +604,7 @@ class OrderManager:
         instrument_resolver: Any | None = None,
         history_path: str | Path | None = None,
         indicator_engine: Any | None = None,
+        trade_journal: "TradeJournal | None" = None,
     ):
         """Initialize with broker client and position manager."""
 
@@ -630,7 +631,9 @@ class OrderManager:
                 )
         self._positions = position_manager
         self._limiter = rate_limiter
-        self.trade_store = TradeStore()
+        self._trade_journal = trade_journal
+        self._seen_signal_ids: set[str] = set()
+        self._signal_history: deque[str] = deque(maxlen=10_000)
         if not hasattr(self, "_logger"):
             self._logger = get_logger(__name__)
         self._broker_circuit = CircuitBreaker()
@@ -737,6 +740,53 @@ class OrderManager:
 
         self._market_data = market_data_manager
         self._configure_options_policy()
+
+    def _is_duplicate_signal(self, signal_id: str) -> bool:
+        """Check in-memory signal idempotency. Args: signal_id; Returns: bool; Raises: None."""
+        with self._lock:
+            return signal_id in self._seen_signal_ids
+
+    def _remember_signal(self, signal_id: str) -> None:
+        """Record signal id to preserve idempotency. Args: signal_id; Returns: None; Raises: None."""
+        with self._lock:
+            if signal_id in self._seen_signal_ids:
+                return
+            if len(self._signal_history) >= self._signal_history.maxlen:
+                stale = self._signal_history.popleft()
+                self._seen_signal_ids.discard(stale)
+            self._signal_history.append(signal_id)
+            self._seen_signal_ids.add(signal_id)
+
+    def _log_trade_event(
+        self,
+        event_type: str,
+        *,
+        symbol: str,
+        side: str,
+        qty: int,
+        price: float,
+        order_id: str | None = None,
+        meta: Mapping[str, object] | None = None,
+    ) -> None:
+        """Queue async trade journal event. Args: event_type,symbol,side,qty,price,order_id,meta; Returns: None; Raises: None."""
+        journal = self._trade_journal
+        if journal is None:
+            return
+        try:
+            journal.log_event(
+                {
+                    "event_type": event_type,
+                    "timestamp": time.time(),
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": int(qty),
+                    "price": float(price),
+                    "order_id": order_id,
+                    "meta": dict(meta or {}),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("Failure in _log_trade_event: %s", exc)
 
     def _ensure_quote_refresh(
         self,
@@ -1702,13 +1752,6 @@ class OrderManager:
         from nifty_scalper_bot.core.trading_switch import trading_switch
         from nifty_scalper_bot.risk import OrderSignal
 
-        # Lazy load TradeStore to avoid circular imports during init
-        if not hasattr(self, "trade_store"):
-            from nifty_scalper_bot.data.trade_store import TradeStore
-
-            self.trade_store = TradeStore()
-        from nifty_scalper_bot.data.trade_store import TradeIntent
-
         normalized_symbol = normalize_symbol(symbol)
         if not is_strategy_instrument(normalized_symbol):
             raise RuntimeError("Blocked non-NIFTY instrument")
@@ -1750,10 +1793,18 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 1. IDEMPOTENCY CHECK (The Fix for Duplicate Trades)
         # ---------------------------------------------------------------------
-        if signal_id and self.trade_store.exists_by_signal(signal_id):
+        if signal_id and self._is_duplicate_signal(signal_id):
             self._logger.warning(
                 f"🛑 DUPLICATE BLOCKED: Signal {signal_id} already traded.",
                 extra={"symbol": normalized_symbol, "event": "duplicate_block"},
+            )
+            self._log_trade_event(
+                "ORDER_BLOCKED_DUPLICATE",
+                symbol=normalized_symbol,
+                side=side,
+                qty=quantity,
+                price=float(price or 0.0),
+                meta={"signal_id": signal_id},
             )
             return None
 
@@ -1877,17 +1928,20 @@ class OrderManager:
         unique_client_id = f"bot_{signal_id[-12:]}"  # Max 20 chars usually
 
         # Persist Intent to Disk
-        intent = TradeIntent(
-            trade_id=trade_id,
+        self._remember_signal(signal_id)
+        self._log_trade_event(
+            "ORDER_SUBMITTED",
             symbol=normalized_symbol,
-            signal_id=signal_id,
-            strategy=strategy_name,
             side=side,
             qty=quantity,
-            timestamp=time.time(),
-            status="SUBMITTED",
+            price=float(price or 0.0),
+            meta={
+                "trade_id": trade_id,
+                "signal_id": signal_id,
+                "strategy": strategy_name,
+                "status": "SUBMITTED",
+            },
         )
-        self.trade_store.add_trade(intent)
 
         # ---------------------------------------------------------------------
         # 6. PAYLOAD OPTIMIZATION (SL-M Fix) - CORRECTED
@@ -2082,14 +2136,15 @@ class OrderManager:
                         normalized_symbol,
                     )
 
-                    # [FIX] Non-Blocking DB Update
-                    # If this fails, we MUST NOT retry the order placement!
-                    try:
-                        self.trade_store.update_status(trade_id, "FILLED", order_id)
-                    except Exception as db_err:
-                        self._logger.error(
-                            f"⚠️ TradeStore update failed (Non-Critical): {db_err}"
-                        )
+                    self._log_trade_event(
+                        "ORDER_FILLED",
+                        symbol=normalized_symbol,
+                        side=side,
+                        qty=quantity,
+                        price=float(price or 0.0),
+                        order_id=order_id,
+                        meta={"trade_id": trade_id, "status": "FILLED"},
+                    )
 
                     # B. Register Order Locally
                     details = OrderDetails(
@@ -2233,7 +2288,14 @@ class OrderManager:
                         f"🛑 FATAL Payload Error: {e}",
                         extra={"event": "fatal_order_error"},
                     )
-                    self.trade_store.update_status(trade_id, "REJECTED_FATAL")
+                    self._log_trade_event(
+                        "ORDER_REJECTED_FATAL",
+                        symbol=normalized_symbol,
+                        side=side,
+                        qty=quantity,
+                        price=float(price or 0.0),
+                        meta={"trade_id": trade_id, "error": str(e)},
+                    )
                     return None
 
                 self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
@@ -10831,28 +10893,22 @@ class OrderManager:
                 activate_immediately=True,
             )
 
-            # DB Persistence
-            try:
-                bracket_dict = {
-                    "order_id": str(synthetic_id),
-                    "id": str(synthetic_id),
-                    "symbol": symbol,
-                    "side": side,
-                    "qty": abs_qty,
-                    "entry_price": base_price,
+            self._log_trade_event(
+                "BRACKET_GUARD_REGISTERED",
+                symbol=symbol,
+                side=side,
+                qty=abs_qty,
+                price=base_price,
+                order_id=synthetic_id,
+                meta={
                     "current_sl": sl_price,
                     "tp1": tp_price,
                     "trailing_active": True,
                     "tag": strategy_tag,
                     "status": "ACTIVE",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-                if hasattr(self._bracket_store, "save_bracket"):
-                    self._bracket_store.save_bracket(bracket_dict)
-                elif hasattr(self._bracket_store, "add_bracket"):
-                    self._bracket_store.add_bracket(bracket_dict)
-            except Exception as e:
-                self._logger.error(f"Failed to save guard bracket: {e}")
+                },
+            )
 
             self._bracket_manager.confirm_entry_fill(synthetic_id, base_price)
             return True

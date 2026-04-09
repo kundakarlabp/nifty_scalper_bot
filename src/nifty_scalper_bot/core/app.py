@@ -37,6 +37,7 @@ from typing import (
 )
 
 import pytz
+from journal.trade_journal import TradeJournal
 
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
@@ -1459,6 +1460,7 @@ class BotContext:
     risk_manager: RiskManager | None = None
     persistent_state: PersistentStateManager | None = None
     order_manager: OrderManager | None = None
+    trade_journal: TradeJournal | None = None
     order_execution_hub: ExecutionEngine | None = None
     bracket_manager: Any | None = None
     paper_engine: PaperFillEngine | None = None
@@ -3698,12 +3700,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     # 9. Initialize Execution
     # [FIX] We inject indicator_engine here to enable Volatility-Adaptive Trailing
+    trade_journal = TradeJournal(db_path=str(get_data_dir() / "trades.db"))
+    trade_journal.start()
     order_manager = OrderManager(
         broker_client=broker_client,
         position_manager=position_manager,
         rate_limiter=rate_limiter,
         instrument_resolver=instrument_resolver,
         indicator_engine=indicator_engine,  # <--- THIS IS THE CRITICAL ADDITION
+        trade_journal=trade_journal,
     )
     order_manager.set_market_data_manager(market_data_manager)
     if not margin_engine_data_hub_attached:
@@ -3732,6 +3737,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 order_manager=order_manager,
                 indicator_engine=indicator_engine,
                 market_data=market_data_manager,
+                trade_journal=trade_journal,
             )
 
             # Configure
@@ -4509,6 +4515,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         position_manager=position_manager,
         risk_manager=risk_manager,
         persistent_state=persistent_state,
+        trade_journal=trade_journal,
         order_manager=order_manager,
         bracket_manager=bracket_manager,
         paper_engine=paper_engine,
@@ -6478,6 +6485,10 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     if tracker is not None:
         with suppress(Exception):
             tracker.close()
+    trade_journal = getattr(ctx, "trade_journal", None)
+    if trade_journal is not None:
+        with suppress(Exception):
+            trade_journal.stop()
 
     LOGGER.info("Bot shutdown complete")
 
