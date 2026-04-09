@@ -31,11 +31,6 @@ from typing import (
 
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
-try:
-    from nifty_scalper_bot.data.bracket_store import BracketStore
-except ImportError:
-    BracketStore = None
-
 # --- NEW IMPORTS FOR WORLD-CLASS TRAILING ---
 try:
     from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
@@ -52,6 +47,7 @@ except ImportError:
         activation: float
 
 if TYPE_CHECKING:
+    from journal.trade_journal import TradeJournal
     from nifty_scalper_bot.infra.metrics import MetricsCollector
 
 # --------------------------------------------------------------------------
@@ -247,9 +243,16 @@ class BracketManager:
     Supports TP1/TP2 scaling, ATR-based Trailing, and Broker Sync.
     """
 
-    def __init__(self, order_manager: Any, indicator_engine: Any = None, market_data: Any = None):
+    def __init__(
+        self,
+        order_manager: Any,
+        indicator_engine: Any = None,
+        market_data: Any = None,
+        trade_journal: "TradeJournal | None" = None,
+    ):
         """Initialize bracket manager runtime dependencies. Args: order_manager, indicator_engine, market_data; Returns: None; Raises: None."""
         self.order_manager = order_manager
+        self._trade_journal = trade_journal
         self._brackets: Dict[str, BracketState] = {}
         # Reverse Index: Map broker order IDs/Symbol to entry IDs
         self._order_to_entry: Dict[str, str] = {}
@@ -258,15 +261,6 @@ class BracketManager:
         # --- ATR & Trailing Setup ---
         self._indicator_engine = indicator_engine
         self._market_data = market_data
-        # ✅ FIX: Initialize Persistence Store
-        self._store = None
-        if BracketStore:
-            try:
-                self._store = BracketStore()
-                LOGGER.info("✅ BracketStore initialized for persistence.")
-            except Exception as e:
-                LOGGER.error(f"❌ Failed to init BracketStore: {e}")
-                
         self._atr_provider = None
         if SafeATRProvider and indicator_engine:
             # Initialize Safe Provider with 60s cache validity
@@ -660,14 +654,11 @@ class BracketManager:
             if symbol not in self._symbol_map:
                 self._symbol_map[symbol] = []
             self._symbol_map[symbol].append(order_id)
-            # ✅ FIX: IMMEDIATE PERSISTENCE
-            # Save to disk immediately so it survives a crash/restart
-            if self._store:
-                try:
-                    self._store.save_bracket(state.to_dict())
-                    LOGGER.info(f"💾 Bracket PERSISTED to DB: {symbol} (SL: {sl})")
-                except Exception as e:
-                    LOGGER.error(f"❌ Failed to persist bracket for {symbol}: {e}")
+            self._log_bracket_event(
+                "BRACKET_REGISTERED",
+                state,
+                meta={"sl": sl, "tp": tp, "activate_immediately": activate_immediately},
+            )
             
             # 7. Initialize Adaptive Controller (The "Brain")
             if (
@@ -1159,6 +1150,17 @@ class BracketManager:
 
             try:
                 LOGGER.info('EXIT TRIGGERED symbol=%s qty=%s reason=%s', symbol, qty, reason)
+                action_type = str(action.get('type', '')).upper()
+                event_type = (
+                    'SL_HIT'
+                    if action_type == 'SL'
+                    else ('POSITION_CLOSED' if action_type == 'FINAL_TP' else 'EXIT_TRIGGERED')
+                )
+                self._log_bracket_event(
+                    event_type,
+                    bracket,
+                    meta={"reason": reason, "qty": qty, "action_type": action_type},
+                )
                 for attempt in range(1, 4):
                     try:
                         if self._exit_executor is None:
@@ -1227,6 +1229,15 @@ class BracketManager:
 
                 if confirmed:
                     LOGGER.info('EXIT_EXECUTED symbol=%s qty=%s', symbol, qty)
+                    self._log_bracket_event(
+                        "POSITION_CLOSED" if bracket.remaining_quantity <= 0 else "ORDER_FILLED",
+                        bracket,
+                        meta={
+                            "reason": reason,
+                            "qty": qty,
+                            "remaining_quantity": bracket.remaining_quantity,
+                        },
+                    )
                     # FIX S10-2: notify runner so orchestrator direction lock clears immediately
                     hook = self._on_exit_complete_hook
                     if hook is not None:
@@ -2131,6 +2142,33 @@ class BracketManager:
                 "atr_tracked_symbols": len(self._current_atr),
                 "adaptive_controllers": len(self._trailing_controllers)
             }
+
+    def _log_bracket_event(
+        self,
+        event_type: str,
+        bracket: BracketState,
+        *,
+        meta: Mapping[str, object] | None = None,
+    ) -> None:
+        """Queue non-blocking bracket journal event. Args: event_type,bracket,meta; Returns: None; Raises: None."""
+        journal = self._trade_journal
+        if journal is None:
+            return
+        try:
+            journal.log_event(
+                {
+                    "event_type": event_type,
+                    "timestamp": time.time(),
+                    "symbol": bracket.symbol,
+                    "side": bracket.side,
+                    "qty": int(bracket.remaining_quantity),
+                    "price": float(bracket.last_ltp or bracket.entry_price),
+                    "order_id": bracket.entry_order_id,
+                    "meta": dict(meta or {}),
+                }
+            )
+        except Exception as e:
+            LOGGER.error("Failure in _log_bracket_event: %s", e)
     # ----------------------------------------------------------------
     # 💾 PERSISTENCE LAYER (Add to BracketManager)
     # ----------------------------------------------------------------
@@ -2159,81 +2197,22 @@ class BracketManager:
         return path
 
     def save_state(self) -> None:
-        """Persist active brackets to disk ATOMICALLY with Enum handling.
-        
-        ✅ PRODUCTION FIX: Added Enum serialization and DATA_DIR support.
-        """
-        import uuid
-        import os
-        from enum import Enum
-        from datetime import datetime, date
-        from decimal import Decimal
-        
-        # ✅ FIX: Sanitize function for Enum types
-        def _sanitize(obj):
-            if isinstance(obj, dict):
-                return {k: _sanitize(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [_sanitize(item) for item in obj]
-            elif isinstance(obj, Enum):
-                return obj.value if hasattr(obj, 'value') else obj.name
-            elif isinstance(obj, (datetime, date)):
-                return obj.isoformat()
-            elif isinstance(obj, Decimal):
-                return float(obj)
-            return obj
-        
-        data = {}
+        """Publish bracket snapshots asynchronously. Args: None; Returns: None; Raises: None."""
         with self._lock:
-            for eid, b in self._brackets.items():
-                data[eid] = _sanitize({
-                    "entry_order_id": eid,
-                    "symbol": b.symbol,
-                    "quantity": b.quantity,
-                    "remaining_quantity": b.remaining_quantity,
-                    "entry_price": b.entry_price,
-                    "side": b.side,
-                    "sl_trigger_price": b.sl_trigger_price,
-                    "tp_trigger_price": b.tp_trigger_price,
-                    "trailing_enabled": b.trailing_enabled,
-                    "trailing_config": b.trailing_config,
-                    "active": b.active,
-                    "created_at": b.created_at,
-                    "updated_at": b.updated_at,
-                    "highest_ltp": b.highest_ltp,
-                    "lowest_ltp": b.lowest_ltp,
-                    "last_ltp": b.last_ltp,
-                    "tp_levels": [
-                        {
-                            "price": tl.price,
-                            "quantity": tl.quantity,
-                            "executed": tl.executed,
-                            "name": tl.name
-                        } for tl in b.tp_levels
-                    ],
-                    "tag": b.tag,
-                    "exit_executed": b.exit_executed,
-                    "atr_warning_logged": b._atr_warning_logged,
-                })
-        
-        try:
-            path = self._get_storage_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # ✅ FIX: Write to temp file first, then atomic replace
-            tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
-            
-            with open(tmp_path, "w") as f:
-                json.dump(data, f, indent=2, default=str)
-                f.flush()
-                os.fsync(f.fileno())  # Force write to physical disk
-            
-            # Atomic swap (Crash-safe)
-            os.replace(tmp_path, path)
-            LOGGER.debug(f"✅ Brackets saved to {path}")
-            
-        except Exception as e:
-            LOGGER.error(f"Failed to save bracket state: {e}")
+            snapshots = list(self._brackets.values())
+        for bracket in snapshots:
+            self._log_bracket_event(
+                "BRACKET_SNAPSHOT",
+                bracket,
+                meta={
+                    "active": bracket.active,
+                    "sl_trigger_price": bracket.sl_trigger_price,
+                    "tp_trigger_price": bracket.tp_trigger_price,
+                    "remaining_quantity": bracket.remaining_quantity,
+                    "exit_executed": bracket.exit_executed,
+                    "pending_exit_order_id": bracket.pending_exit_order_id,
+                },
+            )
 
     def load_state(self) -> None:
         """Restore brackets from disk on startup."""
