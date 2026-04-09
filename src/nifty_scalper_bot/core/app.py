@@ -96,9 +96,7 @@ from nifty_scalper_bot.execution.execution_router import (
     ExecutionRouterSettings,
 )
 from nifty_scalper_bot.execution.lifecycle_manager import LifecycleManager
-from nifty_scalper_bot.execution.order_execution_hub import ExecutionEngine
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
-from nifty_scalper_bot.execution.order_processor import OrderProcessor
 from nifty_scalper_bot.execution.order_queue import OrderQueue
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.execution.position_manager import ActiveContract, PositionManager
@@ -1450,7 +1448,6 @@ class BotContext:
     streamer: Any
     stream_supervisor: StreamSupervisor | None
     message_bus: MessageBus
-    order_processor: None
     data_hub: DataHub | None = None
     market_data_manager: MarketDataManager | None = None
     market_regime: MarketRegimeDetector | None = None
@@ -1461,7 +1458,6 @@ class BotContext:
     persistent_state: PersistentStateManager | None = None
     order_manager: OrderManager | None = None
     trade_journal: TradeJournal | None = None
-    order_execution_hub: None
     bracket_manager: Any | None = None
     paper_engine: PaperFillEngine | None = None
     safe_order_manager: SafeOrderManager | None = None
@@ -4520,7 +4516,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         strategy_runner=strategy_runner,
         unified_manager=unified_manager,
         order_processor=order_processor,
-        order_execution_hub=none,
         instrument_resolver=instrument_resolver,
         instrument_db=instrument_conn,
         instrument_universe=instrument_state,
@@ -5203,7 +5198,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         journal=None,
                         metrics=None,
                         market_regime=ctx.market_regime,
-                        order_execution_hub=ctx.order_execution_hub,
                         order_queue=ctx.order_queue,
                         state_tracker=ctx.state_tracker,
                         preflight_validator=ctx.preflight_validator,
@@ -6389,7 +6383,6 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     """Execute graceful shutdown."""
 
     LOGGER.info("Shutting down bot...")
-    hub = getattr(ctx, "order_execution_hub", None)
     bus = getattr(ctx, "message_bus", None)
     proc = getattr(ctx, "order_processor", None)
     if proc is not None:
@@ -6424,7 +6417,6 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
         "persistent_state",
     )
 
-    hub = getattr(ctx, "order_execution_hub", None)
     if hub is not None:
         with suppress(Exception):
             await hub.shutdown()
