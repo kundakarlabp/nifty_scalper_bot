@@ -91,10 +91,7 @@ from nifty_scalper_bot.execution.bracket_manager import (
     BracketManager,
     SupportsCancelOrder,
 )
-from nifty_scalper_bot.execution.execution_router import (
-    ExecutionRouter,
-    ExecutionRouterSettings,
-)
+
 from nifty_scalper_bot.execution.lifecycle_manager import LifecycleManager
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
@@ -1463,7 +1460,6 @@ class BotContext:
     state_tracker: StateTracker | None = None
     preflight_validator: PreFlightValidator | None = None
     lifecycle_manager: LifecycleManager | None = None
-    execution_router: ExecutionRouter | None = None
     post_fill_monitor: PostFillMonitor | None = None
     strategy_manager: StrategyManager | None = None
     strategy_runner: StrategyRunner | None = None
@@ -4108,17 +4104,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         data_hub=data_hub,
         state_tracker=lifecycle_tracker_adapter,
     )
-    execution_mode_env = (
-        coalesce_str("EXECUTION_MODE", default="SHADOW") or "SHADOW"
-    ).upper()
-    router_settings = ExecutionRouterSettings(
-        retry_attempts=int(coalesce_int("EXECUTION_RETRY_ATTEMPTS", default=3)),
-        retry_delay_ms=int(coalesce_int("EXECUTION_RETRY_DELAY_MS", default=500)),
-        shadow_drift_threshold_bps=float(
-            coalesce_float("SHADOW_DRIFT_THRESHOLD_BPS", default=20.0)
-        ),
-    )
-    execution_router = None
     reconciliation_interval = coalesce_int("RECONCILIATION_INTERVAL_SEC", default=30)
     reconciliation_alert = coalesce_bool(
         "RECONCILIATION_ALERT_ON_MISMATCH", default=True
@@ -4164,7 +4149,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         if ctx_obj is not None:
             ctx_obj.shadow_mode_enabled = next_state
         target_mode = "PAPER" if next_state else execution_mode_env
-        execution_router.set_mode(target_mode)
         return paper_state["enabled"]
 
     def _paper_mode_enabled() -> bool:
@@ -4491,7 +4475,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         state_tracker=state_tracker,
         preflight_validator=preflight_validator,
         lifecycle_manager=lifecycle_manager,
-        execution_router=execution_router,
         post_fill_monitor=post_fill_monitor,
         strategy_manager=strategy_manager,
         strategy_runner=strategy_runner,
