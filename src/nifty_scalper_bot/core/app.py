@@ -14,7 +14,6 @@ from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
-from nifty_scalper_bot.execution.execution_engine import ExecutionEngine
 from importlib import import_module
 import inspect
 import logging
@@ -1466,7 +1465,6 @@ class BotContext:
     lifecycle_manager: LifecycleManager | None = None
     execution_router: ExecutionRouter | None = None
     post_fill_monitor: PostFillMonitor | None = None
-    execution_engine: ExecutionEngine | None = None
     strategy_manager: StrategyManager | None = None
     strategy_runner: StrategyRunner | None = None
     unified_manager: UnifiedManager | None = None
@@ -4131,17 +4129,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         interval_sec=int(reconciliation_interval),
         alert_on_mismatch=bool(reconciliation_alert),
     )
-    execution_engine = ExecutionEngine(
-        state_tracker=state_tracker,
-        preflight_validator=preflight_validator,
-        lifecycle_manager=lifecycle_manager,
-        execution_router=None,
-        post_fill_monitor=post_fill_monitor,
-        data_hub=data_hub,
-        regime_manager=market_regime_manager,
-        risk_manager=risk_manager,
-    )
-    order_processor = None
+    
 
     strategy_runner = StrategyRunner(
         market_data_manager=market_data_manager,
@@ -4505,11 +4493,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         lifecycle_manager=lifecycle_manager,
         execution_router=execution_router,
         post_fill_monitor=post_fill_monitor,
-        execution_engine=execution_engine,
         strategy_manager=strategy_manager,
         strategy_runner=strategy_runner,
         unified_manager=unified_manager,
-        order_processor=order_processor,
         instrument_resolver=instrument_resolver,
         instrument_db=instrument_conn,
         instrument_universe=instrument_state,
@@ -6098,12 +6084,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # OrderProcessor registers the SIGNAL handler; without calling
                 # start() here, MessageBus.start() sees 0 subscribers and logs
                 # "started with 0 active dispatchers" — signals never execute.
-                if ctx.order_processor is not None:
-                    try:
-                        await ctx.order_processor.start()
-                        LOGGER.info("✅ OrderProcessor started — SIGNAL handler registered")
-                    except Exception as _op_exc:
-                        LOGGER.error("OrderProcessor.start() failed: %s", _op_exc)
+                
 
                 # 🚨 CRITICAL: Start MessageBus AFTER subscribers are registered 🚨
                 if ctx.message_bus:
@@ -6377,7 +6358,6 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
 
     LOGGER.info("Shutting down bot...")
     bus = getattr(ctx, "message_bus", None)
-    proc = getattr(ctx, "order_processor", None)
     if proc is not None:
         with suppress(Exception):
             await proc.stop()
