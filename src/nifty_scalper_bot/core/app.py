@@ -3136,11 +3136,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     # Prevent a single bad queue insertion from killing the poller thread
                     LOGGER.error("Tick enqueue failed for token %s: %s", token, exc)
 
-    # ------------------------------------------------------------------
-    # Streamer Selection Logic (Polling vs WebSocket)
-    # ------------------------------------------------------------------
-    # 🚨 ROBUST FIX: Define the handler unconditionally right before it's needed
-        # This guarantees the WebSocket manager can find it, avoiding NameErrors.
+
+        # ------------------------------------------------------------------
+        # Streamer Selection Logic (Polling vs WebSocket)
+        # ------------------------------------------------------------------
         def _on_poll_tick(tick: dict[str, Any]) -> None:
             if not tick or type(tick) is not dict: return
             token = tick.get("instrument_token")
@@ -3163,6 +3162,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     market_data_manager._enqueue_tick_threadsafe(t)
                 except Exception as exc:
                     LOGGER.error("Tick enqueue failed: %s", exc)
+
+        use_websockets = not use_polling
+        if use_websockets:
+            LOGGER.info("Initializing WebSocket Streamer...")       
                     
     use_websockets = not use_polling
     if use_websockets:
@@ -4088,7 +4091,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ctx_obj = ctx_ref.get("ctx")
         if ctx_obj is not None:
             ctx_obj.shadow_mode_enabled = next_state
-        target_mode = "PAPER" if next_state else ("LIVE" if ctx.settings.enable_live else "PAPER")
+        target_mode = "PAPER" if next_state else ("LIVE" if settings.enable_live else "PAPER")
         return paper_state["enabled"]
 
     def _paper_mode_enabled() -> bool:
