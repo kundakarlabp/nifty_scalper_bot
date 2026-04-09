@@ -10,13 +10,11 @@ from nifty_scalper_bot.config.base import RiskConfig
 from nifty_scalper_bot.execution.entry_price import EntryPriceModel, Side
 from nifty_scalper_bot.execution.options_policy import OptionsExecutionPolicy
 from nifty_scalper_bot.utils.errors import BrokerError, OrderPlacementError
+from nifty_scalper_bot.utils.logging import get_logger
 
 
 class ExecutionError(OrderPlacementError):
     """Raised when broker execution fails hard."""
-
-
-from nifty_scalper_bot.utils.logging import get_logger
 
 
 class OrderExecutor:
@@ -186,6 +184,33 @@ class OrderExecutor:
         if ts_val is not None:
             ts_ns = int(ts_val)
         return bid, ask, ts_ns
+
+
+
+    def is_execution_ready(self, symbol: str | None = None) -> tuple[bool, str]:
+        """Validate broker, margin, and instrument readiness. Args: symbol. Returns: (ready, reason). Raises: none."""
+
+        try:
+            if self._broker is None:
+                return (False, 'broker_unavailable')
+            health_fn = getattr(self._broker, 'is_connected', None)
+            if callable(health_fn) and not bool(health_fn()):
+                return (False, 'broker_disconnected')
+            margin_fn = getattr(self._broker, 'available_margin', None)
+            if callable(margin_fn):
+                margin = float(margin_fn())
+                if margin <= 0:
+                    return (False, 'insufficient_margin')
+            if symbol:
+                resolver = getattr(self._mdm, 'resolver', None) if self._mdm is not None else None
+                if resolver is not None:
+                    lookup = getattr(resolver, 'lookup', None)
+                    if callable(lookup) and lookup(symbol) is None:
+                        return (False, 'invalid_instrument')
+            return (True, 'ready')
+        except Exception as e:
+            self._logger.exception('Failure in is_execution_ready: %s', e)
+            return (False, 'execution_readiness_error')
 
     def reconcile_open_orders(self) -> dict[str, Dict[str, object]]:
         """Refresh cached open-order metadata using client order identifiers.
