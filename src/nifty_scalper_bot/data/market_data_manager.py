@@ -953,28 +953,67 @@ class MarketDataManager:
             await asyncio.sleep(0.1)
         raise RuntimeError("Live tick unavailable")
 
-    def get_latest_price(self, symbol: str) -> float | None:
+    def get_ltp(self, symbol: str) -> float | None:
+        """Return latest traded price for symbol with 2-second stale guard.
+
+        If the cached tick is older than 2 seconds, falls back to broker REST
+        quote to guarantee a fresh price is always available.
+
+        Args:
+            symbol: Trading symbol identifier.
+
+        Returns:
+            float | None: Latest price or None if unavailable from all sources.
+        """
+        _STALE_SECONDS = 2.0
+        now = time.time()
+
+        # 1. Try tick cache with freshness check
         tick = self.get_latest_tick(symbol)
+        tick_age: float | None = None
         if tick is not None:
+            last_ts = self._last_tick_time.get(symbol)
+            if last_ts is not None:
+                tick_age = now - last_ts
             try:
-                return float(tick["ltp"])
+                ltp = float(tick["ltp"])
+                if ltp > 0:
+                    if tick_age is None or tick_age <= _STALE_SECONDS:
+                        return ltp
+                    # Tick exists but is stale — log and fall through to broker
+                    self._logger.warning(
+                        "STALE_DATA symbol=%s age=%.2fs — falling back to broker REST",
+                        symbol, tick_age,
+                    )
             except (KeyError, TypeError, ValueError):
                 pass
 
-            # 🔴 REST fallback (already available in this class)
-            broker = getattr(self, "_broker", None)
-            if broker:
-                try:
-                    quote = broker.get_quote(symbol)
-                    if isinstance(quote, dict):
-                        price = quote.get("last_price") or quote.get("ltp")
-                        if price:
-                            return float(price)
-                except Exception as e:
-                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
-                    raise
+        # 2. Broker REST fallback
+        broker = getattr(self, "_broker", None)
+        if broker:
+            try:
+                quote = broker.get_quote(symbol)
+                if isinstance(quote, dict):
+                    price = quote.get("last_price") or quote.get("ltp")
+                    if price:
+                        p = float(price)
+                        if p > 0:
+                            # Refresh cache with fresh REST price
+                            self._logger.debug(
+                                "REST_FALLBACK_HIT symbol=%s price=%.2f", symbol, p
+                            )
+                            return p
+            except Exception as exc:
+                self._logger.warning(
+                    "broker.get_quote failed for %s: %s", symbol, exc
+                )
 
-            return None
+        self._logger.warning("get_ltp: no price available for %s", symbol)
+        return None
+
+    def get_latest_price(self, symbol: str) -> float | None:
+        """Alias for get_ltp — preserves backward compatibility."""
+        return self.get_ltp(symbol)
 
     def _resolve_underlying_price(self, symbol: str) -> float | None:
         tick_price = self.get_latest_price(symbol)

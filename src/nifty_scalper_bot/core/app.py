@@ -2442,6 +2442,119 @@ def _bind_ws_mdm(ctx: BotContext) -> None:
         )
 
 
+async def reconcile_with_broker(
+    broker_client: Any,
+    bracket_manager: Any,
+    order_manager: Any,
+    logger: Any,
+) -> None:
+    """Phase 8: Ghost-order reconciliation on startup.
+
+    Fetches live positions and orders from broker.  Any open position that has
+    no bracket registered (ghost/orphan) gets a safety bracket attached using
+    default risk parameters.  Any open order not tracked locally is logged for
+    visibility.
+
+    Args:
+        broker_client: Live broker API client.
+        bracket_manager: BracketManager instance to check/register brackets.
+        order_manager: OrderManager for placing protective brackets.
+        logger: Structured logger instance.
+
+    Returns:
+        None. All errors are caught and logged — startup must not be blocked.
+    """
+    logger.info("RECONCILE_START: checking broker for ghost orders and orphan positions")
+
+    # ── 1. Fetch live orders ─────────────────────────────────────────────────
+    try:
+        raw_orders = await asyncio.to_thread(_run_sync_locked, broker_client.get_orders)
+        open_orders = [o for o in (raw_orders or []) if isinstance(o, dict)
+                       and str(o.get("status", "")).upper() in {"OPEN", "TRIGGER PENDING"}]
+        logger.info("RECONCILE_ORDERS: found %d open orders from broker", len(open_orders))
+        for o in open_orders:
+            oid = o.get("order_id") or o.get("id", "")
+            sym = o.get("tradingsymbol") or o.get("symbol", "")
+            status = o.get("status", "")
+            logger.info("BROKER_OPEN_ORDER order_id=%s symbol=%s status=%s", oid, sym, status)
+    except Exception as exc:
+        logger.warning("RECONCILE_ORDERS: failed to fetch broker orders: %s", exc)
+
+    # ── 2. Fetch live positions and attach safety brackets for orphans ────────
+    try:
+        raw_positions = await asyncio.to_thread(_run_sync_locked, broker_client.get_positions)
+        positions = [p for p in (raw_positions or []) if isinstance(p, dict)]
+        logger.info("RECONCILE_POSITIONS: found %d positions from broker", len(positions))
+
+        for pos in positions:
+            try:
+                sym = str(
+                    pos.get("tradingsymbol") or pos.get("symbol") or ""
+                ).strip().upper()
+                if not sym:
+                    continue
+                qty = int(pos.get("quantity") or pos.get("net_quantity") or 0)
+                if qty == 0:
+                    continue
+
+                avg_price = float(
+                    pos.get("average_price") or pos.get("buy_price") or pos.get("sell_price") or 0.0
+                )
+
+                # Check if bracket_manager already tracks this symbol
+                is_managed = False
+                if bracket_manager:
+                    is_managed = bool(
+                        getattr(bracket_manager, "is_symbol_managed", lambda s: False)(sym)
+                    )
+
+                if is_managed:
+                    logger.debug("RECONCILE: %s already managed by BracketManager", sym)
+                    continue
+
+                logger.warning(
+                    "GHOST_POSITION detected: symbol=%s qty=%d avg=%.2f — attaching safety bracket",
+                    sym, qty, avg_price,
+                )
+
+                # Attach orphan position with default ATR-based SL (2% fallback)
+                if bracket_manager and avg_price > 0:
+                    try:
+                        sl_default = round(avg_price * 0.98, 2)  # 2% below entry
+                        tp_default = round(avg_price * 1.04, 2)  # 4% above entry
+                        side = "BUY" if qty > 0 else "SELL"
+
+                        attach_fn = getattr(bracket_manager, "attach_orphan_position", None)
+                        if attach_fn:
+                            attach_fn(
+                                symbol=sym,
+                                side=side,
+                                qty=abs(qty),
+                                entry_price=avg_price,
+                                sl=sl_default,
+                                tp=tp_default,
+                            )
+                            logger.warning(
+                                "SAFETY_BRACKET_ATTACHED: symbol=%s sl=%.2f tp=%.2f",
+                                sym, sl_default, tp_default,
+                            )
+                        else:
+                            logger.warning(
+                                "GHOST_POSITION: bracket_manager has no attach_orphan_position for %s", sym
+                            )
+                    except Exception as bracket_exc:
+                        logger.error(
+                            "SAFETY_BRACKET_FAILED: symbol=%s error=%s", sym, bracket_exc
+                        )
+            except Exception as pos_exc:
+                logger.warning("RECONCILE_POSITION_ITEM_ERROR: %s", pos_exc)
+
+    except Exception as exc:
+        logger.warning("RECONCILE_POSITIONS: failed to fetch broker positions: %s", exc)
+
+    logger.info("RECONCILE_COMPLETE")
+
+
 async def reconcile_positions_on_startup(
     broker_client: Any,
     position_manager: Any,
@@ -6055,6 +6168,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                         ctx.broker_client.cancel_order, o.get("order_id")
                     )
             LOGGER.info("✅ Zombie orders cleared.")
+
+            # ── PHASE 8: Ghost-position reconciliation ──────────────────────
+            try:
+                await reconcile_with_broker(
+                    broker_client=ctx.broker_client,
+                    bracket_manager=ctx.bracket_manager,
+                    order_manager=ctx.order_manager,
+                    logger=LOGGER,
+                )
+            except Exception as reconcile_exc:
+                LOGGER.error("reconcile_with_broker failed (non-fatal): %s", reconcile_exc)
+            # ────────────────────────────────────────────────────────────────
 
             async def _sync_loop():
                 from nifty_scalper_bot.utils.market_hours import is_market_open

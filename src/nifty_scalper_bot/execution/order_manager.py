@@ -1678,6 +1678,11 @@ class OrderManager:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
         """
+        # ── PHASE 3: TRADE_ATTEMPT — first thing, always ─────────────────────
+        self._logger.critical(
+            "TRADE_ATTEMPT symbol=%s side=%s qty=%s price=%s sl=%s tp=%s strategy=%s signal_id=%s",
+            symbol, side, quantity, price, stop_loss, take_profit, strategy_name, signal_id,
+        )
         # ✅ FIX: Round Price/Trigger to 0.05 tick size BEFORE processing
         # ═══════════════════════════════════════════════════════════════════════
         if price is not None and price > 0:
@@ -1699,6 +1704,7 @@ class OrderManager:
             os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
         ):
             if not self._validate_live_execution_safety():
+                self._logger.critical("ORDER_BLOCKED: live_execution_safety_check_failed symbol=%s", symbol)
                 return None
 
         # 🛡️ CIRCUIT BREAKER CHECK — skipped for system exits
@@ -1713,6 +1719,7 @@ class OrderManager:
                     f"💀 KILL SWITCH ENGAGED: {self._consecutive_failures} consecutive broker errors. "
                     "Trading Halted to prevent API ban / account blowup."
                 )
+                self._logger.critical("ORDER_BLOCKED: kill_switch_engaged consecutive_failures=%s symbol=%s", self._consecutive_failures, symbol)
                 return None
         # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
         is_entry = (side == "BUY") and not is_system_exit
@@ -1723,12 +1730,12 @@ class OrderManager:
 
         if not is_system_exit:
             if self._positions.has_open_position(symbol):
-                self._logger.info("duplicate_entry_prevented")
+                self._logger.critical("ORDER_BLOCKED: duplicate_entry_prevented symbol=%s side=%s", symbol, side)
                 return None
             if not self._signal_arbitrator.allow(symbol, side):
-                self._logger.info(
-                    "signal_arbitrator_blocked",
-                    extra={"symbol": symbol, "side": side},
+                self._logger.critical(
+                    "ORDER_BLOCKED: signal_arbitrator_blocked symbol=%s side=%s",
+                    symbol, side,
                 )
                 return None
 
@@ -1741,6 +1748,7 @@ class OrderManager:
                     f"\nReason: Intraday Buy Orders MUST have a Stop Loss to attach a Virtual Bracket."
                     f"\nData: Qty={quantity}, SL={stop_loss}, Tag={tag}"
                 )
+                self._logger.critical("ORDER_BLOCKED: naked_entry_no_stop_loss symbol=%s qty=%s", symbol, quantity)
                 return None  # ❌ STOP HERE. DO NOT CALL BROKER.
 
         # =========================================================
@@ -1781,6 +1789,7 @@ class OrderManager:
                     f"🚫 BLOCKED: Fresh pending order exists for {normalized_symbol}. Ignored to prevent duplicate.",
                     extra={"event": "duplicate_block", "symbol": normalized_symbol},
                 )
+                self._logger.critical("ORDER_BLOCKED: fresh_pending_order_exists symbol=%s", normalized_symbol)
                 return None
             elif pending_orders and is_system_exit:
                 self._logger.warning(
@@ -1806,6 +1815,7 @@ class OrderManager:
                 price=float(price or 0.0),
                 meta={"signal_id": signal_id},
             )
+            self._logger.critical("ORDER_BLOCKED: duplicate_signal signal_id=%s symbol=%s", signal_id, normalized_symbol)
             return None
 
         # --- SEMANTIC VALIDATION GATEKEEPER ---
@@ -1816,11 +1826,13 @@ class OrderManager:
                     self._logger.error(
                         f"🛑 REJECTED: BUY TP ({take_profit}) is below entry ({price})"
                     )
+                    self._logger.critical("ORDER_BLOCKED: buy_tp_below_entry symbol=%s tp=%s entry=%s", normalized_symbol, take_profit, price)
                     return None
                 if stop_loss and stop_loss >= price:
                     self._logger.error(
                         f"🛑 REJECTED: BUY SL ({stop_loss}) is above entry ({price})"
                     )
+                    self._logger.critical("ORDER_BLOCKED: buy_sl_above_entry symbol=%s sl=%s entry=%s", normalized_symbol, stop_loss, price)
                     return None
             elif side == "SELL":
                 # For a Short/Exit, TP must be below Entry, SL must be above Entry
@@ -1828,11 +1840,13 @@ class OrderManager:
                     self._logger.error(
                         f"🛑 REJECTED: SELL TP ({take_profit}) is above entry ({price})"
                     )
+                    self._logger.critical("ORDER_BLOCKED: sell_tp_above_entry symbol=%s tp=%s entry=%s", normalized_symbol, take_profit, price)
                     return None
                 if stop_loss and stop_loss <= price:
                     self._logger.error(
                         f"🛑 REJECTED: SELL SL ({stop_loss}) is below entry ({price})"
                     )
+                    self._logger.critical("ORDER_BLOCKED: sell_sl_below_entry symbol=%s sl=%s entry=%s", normalized_symbol, stop_loss, price)
                     return None
 
         # ---------------------------------------------------------------------
@@ -1861,6 +1875,7 @@ class OrderManager:
                             "event": "time_guard_block",
                         },
                     )
+                    self._logger.critical("ORDER_BLOCKED: time_guard reason=%s symbol=%s time=%s", reason, normalized_symbol, now.strftime("%H:%M:%S"))
                     return None
             except Exception as e:
                 self._logger.error(
@@ -1885,6 +1900,7 @@ class OrderManager:
                     "Order blocked: Trading Switch is OFF",
                     extra={"symbol": normalized_symbol},
                 )
+                self._logger.critical("ORDER_BLOCKED: trading_switch_off symbol=%s", normalized_symbol)
                 return None
 
         # ---------------------------------------------------------------------
@@ -1913,6 +1929,7 @@ class OrderManager:
                     f"Risk Block: {reason}",
                     extra={"symbol": normalized_symbol, "event": "risk_block"},
                 )
+                self._logger.critical("ORDER_BLOCKED: risk_manager_blocked reason=%s symbol=%s", reason, normalized_symbol)
                 return None
 
         # ---------------------------------------------------------------------
