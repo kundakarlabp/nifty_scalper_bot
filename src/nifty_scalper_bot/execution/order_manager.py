@@ -346,6 +346,10 @@ def resolve_reference_price(
         None.
     """
 
+    # NEW: Intercept and map invalid spot symbol before broker rejection
+    if symbol.upper() == "NSE:NIFTY":
+        symbol = "NSE:NIFTY 50"
+        
     _REFERENCE_LOGGER.debug(
         "Entered resolve_reference_price",
         extra={"event": "resolve_reference_price_enter", "symbol": symbol},
