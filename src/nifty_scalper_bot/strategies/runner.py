@@ -2824,11 +2824,7 @@ class StrategyRunner:
         tick = self._market_data.get_latest_tick(symbol) if self._market_data else None
         if not tick:
             raise RuntimeError("Execution blocked due to stale tick")
-        spot_tick = (
-            self._market_data.get_latest_tick("NSE:NIFTY")
-            if self._market_data
-            else None
-        )
+        spot_tick = self._get_spot_tick()
         fut_tick = None
         if self._market_data is not None:
             for fut_symbol in ("NFO:NIFTY FUT", "NFO:NIFTYFUT"):
@@ -4542,11 +4538,7 @@ class StrategyRunner:
                 # Strategy evaluation is now purely event-driven. 
                 # ExecutionEngine handles any timing constraints.
 
-                spot_tick = (
-                    self._market_data.get_latest_tick("NSE:NIFTY")
-                    if self._market_data
-                    else None
-                )
+                spot_tick = self._get_spot_tick()
                 # BUG W2 FIX: Previous code had:
                 #   if spot_tick is None: spot_stale = True
                 #   spot_stale = False          ← unconditional overwrite — dead code
@@ -5979,7 +5971,7 @@ class StrategyRunner:
 
         if mdm:
             # Try getting LTP
-            ltp = mdm.get_latest_price("NSE:NIFTY")
+            ltp = self._get_spot_price()
             if ltp and ltp > 0:
                 spot = ltp
 
