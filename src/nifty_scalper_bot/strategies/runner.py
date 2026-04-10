@@ -4604,7 +4604,50 @@ class StrategyRunner:
                     )
                     self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
 
-                # 8B. PRIMARY STRATEGY: VWAP Crossover (Requires VWAP > 0)
+                # 8B. PREMIUM MOMENTUM SQUEEZE (Shift Brain to Options)
+                if generated_signal is None and self._indicator_engine.has_min_bars(symbol, 20):
+                    inds = self._indicator_engine.get_indicators(symbol)
+                    
+                    rsi = inds.get("rsi")
+                    vwap = inds.get("vwap")
+                    ema = inds.get("ema") # Fallback to None if EMA isn't calculated
+                    close_price = price
+
+                    # Only evaluate if RSI and VWAP are valid
+                    if rsi is not None and vwap is not None and vwap > 0:
+                        is_bullish_premium = close_price > vwap
+                        if ema is not None:
+                            is_bullish_premium = is_bullish_premium and close_price > ema
+                            
+                        is_momentum_active = 60 < rsi < 85 
+                        
+                        if is_bullish_premium and is_momentum_active:
+                            self._logger.info(f"🔥 Premium Squeeze Detected on {symbol}! RSI: {rsi:.2f}")
+                            
+                            # Dynamic TP/SL based on premium
+                            sl_pct = self._vwap_sl_pct  
+                            tp_pct = self._vwap_tp_pct  
+
+                            calculated_sl = price * (1 - sl_pct / 100)
+                            calculated_tp = price * (1 + tp_pct / 100)
+
+                            generated_signal = Signal(
+                                action="BUY",
+                                symbol=symbol,
+                                quantity=1, 
+                                confidence=0.85,
+                                reason="premium_momentum_squeeze",
+                                stop_loss=calculated_sl,  
+                                take_profit=calculated_tp, 
+                                metadata={
+                                    "strategy": "premium_momentum",
+                                    "vwap": vwap,
+                                    "rsi": rsi,
+                                    "tag": "premium_squeeze",
+                                },
+                            )
+
+                # 8C. VWAP CROSSOVER (Requires VWAP > 0)
                 if (
                     self._vwap_crossover_enabled
                     and generated_signal is None
@@ -4628,7 +4671,6 @@ class StrategyRunner:
                             curr_vwap - threshold
                         )
 
-                        # ✅ FIX: Calculate proper stop_loss and take_profit
                         sl_pct = self._vwap_sl_pct  # 1.5% SL
                         tp_pct = self._vwap_tp_pct  # 2.0% TP (1:1.33 RR)
 
@@ -4647,8 +4689,8 @@ class StrategyRunner:
                                 quantity=1,
                                 confidence=0.75,
                                 reason="vwap_crossover_up",
-                                stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
-                                take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
+                                stop_loss=calculated_sl,
+                                take_profit=calculated_tp,
                                 metadata={
                                     "strategy": "vwap_scalp",
                                     "vwap": curr_vwap,
@@ -4672,8 +4714,8 @@ class StrategyRunner:
                                 quantity=1,
                                 confidence=0.75,
                                 reason="vwap_crossover_down",
-                                stop_loss=calculated_sl,  # ✅ NOW HAS PROPER SL
-                                take_profit=calculated_tp,  # ✅ NOW HAS PROPER TP
+                                stop_loss=calculated_sl,
+                                take_profit=calculated_tp,
                                 metadata={
                                     "strategy": "vwap_scalp",
                                     "vwap": curr_vwap,
@@ -4683,14 +4725,10 @@ class StrategyRunner:
                                 },
                             )
 
-                # 8C. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
+                # 8D. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
 
                 # Update last tick
                 state.last_tick = dict(tick)
-
-                # Check if trading is paused
-                if not self._running or getattr(self, "_trading_paused", False):
-                    return
 
             # =================================================================
             # PHASE 9: SIGNAL SELECTION & STRATEGY MANAGER EVALUATION
