@@ -1731,7 +1731,7 @@ class RuntimeSelfChecker:
             # Pick the most liquid / reliable symbol (Spot index preferred)
             symbol = None
             for s in symbols:
-                if "NIFTY" in s and "NSE" in s:
+                if "NIFTY 50" in s and "NIFTY" in s) and "nsse" IN S:
                     symbol = s
                     break
 
@@ -2169,7 +2169,7 @@ def _get_symbols(
         return None
 
     ltp: float = 0.0
-    spot_symbol = "NSE:NIFTY"
+    spot_symbol = "NSE:NIFTY 50"
 
     _allow_offhours = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
     _wait_timeout = 0.5 if _allow_offhours else 15.0
@@ -3068,7 +3068,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if raw_syms:
         poll_symbols = unique_normalized_symbols(raw_syms)
     else:
-        poll_symbols = ["NSE:NIFTY", "256265"]
+        poll_symbols = ["NSE:NIFTY 50", "256265"]
 
     attach_resolver = getattr(broker_client, "attach_resolver", None)
     if callable(attach_resolver):
@@ -5596,7 +5596,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 else:
                     LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
 
-            targets.append("NSE:NIFTY")
+            targets.append("NSE:NIFTY 50")
             targets = list(dict.fromkeys(targets))
 
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
