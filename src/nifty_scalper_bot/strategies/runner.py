@@ -2760,17 +2760,28 @@ class StrategyRunner:
 
         return best
 
-    def _build_option_score_config(
-        self, side: Literal["BUY", "SELL"]
-    ) -> Mapping[str, Any]:
+    def _build_option_score_config(self, side: Literal["BUY", "SELL"] ) -> Mapping[str, Any]:
         """Return strike selector score configuration for the supplied side."""
-        return {
-            "weights": dict(self._option_score_weights),
-            "delta_target": float(self._option_delta_target),
-            "max_iv_rank": float(self._option_max_iv_rank),
-            "min_liquidity": float(self._option_min_liquidity),
-            "side": side,
-        }
+        return {"weights": dict(self._option_score_weights), "delta_target": float(self._option_delta_target), "max_iv_rank": float(self._option_max_iv_rank), "min_liquidity": float(self._option_min_liquidity), "side": side, }
+
+    def _get_spot_tick(self) -> dict[str, Any] | None:
+        """Resilient spot tick fetcher checking canonical variants."""
+        if not self._market_data: return None
+        for sym in ("NSE:NIFTY 50", "NSE:NIFTY", "256265"):
+            tick = self._market_data.get_latest_tick(sym)
+            if tick: return tick
+        return None
+
+    def _get_spot_price(self) -> float:
+        """Resilient spot price fetcher checking canonical variants."""
+        if not self._market_data: return 0.0
+        for sym in ("NSE:NIFTY 50", "NSE:NIFTY", "256265"):
+            p = self._market_data.get_latest_price(sym)
+            if p and p > 0: return p
+        return 0.0
+
+    def _execute_order(self, *, symbol: str, base_symbol: str, side: Literal["BUY", "SELL"], quantity: int, price: float, stop_loss: float | None, take_profit: float | None, timestamp: datetime, reference_price: float | None = None, metadata: Mapping[str, Any] | None = None, ) -> tuple[str, int]:
+        """Execute an order request with quantity normalization and metrics."""
 
     def _execute_order(
         self,
