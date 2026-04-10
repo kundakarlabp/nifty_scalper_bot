@@ -5603,12 +5603,17 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             # ---------- HISTORICAL HYDRATION (SEQUENTIAL FETCH + SERIAL COMMIT) ----------
             end_dt = datetime.now()
-            start_dt = end_dt - timedelta(days=5)
+            # ✅ FIX: Fetch only 1 day of history to support weekly options
+            start_dt = end_dt - timedelta(days=1)
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
             hydrated_counts: dict[str, int] = {}
             runner = ctx.strategy_runner
+            
+            # ✅ FIX: Combine Spot and final options for multi-symbol hydration
+            symbols_to_hydrate = [sym for sym in targets if sym]
+            LOGGER.info(f"Starting multi-symbol hydration for {len(symbols_to_hydrate)} instruments...")
 
             async def _fetch_symbol(symbol: str) -> tuple[str, list[Any]]:
                 """Fetch historical records for one symbol. Args: symbol. Returns: symbol and raw records. Raises: Exception."""
@@ -5630,7 +5635,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 return symbol, list(records or [])
 
             fetch_results: list[tuple[str, list[Any]] | Exception] = []
-            for target_symbol in targets:
+            for target_symbol in symbols_to_hydrate:
                 try:
                     fetch_results.append(await _fetch_symbol(target_symbol))
                 except Exception as exc:  # noqa: BLE001
