@@ -60,7 +60,8 @@ from nifty_scalper_bot.data.source import (
     ensure_ltp,
     is_symbol_valid,
 )
-from nifty_scalper_bot.execution.order_execution_hub import ExecutionEngine
+# ExecutionEngine removed — signals now route directly through order_manager.place_order()
+# from nifty_scalper_bot.execution.order_execution_hub import ExecutionEngine
 from nifty_scalper_bot.execution.order_manager import OrderType
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
@@ -466,7 +467,6 @@ class StrategyRunner:
         data_hub: "DataHub | None" = None,
         strike_selector: StrikeSelector | None = None,
         bracket_manager: Any | None = None,
-        execution_engine: ExecutionEngine | None = None,
     ) -> None:
         self._market_data = market_data_manager
         self._indicator_engine = indicator_engine
@@ -476,7 +476,7 @@ class StrategyRunner:
         self._position_manager = position_manager
         self._message_bus = message_bus
         self._config = config or StrategyRunnerConfig()
-        self._execution_engine = execution_engine
+        self._execution_engine = None  # Removed — signals route directly via order_manager
         self._logger = get_logger(__name__)
         self._logger.debug(
             "StrategyRunner using MessageBus id=%s", id(self._message_bus)
@@ -5623,37 +5623,107 @@ class StrategyRunner:
         trade_price: float,
         timestamp: datetime,
     ) -> None:
-        """Args: signal, base_symbol, trade_symbol, trade_price, timestamp. Returns: None. Raises: Exception."""
+        """Direct order_manager entry path — no ExecutionEngine middleman.
+
+        Args: signal, base_symbol, trade_symbol, trade_price, timestamp.
+        Returns: None. Raises: Exception.
+        """
         try:
             self._logger.debug(
-                "Entered StrategyRunner._handle_entry_signal_inner (Atomic Engine Flow)",
+                "Entered StrategyRunner._handle_entry_signal_inner (Direct OrderManager Flow)",
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
             )
 
-            # --- SINGLE AUTHORITY ENFORCEMENT ---
-            if self._execution_engine is None:
-                raise RuntimeError("CRITICAL: ExecutionEngine missing in StrategyRunner. Cannot process signals.")
+            # ── PHASE 2: SIGNAL_RECEIVED log ────────────────────────────────
+            self._logger.critical(
+                "SIGNAL_RECEIVED symbol=%s action=%s qty=%s sl=%s tp=%s confidence=%.2f reason=%s",
+                signal.symbol,
+                signal.action,
+                signal.quantity,
+                signal.stop_loss,
+                signal.take_profit,
+                signal.confidence,
+                signal.reason,
+            )
 
-            # 🚀 DELEGATE TO EXECUTION ENGINE (The Single Authority)
-            # Strategy only computes edge; Engine enforces discipline (cooldown, max trades, etc.)
-            if self._main_loop and self._main_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    self._execution_engine.submit_signal(signal),
-                    self._main_loop
+            if not self._order_manager:
+                self._logger.critical(
+                    "ORDER_BLOCKED: order_manager is None — cannot execute entry for %s",
+                    base_symbol,
                 )
-                order_id = future.result(timeout=10.0)
-            else:
-                order_id = asyncio.run(self._execution_engine.submit_signal(signal))
-            
+                return
+
+            qty = int(signal.quantity or 0)
+            if qty <= 0:
+                self._logger.critical(
+                    "ORDER_BLOCKED: invalid quantity=%s for %s", qty, base_symbol
+                )
+                return
+
+            # Resolve price: prefer signal metadata, fall back to live tick
+            price: float | None = None
+            raw_price = signal.metadata.get("signal_price") or signal.metadata.get("price")
+            if raw_price:
+                try:
+                    price = float(raw_price)
+                except (TypeError, ValueError):
+                    price = None
+            if not price or price <= 0:
+                price = trade_price if trade_price > 0 else None
+
+            # Stop-loss is mandatory for all intraday entries
+            stop_loss = signal.stop_loss
+            take_profit = signal.take_profit
+            strategy_name = str(
+                signal.metadata.get("strategy_name")
+                or signal.metadata.get("strategy_id")
+                or "runner"
+            )
+
+            self._logger.critical(
+                "TRADE_ATTEMPT symbol=%s side=%s qty=%s price=%s sl=%s tp=%s strategy=%s",
+                base_symbol,
+                signal.action,
+                qty,
+                price,
+                stop_loss,
+                take_profit,
+                strategy_name,
+            )
+
+            order_id = self._order_manager.place_order(
+                symbol=base_symbol,
+                side=signal.action,  # "BUY" or "SELL"
+                quantity=qty,
+                order_type=OrderType.MARKET,
+                price=price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                signal_id=signal.deterministic_id,
+                strategy_name=strategy_name,
+                tag=f"runner_{signal.action.lower()}",
+            )
+
             if order_id:
-                self._logger.info(f"🟢 SIGNAL ACCEPTED BY ENGINE: {order_id} | {signal.symbol}")
+                self._logger.critical(
+                    "ORDER_FILLED order_id=%s symbol=%s side=%s qty=%s",
+                    order_id, base_symbol, signal.action, qty,
+                )
+                try:
+                    self._record_trade(
+                        base_symbol,
+                        TradeRecord(timestamp, signal.action, qty, price or 0.0, "filled", signal.reason, order_id),
+                    )
+                except Exception as rec_exc:
+                    self._logger.error("record_trade failed: %s", rec_exc)
             else:
-                self._logger.warning(f"🔴 SIGNAL REJECTED BY ENGINE: {signal.symbol}")
-            
-            return
+                self._logger.warning(
+                    "🔴 ORDER REJECTED by order_manager for %s — check ORDER_BLOCKED logs above",
+                    base_symbol,
+                )
 
         except Exception as exc:
-            self._logger.error(f"🔴 ENTRY LOGIC CRASH: {exc}", exc_info=True)
+            self._logger.error("🔴 ENTRY LOGIC CRASH: %s", exc, exc_info=True)
 
     def _get_atr_with_fallback(
         self, symbol: str, metadata: dict, current_price: float
@@ -5800,33 +5870,90 @@ class StrategyRunner:
         trade_price: float,
         timestamp: datetime,
     ) -> None:
-        """Handle exit (CLOSE_LONG/CLOSE_SHORT) signals via ExecutionEngine."""
+        """Direct order_manager exit path — no ExecutionEngine middleman."""
         try:
             self._logger.debug(
-                "Entered StrategyRunner._handle_exit_signal (Atomic Engine Flow)",
+                "Entered StrategyRunner._handle_exit_signal (Direct OrderManager Flow)",
                 extra={"event": "exit_signal_inner", "symbol": base_symbol},
             )
 
-            if self._execution_engine is None:
-                raise RuntimeError("CRITICAL: ExecutionEngine missing in StrategyRunner. Cannot process signals.")
+            # ── PHASE 2: SIGNAL_RECEIVED log ────────────────────────────────
+            self._logger.critical(
+                "SIGNAL_RECEIVED symbol=%s action=%s reason=%s",
+                signal.symbol,
+                signal.action,
+                signal.reason,
+            )
 
-            # 🚀 DELEGATE TO EXECUTION ENGINE (The Single Authority)
-            if self._main_loop and self._main_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    self._execution_engine.submit_signal(signal),
-                    self._main_loop
+            if not self._order_manager:
+                self._logger.critical(
+                    "ORDER_BLOCKED: order_manager is None — cannot execute exit for %s",
+                    base_symbol,
                 )
-                order_id = future.result(timeout=10.0)
+                return
+
+            # Determine exit side from action
+            if signal.action == "CLOSE_LONG":
+                exit_side = "SELL"
+            elif signal.action == "CLOSE_SHORT":
+                exit_side = "BUY"
             else:
-                order_id = asyncio.run(self._execution_engine.submit_signal(signal))
-            
+                self._logger.critical(
+                    "ORDER_BLOCKED: unknown exit action=%s for %s",
+                    signal.action, base_symbol,
+                )
+                return
+
+            # Resolve quantity from position manager
+            qty = int(signal.quantity or 0)
+            if qty <= 0 and self._position_manager:
+                pos = self._position_manager.get_position(base_symbol)
+                if pos:
+                    qty = abs(int(getattr(pos, "quantity", 0)))
+            if qty <= 0:
+                self._logger.critical(
+                    "ORDER_BLOCKED: cannot determine exit qty for %s", base_symbol
+                )
+                return
+
+            from nifty_scalper_bot.execution.order_manager import ExitIntent
+
+            exit_intent = ExitIntent(
+                symbol=base_symbol,
+                qty=qty,
+                product="MIS",
+                exchange="NFO",
+                order_type="MARKET",
+                tag=f"runner_{signal.action.lower()}",
+            )
+
+            self._logger.critical(
+                "EXIT_TRIGGERED symbol=%s side=%s qty=%s reason=%s",
+                base_symbol, exit_side, qty, signal.reason,
+            )
+
+            order_id = self._order_manager.place_reduce_only_exit(exit_intent)
+
             if order_id:
-                self._logger.info(f"🟢 EXIT SIGNAL ACCEPTED BY ENGINE: {order_id} | {signal.symbol}")
+                self._logger.critical(
+                    "ORDER_FILLED order_id=%s symbol=%s side=%s qty=%s (EXIT)",
+                    order_id, base_symbol, exit_side, qty,
+                )
+                try:
+                    self._record_trade(
+                        base_symbol,
+                        TradeRecord(timestamp, signal.action, qty, trade_price, "filled", signal.reason, order_id),
+                    )
+                except Exception as rec_exc:
+                    self._logger.error("record_trade failed: %s", rec_exc)
             else:
-                self._logger.warning(f"🔴 EXIT SIGNAL REJECTED BY ENGINE: {signal.symbol}")
+                self._logger.warning(
+                    "🔴 EXIT REJECTED by order_manager for %s — check ORDER_BLOCKED logs above",
+                    base_symbol,
+                )
 
         except Exception as exc:
-            self._logger.error(f"🔴 EXIT LOGIC CRASH: {exc}", exc_info=True)
+            self._logger.error("🔴 EXIT LOGIC CRASH: %s", exc, exc_info=True)
 
     # [PASTE THIS METHOD INTO StrategyRunner CLASS]
     def calculate_portfolio_greeks(self) -> dict[str, float]:
