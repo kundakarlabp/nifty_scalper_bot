@@ -1731,7 +1731,7 @@ class RuntimeSelfChecker:
             # Pick the most liquid / reliable symbol (Spot index preferred)
             symbol = None
             for s in symbols:
-                if "NIFTY 50" in s and "NIFTY" in s) and "NSE" in s:
+                if ("NIFTY 50" in s and "NIFTY" in s) and "NSE" in s:
                     symbol = s
                     break
 
