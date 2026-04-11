@@ -507,6 +507,8 @@ class StrategyRunner:
 
         hedge_env = os.getenv("NSB__ALLOW_HEDGE_ENTRIES", "false").strip().lower()
         self._allow_hedge_entries = hedge_env in {"1", "true", "yes", "on"}
+        allow_poll_env = os.getenv("ALLOW_POLLING_FALLBACK", "true").strip().lower()
+        self._allow_polling_fallback = allow_poll_env in {"1", "true", "yes", "on"}
 
         self._options_long_only = True
         self._legacy_side_to_type = False
@@ -4193,6 +4195,8 @@ class StrategyRunner:
                 tick, "volume", "volume_traded", "volume_traded_today"
             )
             source = tick.get("source", "unknown")
+            if source == "poll":
+                self._mark_live(symbol)
             is_seed = bool(tick.get("seed"))
             normalized_symbol = symbol
             history_ready = bool(self._history_ready_by_symbol.get(symbol, False))
@@ -4815,7 +4819,8 @@ class StrategyRunner:
                 should_evaluate = False
                 phase = self._data_phase.get(symbol, "HYDRATION")
                 if phase != "LIVE":
-                    return
+                    if not self._allow_polling_fallback:
+                        return
                 with self._lock:
                     state = self._symbol_state.get(symbol)
                     if state:
