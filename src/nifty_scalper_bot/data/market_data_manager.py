@@ -196,7 +196,7 @@ class MarketDataManager:
 
         ws_disabled = os.getenv("WEBSOCKET__DISABLED", "false").lower() == "true"
         poll_src = os.getenv("DATA_READINESS_SOURCE", "").upper() == "POLL"
-        self._rest_poll_enabled = ws_disabled or poll_src or True
+        self._rest_poll_enabled = ws_disabled or poll_src
         self._rest_poll_interval = self._parse_float_env(
             "MDM_POLL_INTERVAL_SECONDS", default=1.5, minimum=0.5
         )
@@ -263,6 +263,32 @@ class MarketDataManager:
         self._last_balance_log_time = 0.0
         self._started = False
 
+    def _initialize_instruments(self) -> None:
+        """Load instrument token mappings from broker. Args: none. Returns: None. Raises: Exception."""
+
+        try:
+            if self._broker is None or not hasattr(self._broker, "instruments"):
+                return
+            instruments = self._broker.instruments()
+            loaded = 0
+            with self._lock:
+                for ins in instruments:
+                    try:
+                        token = int(ins["instrument_token"])
+                        symbol = str(ins["tradingsymbol"]).strip()
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not symbol:
+                        continue
+                    canonical_symbol = normalize_symbol(symbol)
+                    self._token_by_symbol[canonical_symbol] = token
+                    self._symbol_by_token[token] = canonical_symbol
+                    loaded += 1
+            self._logger.info(f"Loaded {loaded} instruments")
+        except Exception as e:
+            self._logger.error(f"Instrument load failed: {e}")
+            raise
+
     def validate_token_symbol_mappings(self) -> None:
         """Args: none; Returns: None; Raises: RuntimeError on mapping mismatch."""
 
@@ -304,7 +330,7 @@ class MarketDataManager:
             if isinstance(poll_ts, (int, float)):
                 poll_bucket = int(float(poll_ts) // 60)
                 current_live_bucket = int(time.time() // 60)
-                if poll_bucket >= current_live_bucket:
+                if poll_bucket > current_live_bucket:
                     return
             normalized.setdefault("source", "poll")
             self._emit_tick(symbol, normalized, source="poll")
@@ -356,9 +382,9 @@ class MarketDataManager:
                 option_contracts = self._resolver.option_contracts(normalized_underlying)
             
             # CRITICAL FALLBACK: If resolver returns nothing, query broker for active NFO instruments
-            if not option_contracts and hasattr(self._broker, "get_instruments"):
+            if not option_contracts and hasattr(self._broker, "instruments"):
                 self._logger.info(f"Resolver failed. Fetching NIFTY chain directly from broker for {expiry}")
-                all_nfo = self._broker.get_instruments("NFO")
+                all_nfo = self._broker.instruments()
                 option_contracts = [
                     ins for ins in all_nfo 
                     if ins["name"] == normalized_underlying 
@@ -471,6 +497,7 @@ class MarketDataManager:
         if self._started:
             return
         self._started = True
+        self._initialize_instruments()
         if self._ws is not None:
             try:
                 self._ws.start()
@@ -2421,18 +2448,6 @@ class MarketDataManager:
             token_int = int(token)
             symbol_from_map = self._symbol_by_token.get(token_int)
             
-            # FIX: If token is unknown, try resolving it via broker metadata immediately
-            if not symbol_from_map and self._broker:
-                try:
-                    # Some brokers allow fetching a single instrument's meta by token
-                    meta = self._broker.get_instrument_by_token(token_int)
-                    if meta:
-                        symbol_from_map = meta["tradingsymbol"]
-                        self.register_symbol(symbol_from_map, token_int)
-                        self._logger.info(f"Auto-mapped token {token_int} to {symbol_from_map}")
-                except Exception:
-                    pass # Fallback to dropping if resolution fails
-
             if not symbol_from_map:
                 # Log only once every 60s for this specific token to avoid spam
                 self._logger.error(f"Unmapped token {token_int} dropped")
@@ -2841,7 +2856,7 @@ class MarketDataManager:
         if not is_market_open():
             self._zombie_stale_logged = False
             return
-        if not self._is_ws_connected():
+        if not self._is_ws_healthy():
             self._zombie_stale_logged = False
             return
 
@@ -2985,15 +3000,22 @@ class MarketDataManager:
         last_margin_refresh = 0.0
         margin_interval = 60.0
         consecutive_errors = 0
+        last_ws_healthy: bool | None = None
+        last_poll_active: bool | None = None
 
         while not self._rest_poll_stop.is_set():
             loop_start = time.time()
 
             ws_healthy = self._is_ws_healthy()
-            self._rest_poll_enabled = not ws_healthy
-            if ws_healthy:
-                if self._rest_poll_stop.wait(1.0):
-                    break
+            poll_active = not ws_healthy
+            if ws_healthy and last_ws_healthy is not True:
+                self._logger.info("WS HEALTHY")
+            if poll_active and last_poll_active is not True:
+                self._logger.info("POLLING ACTIVE")
+            last_ws_healthy = ws_healthy
+            last_poll_active = poll_active
+            if not poll_active:
+                time.sleep(1)
                 continue
 
             try:
@@ -3173,7 +3195,7 @@ class MarketDataManager:
                 "Condition met: mdm_tracking_added",
                 extra={"event": "mdm_tracking_added", "symbol": sym},
             )
-            if seed and not self._seed_completed and not self._ws_connected:
+            if seed and not self._seed_completed and not self._is_ws_healthy():
                 if sym not in self._seeded_symbols:
                     seeded = self._seed_quote_from_broker(sym)
                     if seeded:
@@ -3362,7 +3384,7 @@ class MarketDataManager:
             broker = getattr(self, "_broker", None)
             if broker is None or not hasattr(broker, "get_quote"):
                 return False
-            if self._ws_connected:
+            if self._is_ws_healthy():
                 return False
             if symbol in self._seeded_symbols:
                 return False
@@ -3957,19 +3979,10 @@ class MarketDataManager:
             return
         try:
             token = self._token_by_symbol.get(symbol)
-            if token is None:
-                token = self._resolve_token(symbol)
-            if token is None:
-                self._logger.error(
-                    "WS subscribe skipped (no token)", extra={"symbol": symbol}
-                )
-                return
+            if not token:
+                raise RuntimeError(f"Token missing for {symbol}")
             self.validate_token_symbol_mappings()
-            self._logger.debug(
-                "EVENT|subscribe|%s|token=%s|mode=full",
-                symbol,
-                token,
-            )
+            self._logger.info(f"WS SUBSCRIBED: {symbol} ({token})")
             self._ws.subscribe_tokens([token], mode="full")
         except Exception as exc:  # noqa: BLE001
             # Log both message and details so it shows up even if the logger ignores
@@ -4005,7 +4018,7 @@ class MarketDataManager:
         try:
             # We strip exchange prefixes if present for the search
             clean_symbol = symbol.split(":")[-1]
-            instruments = self._broker.get_instruments("NFO")
+            instruments = self._broker.instruments()
             for ins in instruments:
                 if ins["tradingsymbol"] == clean_symbol:
                     t = int(ins["instrument_token"])
