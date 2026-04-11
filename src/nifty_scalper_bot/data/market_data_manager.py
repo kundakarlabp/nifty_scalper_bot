@@ -129,6 +129,8 @@ class MarketDataManager:
         self._async_dispatch_drops = 0
         self._last_async_drop_log = time.monotonic()
         self._ws_connected = False
+        self._last_ws_tick_mono: float = 0.0
+        self._event_loop_lag_seconds: float = 0.0
         self._hydration_status: dict[str, str] = {}
         self._last_hb_mono: float | None = None
         self._heartbeat_callbacks: list[Callable[[float], None]] = []
@@ -194,7 +196,7 @@ class MarketDataManager:
 
         ws_disabled = os.getenv("WEBSOCKET__DISABLED", "false").lower() == "true"
         poll_src = os.getenv("DATA_READINESS_SOURCE", "").upper() == "POLL"
-        self._rest_poll_enabled = ws_disabled or poll_src or True # Force enable fallback
+        self._rest_poll_enabled = ws_disabled or poll_src or True
         self._rest_poll_interval = self._parse_float_env(
             "MDM_POLL_INTERVAL_SECONDS", default=1.5, minimum=0.5
         )
@@ -298,6 +300,12 @@ class MarketDataManager:
             # Ensure timestamp present for downstream validator
             if "timestamp" not in normalized:
                 normalized["timestamp"] = time.time()
+            poll_ts = normalized.get("timestamp")
+            if isinstance(poll_ts, (int, float)):
+                poll_bucket = int(float(poll_ts) // 60)
+                current_live_bucket = int(time.time() // 60)
+                if poll_bucket >= current_live_bucket:
+                    return
             normalized.setdefault("source", "poll")
             self._emit_tick(symbol, normalized, source="poll")
         except Exception as exc:  # noqa: BLE001
@@ -2332,11 +2340,13 @@ class MarketDataManager:
 
     def _enqueue_tick_threadsafe(self, tick: dict[str, Any]) -> None:
         """Enqueue websocket ticks from sync callbacks onto the async queue."""
+        tick_payload = dict(tick)
+        tick_payload.setdefault("_enqueued_monotonic", time.monotonic())
         loop = self._main_loop
         if loop is not None and loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.push_tick(tick), loop)
+            asyncio.run_coroutine_threadsafe(self.push_tick(tick_payload), loop)
             return
-        self._tick_queue.put_nowait(dict(tick))
+        self._tick_queue.put_nowait(tick_payload)
         self._drain_tick_queue_sync()
 
     def _on_tick(self, tick: dict[str, Any]) -> None:
@@ -2401,6 +2411,9 @@ class MarketDataManager:
             self._process_queued_tick(raw)
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
+        enqueued_mono = raw.get("_enqueued_monotonic")
+        if isinstance(enqueued_mono, (int, float)):
+            self._event_loop_lag_seconds = max(0.0, time.monotonic() - float(enqueued_mono))
         if not raw.get("symbol"):
             token = raw.get("instrument_token")
             if token is None: return
@@ -2568,6 +2581,8 @@ class MarketDataManager:
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
+        if source == "ws":
+            self._last_ws_tick_mono = time.monotonic()
         self._store_tick(symbol, tick)
         callbacks: list[TickCallback]
         tick_payload = dict(tick)
@@ -2763,6 +2778,23 @@ class MarketDataManager:
         except Exception:  # noqa: BLE001
             return bool(self._ws_connected)
 
+    def _is_ws_healthy(self) -> bool:
+        """Return WS health. Args: none. Returns: bool. Raises: None."""
+
+        try:
+            connected = self._is_ws_connected()
+            now_mono = time.monotonic()
+            last_tick_age = (
+                max(0.0, now_mono - self._last_ws_tick_mono)
+                if self._last_ws_tick_mono > 0
+                else float("inf")
+            )
+            event_loop_lag = max(0.0, float(self._event_loop_lag_seconds))
+            return connected and last_tick_age < 2.0 and event_loop_lag < 0.5
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("Failure in _is_ws_healthy: %s", exc)
+            return False
+
     def _start_health_monitor(self) -> None:
         """Args: none; Returns: none; Raises: none."""
 
@@ -2957,10 +2989,9 @@ class MarketDataManager:
         while not self._rest_poll_stop.is_set():
             loop_start = time.time()
 
-            # --- Objective 7: WebSocket + Polling Sync Guard ---
-            # Skip high-frequency polling ONLY if WebSocket is actively delivering ticks.
-            # We check if we've received ANY tick (last_tick_time > 0) and if it's fresh (< 5s).
-            if self._ws_connected and self.last_tick_time > 0 and (loop_start - self.last_tick_time < 5.0):
+            ws_healthy = self._is_ws_healthy()
+            self._rest_poll_enabled = not ws_healthy
+            if ws_healthy:
                 if self._rest_poll_stop.wait(1.0):
                     break
                 continue

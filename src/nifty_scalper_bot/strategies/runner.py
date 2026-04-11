@@ -692,6 +692,7 @@ class StrategyRunner:
         # blocks all subsequent ticks → zero strategy evaluations until first live
         # bar closes (up to 60 s after startup).
         self._live_bar_seen: set[str] = set()
+        self._data_phase: dict[str, str] = {}
         # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
         # for each symbol so Railway logs confirm the moment strategies become active.
         self._warmup_complete_logged: set[str] = set()
@@ -762,6 +763,7 @@ class StrategyRunner:
             self._hydration_complete = True
             for symbol in symbols:
                 self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
+                self._data_phase.setdefault(symbol, "HYDRATION")
             self._rate_limit_backoff_until_by_symbol = {}
             # BUG W3 FIX: Do NOT wipe warmup accumulators when mark_ready() has
             # already promoted runner state to EXECUTION_ENABLED.  The call order
@@ -895,6 +897,7 @@ class StrategyRunner:
                 return
             self._active_symbols.add(normalized)
             self._tracked_symbols.add(normalized)
+            self._data_phase[normalized] = "HYDRATION"
             self._symbol_states.setdefault(normalized, SymbolState.DISCOVERED)
             self._set_symbol_hydration_state(normalized, SymbolState.HYDRATING)
             # FIX (2026-02-27): Initialize _last_bar_ts for dynamically-added symbols.
@@ -1492,6 +1495,7 @@ class StrategyRunner:
             # 4. Force Registration
             with self._lock:
                 self._active_symbols.add(symbol)
+                self._data_phase.setdefault(symbol, "HYDRATION")
                 if symbol not in self._symbol_state:
                     self._symbol_state[symbol] = SymbolRuntimeState(
                         symbol=symbol, history_limit=2000
@@ -1526,6 +1530,7 @@ class StrategyRunner:
                 normalized = enforce_canonical(normalize_symbol(sym))
                 # 1. Register Active (Critical for main loop)
                 self._active_symbols.add(normalized)
+                self._data_phase.setdefault(normalized, "HYDRATION")
                 self._tracked_symbols.add(normalized)
 
                 # 2. Ensure SymbolState exists (Critical for Strategy Context)
@@ -2113,8 +2118,8 @@ class StrategyRunner:
 
         # Use the public .timestamp property (wraps .start)
         if not is_backfill and last_ts and bar.timestamp <= last_ts:
-            self._logger.debug(
-                "Dropping out-of-order bar",
+            self._logger.warning(
+                "Dropping out-of-order candle",
                 extra={"symbol": symbol, "bar_ts": bar.timestamp, "last_ts": last_ts},
             )
             return
@@ -2259,7 +2264,7 @@ class StrategyRunner:
             # the PHASE-9 stale-bar gate instead of _symbol_history (which contains old
             # hydration bars) so the gate only activates after the FIRST real minute bar
             # completes — not immediately at startup.
-            self._live_bar_seen.add(symbol)
+            self._mark_live(symbol)
             return
 
         except Exception as exc:
@@ -2268,6 +2273,16 @@ class StrategyRunner:
                 exc_info=True,
                 extra={"event": "ingest_bar_failed", "symbol": symbol},
             )
+
+    def _mark_live(self, symbol: str) -> None:
+        """Mark symbol live phase. Args: symbol. Returns: None. Raises: None."""
+        try:
+            if self._data_phase.get(symbol) != "LIVE":
+                self._data_phase[symbol] = "LIVE"
+                self._live_bar_seen.add(symbol)
+                LOGGER.info("LIVE MODE ENABLED: %s", symbol)
+        except Exception as e:
+            self._logger.error("Failure in StrategyRunner._mark_live: %s", e)
 
     def _apply_premium_targets(
         self,
@@ -4798,6 +4813,9 @@ class StrategyRunner:
             
             if signal is None and self._required_candles:
                 should_evaluate = False
+                phase = self._data_phase.get(symbol, "HYDRATION")
+                if phase != "LIVE":
+                    return
                 with self._lock:
                     state = self._symbol_state.get(symbol)
                     if state:
@@ -4832,7 +4850,12 @@ class StrategyRunner:
                             _effective_last_bar_ts = datetime.fromtimestamp(
                                 _bucket_ts, tz=timezone.utc
                             )
-                        if _effective_last_bar_ts and state._last_eval_bar_ts:
+                        disable_same_bar_skip = phase != "LIVE"
+                        if (
+                            not disable_same_bar_skip
+                            and _effective_last_bar_ts
+                            and state._last_eval_bar_ts
+                        ):
                             if _effective_last_bar_ts <= state._last_eval_bar_ts:
                                 logged_map = getattr(
                                     self, "_same_bar_skip_logged", None
