@@ -723,6 +723,12 @@ class WebSocketManager:
             )
 
         for tick in ticks:
+            if "instrument_token" not in tick:
+                self._logger.debug(
+                    "Skipping tick without instrument_token: %s",
+                    list(tick.keys())[:5],
+                )
+                continue
             try:
                 result = callback(tick)
                 if asyncio.iscoroutine(result):

@@ -1873,6 +1873,28 @@ class ZerodhaKiteClient(BaseBrokerClient):
             self._last_log_instrument_load = now
         return instruments
 
+    def instruments(self, exchange: str = "NSE") -> list[dict]:
+        """KiteConnect-compatible alias for load_instruments().
+
+        InstrumentManager, get_atm_contracts(), and InstrumentsCache all call
+        ``kite.instruments(exchange)`` — this method satisfies that contract.
+
+        Args:
+            exchange: Exchange code, e.g. ``"NFO"`` or ``"NSE"``.
+
+        Returns:
+            list[dict]: Instrument rows for the requested exchange.
+
+        Raises:
+            BrokerError: When the HTTP request or CSV parse fails.
+        """
+        LOGGER.debug(
+            "ZerodhaKiteClient.instruments: delegating to load_instruments exchange=%s",
+            exchange,
+            extra={"event": "zerodha.instruments.enter", "exchange": exchange},
+        )
+        return self.load_instruments(exchange)
+
     def list_instruments(self) -> list[dict[str, Any]]:
         """Return cached instrument rows across all exchanges.
 

@@ -5593,6 +5593,76 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
 
     # ---------------------------------------------------------
+    # 2c. Token-based ATM contract selection + pre-hydration
+    #     Uses InstrumentManager (token-first) + hydrate_contracts()
+    #     MUST run before WS and strategy start.
+    # ---------------------------------------------------------
+    if broker_ready and ctx.instrument_manager is not None and ctx.instrument_manager.is_loaded():
+        try:
+            from nifty_scalper_bot.core.hydration import assert_valid_token, hydrate_contracts
+            from nifty_scalper_bot.core.contract_selector import get_atm_contracts
+
+            # Resolve the underlying sync broker (ZerodhaKiteClient)
+            _sync_broker_for_hydration = getattr(
+                ctx.broker_client, "_broker",
+                getattr(ctx.broker_client, "broker", ctx.broker_client),
+            )
+
+            # Get approximate spot price (best-effort; fallback to a safe default)
+            _spot_for_hydration = 25600.0
+            if ctx.market_data_manager:
+                _last_nifty = ctx.market_data_manager.get_last_tick("NSE:NIFTY")
+                if _last_nifty:
+                    _spot_for_hydration = float(_last_nifty.get("ltp", _spot_for_hydration))
+
+            # Select ATM option contracts purely by token — no string building
+            _atm_contracts = get_atm_contracts(_sync_broker_for_hydration, _spot_for_hydration)
+            _atm_tokens = [int(c["instrument_token"]) for c in _atm_contracts]
+            # Validate all tokens before hydration
+            for _t in _atm_tokens:
+                assert_valid_token(_t)
+
+            LOGGER.info(
+                "Token-based pre-hydration: %d ATM contracts selected, spot=%.2f",
+                len(_atm_tokens),
+                _spot_for_hydration,
+                extra={
+                    "event": "token_hydration_start",
+                    "count": len(_atm_tokens),
+                    "spot": _spot_for_hydration,
+                },
+            )
+
+            # Hydrate each token — raises RuntimeError on < 50 bars (fail fast)
+            _hydration_results = await asyncio.to_thread(
+                hydrate_contracts,
+                _sync_broker_for_hydration,
+                _atm_tokens,
+                min_bars=50,
+                lookback_days=3,
+            )
+            LOGGER.info(
+                "✅ Token-based pre-hydration complete: %d tokens hydrated",
+                len(_hydration_results),
+                extra={"event": "token_hydration_complete", "count": len(_hydration_results)},
+            )
+        except RuntimeError as _hydration_err:
+            # Fail fast: if hydration fails, log critical but continue in degraded mode
+            # so the health endpoint still responds. The strategy will not trade without
+            # sufficient bars because mark_ready() won't be called.
+            LOGGER.critical(
+                "❌ Token pre-hydration FAILED: %s — strategy will remain unready",
+                _hydration_err,
+                extra={"event": "token_hydration_failed", "error": str(_hydration_err)},
+            )
+        except Exception as _hydration_exc:
+            LOGGER.warning(
+                "Token pre-hydration error (non-fatal): %s",
+                _hydration_exc,
+                exc_info=True,
+            )
+
+    # ---------------------------------------------------------
     # 3. Symbol resolution + HYDRATION (FIXED)
     # ---------------------------------------------------------
     if broker_ready:
@@ -5647,8 +5717,11 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             # ---------- HISTORICAL HYDRATION (SEQUENTIAL FETCH + SERIAL COMMIT) ----------
             end_dt = datetime.now()
-            # ✅ FIX: Fetch only 1 day of history to support weekly options
-            start_dt = end_dt - timedelta(days=1)
+            # ✅ FIX: Use 3-day lookback so same-day Zerodha API gaps (which return
+            # 0 bars for the current session) don't cause hydration_zero_bars.
+            # Weekly options may have no same-day candles early in the week — a
+            # multi-day window guarantees at least 50 bars from recent sessions.
+            start_dt = end_dt - timedelta(days=3)
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -5691,10 +5764,24 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 record_count = len(records or [])
                 if record_count == 0:
-                    LOGGER.warning(
-                        "hydration_zero_bars: %s returned 0 bars — check token and time range",
+                    LOGGER.error(
+                        "hydration_zero_bars: %s returned 0 bars — "
+                        "Zerodha historical API returned empty data. "
+                        "Extending lookback or check broker auth.",
                         symbol,
                         extra={"event": "hydration_zero_bars", "symbol": symbol},
+                    )
+                elif record_count < 20:
+                    LOGGER.error(
+                        "insufficient_bars_for_strategy: %s returned only %d bars (need ≥20) — "
+                        "strategy indicators will be unreliable",
+                        symbol,
+                        record_count,
+                        extra={
+                            "event": "insufficient_bars_for_strategy",
+                            "symbol": symbol,
+                            "bars": record_count,
+                        },
                     )
                 LOGGER.info(
                     "hydration_fetch_complete",
