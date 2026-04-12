@@ -13,6 +13,9 @@ from nifty_scalper_bot.data.instrument_loader import (
     write_instrument_rows_to_csv,
 )
 from nifty_scalper_bot.data.instruments import (
+    # NOTE: InstrumentResolver is kept for backward-compatibility with the
+    # CSV/SQLite warm-up path in app.py and cron_refresh.py.
+    # New code should use core.instrument_manager.InstrumentManager.get_token().
     InstrumentResolver,
     ResolvedSymbol,
     SymbolResolver,

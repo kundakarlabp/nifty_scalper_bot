@@ -3,7 +3,9 @@
 Instrument resolver and CSV/SQLite instrument loader.
 
 Provides:
-- InstrumentResolver: broker/CSV/DB-backed instrument token resolver.
+- Token-based instrument loader (resolver removed from public API).
+- InstrumentResolver: legacy broker/CSV/DB-backed resolver (deprecated — use
+  InstrumentManager.get_token() for new code).
 - ensure_sqlite: create/open a sqlite db for cached instruments.
 - refresh_from_csv: read instruments CSV and persist into sqlite.
 - load_rows_for_resolver: return rows (mapping) usable by resolver.warm_from_broker_dump.
@@ -14,6 +16,10 @@ Optimized / hardened version:
 - Dynamic lot_size resolution via get_lot_size(symbol_or_base).
 - Expiry parsing / weekly-monthly helpers (includes O/N/D month codes).
 - Negative cache TTL configurable via env.
+
+NOTE: Prefer core.instrument_manager.InstrumentManager.get_token(symbol) over
+InstrumentResolver.resolve() in new code.  InstrumentResolver is kept for
+backward-compatibility with the CSV/SQLite warm-up path.
 """
 from __future__ import annotations
 
