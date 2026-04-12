@@ -1048,6 +1048,29 @@ class InstrumentResolver:
             return None
         return token
 
+    def get_symbol(self, token: int, *, default: Optional[str] = None) -> Optional[str]:
+        """Return canonical exchange-qualified symbol for an instrument token.
+
+        This is the token→symbol direction used by the universe sync loop and
+        polling streamer.  Delegates to format_token_as_symbol which handles
+        well-known index tokens (NIFTY/BANKNIFTY) plus the general resolver cache.
+
+        Args:
+            token – integer instrument token.
+            default – value to return when the token is not in the cache.
+        Returns: canonical symbol string (e.g. 'NSE:NIFTY 50', 'NFO:NIFTY26APR25600CE')
+                 or *default* when the token is unknown.
+        Raises: None.
+        """
+        try:
+            result = self.format_token_as_symbol(int(token))
+            # format_token_as_symbol returns str(token) as fallback — treat that as not-found
+            if result and result != str(token):
+                return result
+            return default
+        except Exception:
+            return default
+
     def sync_nfo_from_broker(self, instruments: list) -> int:
         """
         Sync NFO instruments from broker API response into _option_contracts.
