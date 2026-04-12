@@ -175,6 +175,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         # instrument cache: exchange -> mapping of many normalized keys -> row
         self._instrument_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        # token_map: instrument_token (int) -> instrument row dict, populated from
+        # NFO (and NSE) on each load_instruments("NFO") / load_instruments("NSE") call.
+        # Provides O(1) reverse lookup: token -> full instrument metadata.
+        self.token_map: dict[int, dict[str, Any]] = {}
         self._resolver: InstrumentResolver | None = None
         self._log_time_fn: Callable[[], float] = time.time
         self._resilience_lock = threading.RLock()
@@ -1858,6 +1862,16 @@ class ZerodhaKiteClient(BaseBrokerClient):
             cache[base] = row
 
         self._instrument_cache[normalized_exchange] = cache
+
+        # Rebuild token_map from all loaded exchanges so callers can do
+        # fast O(1) instrument_token -> row lookups without iterating lists.
+        for row in instruments:
+            try:
+                tok = int(row.get("instrument_token") or 0)
+            except (TypeError, ValueError):
+                continue
+            if tok:
+                self.token_map[tok] = row
 
         # [CORRECTED] Aligned correctly
         now = time.time()

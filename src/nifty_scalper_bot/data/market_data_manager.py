@@ -180,6 +180,11 @@ class MarketDataManager:
         self._seeded_symbols: set[str] = set()
         self.ready: bool = False
         self.degraded: bool = False
+        # True once at least one symbol has successfully passed the readiness
+        # gate.  The DEGRADED mode transition in wait_until_ready() is only
+        # armed after hydration has completed at least once so that a cold
+        # startup that never receives data does not immediately enter DEGRADED.
+        self.hydration_complete: bool = False
         self._margin_cache_ttl = self._parse_float_env(
             "MDM_MARGIN_TTL_SEC", default=15.0, minimum=1.0
         )
@@ -275,21 +280,31 @@ class MarketDataManager:
         try:
             if self._broker is None or not hasattr(self._broker, "instruments"):
                 return
-            instruments = self._broker.instruments()
             loaded = 0
-            with self._lock:
-                for ins in instruments:
-                    try:
-                        token = int(ins["instrument_token"])
-                        symbol = str(ins["tradingsymbol"]).strip()
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                    if not symbol:
-                        continue
-                    canonical_symbol = normalize_symbol(symbol)
-                    self.register_symbol(canonical_symbol, token)
-                    loaded += 1
-            self._logger.info(f"Loaded {loaded} instruments")
+            # Load NFO (derivatives) first, then NSE (index tokens like NIFTY 50).
+            # Previously the call had no exchange argument which defaulted to NSE,
+            # leaving all NFO futures/options tokens missing from the mapping.
+            for exchange in ("NFO", "NSE"):
+                try:
+                    exchange_instruments = self._broker.instruments(exchange)
+                except Exception as exc:
+                    self._logger.warning(
+                        "Could not load instruments for %s: %s", exchange, exc
+                    )
+                    continue
+                with self._lock:
+                    for ins in exchange_instruments:
+                        try:
+                            token = int(ins["instrument_token"])
+                            symbol = str(ins["tradingsymbol"]).strip()
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if not symbol:
+                            continue
+                        canonical_symbol = normalize_symbol(symbol)
+                        self.register_symbol(canonical_symbol, token)
+                        loaded += 1
+            self._logger.info(f"Loaded {loaded} instruments (NFO + NSE)")
         except Exception as e:
             self._logger.error(f"Instrument load failed: {e}")
             raise
@@ -458,7 +473,7 @@ class MarketDataManager:
             # CRITICAL FALLBACK: If resolver returns nothing, query broker for active NFO instruments
             if not option_contracts and hasattr(self._broker, "instruments"):
                 self._logger.info(f"Resolver failed. Fetching NIFTY chain directly from broker for {expiry}")
-                all_nfo = self._broker.instruments()
+                all_nfo = self._broker.instruments("NFO")
                 option_contracts = [
                     ins for ins in all_nfo 
                     if ins["name"] == normalized_underlying 
@@ -994,6 +1009,23 @@ class MarketDataManager:
         with self._lock:
             tick = self._tick_cache.get(resolved_symbol)
             return dict(tick) if tick is not None else None
+
+    def get_last_tick(self, symbol: str | int) -> dict[str, Any] | None:
+        """Return the most recent cached tick for *symbol*.
+
+        Alias for :meth:`get_latest_tick` — provided so callers that use the
+        ``get_last_tick`` convention work without modification.
+
+        Args:
+            symbol: Instrument identifier (symbol string or integer token).
+
+        Returns:
+            dict snapshot of the latest tick, or ``None`` if not yet received.
+
+        Raises:
+            None.
+        """
+        return self.get_latest_tick(symbol)
 
     async def ensure_fresh_tick(self, symbol: str) -> dict[str, Any] | None:
         """Args: symbol; Returns: cached tick; Raises: none."""
@@ -2167,6 +2199,7 @@ class MarketDataManager:
             if valid_symbols:
                 self.ready = True
                 self.degraded = False
+                self.hydration_complete = True
                 self._logger.info(
                     "Condition met: mdm_ready",
                     extra={"event": "mdm_ready", "symbols": valid_symbols},
@@ -2185,13 +2218,21 @@ class MarketDataManager:
 
         self._logger.warning(
             "Entering DEGRADED mode due to insufficient live data "
-            "(timeout=%.1fs, min_bars=%d, bars=%s)",
+            "(timeout=%.1fs, min_bars=%d, bars=%s, hydration_complete=%s)",
             timeout,
             min_bars,
             bars,
+            self.hydration_complete,
         )
-        self.ready = False
-        self.degraded = True
+        # Only arm DEGRADED once hydration has completed at least once.
+        # On a cold start that never received ticks we stay not-ready without
+        # falsely declaring the system degraded.
+        if self.hydration_complete:
+            self.ready = False
+            self.degraded = True
+        else:
+            self.ready = False
+            self.degraded = False
         return
 
     def get_hydration_status(self, symbol: str) -> str:
@@ -4120,7 +4161,12 @@ class MarketDataManager:
         try:
             # We strip exchange prefixes if present for the search
             clean_symbol = symbol.split(":")[-1]
-            instruments = self._broker.instruments()
+            # Route to the correct exchange: derivatives end in FUT/CE/PE → NFO,
+            # everything else → NSE.  Previously the call had no exchange argument
+            # which defaulted to NSE, so all NFO instruments silently returned None.
+            _suffix = clean_symbol.upper()
+            _exchange = "NFO" if any(_suffix.endswith(s) for s in ("FUT", "CE", "PE")) else "NSE"
+            instruments = self._broker.instruments(_exchange)
             for ins in instruments:
                 if ins["tradingsymbol"] == clean_symbol:
                     t = int(ins["instrument_token"])
