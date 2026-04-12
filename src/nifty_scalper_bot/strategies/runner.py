@@ -4821,10 +4821,13 @@ class StrategyRunner:
                 should_evaluate = False
                 phase = self._data_phase.get(symbol, "HYDRATION")
                 if phase != "LIVE":
-                    if getattr(self, "_allow_polling_fallback", True):
-                        if not self._symbol_history.get(symbol):
-                            return
-                    else:
+                    fallback_enabled = bool(
+                        getattr(self, "_fallback_enabled", False)
+                        or getattr(self, "_allow_polling_fallback", True)
+                    )
+                    if not fallback_enabled:
+                        return
+                    if not self._symbol_history.get(symbol):
                         return
                 with self._lock:
                     state = self._symbol_state.get(symbol)
@@ -4924,6 +4927,7 @@ class StrategyRunner:
                         should_evaluate = True
 
                 if should_evaluate:
+                    self._logger.info("Strategy evaluation triggered: %s", symbol)
                     # ✅ DIAGNOSTIC LOG: Confirm evaluation is happening
                     log_throttled(
                         self._logger,
