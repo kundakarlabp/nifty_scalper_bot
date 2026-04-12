@@ -63,7 +63,7 @@ class EventBus:
             try:
                 handler(payload)
             except Exception as exc:  # noqa: BLE001
-                LOGGER.error("Failure in EventBus.publish: %s", exc, exc_info=exc)
+                LOGGER.error("Handler failed: %s", exc, exc_info=exc)
 
 
 class TickBus:
@@ -206,6 +206,8 @@ class DataHub:
         self._quotes: dict[str, Tick] = {}
         self._orders: dict[str, dict[str, Any]] = {}
         self._positions: dict[str, dict[str, Any]] = {}
+        self._token_by_symbol: dict[str, int] = {}
+        self._symbol_by_token: dict[int, str] = {}
         self._message_bus = message_bus or event_bus
         LOGGER.debug("DataHub using MessageBus id=%s", id(self._message_bus))
         
@@ -244,6 +246,17 @@ class DataHub:
         self.broker = getattr(self._mdm, "broker", None) or getattr(self._mdm, "_broker", None)
         self.bar_aggregator = getattr(self._mdm, "bar_aggregator", None)
         self.indicators_ready = False
+
+    def register_symbol(self, symbol: str, token: int) -> None:
+        """Register symbol-token mapping; Args: symbol/token; Returns: none; Raises: none."""
+        try:
+            normalized = enforce_canonical(normalize_symbol(str(symbol)))
+            token_int = int(token)
+            with self._lock:
+                self._token_by_symbol[normalized] = token_int
+                self._symbol_by_token[token_int] = normalized
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("Failure in DataHub.register_symbol: %s", exc, exc_info=exc)
 
     # ----------------------------------------------------------------
     # Ingestion (Write Path)

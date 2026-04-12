@@ -109,6 +109,10 @@ class MarketDataManager:
         )
         self._token_by_symbol: dict[str, int] = {}
         self._symbol_by_token: dict[int, str] = {}
+        self._token_by_symbol["NSE:NIFTY 50"] = 256265
+        self._symbol_by_token[256265] = "NSE:NIFTY 50"
+        self._token_by_symbol["NSE:BANKNIFTY"] = 260105
+        self._symbol_by_token[260105] = "NSE:BANKNIFTY"
         self._last_signature: dict[
             str, tuple[tuple[float | None, float | None, float | None], float]
         ] = {}
@@ -283,8 +287,7 @@ class MarketDataManager:
                     if not symbol:
                         continue
                     canonical_symbol = normalize_symbol(symbol)
-                    self._token_by_symbol[canonical_symbol] = token
-                    self._symbol_by_token[token] = canonical_symbol
+                    self.register_symbol(canonical_symbol, token)
                     loaded += 1
             self._logger.info(f"Loaded {loaded} instruments")
         except Exception as e:
@@ -2603,9 +2606,7 @@ class MarketDataManager:
             token_int = int(token)
         except (TypeError, ValueError):
             return
-        with self._lock:
-            self._token_by_symbol[symbol] = token_int
-            self._symbol_by_token[token_int] = symbol
+        self.register_symbol(symbol, token_int)
 
     def register_symbol(self, symbol: str, token: int) -> None:
         """Args: symbol/token; Returns: none; Raises: RuntimeError on bad data."""
@@ -2619,6 +2620,14 @@ class MarketDataManager:
                 return
             self._token_by_symbol[normalized_symbol] = token_int
             self._symbol_by_token[token_int] = normalized_symbol
+        try:
+            if self._resolver is not None and hasattr(self._resolver, "register"):
+                self._resolver.register(normalized_symbol, token_int)
+            datahub = getattr(self, "_datahub", None)
+            if datahub is not None and hasattr(datahub, "register_symbol"):
+                datahub.register_symbol(normalized_symbol, token_int)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Resolver/DataHub sync skipped: %s", exc, exc_info=exc)
 
     def _store_tick(self, symbol: str, tick: dict[str, Any]) -> None:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
@@ -2814,6 +2823,7 @@ class MarketDataManager:
                         "minute",
                     )
 
+                hydrated_count = 0
                 for candle in candles or ():
                     candle_dt = candle.get("date")
                     if isinstance(candle_dt, str):
@@ -2847,6 +2857,27 @@ class MarketDataManager:
                         self._last_historical_ts[canonical_symbol] = float(
                             validated_ts.timestamp()
                         )
+                    hydrated_count += 1
+                    runner = getattr(self, "_runner", None)
+                    if runner is not None and hasattr(runner, "ingest_historical_bar"):
+                        try:
+                            runner.ingest_historical_bar(
+                                {
+                                    "symbol": canonical_symbol,
+                                    "open": float(candle.get("open", 0.0)),
+                                    "high": float(candle.get("high", 0.0)),
+                                    "low": float(candle.get("low", 0.0)),
+                                    "close": float(candle.get("close", 0.0)),
+                                    "volume": float(candle.get("volume", 0.0)),
+                                    "timestamp": candle_dt,
+                                }
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            self._logger.error(
+                                "Hydration ingest failed",
+                                exc_info=exc,
+                            )
+                self._logger.info("Hydrated %s: %d bars", canonical_symbol, hydrated_count)
 
             self._logger.info("WARMUP_COMPLETE")
         except Exception as e:
@@ -3077,6 +3108,7 @@ class MarketDataManager:
             loop_start = time.time()
 
             ws_healthy = self._is_ws_healthy()
+            self._rest_poll_enabled = not ws_healthy
             poll_active = not ws_healthy
             if ws_healthy and last_ws_healthy is not True:
                 self._logger.info("WS HEALTHY")
