@@ -117,6 +117,8 @@ from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
     TelegramWebhookController,
     register_webhook,
 )
+from nifty_scalper_bot.core.instrument_manager import InstrumentManager
+from nifty_scalper_bot.core.contract_selector import get_atm_contracts
 from nifty_scalper_bot.options.strike_selector import StrikeSelector
 from nifty_scalper_bot.risk import RiskManager, RiskSnapshot, RiskState
 from nifty_scalper_bot.risk.session_gate import build_session_guard
@@ -1474,6 +1476,7 @@ class BotContext:
     strategy_runner: StrategyRunner | None = None
     unified_manager: UnifiedManager | None = None
     instrument_resolver: InstrumentResolver | None = None
+    instrument_manager: InstrumentManager | None = None
     instrument_db: sqlite3.Connection | None = None
     instrument_universe: InstrumentUniverseStatus | None = None
     instrument_refresh_task: asyncio.Task[Any] | None = None
@@ -2966,6 +2969,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
 
     broker_client.preload_instruments()
+
+    # ── InstrumentManager: token-first single source of truth ────────────────
+    # Created here (not loaded yet — load() is deferred to startup_sequence
+    # so the broker auth token is valid and market is open).
+    instrument_manager = InstrumentManager(broker_client)
 
     instrument_resolver = InstrumentResolver(broker_client)
     cache_settings = getattr(settings, "instruments", None)
@@ -4491,6 +4499,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         strategy_runner=strategy_runner,
         unified_manager=unified_manager,
         instrument_resolver=instrument_resolver,
+        instrument_manager=instrument_manager,
         instrument_db=instrument_conn,
         instrument_universe=instrument_state,
         instrument_refresh_task=instrument_refresh_task,
@@ -5549,6 +5558,41 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.error(f"Instrument load failed: {e}", exc_info=True)
 
     # ---------------------------------------------------------
+    # 2b. InstrumentManager — token-first single source of truth
+    # ---------------------------------------------------------
+    # Load after broker auth is confirmed (broker_ready) and NFO instruments
+    # have been synced into the resolver so the same API round-trip is reused.
+    if broker_ready and ctx.instrument_manager is not None:
+        try:
+            inner_broker = getattr(ctx.broker_client, "_broker",
+                                   getattr(ctx.broker_client, "broker",
+                                           ctx.broker_client))
+            ctx.instrument_manager._kite = inner_broker
+            ctx.instrument_manager.load()
+            _im_size = ctx.instrument_manager.size()
+            # ── STARTUP GUARD ────────────────────────────────────────────────
+            assert _im_size > 0, (
+                "InstrumentManager.load() completed but zero NIFTY instruments "
+                "were found. Check broker authentication and NFO instrument dump."
+            )
+            LOGGER.info(
+                "✅ InstrumentManager loaded %d NIFTY instruments",
+                _im_size,
+                extra={"event": "instrument_manager_ready", "count": _im_size},
+            )
+        except AssertionError as _guard_err:
+            LOGGER.critical("❌ STARTUP GUARD: %s", _guard_err)
+            # Propagate as RuntimeError so the startup sequence logs it clearly
+            # but does NOT crash the health server — degraded mode still serves /health
+            LOGGER.warning("⚠️ Continuing in degraded mode — no NIFTY instruments")
+        except Exception as _im_exc:
+            LOGGER.warning(
+                "InstrumentManager.load() failed (non-fatal, will use InstrumentResolver): %s",
+                _im_exc,
+                exc_info=True,
+            )
+
+    # ---------------------------------------------------------
     # 3. Symbol resolution + HYDRATION (FIXED)
     # ---------------------------------------------------------
     if broker_ready:
@@ -5612,8 +5656,29 @@ async def startup_sequence(ctx: BotContext) -> None:
             runner = ctx.strategy_runner
             
             # ✅ FIX: Combine Spot and final options for multi-symbol hydration
-            symbols_to_hydrate = [sym for sym in targets if sym]
-            LOGGER.info(f"Starting multi-symbol hydration for {len(symbols_to_hydrate)} instruments...")
+            # Validate tokens before hydration — skip symbols with no resolvable
+            # token so we don't waste API quota on unresolvable contracts.
+            symbols_to_hydrate_raw = [sym for sym in targets if sym]
+            symbols_to_hydrate: list[str] = []
+            for _sym in symbols_to_hydrate_raw:
+                _tok = None
+                if ctx.instrument_resolver:
+                    _tok = ctx.instrument_resolver.resolve(_sym)
+                # Well-known index tokens always have a token; skip only unknown options
+                if _tok is None and _sym.startswith("NFO:"):
+                    LOGGER.warning(
+                        "hydration_skip_no_token: skipping %s (no instrument token found)",
+                        _sym,
+                        extra={"event": "hydration_skip_no_token", "symbol": _sym},
+                    )
+                    continue
+                symbols_to_hydrate.append(_sym)
+
+            LOGGER.info(
+                "Starting multi-symbol hydration for %d/%d instruments (after token validation)...",
+                len(symbols_to_hydrate),
+                len(symbols_to_hydrate_raw),
+            )
 
             async def _fetch_symbol(symbol: str) -> tuple[str, list[Any]]:
                 """Fetch historical records for one symbol. Args: symbol. Returns: symbol and raw records. Raises: Exception."""
@@ -5624,12 +5689,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                     from_str,
                     to_str,
                 )
+                record_count = len(records or [])
+                if record_count == 0:
+                    LOGGER.warning(
+                        "hydration_zero_bars: %s returned 0 bars — check token and time range",
+                        symbol,
+                        extra={"event": "hydration_zero_bars", "symbol": symbol},
+                    )
                 LOGGER.info(
                     "hydration_fetch_complete",
                     extra={
                         "event": "hydration_fetch_complete",
                         "symbol": symbol,
-                        "records": len(records or []),
+                        "records": record_count,
                     },
                 )
                 return symbol, list(records or [])

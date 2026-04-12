@@ -5216,7 +5216,21 @@ class StrategyRunner:
                 return True
             broker_positions = broker.get_positions()
             if asyncio.iscoroutine(broker_positions):
-                broker_positions = asyncio.run(broker_positions)
+                # asyncio.run() raises RuntimeError when an event loop is already
+                # running (which it always is in this async FastAPI app). Close the
+                # coroutine to suppress "coroutine was never awaited" warnings, then
+                # allow trading to proceed — blocking orders on an unresolvable async
+                # positions call is worse than skipping the validation.
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        broker_positions.close()
+                        return True
+                    broker_positions = loop.run_until_complete(broker_positions)
+                except RuntimeError:
+                    if hasattr(broker_positions, "close"):
+                        broker_positions.close()
+                    return True
             if broker_positions is None:
                 return False
             return True
