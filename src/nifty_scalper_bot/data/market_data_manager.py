@@ -207,6 +207,8 @@ class MarketDataManager:
             configured_poll_max if self._rest_poll_enabled else 0
         )
         self._fallback_enabled = self._rest_poll_enabled
+        self._poll_bar_state: dict[str, dict[str, float | None | int]] = {}
+        self._last_poll_bucket: dict[str, int] = {}
         self._rest_poll_stop = threading.Event()
         self._rest_poll_thread: threading.Thread | None = None
         self._health_monitor_stop = threading.Event()
@@ -333,11 +335,80 @@ class MarketDataManager:
                 if poll_bucket > current_live_bucket:
                     return
             normalized.setdefault("source", "poll")
-            self._emit_tick(symbol, normalized, source="poll")
+            self._process_poll_quote(symbol, normalized)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
                 "ingest_rest_quote failed for %s: %s", symbol, exc
             )
+
+    def _process_poll_quote(self, symbol: str, quote: Mapping[str, Any]) -> None:
+        """Aggregate poll quotes into minute candles. Args: symbol, quote. Returns: None. Raises: Exception."""
+        try:
+            ts = float(quote.get("timestamp") or time.time())
+            if ts > 1e12:
+                ts /= 1000.0
+
+            bucket = int(ts // 60)
+            state = self._poll_bar_state.setdefault(
+                symbol,
+                {
+                    "open": None,
+                    "high": None,
+                    "low": None,
+                    "close": None,
+                    "volume": 0,
+                },
+            )
+
+            price = float(quote.get("last_price") or quote.get("ltp") or 0.0)
+            if price <= 0:
+                return
+
+            if state["open"] is None:
+                state["open"] = price
+                state["high"] = price
+                state["low"] = price
+            else:
+                state["high"] = max(float(state["high"] or price), price)
+                state["low"] = min(float(state["low"] or price), price)
+            state["close"] = price
+
+            last_bucket = self._last_poll_bucket.get(symbol)
+            if last_bucket is None:
+                self._last_poll_bucket[symbol] = bucket
+                return
+
+            if bucket > last_bucket:
+                candle = {
+                    "symbol": symbol,
+                    "open": state["open"],
+                    "high": state["high"],
+                    "low": state["low"],
+                    "close": state["close"],
+                    "volume": int(state["volume"] or 0),
+                    "timestamp": last_bucket * 60,
+                    "source": "poll",
+                }
+                self._poll_bar_state[symbol] = {
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": 0,
+                }
+                self._last_poll_bucket[symbol] = bucket
+                self._emit_poll_candle(candle)
+                self._logger.info("POLL CANDLE EMITTED: %s", symbol)
+        except Exception as e:
+            self._logger.error("Poll candle build failed for %s: %s", symbol, e)
+
+    def _emit_poll_candle(self, candle: Mapping[str, Any]) -> None:
+        """Send poll-built candles through runner ingestion. Args: candle. Returns: None. Raises: Exception."""
+        try:
+            if self._runner:
+                self._runner.ingest_historical_bar(dict(candle))
+        except Exception as e:
+            self._logger.error("Poll candle emit failed: %s", e)
 
     def set_unified_manager(self, manager: Any | None) -> None:
         """Retain compatibility hook. Args: manager. Returns: None. Raises: None."""
@@ -2449,8 +2520,7 @@ class MarketDataManager:
             symbol_from_map = self._symbol_by_token.get(token_int)
             
             if not symbol_from_map:
-                # Log only once every 60s for this specific token to avoid spam
-                self._logger.error(f"Unmapped token {token_int} dropped")
+                self._logger.warning("Unmapped token %s", token_int)
                 return
             raw = {**raw, "symbol": symbol_from_map}
 

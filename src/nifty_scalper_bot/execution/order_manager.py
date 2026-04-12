@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
@@ -5528,6 +5529,8 @@ class OrderManager:
             try:
                 if hasattr(self._broker, "get_positions"):
                     raw_positions = self._broker.get_positions()
+                    if asyncio.iscoroutine(raw_positions):
+                        raw_positions = asyncio.run(raw_positions)
                     if isinstance(raw_positions, list):
                         broker_positions = [
                             p for p in raw_positions if isinstance(p, dict)
@@ -10428,6 +10431,8 @@ class OrderManager:
             # Fetch net positions (standard for most brokers)
             try:
                 broker_pos_payload = self._broker.get_positions()
+                if asyncio.iscoroutine(broker_pos_payload):
+                    broker_pos_payload = asyncio.run(broker_pos_payload)
             except Exception as e:
                 self._logger.error(f"Failed to fetch broker positions: {e}")
                 return

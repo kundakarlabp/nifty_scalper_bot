@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping, Protocol, Sequence
 
@@ -144,6 +145,8 @@ class StrategyOrchestrator:
         )
         try:
             positions = self._broker.get_positions()
+            if asyncio.iscoroutine(positions):
+                positions = asyncio.run(positions)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "Failure in StrategyOrchestrator._calculate_daily_pnl: %s",

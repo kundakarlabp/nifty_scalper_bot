@@ -2266,7 +2266,8 @@ class StrategyRunner:
             # the PHASE-9 stale-bar gate instead of _symbol_history (which contains old
             # hydration bars) so the gate only activates after the FIRST real minute bar
             # completes — not immediately at startup.
-            self._mark_live(symbol)
+            if bar and symbol not in self._live_bar_seen:
+                self._mark_live(symbol)
             return
 
         except Exception as exc:
@@ -2283,6 +2284,7 @@ class StrategyRunner:
                 self._data_phase[symbol] = "LIVE"
                 self._live_bar_seen.add(symbol)
                 LOGGER.info("LIVE MODE ENABLED: %s", symbol)
+                self._logger.info("LIVE MODE ENABLED: %s", symbol)
         except Exception as e:
             self._logger.error("Failure in StrategyRunner._mark_live: %s", e)
 
@@ -4819,7 +4821,10 @@ class StrategyRunner:
                 should_evaluate = False
                 phase = self._data_phase.get(symbol, "HYDRATION")
                 if phase != "LIVE":
-                    if not self._allow_polling_fallback:
+                    if getattr(self, "_allow_polling_fallback", True):
+                        if not self._symbol_history.get(symbol):
+                            return
+                    else:
                         return
                 with self._lock:
                     state = self._symbol_state.get(symbol)
@@ -5206,6 +5211,8 @@ class StrategyRunner:
             if broker is None or not hasattr(broker, "get_positions"):
                 return True
             broker_positions = broker.get_positions()
+            if asyncio.iscoroutine(broker_positions):
+                broker_positions = asyncio.run(broker_positions)
             if broker_positions is None:
                 return False
             return True
