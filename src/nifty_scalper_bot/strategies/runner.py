@@ -5214,26 +5214,27 @@ class StrategyRunner:
             )
             if broker is None or not hasattr(broker, "get_positions"):
                 return True
-            broker_positions = broker.get_positions()
+
+            # Prefer the underlying sync client (ZerodhaKiteClient) when the
+            # broker wrapper is an async RobustDataProvider — calling an async
+            # method synchronously from within a running event loop is not safe.
+            sync_broker = getattr(
+                broker,
+                "client",
+                getattr(broker, "_broker", broker),
+            )
+            method = getattr(sync_broker, "get_positions", None)
+            if method is None:
+                return True
+
+            broker_positions = method()
             if asyncio.iscoroutine(broker_positions):
-                # asyncio.run() raises RuntimeError when an event loop is already
-                # running (which it always is in this async FastAPI app). Close the
-                # coroutine to suppress "coroutine was never awaited" warnings, then
-                # allow trading to proceed — blocking orders on an unresolvable async
-                # positions call is worse than skipping the validation.
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        broker_positions.close()
-                        return True
-                    broker_positions = loop.run_until_complete(broker_positions)
-                except RuntimeError:
-                    if hasattr(broker_positions, "close"):
-                        broker_positions.close()
-                    return True
-            if broker_positions is None:
-                return False
-            return True
+                # If we still ended up with a coroutine, close it to prevent
+                # "coroutine was never awaited" warnings and allow trading to
+                # proceed — blocking on an unresolvable async call is worse.
+                broker_positions.close()
+                return True
+            return broker_positions is not None
         except Exception as e:
             self._logger.error(f"State verification failed: {e}")
             return False
