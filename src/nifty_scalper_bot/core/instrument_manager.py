@@ -22,9 +22,25 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Optional
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.instrument_manager")
+
+# Well-known index tokens
+_WELL_KNOWN_TOKENS: Dict[str, int] = {
+    "NIFTY": 256265,
+    "BANKNIFTY": 260105,
+    "NSE:NIFTY": 256265,
+    "NSE:BANKNIFTY": 260105,
+}
+
+
+def _atm_strike_for_spot(spot: float, step: int) -> int:
+    """Return the nearest ATM strike for a spot price."""
+    if spot <= 0 or step <= 0:
+        return 0
+    return int(round(spot / step) * step)
 
 
 class InstrumentManager:
@@ -178,3 +194,288 @@ class InstrumentManager:
         """Populate reverse maps. Must be called under self._lock."""
         self._symbol_map[token] = tradingsymbol
         self._exchange_map[token] = exchange
+
+    # ------------------------------------------------------------------
+    # Additional helpers to replace InstrumentResolver functionality
+    # ------------------------------------------------------------------
+
+    def get_option_contracts(self, underlying: str) -> List[Dict[str, Any]]:
+        """Return option contracts for an underlying (e.g., 'NIFTY').
+        
+        Args: underlying – base name like 'NIFTY' or 'BANKNIFTY'.
+        Returns: List of contract dicts with keys: instrument_token, tradingsymbol, 
+                 expiry, strike, instrument_type, lot_size.
+        Raises: None.
+        """
+        key = str(underlying).strip().upper()
+        today = date.today()
+        contracts: List[Dict[str, Any]] = []
+        
+        with self._lock:
+            for token, symbol in self._symbol_map.items():
+                sym_upper = symbol.upper()
+                if not sym_upper.startswith(key):
+                    continue
+                if not any(sym_upper.endswith(x) for x in ("CE", "PE")):
+                    continue
+                
+                # Extract expiry and strike from symbol
+                # Format: NIFTY26APR25600CE or NIFTY2641325600CE (weekly)
+                rest = sym_upper[len(key):]
+                
+                # Try to parse expiry and strike
+                expiry_date: Optional[date] = None
+                strike: float = 0.0
+                inst_type = "CE" if sym_upper.endswith("CE") else "PE"
+                
+                # Remove CE/PE suffix
+                core = rest[:-2]
+                
+                # Parse based on format
+                if len(core) >= 7:  # Monthly: 26APR25600
+                    # Find where digits start after month code
+                    idx = 0
+                    while idx < len(core) and not core[idx].isdigit():
+                        idx += 1
+                    if idx >= 3:
+                        expiry_str = core[:idx]
+                        strike_str = core[idx:]
+                        try:
+                            # Parse YYMMM format
+                            yy = int(expiry_str[:2])
+                            month_str = expiry_str[2:].upper()
+                            months = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                                     "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+                            month = months.get(month_str, 0)
+                            if month:
+                                year = 2000 + yy if yy < 50 else 1900 + yy
+                                # Get last Tuesday of month
+                                import calendar
+                                last_day = calendar.monthrange(year, month)[1]
+                                exp_dt = datetime(year, month, last_day)
+                                while exp_dt.weekday() != 1:  # Tuesday
+                                    exp_dt = exp_dt.replace(day=exp_dt.day - 1)
+                                expiry_date = exp_dt.date()
+                            strike = float(strike_str)
+                        except (ValueError, IndexError):
+                            pass
+                elif len(core) >= 6:  # Weekly: 2641325600
+                    try:
+                        yy = int(core[:2])
+                        mm = int(core[2:3]) if core[2].isdigit() else 0
+                        dd = int(core[3:5])
+                        strike_str = core[5:]
+                        year = 2000 + yy if yy < 50 else 1900 + yy
+                        # Map single digit month codes (O=10, N=11, D=12)
+                        if mm == 0 and len(core) > 2:
+                            mc = core[2]
+                            mm_map = {"O": 10, "N": 11, "D": 12}
+                            mm = mm_map.get(mc, 0)
+                        if mm and dd:
+                            expiry_date = date(year, mm, dd)
+                        strike = float(strike_str)
+                    except (ValueError, IndexError):
+                        pass
+                
+                if expiry_date and expiry_date >= today and strike > 0:
+                    contracts.append({
+                        "instrument_token": token,
+                        "tradingsymbol": symbol,
+                        "expiry": expiry_date,
+                        "strike": strike,
+                        "instrument_type": inst_type,
+                        "lot_size": 75,  # Default; could be enhanced
+                    })
+        
+        return sorted(contracts, key=lambda c: (c["expiry"], c["strike"]))
+
+    def get_future_contracts(self, underlying: str) -> List[Dict[str, Any]]:
+        """Return futures contracts for an underlying (e.g., 'NIFTY').
+        
+        Args: underlying – base name like 'NIFTY' or 'BANKNIFTY'.
+        Returns: List of contract dicts with keys: instrument_token, tradingsymbol, 
+                 expiry, instrument_type="FUT", lot_size.
+        Raises: None.
+        """
+        key = str(underlying).strip().upper()
+        today = date.today()
+        contracts: List[Dict[str, Any]] = []
+        
+        with self._lock:
+            for token, symbol in self._symbol_map.items():
+                sym_upper = symbol.upper()
+                if not sym_upper.startswith(key):
+                    continue
+                if not sym_upper.endswith("FUT"):
+                    continue
+                
+                # Extract expiry from future symbol
+                rest = sym_upper[len(key):-3]  # Remove FUT suffix
+                expiry_date: Optional[date] = None
+                
+                if len(rest) >= 5:  # 26APR format
+                    try:
+                        yy = int(rest[:2])
+                        month_str = rest[2:5].upper()
+                        months = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                                 "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+                        month = months.get(month_str, 0)
+                        if month:
+                            year = 2000 + yy if yy < 50 else 1900 + yy
+                            import calendar
+                            last_day = calendar.monthrange(year, month)[1]
+                            exp_dt = datetime(year, month, last_day)
+                            while exp_dt.weekday() != 1:  # Tuesday
+                                exp_dt = exp_dt.replace(day=exp_dt.day - 1)
+                            expiry_date = exp_dt.date()
+                    except (ValueError, IndexError):
+                        pass
+                
+                if expiry_date and expiry_date >= today:
+                    contracts.append({
+                        "instrument_token": token,
+                        "tradingsymbol": symbol,
+                        "expiry": expiry_date,
+                        "instrument_type": "FUT",
+                        "lot_size": 75,
+                    })
+        
+        return sorted(contracts, key=lambda c: c["expiry"])
+
+    def select_tokens_for_universe(
+        self,
+        base: str = "NIFTY",
+        spot_price: float | None = None,
+        strikes_around_atm: int = 2,
+        strike_step: int = 50,
+    ) -> list[int]:
+        """Select tokens for the trading universe including spot, futures, and ATM options.
+        
+        Args:
+            base – underlying name ('NIFTY', 'BANKNIFTY').
+            spot_price – current spot price for ATM calculation.
+            strikes_around_atm – number of strikes around ATM to include.
+            strike_step – strike interval (default 50 for NIFTY).
+        
+        Returns: Sorted list of instrument tokens.
+        """
+        tokens: set[int] = set()
+        base_upper = str(base).strip().upper()
+        
+        # 1. Spot token
+        spot_key = base_upper
+        if spot_key in _WELL_KNOWN_TOKENS:
+            tokens.add(_WELL_KNOWN_TOKENS[spot_key])
+        
+        # 2. Nearest future
+        today = date.today()
+        nearest_future: Optional[Dict[str, Any]] = None
+        nearest_future_expiry: Optional[date] = None
+        
+        with self._lock:
+            for token, symbol in self._symbol_map.items():
+                sym_upper = symbol.upper()
+                if not sym_upper.startswith(base_upper):
+                    continue
+                if not sym_upper.endswith("FUT"):
+                    continue
+                
+                # Parse expiry from future symbol
+                rest = sym_upper[len(base_upper):-3]  # Remove FUT suffix
+                expiry_date: Optional[date] = None
+                
+                if len(rest) >= 5:  # 26APR format
+                    try:
+                        yy = int(rest[:2])
+                        month_str = rest[2:5].upper()
+                        months = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                                 "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+                        month = months.get(month_str, 0)
+                        if month:
+                            year = 2000 + yy if yy < 50 else 1900 + yy
+                            import calendar
+                            last_day = calendar.monthrange(year, month)[1]
+                            exp_dt = datetime(year, month, last_day)
+                            while exp_dt.weekday() != 1:
+                                exp_dt = exp_dt.replace(day=exp_dt.day - 1)
+                            expiry_date = exp_dt.date()
+                    except (ValueError, IndexError):
+                        pass
+                
+                if expiry_date and expiry_date >= today:
+                    if nearest_future_expiry is None or expiry_date < nearest_future_expiry:
+                        nearest_future_expiry = expiry_date
+                        nearest_future = {"token": token, "symbol": symbol, "expiry": expiry_date}
+        
+        if nearest_future:
+            tokens.add(nearest_future["token"])
+        
+        # 3. ATM options for nearest expiry
+        if spot_price and spot_price > 0 and nearest_future_expiry:
+            atm_strike = _atm_strike_for_spot(spot_price, strike_step)
+            actual_around = max(2, strikes_around_atm)
+            target_strikes = {
+                atm_strike + (i * strike_step)
+                for i in range(-actual_around, actual_around + 1)
+            }
+            
+            with self._lock:
+                for token, symbol in self._symbol_map.items():
+                    sym_upper = symbol.upper()
+                    if not sym_upper.startswith(base_upper):
+                        continue
+                    if not any(sym_upper.endswith(x) for x in ("CE", "PE")):
+                        continue
+                    
+                    # Parse expiry and strike
+                    rest = sym_upper[len(base_upper):]
+                    expiry_date: Optional[date] = None
+                    strike: float = 0.0
+                    
+                    ce_pe = "CE" if sym_upper.endswith("CE") else "PE"
+                    core = rest[:-2]
+                    
+                    if len(core) >= 7:  # Monthly
+                        idx = 0
+                        while idx < len(core) and not core[idx].isdigit():
+                            idx += 1
+                        if idx >= 3:
+                            expiry_str = core[:idx]
+                            strike_str = core[idx:]
+                            try:
+                                yy = int(expiry_str[:2])
+                                month_str = expiry_str[2:].upper()
+                                months = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                                         "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+                                month = months.get(month_str, 0)
+                                if month:
+                                    year = 2000 + yy if yy < 50 else 1900 + yy
+                                    import calendar
+                                    last_day = calendar.monthrange(year, month)[1]
+                                    exp_dt = datetime(year, month, last_day)
+                                    while exp_dt.weekday() != 1:
+                                        exp_dt = exp_dt.replace(day=exp_dt.day - 1)
+                                    expiry_date = exp_dt.date()
+                                strike = float(strike_str)
+                            except (ValueError, IndexError):
+                                pass
+                    elif len(core) >= 6:  # Weekly
+                        try:
+                            yy = int(core[:2])
+                            mc = core[2]
+                            dd = int(core[3:5])
+                            strike_str = core[5:]
+                            year = 2000 + yy if yy < 50 else 1900 + yy
+                            mm_map = {"O": 10, "N": 11, "D": 12}
+                            mm = mm_map.get(mc, 0)
+                            if mm and dd:
+                                expiry_date = date(year, mm, dd)
+                            strike = float(strike_str)
+                        except (ValueError, IndexError):
+                            pass
+                    
+                    if (expiry_date and expiry_date == nearest_future_expiry 
+                        and strike in target_strikes):
+                        tokens.add(token)
+        
+        return sorted(list(tokens))

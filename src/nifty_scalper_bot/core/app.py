@@ -40,7 +40,11 @@ import pytz
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
 
 from nifty_scalper_bot.config.paths import get_data_dir
-from nifty_scalper_bot.data.instruments import ensure_sqlite, load_rows_for_resolver
+from nifty_scalper_bot.data.instruments import (
+    InstrumentResolver,
+    ensure_sqlite,
+    load_rows_for_resolver,
+)
 from nifty_scalper_bot.data.robust_provider import (
     CircuitBreakerConfig,
     RobustDataProvider,
@@ -74,7 +78,6 @@ from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.unified_manager import UnifiedManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 from nifty_scalper_bot.data import (
-    InstrumentResolver,
     InstrumentUniverseStatus,
     ensure_sqlite,
     load_rows_for_resolver,
@@ -118,6 +121,7 @@ from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
     register_webhook,
 )
 from nifty_scalper_bot.core.instrument_manager import InstrumentManager
+from nifty_scalper_bot.options.contracts import OptionsContractStore
 from nifty_scalper_bot.core.contract_selector import get_atm_contracts
 from nifty_scalper_bot.options.strike_selector import StrikeSelector
 from nifty_scalper_bot.risk import RiskManager, RiskSnapshot, RiskState
@@ -1475,8 +1479,9 @@ class BotContext:
     strategy_manager: StrategyManager | None = None
     strategy_runner: StrategyRunner | None = None
     unified_manager: UnifiedManager | None = None
-    instrument_resolver: InstrumentResolver | None = None
+    instrument_resolver: InstrumentResolver | None = None  # Deprecated: use instrument_manager
     instrument_manager: InstrumentManager | None = None
+    options_store: OptionsContractStore | None = None
     instrument_db: sqlite3.Connection | None = None
     instrument_universe: InstrumentUniverseStatus | None = None
     instrument_refresh_task: asyncio.Task[Any] | None = None
@@ -5585,14 +5590,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                 _im_size,
                 extra={"event": "instrument_manager_ready", "count": _im_size},
             )
+            
+            # Initialize OptionsContractStore as single source of truth for options
+            ctx.options_store = OptionsContractStore(ctx.instrument_manager)
+            ctx.options_store.load()
+            LOGGER.info(
+                "✅ OptionsContractStore initialized with %d contracts",
+                ctx.options_store.contract_count(),
+                extra={"event": "options_store_ready", "count": ctx.options_store.contract_count()},
+            )
         except AssertionError as _guard_err:
             LOGGER.critical("❌ STARTUP GUARD: %s", _guard_err)
-            # Propagate as RuntimeError so the startup sequence logs it clearly
-            # but does NOT crash the health server — degraded mode still serves /health
             LOGGER.warning("⚠️ Continuing in degraded mode — no NIFTY instruments")
         except Exception as _im_exc:
             LOGGER.warning(
-                "InstrumentManager.load() failed (non-fatal, will use InstrumentResolver): %s",
+                "InstrumentManager.load() failed: %s",
                 _im_exc,
                 exc_info=True,
             )
@@ -5638,13 +5650,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                 },
             )
 
-            # Hydrate each token — raises RuntimeError on < 50 bars (fail fast)
+            # Hydrate each token — with fail_fast=False to continue with remaining tokens
+            # even if some tokens fail (e.g., newly listed contracts with insufficient history)
             _hydration_results = await asyncio.to_thread(
                 hydrate_contracts,
                 _sync_broker_for_hydration,
                 _atm_tokens,
                 min_bars=50,
                 lookback_days=3,
+                fail_fast=False,  # Continue with other tokens even if some fail
             )
             LOGGER.info(
                 "✅ Token-based pre-hydration complete: %d tokens hydrated",
