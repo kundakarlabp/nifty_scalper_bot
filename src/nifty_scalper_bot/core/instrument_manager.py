@@ -59,6 +59,8 @@ class InstrumentManager:
         self._token_map: dict[str, int] = {}   # tradingsymbol.upper() → token
         self._symbol_map: dict[int, str] = {}  # token → tradingsymbol (bare)
         self._exchange_map: dict[int, str] = {}  # token → exchange
+        self._lot_size_map: dict[int, int] = {}  # token → lot_size
+        self._instrument_data: dict[int, dict] = {}  # token → full instrument dict
         self._lock = threading.RLock()
         self._loaded = False
 
@@ -81,6 +83,8 @@ class InstrumentManager:
             self._token_map.clear()
             self._symbol_map.clear()
             self._exchange_map.clear()
+            self._lot_size_map.clear()
+            self._instrument_data.clear()
 
             for inst in raw:
                 name = str(inst.get("name", "")).upper()
@@ -103,6 +107,18 @@ class InstrumentManager:
                 self._token_map[key] = token
                 self._token_map[f"{exchange}:{key}"] = token
                 self._symbol_by_token_set(token, tradingsymbol, exchange)
+                
+                # Store lot size - NIFTY options now have lot size of 65
+                lot_size = inst.get("lot_size")
+                if lot_size:
+                    try:
+                        self._lot_size_map[token] = int(lot_size)
+                    except (TypeError, ValueError):
+                        pass
+                
+                # Store full instrument data for lookup
+                self._instrument_data[token] = dict(inst)
+                
                 count += 1
 
             self._loaded = True
@@ -183,6 +199,98 @@ class InstrumentManager:
         """
         with self._lock:
             return len(self._symbol_map)
+
+    def get_lot_size(self, token_or_symbol: int | str) -> Optional[int]:
+        """Get lot size for a token or symbol.
+        
+        Args: token_or_symbol – either integer token or string symbol.
+        Returns: lot size integer or None if not found.
+        Raises: None.
+        """
+        with self._lock:
+            # If it's a symbol, convert to token first
+            if isinstance(token_or_symbol, str):
+                key = str(token_or_symbol).strip().upper()
+                token = self._token_map.get(key)
+                if token is None:
+                    # Try without exchange prefix
+                    bare = key.split(":", 1)[-1]
+                    token = self._token_map.get(bare)
+                if token is None:
+                    return None
+            else:
+                token = int(token_or_symbol)
+            
+            # Return lot size - NIFTY options should return 65 (current lot size)
+            return self._lot_size_map.get(token)
+
+    def lookup(self, token_or_symbol: int | str) -> Optional[dict]:
+        """Lookup full instrument data by token or symbol.
+        
+        Args: token_or_symbol – either integer token or string symbol.
+        Returns: Full instrument dict from broker or None if not found.
+        Raises: None.
+        """
+        with self._lock:
+            # If it's a symbol, convert to token first
+            if isinstance(token_or_symbol, str):
+                key = str(token_or_symbol).strip().upper()
+                token = self._token_map.get(key)
+                if token is None:
+                    # Try without exchange prefix
+                    bare = key.split(":", 1)[-1]
+                    token = self._token_map.get(bare)
+                if token is None:
+                    return None
+            else:
+                token = int(token_or_symbol)
+            
+            return self._instrument_data.get(token)
+
+    def get_instruments_by_expiry(self, expiry_date: date) -> List[Dict[str, Any]]:
+        """Get all instruments expiring on a specific date.
+        
+        Args: expiry_date – the expiry date to filter by.
+        Returns: List of instrument dicts expiring on that date.
+        Raises: None.
+        """
+        result = []
+        with self._lock:
+            for token, inst_data in self._instrument_data.items():
+                expiry_str = inst_data.get("expiry")
+                if expiry_str:
+                    try:
+                        # Parse expiry string (format: YYYY-MM-DD)
+                        inst_expiry = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+                        if inst_expiry == expiry_date:
+                            result.append(dict(inst_data))
+                    except (ValueError, TypeError):
+                        pass
+        return result
+
+    def get_weekly_expiry_dates(self, num_weeks: int = 4) -> List[date]:
+        """Get upcoming weekly expiry dates for NIFTY (Tuesdays).
+        
+        Args: num_weeks – number of weeks to look ahead (default 4).
+        Returns: List of upcoming Tuesday expiry dates.
+        Raises: None.
+        """
+        today = date.today()
+        expiries = []
+        
+        # Find next Tuesday
+        days_until_tuesday = (1 - today.weekday()) % 7
+        if days_until_tuesday == 0:
+            days_until_tuesday = 7  # If today is Tuesday, get next week
+        
+        next_tuesday = today + timedelta(days=days_until_tuesday)
+        
+        # Get num_weeks Tuesdays
+        for i in range(num_weeks):
+            expiry = next_tuesday + timedelta(weeks=i)
+            expiries.append(expiry)
+        
+        return expiries
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -278,13 +386,15 @@ class InstrumentManager:
                         pass
                 
                 if expiry_date and expiry_date >= today and strike > 0:
+                    # Get actual lot size from broker data - NIFTY is now 65
+                    actual_lot_size = self._lot_size_map.get(token, 65)
                     contracts.append({
                         "instrument_token": token,
                         "tradingsymbol": symbol,
                         "expiry": expiry_date,
                         "strike": strike,
                         "instrument_type": inst_type,
-                        "lot_size": 75,  # Default; could be enhanced
+                        "lot_size": actual_lot_size,
                     })
         
         return sorted(contracts, key=lambda c: (c["expiry"], c["strike"]))
@@ -332,12 +442,14 @@ class InstrumentManager:
                         pass
                 
                 if expiry_date and expiry_date >= today:
+                    # Get actual lot size from broker data - NIFTY is now 65
+                    actual_lot_size = self._lot_size_map.get(token, 65)
                     contracts.append({
                         "instrument_token": token,
                         "tradingsymbol": symbol,
                         "expiry": expiry_date,
                         "instrument_type": "FUT",
-                        "lot_size": 75,
+                        "lot_size": actual_lot_size,
                     })
         
         return sorted(contracts, key=lambda c: c["expiry"])

@@ -2985,37 +2985,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # so the broker auth token is valid and market is open).
     instrument_manager = InstrumentManager(broker_client)
 
-    instrument_resolver = InstrumentResolver(broker_client)
-    cache_settings = getattr(settings, "instruments", None)
-    warm_result = _try_warm_instruments(settings, instrument_resolver, LOGGER)
-    instrument_state = warm_result.status
-    instrument_conn = warm_result.connection
-    instrument_tokens = instrument_state.tokens or warm_result.tokens
-    instrument_options = instrument_state.options or warm_result.options
-    instrument_source = instrument_state.last_source or warm_result.source
-    csv_hint = warm_result.csv_path or warm_result.db_path
-
-    METRICS.record_resolver_tokens(
-        source=instrument_source,
-        count=instrument_tokens,
-    )
-    LOGGER.info(
-        "resolver_warm_loaded tokens=%s options=%s source=%s",
-        instrument_tokens,
-        instrument_options,
-        instrument_source,
-        extra={
-            "event": "resolver_warm_loaded",
-            "tokens": instrument_tokens,
-            "options": instrument_options,
-            "source": instrument_source,
-            "csv_path": csv_hint,
-        },
-    )
-    ensure_fn = getattr(instrument_resolver, "ensure_core_index_tokens", None)
-    if callable(ensure_fn):
-        ensure_fn()
-
     margin_segment_env = os.getenv("BROKER_MARGIN_SEGMENT", "equity") or "equity"
     margin_segment = margin_segment_env.strip().lower()
     if margin_segment not in {"equity", "commodity"}:
@@ -3088,10 +3057,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     else:
         poll_symbols = ["NSE:NIFTY 50", "256265"]
 
-    attach_resolver = getattr(broker_client, "attach_resolver", None)
-    if callable(attach_resolver):
-        with suppress(Exception):
-            attach_resolver(instrument_resolver)
+    # InstrumentManager is the single source of truth - no resolver needed
+    # Broker client will use instrument_manager directly via unified_manager
 
     websocket_client: Any | None = None
     websocket_manager: WebSocketManager | None = None
