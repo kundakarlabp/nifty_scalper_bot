@@ -6177,15 +6177,18 @@ async def _reconcile_state(ctx: BotContext) -> None:
             )
             try:
                 raw = _sync_broker.get_positions()
-                # Guard: if the resolved broker method is async it returns a coroutine
-                # object instead of positions (e.g. RobustDataProvider leaked through).
-                # Close the coroutine to suppress ResourceWarning and fall back safely.
-                if asyncio.iscoroutine(raw):
+                # Guard: if the resolved broker method is async it returns an awaitable
+                # (coroutine, Task, or Future) instead of positions.  Clean up the
+                # awaitable correctly and fall back to an empty result.
+                if inspect.isawaitable(raw):
                     LOGGER.error(
-                        "get_positions() returned a coroutine in sync context – "
+                        "get_positions() returned an awaitable in sync context – "
                         "broker client wrapping is incorrect. Falling back to empty list."
                     )
-                    raw.close()
+                    if asyncio.iscoroutine(raw):
+                        raw.close()          # suppress ResourceWarning on coroutines
+                    elif hasattr(raw, "cancel"):
+                        raw.cancel()         # cancel Tasks / Futures
                     raw = {}
             except Exception as _pos_err:
                 LOGGER.warning("Position fetch failed in reconcile: %s", _pos_err)
