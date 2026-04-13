@@ -7375,8 +7375,6 @@ async def _run_atr_feed_task(ctx: BotContext) -> None:
                     atr = runner._indicator_engine.compute_atr(symbol, period=14)
                     if atr and atr > 0:
                         ctx.bracket_manager.update_market_stats(symbol, atr=atr)
-                    if atr and atr > 0:
-                        ctx.bracket_manager.update_market_stats(symbol, atr=atr)
             await asyncio.sleep(30)
         except asyncio.CancelledError:
             break
