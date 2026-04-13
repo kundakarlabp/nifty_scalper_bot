@@ -6177,6 +6177,19 @@ async def _reconcile_state(ctx: BotContext) -> None:
             )
             try:
                 raw = _sync_broker.get_positions()
+                # Guard: if the resolved broker method is async it returns an awaitable
+                # (coroutine, Task, or Future) instead of positions.  Clean up the
+                # awaitable correctly and fall back to an empty result.
+                if inspect.isawaitable(raw):
+                    LOGGER.error(
+                        "get_positions() returned an awaitable in sync context – "
+                        "broker client wrapping is incorrect. Falling back to empty list."
+                    )
+                    if asyncio.iscoroutine(raw):
+                        raw.close()          # suppress ResourceWarning on coroutines
+                    elif hasattr(raw, "cancel"):
+                        raw.cancel()         # cancel Tasks / Futures
+                    raw = {}
             except Exception as _pos_err:
                 LOGGER.warning("Position fetch failed in reconcile: %s", _pos_err)
                 raw = {}
@@ -6200,6 +6213,9 @@ async def _reconcile_state(ctx: BotContext) -> None:
         try:
             broker_positions = await asyncio.to_thread(safe_sync_fetch)
             # A. Fetch Broker Positions (REQUIRED STEP)
+            # Initialise bm here so the ghost-bracket cleanup below never hits NameError
+            # even when ctx.order_manager or _bracket_manager is absent.
+            bm = None
             # C. Auto-Guard Orphans (CRITICAL SAFETY LOGIC)
             if ctx.order_manager and ctx.order_manager._bracket_manager:
                 om = ctx.order_manager
