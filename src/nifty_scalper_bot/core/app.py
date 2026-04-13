@@ -2220,7 +2220,12 @@ async def reconcile_with_broker(
 
     # ── 2. Fetch live positions and attach safety brackets for orphans ────────
     try:
-        raw_positions = await asyncio.to_thread(_run_sync_locked, broker_client.get_positions)
+        if inspect.iscoroutinefunction(getattr(broker_client, "get_positions", None)):
+            raw_positions = await broker_client.get_positions()
+        else:
+            raw_positions = await asyncio.to_thread(_run_sync_locked, broker_client.get_positions)
+            if asyncio.iscoroutine(raw_positions):
+                raw_positions = await raw_positions
         positions = [p for p in (raw_positions or []) if isinstance(p, dict)]
         logger.info("RECONCILE_POSITIONS: found %d positions from broker", len(positions))
 
@@ -5199,7 +5204,6 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             # ---------- Futures rollover logic (unchanged) ----------
             import calendar
-            from datetime import datetime, timedelta
 
             now = datetime.now()
             year, month = now.year, now.month
