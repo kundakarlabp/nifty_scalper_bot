@@ -2980,6 +2980,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # Created here (not loaded yet — load() is deferred to startup_sequence
     # so the broker auth token is valid and market is open).
     instrument_manager = InstrumentManager(broker_client)
+    
+    # ── InstrumentResolver: Backward compatibility layer ─────────────────────
+    # Required for DataHub, MarketDataManager, and other legacy components
+    instrument_resolver = InstrumentResolver(broker_client)
 
     margin_segment_env = os.getenv("BROKER_MARGIN_SEGMENT", "equity") or "equity"
     margin_segment = margin_segment_env.strip().lower()
