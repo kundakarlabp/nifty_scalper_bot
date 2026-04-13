@@ -2471,9 +2471,14 @@ async def reconcile_with_broker(
 
     # ── 1. Fetch live orders ─────────────────────────────────────────────────
     try:
-        raw_orders = await asyncio.to_thread(_run_sync_locked, broker_client.get_orders)
-        open_orders = [o for o in (raw_orders or []) if isinstance(o, dict)
-                       and str(o.get("status", "")).upper() in {"OPEN", "TRIGGER PENDING"}]
+        if inspect.iscoroutinefunction(getattr(broker_client, "get_orders", None)):
+            raw_orders = await broker_client.get_orders()
+        else:
+            raw_orders = await asyncio.to_thread(_run_sync_locked, broker_client.get_orders)
+            if asyncio.iscoroutine(raw_orders):
+                raw_orders = await raw_orders
+                
+        open_orders = [o for o in (raw_orders or []) if isinstance(o, dict) and str(o.get("status", "")).upper() in {"OPEN", "TRIGGER PENDING"}]
         logger.info("RECONCILE_ORDERS: found %d open orders from broker", len(open_orders))
         for o in open_orders:
             oid = o.get("order_id") or o.get("id", "")
@@ -2482,6 +2487,18 @@ async def reconcile_with_broker(
             logger.info("BROKER_OPEN_ORDER order_id=%s symbol=%s status=%s", oid, sym, status)
     except Exception as exc:
         logger.warning("RECONCILE_ORDERS: failed to fetch broker orders: %s", exc)
+
+    # ── 2. Fetch live positions and attach safety brackets for orphans ────────
+    try:
+        if inspect.iscoroutinefunction(getattr(broker_client, "get_positions", None)):
+            raw_positions = await broker_client.get_positions()
+        else:
+            raw_positions = await asyncio.to_thread(_run_sync_locked, broker_client.get_positions)
+            if asyncio.iscoroutine(raw_positions):
+                raw_positions = await raw_positions
+                
+        positions = [p for p in (raw_positions or []) if isinstance(p, dict)]
+        logger.info("RECONCILE_POSITIONS: found %d positions from broker", len(positions))
 
     # ── 2. Fetch live positions and attach safety brackets for orphans ────────
     try:
