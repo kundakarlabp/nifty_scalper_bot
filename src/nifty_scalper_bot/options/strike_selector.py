@@ -24,7 +24,6 @@ from nifty_scalper_bot.utils.logging import get_logger
 if TYPE_CHECKING:  # pragma: no cover - import for type checking only
     from nifty_scalper_bot.config.settings import LiquiditySettings, SelectorSettings
     from nifty_scalper_bot.data.data_hub import DataHub
-    from nifty_scalper_bot.data.instruments import InstrumentResolver
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 LOGGER = get_logger(__name__)
