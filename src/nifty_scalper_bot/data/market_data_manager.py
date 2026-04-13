@@ -106,8 +106,9 @@ class MarketDataManager:
         )
         self._token_by_symbol: dict[str, int] = {}
         self._symbol_by_token: dict[int, str] = {}
-        self._token_by_symbol["NSE:NIFTY 50"] = 256265
-        self._symbol_by_token[256265] = "NSE:NIFTY 50"
+        self._token_by_symbol["NSE:NIFTY"] = 256265       # canonical
+        self._token_by_symbol["NSE:NIFTY 50"] = 256265  # alias
+        self._symbol_by_token[256265] = "NSE:NIFTY"
         self._token_by_symbol["NSE:BANKNIFTY"] = 260105
         self._symbol_by_token[260105] = "NSE:BANKNIFTY"
         self._last_signature: dict[
