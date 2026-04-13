@@ -1169,6 +1169,41 @@ class InstrumentResolver:
                     self._by_symbol[ts_upper] = token_int
                     self._symbol_by_token[token_int] = ts
                     self._exchange_by_token[token_int] = "NFO"
+                    
+                    # ✅ FIX: Add weekly expiry format aliases for cross-format resolution
+                    # Broker may store "NIFTY26APR25600CE" but queries may use "NIFTY2641425600CE"
+                    # Generate weekly-style alias if this is a monthly contract
+                    try:
+                        expiry_raw = inst.get("expiry")
+                        if expiry_raw:
+                            from datetime import datetime as _dt
+                            if isinstance(expiry_raw, str):
+                                _exp_date = _dt.strptime(expiry_raw.split("T")[0], "%Y-%m-%d").date()
+                            elif hasattr(expiry_raw, "date"):
+                                _exp_date = expiry_raw.date()
+                            else:
+                                _exp_date = expiry_raw
+                            
+                            # Create weekly format alias: YY + MM + DD (e.g., 26413 for Apr 13, 2026)
+                            _y = _exp_date.strftime("%y")
+                            _m = f"{_exp_date.month:02d}"  # Zero-padded month (01-12)
+                            _d = _exp_date.strftime("%d")
+                            _weekly_code = f"{_y}{_m}{_d}"
+                            
+                            # Extract strike and option type from tradingsymbol
+                            _strike_opt = ts_upper.replace("NIFTY", "").replace("BANKNIFTY", "")
+                            # Remove expiry portion to get strike+opt
+                            for _prefix in [expiry_code if 'expiry_code' in dir() else "26APR", "26OCT", "26NOV", "26DEC"]:
+                                if _strike_opt.startswith(_prefix):
+                                    _strike_opt = _strike_opt[len(_prefix):]
+                                    break
+                            
+                            # Build weekly-style alias
+                            _weekly_alias = f"NIFTY{_weekly_code}{_strike_opt}"
+                            self._by_symbol[_weekly_alias] = token_int
+                            self._by_symbol[f"NFO:{_weekly_alias}"] = token_int
+                    except Exception:
+                        pass  # Non-fatal; alias generation is best-effort
 
                     synced += 1
 
