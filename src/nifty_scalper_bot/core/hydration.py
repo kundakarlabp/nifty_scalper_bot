@@ -145,8 +145,9 @@ def hydrate_contracts(
     min_bars: int = _DEFAULT_MIN_BARS,
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
     interval: str = "minute",
+    fail_fast: bool = False,
 ) -> dict[int, list[dict[str, Any]]]:
-    """Hydrate multiple tokens, raising on the first failure.
+    """Hydrate multiple tokens, optionally raising on the first failure.
 
     Args:
         kite: Broker client with ``historical_data()`` method.
@@ -154,22 +155,49 @@ def hydrate_contracts(
         min_bars: Minimum bars required per token.
         lookback_days: Look-back window in calendar days.
         interval: Kite interval string.
+        fail_fast: If True, raise on first failure. If False, log warnings
+            and continue with remaining tokens.
 
     Returns:
         dict[int, list[dict]]: Mapping of token → OHLC bars.
+            Only includes successfully hydrated tokens.
 
     Raises:
-        RuntimeError: On any invalid token or insufficient bars.
+        RuntimeError: On any invalid token or insufficient bars if fail_fast=True.
     """
     results: dict[int, list[dict[str, Any]]] = {}
+    failed_tokens: list[tuple[int, str]] = []
+    
     for token in tokens:
-        results[token] = hydrate(
-            kite,
-            token,
-            min_bars=min_bars,
-            lookback_days=lookback_days,
-            interval=interval,
+        try:
+            results[token] = hydrate(
+                kite,
+                token,
+                min_bars=min_bars,
+                lookback_days=lookback_days,
+                interval=interval,
+            )
+        except RuntimeError as exc:
+            error_msg = str(exc)
+            failed_tokens.append((token, error_msg))
+            if fail_fast:
+                raise
+            LOGGER.warning(
+                "Hydration failed for token=%d: %s — skipping",
+                token,
+                error_msg,
+                extra={"event": "hydration_token_failed", "token": token},
+            )
+    
+    if failed_tokens:
+        LOGGER.warning(
+            "Hydration completed with %d/%d failures: failed_tokens=%s",
+            len(failed_tokens),
+            len(tokens),
+            [t[0] for t in failed_tokens],
+            extra={"event": "hydration_partial_complete", "failed_count": len(failed_tokens)},
         )
+    
     LOGGER.info(
         "All tokens hydrated: count=%d",
         len(results),
