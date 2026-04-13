@@ -75,10 +75,6 @@ from nifty_scalper_bot.core.unified_manager import UnifiedManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 from nifty_scalper_bot.data import (
     InstrumentUniverseStatus,
-    ensure_sqlite,
-    load_rows_for_resolver,
-    refresh_from_csv,
-    sync_instrument_csv_from_broker,
 )
 from nifty_scalper_bot.data.assess_data import assess_datahub_fresh
 from nifty_scalper_bot.data.data_hub import DataHub
@@ -253,217 +249,6 @@ def _require_component(component: _ComponentT | None, name: str) -> _ComponentT:
             exc_info=exc,
         )
         raise
-
-
-@dataclass(slots=True)
-class InstrumentWarmResult:
-    """Snapshot capturing the resolver warm-up outcome."""
-
-    status: InstrumentUniverseStatus
-    tokens: int
-    options: int
-    source: str
-    csv_path: str | None
-    db_path: str | None
-    connection: sqlite3.Connection | None
-    last_refresh: datetime | None
-
-
-def _try_warm_instruments(
-    settings: Settings,
-    resolver: InstrumentResolver,
-    logger: Any,
-) -> InstrumentWarmResult:
-    """Warm resolver from CSV when available without blocking startup.
-
-    Args:
-        settings: Runtime settings carrying instrument configuration.
-        resolver: Resolver that should be populated with instrument data.
-        logger: Structured logger instance for diagnostics.
-
-    Returns:
-        InstrumentWarmResult: Outcome describing the warm-up state.
-
-    Raises:
-        None.
-    """
-
-    logger.debug(
-        "Entered _try_warm_instruments",
-        extra={"event": "instrument_warm_enter"},
-    )
-    status = InstrumentUniverseStatus()
-    instrument_tokens = 0
-    instrument_options = 0
-    instrument_source = "broker"
-    last_refresh_ts: datetime | None = None
-    csv_hint: str | None = None
-    db_hint: str | None = None
-    conn: sqlite3.Connection | None = None
-    cache_settings = getattr(settings, "instruments", None)
-    try:
-        if cache_settings is None:
-            logger.info(
-                "Instrument settings not provided; warming resolver via broker.",
-                extra={"event": "instrument_warm_broker_only"},
-            )
-            resolver.warm()
-            instrument_tokens = len(getattr(resolver, "_symbol_by_token", {}))
-            instrument_options = instrument_tokens
-        else:
-            csv_path = getattr(cache_settings, "csv_path", None)
-            db_path = getattr(cache_settings, "db_path", None)
-            if csv_path:
-                csv_hint = str(csv_path)
-            if db_path:
-                db_hint = str(db_path)
-            if db_path:
-                conn = ensure_sqlite(str(db_path))
-            if csv_path is None:
-                logger.info(
-                    "Instrument CSV path not configured; skipping CSV warm-up.",
-                    extra={"event": "instrument_warm_csv_missing"},
-                )
-            elif conn is None:
-                logger.warning(
-                    "Instrument database path not configured; skipping cache refresh.",
-                    extra={"event": "instrument_warm_db_missing"},
-                )
-            else:
-                csv_file = Path(csv_path)
-                if not csv_file.exists():
-                    logger.warning(
-                        "Instrument CSV not found at %s; creating from broker.",
-                        csv_path,
-                        extra={
-                            "event": "instrument_warm_csv_not_found",
-                            "csv_path": str(csv_path),
-                        },
-                    )
-                    sync_summary = sync_instrument_csv_from_broker(
-                        resolver._broker,
-                        str(csv_path),
-                        exchange="NFO",
-                    )
-                    logger.info(
-                        "Condition met: instrument_csv_bootstrap_complete",
-                        extra={
-                            "event": "instrument_csv_bootstrap_complete",
-                            "csv_path": str(csv_path),
-                            "written": int(sync_summary.get("written") or 0),
-                        },
-                    )
-                summary = refresh_from_csv(conn, str(csv_path))
-                instrument_options = int(summary.get("stored") or instrument_options)
-                instrument_source = "csv"
-                last_refresh_ts = datetime.now(timezone.utc)
-            if conn is not None:
-                rows = load_rows_for_resolver(conn)
-                if rows:
-                    resolver.warm_from_broker_dump(rows)
-                    instrument_tokens = len(rows)
-                    if instrument_options <= 0:
-                        instrument_options = len(rows)
-                    if instrument_source != "csv":
-                        instrument_source = "sqlite"
-                else:
-                    logger.info(
-                        "Condition met: instrument_cache_empty; "
-                        "falling back to broker warm-up.",
-                        extra={"event": "instrument_warm_empty_cache"},
-                    )
-                    resolver.warm()
-                    instrument_tokens = len(getattr(resolver, "_symbol_by_token", {}))
-                    instrument_options = instrument_tokens
-                    instrument_source = "broker"
-            else:
-                resolver.warm()
-                instrument_tokens = len(getattr(resolver, "_symbol_by_token", {}))
-                instrument_options = instrument_tokens
-                instrument_source = "broker"
-            if conn is not None:
-                try:
-                    count_row = conn.execute(
-                        "SELECT COUNT(1) FROM instruments"
-                    ).fetchone()
-                    if count_row and count_row[0]:
-                        instrument_tokens = instrument_tokens or int(count_row[0])
-                        instrument_options = instrument_options or int(count_row[0])
-                    ts_row = conn.execute(
-                        "SELECT MAX(updated_at) FROM instruments"
-                    ).fetchone()
-                    if ts_row and ts_row[0]:
-                        last_refresh_ts = datetime.fromisoformat(str(ts_row[0]))
-                except Exception as meta_exc:  # noqa: BLE001
-                    logger.error(
-                        "Failure in _try_warm_instruments metadata query: %s",
-                        meta_exc,
-                        extra={"event": "instrument_warm_metadata_error"},
-                        exc_info=meta_exc,
-                    )
-        if instrument_tokens <= 0:
-            instrument_tokens = len(getattr(resolver, "_symbol_by_token", {}))
-        if instrument_options <= 0:
-            instrument_options = instrument_tokens
-        status.record_refresh(
-            tokens=instrument_tokens,
-            options=instrument_options,
-            source=instrument_source,
-            path=csv_hint or db_hint,
-            timestamp=last_refresh_ts,
-        )
-        logger.info(
-            "Instrument warm-up complete: tokens=%s options=%s source=%s path=%s",
-            status.tokens,
-            status.options,
-            status.last_source,
-            csv_hint or db_hint or "n/a",
-            extra={
-                "event": "instrument_warm_complete",
-                "tokens": status.tokens,
-                "options": status.options,
-                "source": status.last_source,
-                "csv_path": csv_hint,
-                "db_path": db_hint,
-            },
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "Instrument warm-up failed: %s",
-            exc,
-            extra={"event": "instrument_warm_failed"},
-            exc_info=exc,
-        )
-        try:
-            resolver.warm()
-            fallback_tokens = len(getattr(resolver, "_symbol_by_token", {}))
-        except Exception as fallback_exc:
-            logger.warning(
-                "Fallback resolver warm failed: %s",
-                fallback_exc,
-                extra={"event": "instrument_fallback_warm_failed"},
-            )
-            fallback_tokens = 0
-
-        status.record_refresh(
-            tokens=fallback_tokens,
-            options=fallback_tokens,
-            source="broker",
-            path=csv_hint or db_hint,
-        )
-        instrument_tokens = status.tokens
-        instrument_options = status.options
-        instrument_source = status.last_source
-    return InstrumentWarmResult(
-        status=status,
-        tokens=instrument_tokens,
-        options=instrument_options,
-        source=instrument_source,
-        csv_path=csv_hint,
-        db_path=db_hint,
-        connection=conn,
-        last_refresh=status.last_refresh,
-    )
 
 
 _HTTP_APP: FastAPI | None = None
@@ -1396,43 +1181,6 @@ def get_http_app() -> FastAPI:
 
     app.include_router(selftest_router)
 
-    # Ensure the instrument resolver is warmed from any broker dump / csv
-    # when the FastAPI app starts. This guarantees resolver lookups (symbols→tokens)
-    # work before handlers or external probes rely on the resolver.
-    @app.on_event("startup")
-    async def _warm_instrument_resolver_on_startup() -> None:
-        """
-        Force fresh instrument sync on startup efficiently.
-        Uses smart caching to avoid Rate Limits.
-        """
-        try:
-            ctx = get_latest_bot_context()
-            if ctx is None:
-                LOGGER.debug("Resolver warm skipped: no bot context")
-                return
-
-            # [FIX] Initialize variable safely
-            resolver = getattr(ctx, "instrument_resolver", None) or getattr(
-                ctx, "resolver", None
-            )
-
-            if resolver is None:
-                LOGGER.debug("Resolver warm skipped: no resolver found")
-                return
-
-            LOGGER.info("Verifying Instrument Cache...")
-            # [FIX] Run warm in a thread to prevent blocking the event loop
-            await asyncio.to_thread(resolver.warm)
-
-            tokens = len(getattr(resolver, "_symbol_by_token", {}))
-            LOGGER.info(
-                f"✅ Instrument Resolver Ready. Active Tokens: {tokens}",
-                extra={"event": "instrument_warm_complete", "tokens": tokens},
-            )
-
-        except Exception as exc:
-            LOGGER.error(f"Instrument warm-up failed: {exc}", exc_info=True)
-
 
 def get_telegram_notifier() -> TelegramEnhancedNotifier | None:
     """Return the notifier created for webhook delivery, if any."""
@@ -1475,7 +1223,6 @@ class BotContext:
     strategy_manager: StrategyManager | None = None
     strategy_runner: StrategyRunner | None = None
     unified_manager: UnifiedManager | None = None
-    instrument_resolver: InstrumentResolver | None = None  # Deprecated: use instrument_manager
     instrument_manager: InstrumentManager | None = None
     options_store: OptionsContractStore | None = None
     instrument_db: sqlite3.Connection | None = None
@@ -2031,29 +1778,11 @@ def _find_existing_nifty_option_symbol(
 ) -> str | None:
     """
     Return a best-effort matching tradingsymbol (without exchange prefix) present
-    in the warmed instrument resolver. Checks both NFO-prefixed and unprefixed keys.
+    in the InstrumentManager. Checks both NFO-prefixed and unprefixed keys.
     """
-    # try to locate a resolver instance on globals or import fallback
-    possible_names = (
-        "instrument_resolver",
-        "resolver",
-        "InstrumentResolverInstance",
-        "instrumentResolver",
-    )
-    resolver = None
-    for n in possible_names:
-        resolver = globals().get(n)
-        if resolver:
-            break
-    if resolver is None:
-        try:
-            from nifty_scalper_bot.data import instruments as _instr_mod  # type: ignore
-
-            resolver = getattr(_instr_mod, "instrument_resolver", None) or getattr(
-                _instr_mod, "resolver", None
-            )
-        except Exception:
-            resolver = None
+    # Try to locate InstrumentManager from bot context
+    ctx = get_latest_bot_context()
+    resolver = getattr(ctx, "instrument_manager", None) if ctx else None
 
     # nothing to validate against
     if resolver is None:
@@ -2134,7 +1863,7 @@ def _find_existing_nifty_option_symbol(
 
 def _get_symbols(
     config: AppConfig,
-    resolver: InstrumentResolver | None = None,
+    resolver: Any | None = None,
     broker: Any | None = None,
     option_universe: OptionUniverseManager | None = None,
     market_data_manager: MarketDataManager | None = None,
@@ -2916,7 +2645,7 @@ def _setup_telegram(ctx: BotContext) -> None:
             unified_manager=ctx.unified_manager,
             stream_supervisor=getattr(ctx, "stream_supervisor", None),
             data_hub=ctx.data_hub,
-            instrument_resolver=getattr(ctx, "instrument_resolver", None),
+            instrument_resolver=getattr(ctx, "instrument_manager", None),
             enable_polling_fallback=True,
         )
 
@@ -2980,10 +2709,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # Created here (not loaded yet — load() is deferred to startup_sequence
     # so the broker auth token is valid and market is open).
     instrument_manager = InstrumentManager(broker_client)
-    
-    # ── InstrumentResolver: Backward compatibility layer ─────────────────────
-    # Required for DataHub, MarketDataManager, and other legacy components
-    instrument_resolver = InstrumentResolver(broker_client)
 
     margin_segment_env = os.getenv("BROKER_MARGIN_SEGMENT", "equity") or "equity"
     margin_segment = margin_segment_env.strip().lower()
@@ -3114,7 +2839,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         market_data_manager = MarketDataManager(
             broker_client,
             None,
-            resolver=instrument_resolver,
+            resolver=instrument_manager,
         )
 
         # [FIX] Start Health Monitor (Watchdog) for Polling Mode
@@ -3153,7 +2878,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         data_hub = DataHub(
             market_data_manager,
-            instrument_resolver,
+            instrument_manager,
             options_only=True,
             store=hub_store,
             event_bus=message_bus,
@@ -3202,7 +2927,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         token = tick.get("instrument_token")
         if not token: return
             
-        symbol = instrument_resolver.get_symbol(token, default="unknown")
+        symbol = instrument_manager.get_symbol(token) or "unknown"
         t = tick.copy()
         t["source"] = "stream"
         t["symbol"] = symbol
@@ -3299,7 +3024,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             broker_client,
             websocket_manager,
             settings=settings,
-            resolver=instrument_resolver,
+            resolver=instrument_manager,
         )
 
         # ── INJECT MDM REFERENCE INTO WEBSOCKET MANAGER ──────────────────────
@@ -3312,7 +3037,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         LOGGER.info("✅ WS: MDM reference injected into WebSocketManager")
         data_hub = DataHub(
             market_data_manager,
-            instrument_resolver,
+            instrument_manager,
             options_only=True,
             store=hub_store,
             event_bus=message_bus,
@@ -3321,7 +3046,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         polling_fallback_streamer = PollingStreamer(
             broker_client=broker_client,
             on_tick=_on_poll_tick,
-            instrument_resolver=instrument_resolver,
+            instrument_resolver=instrument_manager,
             data_hub=data_hub,
             poll_interval_ms=int(poll_interval_sec * 1000),
             batch_size=poll_batch_size,
@@ -3344,13 +3069,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             broker_client,
             None,
             settings=settings,
-            resolver=instrument_resolver,
+            resolver=instrument_manager,
         )
 
         # ✅ FIX: Create DataHub BEFORE PollingStreamer so it's not None
         data_hub = DataHub(
             market_data_manager,
-            instrument_resolver,
+            instrument_manager,
             options_only=True,
             store=hub_store,
             event_bus=message_bus,
@@ -3361,7 +3086,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         streamer = PollingStreamer(
             broker_client=broker_client,
             on_tick=_on_poll_tick,
-            instrument_resolver=instrument_resolver,
+            instrument_resolver=instrument_manager,
             data_hub=data_hub,  # data_hub is now valid!
             poll_interval_ms=int(poll_interval_sec * 1000),
             batch_size=poll_batch_size,
@@ -3413,7 +3138,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if use_polling:
         stream_supervisor = StreamSupervisor(
             streamer=streamer,
-            resolver=instrument_resolver,
+            resolver=instrument_manager,
             default_symbols=list(poll_symbols or ["NSE:NIFTY"]),
             autostart=True,
             monitor_interval_s=1.0,
@@ -3606,25 +3331,20 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("risk_manager_attach_data_hub_failed: %s", exc)
 
-    # 5. [FIX] Wire Lot Size Provider (Unconditional)
-    # We define this logic regardless of resolver state to ensure sizing always works.
+    # 5. Wire Lot Size Provider using InstrumentManager as source of truth.
     def _lot_size_lookup(symbol: str) -> int:
         try:
-            # A. Try metadata from resolver if available
-            if instrument_resolver:
-                meta = instrument_resolver.lookup(symbol)
-                if meta and "lot_size" in meta:
-                    return int(meta["lot_size"])
-
-            # B. Fallback Defaults
+            lot = instrument_manager.get_lot_size(symbol)
+            if lot and lot > 0:
+                return int(lot)
+            # Fallback defaults
             sym_upper = symbol.upper()
             if "NIFTY" in sym_upper:
-                return 65  # Updated NIFTY lot size fallback
+                return 65
             if "BANKNIFTY" in sym_upper:
                 return 15
             return 1
         except Exception:
-            # C. Safety Net
             if "NIFTY" in symbol.upper():
                 return 65
             return 1
@@ -3671,7 +3391,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         LOGGER.exception("risk_state_init_failed")
         risk_state = None
 
-    paper_engine = PaperFillEngine(data_hub, instrument_resolver)
+    paper_engine = PaperFillEngine(data_hub, instrument_manager)
     live_toggle_env = coalesce_bool(
         "ENABLE_LIVE_TRADING",
         "ENABLE_LIVE",
@@ -3691,7 +3411,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         broker_client=broker_client,
         position_manager=position_manager,
         rate_limiter=rate_limiter,
-        instrument_resolver=instrument_resolver,
+        instrument_resolver=instrument_manager,
         indicator_engine=indicator_engine,  # <--- THIS IS THE CRITICAL ADDITION
         trade_journal=trade_journal,
     )
@@ -3706,7 +3426,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             LOGGER.error("margin_engine_attach_data_hub_failed: %s", exc)
     else:
         LOGGER.info("ℹ️ Margin Engine already attached to DataHub")
-    order_manager.set_instrument_resolver(instrument_resolver)
+    order_manager.set_instrument_resolver(instrument_manager)
     order_manager.set_risk_manager(risk_manager)
     order_manager.attach_persistent_state(persistent_state)
 
@@ -4213,8 +3933,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     refresh_task = schedule_instrument_refresh(
         settings,
-        instrument_resolver,
-        state=instrument_state,
+        instrument_manager,
+        state=None,
     )
     if refresh_task is not None:
         background_tasks.append(refresh_task)
@@ -4475,10 +4195,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         strategy_manager=strategy_manager,
         strategy_runner=strategy_runner,
         unified_manager=unified_manager,
-        instrument_resolver=instrument_resolver,
         instrument_manager=instrument_manager,
-        instrument_db=instrument_conn,
-        instrument_universe=instrument_state,
+        instrument_db=None,
+        instrument_universe=None,
         instrument_refresh_task=instrument_refresh_task,
         websocket_enabled=websocket_enabled,
         shadow_mode_enabled=shadow_enabled,
@@ -4496,39 +4215,24 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         bracket_manager_attached=bracket_manager_attached,
     )
 
-    resolver_candidate = ctx.instrument_resolver
-    if resolver_candidate is None and ctx.broker_client is not None:
-        try:
-            resolver_candidate = InstrumentResolver(ctx.broker_client)
-            with suppress(Exception):
-                resolver_candidate.warm()
-            ctx.instrument_resolver = resolver_candidate
-        except Exception as _resolver_exc:  # noqa: BLE001 - defensive wiring
-            LOGGER.error(
-                "Resolver init failed: %s",
-                _resolver_exc,
-                extra={"event": "resolver_init_failed"},
-                exc_info=_resolver_exc,
-            )
-            ctx.instrument_resolver = None
-            resolver_candidate = None
-    if resolver_candidate is not None:
+    # Wire InstrumentManager to MDM and UnifiedManager for symbol/token resolution
+    if ctx.instrument_manager is not None:
         if ctx.market_data_manager is not None:
             try:
-                setattr(ctx.market_data_manager, "_resolver", resolver_candidate)
+                setattr(ctx.market_data_manager, "_resolver", ctx.instrument_manager)
             except Exception as exc:  # noqa: BLE001 - defensive wiring
                 LOGGER.error(
-                    "Resolver attach to MDM failed: %s",
+                    "InstrumentManager attach to MDM failed: %s",
                     exc,
                     extra={"event": "resolver_attach_mdm_failed"},
                     exc_info=exc,
                 )
         if unified_manager is not None:
             try:
-                setattr(unified_manager, "resolver", resolver_candidate)
+                setattr(unified_manager, "resolver", ctx.instrument_manager)
             except Exception as exc:  # noqa: BLE001 - defensive wiring
                 LOGGER.error(
-                    "Resolver attach to UM failed: %s",
+                    "InstrumentManager attach to UM failed: %s",
                     exc,
                     extra={"event": "resolver_attach_um_failed"},
                     exc_info=exc,
@@ -5090,8 +4794,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 order_manager=ctx.order_manager,
                 safe_order_manager=ctx.safe_order_manager,
                 risk_manager=ctx.risk_manager,
-                instrument_resolver=ctx.instrument_resolver,
-                resolver=ctx.instrument_resolver,
+                instrument_resolver=ctx.instrument_manager,
+                resolver=ctx.instrument_manager,
                 instrument_universe=ctx.instrument_universe,
                 instrument_db_path=(
                     str(cache_settings.db_path) if cache_settings is not None else None
@@ -5344,7 +5048,8 @@ async def startup_sequence(ctx: BotContext) -> None:
 
     # ---------------------------------------------------------
     # ---------------------------------------------------------
-    # 2. Load instruments AND sync to resolver
+    # 2. Pre-load broker instrument caches (NSE + NFO)
+    # InstrumentManager.load() in section 2b fetches directly from broker.
     # ---------------------------------------------------------
     if broker_ready:
         try:
@@ -5360,176 +5065,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info("📦 Loading NFO instruments...")
             await asyncio.to_thread(inner.load_instruments, "NFO")
             LOGGER.info("✅ NFO instruments loaded")
-
-            # ✅ CRITICAL FIX: Sync loaded instruments to InstrumentResolver
-            # The resolver was warmed BEFORE instruments were loaded, so we must update it now
-            if ctx.instrument_resolver:
-                LOGGER.info("🔄 Syncing NFO instruments to InstrumentResolver...")
-                synced_count = 0
-
-                # Get instruments from broker cache
-                broker_ref = getattr(ctx.broker_client, "_broker", ctx.broker_client)
-                nfo_cache = getattr(broker_ref, "_instrument_cache", {}).get("NFO", {})
-
-                if not nfo_cache:
-                    # Fallback: try list_instruments
-                    list_fn = getattr(broker_ref, "list_instruments", None)
-                    if callable(list_fn):
-                        all_instruments = list_fn()
-                        nfo_cache = {
-                            row.get("tradingsymbol", ""): row
-                            for row in all_instruments
-                            if row.get("exchange") == "NFO"
-                        }
-
-                _nifty_prefixes = ("NIFTY",)
-                nfo_cache_filtered = {
-                    k: v
-                    for k, v in nfo_cache.items()
-                    if str(v.get("tradingsymbol") or v.get("symbol") or "")
-                    .upper()
-                    .startswith(_nifty_prefixes)
-                }
-                total_items = len(nfo_cache_filtered)
-                LOGGER.info(
-                    "nfo_cache_filtered",
-                    extra={
-                        "event": "nfo_cache_filtered",
-                        "filtered_contracts": total_items,
-                        "total_contracts": len(nfo_cache),
-                    },
-                )
-
-                for idx, (key, row) in enumerate(nfo_cache_filtered.items(), 1):
-                    try:
-                        token = row.get("instrument_token")
-                        ts = row.get("tradingsymbol") or row.get("symbol")
-                        exchange = row.get("exchange", "NFO")
-
-                        if token and ts:
-                            # Add to resolver's internal caches
-                            # Note: upsert now logs at DEBUG level (not INFO)
-                            ctx.instrument_resolver.upsert(
-                                ts, int(token), exchange=exchange
-                            )
-                            synced_count += 1
-
-                        # Progress logging every 1000 instruments to show activity
-                        if idx % 1000 == 0:
-                            LOGGER.info(f"📥 NFO sync progress: {idx}/{total_items}")
-
-                    except Exception as e:
-                        # Log failures at debug level to avoid spam
-                        LOGGER.debug(f"Skip NFO instrument {key}: {e}")
-
-                LOGGER.info(
-                    f"✅ Synced {synced_count}/{total_items} NFO instruments to resolver"
-                )
-                if synced_count <= 0:
-                    raise RuntimeError(
-                        "InstrumentResolver initialized with empty token cache"
-                    )
-                instrument_cache_ready.set()
-
-                # ✅ FIX #3: Populate _option_contracts from broker NFO instruments
-                if hasattr(ctx.instrument_resolver, "sync_nfo_from_broker"):
-                    nfo_payload = (
-                        list(nfo_cache_filtered.values())
-                        if isinstance(nfo_cache_filtered, dict)
-                        else list(nfo_cache_filtered)
-                    )
-                    nfo_synced = ctx.instrument_resolver.sync_nfo_from_broker(
-                        nfo_payload
-                    )
-                    if hasattr(ctx.instrument_resolver, "_finalize_futures"):
-                        ctx.instrument_resolver._finalize_futures()
-                    LOGGER.info(
-                        f"✅ Synced {nfo_synced} NFO options to resolver._option_contracts"
-                    )
-                else:
-                    LOGGER.warning(
-                        "⚠️ InstrumentResolver missing sync_nfo_from_broker method"
-                    )
-
-                # ✅ FIX #1: DYNAMIC NFO Test Symbol Generation
-                # Generate test symbol for CURRENT/NEXT expiry (not hardcoded expired!)
-                import calendar as _cal
-                from datetime import datetime, timedelta
-
-                _now = datetime.now()
-                _today = _now.date()
-
-                # Find next Tuesday (weekly expiry)
-                _target_weekday = 1  # Tuesday
-                _days_ahead = _target_weekday - _today.weekday()
-                if _days_ahead < 0:
-                    _days_ahead += 7
-                if _days_ahead == 0 and _now.hour >= 16:  # After market close
-                    _days_ahead += 7
-
-                _next_expiry = _today + timedelta(days=_days_ahead)
-
-                # Check if monthly expiry (last Tuesday of month)
-                _last_day = _cal.monthrange(_next_expiry.year, _next_expiry.month)[1]
-                _potential_monthly = datetime(
-                    _next_expiry.year, _next_expiry.month, _last_day
-                ).date()
-                while _potential_monthly.weekday() != _target_weekday:
-                    _potential_monthly -= timedelta(days=1)
-
-                _is_monthly = _next_expiry == _potential_monthly
-
-                # Format expiry code (Zerodha convention)
-                if _is_monthly:
-                    expiry_code = _next_expiry.strftime("%y%b").upper()
-                    assert len(expiry_code) == 5, "Invalid expiry format"
-                    _date_code = expiry_code  # "26FEB"
-                else:
-                    _y = _next_expiry.strftime("%y")  # "26"
-                    _d = _next_expiry.strftime("%d")  # "11"
-                    _m_map = {10: "O", 11: "N", 12: "D"}
-                    _m = _m_map.get(
-                        _next_expiry.month, str(_next_expiry.month)
-                    )  # "2" for Feb
-                    _date_code = f"{_y}{_m}{_d}"  # "26211" for Feb 11, 2026
-                    expiry_code = _date_code
-
-                # Use current ATM strike (approximate)
-                _atm_strike = 25600  # Default; ideally get from live NIFTY price
-
-                # Generate dynamic test symbol
-                test_sym = f"NFO:NIFTY{expiry_code}{_atm_strike}CE"
-                LOGGER.info(
-                    f"📝 Testing dynamic NFO symbol: {test_sym} (Expiry: {_next_expiry})"
-                )
-
-                test_tok = ctx.instrument_resolver.resolve(test_sym)
-                if test_tok:
-                    LOGGER.info(
-                        f"✅ NFO resolution test PASSED: {test_sym} -> {test_tok}"
-                    )
-                else:
-                    LOGGER.warning(
-                        f"⚠️ NFO resolution: {test_sym} -> None (trying variants)"
-                    )
-
-                    # Try PE variant and different strikes
-                    _test_variants = [
-                        test_sym.replace("CE", "PE"),
-                        f"NIFTY{_date_code}{_atm_strike}CE",  # Without NFO: prefix
-                        f"NFO:NIFTY{_date_code}{_atm_strike + 50}CE",
-                        f"NFO:NIFTY{_date_code}{_atm_strike - 50}PE",
-                    ]
-
-                    for alt_sym in _test_variants:
-                        alt_tok = ctx.instrument_resolver.resolve(alt_sym)
-                        if alt_tok:
-                            LOGGER.info(f"✅ Variant resolved: {alt_sym} -> {alt_tok}")
-                            break
-                    else:
-                        LOGGER.warning(
-                            f"⚠️ No NFO variants resolved - check instrument sync"
-                        )
+            instrument_cache_ready.set()
 
         except Exception as e:
             LOGGER.error(f"Instrument load failed: {e}", exc_info=True)
@@ -5655,7 +5191,7 @@ async def startup_sequence(ctx: BotContext) -> None:
         try:
             targets = _get_symbols(
                 ctx.config,
-                ctx.instrument_resolver,
+                ctx.instrument_manager,
                 ctx.broker_client,
                 option_universe=ctx.option_universe,
                 market_data_manager=ctx.market_data_manager,
@@ -5682,18 +5218,19 @@ async def startup_sequence(ctx: BotContext) -> None:
             m_str = target_date.strftime("%b").upper()
             future_symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
 
-            if ctx.instrument_resolver:
-                fut_token = ctx.instrument_resolver.resolve(future_symbol)
-                if fut_token:
-                    LOGGER.info(
-                        f"✅ Resolved Futures (Data Only): {future_symbol} -> {fut_token}"
-                    )
-                    targets.append(future_symbol)
-                    if ctx.strategy_manager and hasattr(
-                        ctx.strategy_manager, "orchestrator"
-                    ):
-                        ctx.strategy_manager.orchestrator.futures_symbol = future_symbol
-                else:
+            if ctx.instrument_manager and ctx.instrument_manager.is_loaded():
+                try:
+                    fut_token = ctx.instrument_manager.get_token(future_symbol)
+                    if fut_token:
+                        LOGGER.info(
+                            f"✅ Resolved Futures (Data Only): {future_symbol} -> {fut_token}"
+                        )
+                        targets.append(future_symbol)
+                        if ctx.strategy_manager and hasattr(
+                            ctx.strategy_manager, "orchestrator"
+                        ):
+                            ctx.strategy_manager.orchestrator.futures_symbol = future_symbol
+                except RuntimeError:
                     LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
 
             targets.append("NSE:NIFTY 50")
@@ -5721,9 +5258,14 @@ async def startup_sequence(ctx: BotContext) -> None:
             symbols_to_hydrate: list[str] = []
             for _sym in symbols_to_hydrate_raw:
                 _tok = None
-                if ctx.instrument_resolver:
-                    _tok = ctx.instrument_resolver.resolve(_sym)
-                # Well-known index tokens always have a token; skip only unknown options
+                if ctx.instrument_manager and ctx.instrument_manager.is_loaded() and _sym.startswith("NFO:"):
+                    try:
+                        _tok = ctx.instrument_manager.get_token(_sym)
+                    except RuntimeError:
+                        _tok = None
+                elif not _sym.startswith("NFO:"):
+                    _tok = 1  # Well-known index, always valid
+                # Skip unknown NFO options with no token
                 if _tok is None and _sym.startswith("NFO:"):
                     LOGGER.warning(
                         "hydration_skip_no_token: skipping %s (no instrument token found)",
@@ -5959,28 +5501,28 @@ async def startup_sequence(ctx: BotContext) -> None:
             streamer = ctx.streamer
             tokens_to_poll = []
 
-            # --- Objective 1: Enhanced Token Selection ---
-            if ctx.instrument_resolver:
+            # --- Token Selection via InstrumentManager ---
+            im = ctx.instrument_manager
+            if im and im.is_loaded():
                 # Add Spot and mandatory targets
                 for sym in targets:
-                    tok = ctx.instrument_resolver.resolve(sym)
-                    if tok and tok not in tokens_to_poll:
-                        tokens_to_poll.append(tok)
+                    try:
+                        tok = im.get_token(sym)
+                        if tok and tok not in tokens_to_poll:
+                            tokens_to_poll.append(tok)
+                    except RuntimeError:
+                        pass
 
                 # Add ATM Options and Futures
-                # Try to get current spot price for better ATM selection
                 spot_price = 0.0
                 if mdm:
                     last_tick = mdm.get_last_tick("NSE:NIFTY")
                     if last_tick:
                         spot_price = last_tick.get("ltp", 0.0)
-                
-                # Fallback if no tick yet
                 if spot_price <= 0:
-                    # Try a one-off fetch if possible, or use a reasonable default for NIFTY
-                    spot_price = 25600.0 
+                    spot_price = 25600.0
 
-                extra_tokens = ctx.instrument_resolver.select_tokens_for_universe(
+                extra_tokens = im.select_tokens_for_universe(
                     base="NIFTY",
                     spot_price=spot_price,
                     strikes_around_atm=settings.option_universe.strikes_around_atm,
@@ -6018,11 +5560,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                     mdm.ensure_tracking(sym, seed=not websocket_enabled)
 
                 tok = None
-                if ctx.instrument_resolver:
-                    tok = ctx.instrument_resolver.resolve(sym)
+                if ctx.instrument_manager and ctx.instrument_manager.is_loaded():
                     # BUG-α FIX: Never raise here — a missing token for one symbol
                     # must NOT abort streaming/subscription wiring for all others.
-                    # Unresolved symbols are tracked in unresolved_symbols and logged.
+                    try:
+                        tok = ctx.instrument_manager.get_token(sym)
+                    except RuntimeError:
+                        tok = None
                     if tok:
                         if mdm:
                             mdm.register_symbol(sym, tok)
@@ -6125,10 +5669,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                             else None
                         )
                         
-                        # --- Objective 7: Auto ATM Resubscription ---
-                        if spot and spot > 0:
-                            # Use the new selection logic to find desired tokens
-                            target_tokens = ctx.instrument_resolver.select_tokens_for_universe(
+                        # --- Objective 7: Auto ATM Resubscription via InstrumentManager ---
+                        _im = ctx.instrument_manager
+                        if spot and spot > 0 and _im and _im.is_loaded():
+                            target_tokens = _im.select_tokens_for_universe(
                                 base="NIFTY",
                                 spot_price=float(spot),
                                 strikes_around_atm=settings.option_universe.strikes_around_atm,
@@ -6136,9 +5680,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                             latest_symbols = set()
                             for t in target_tokens:
-                                s = ctx.instrument_resolver.get_symbol(t)
-                                if s and s.startswith("NFO:NIFTY"):
-                                    latest_symbols.add(s)
+                                s = _im.get_symbol(t)
+                                if s:
+                                    qualified = f"NFO:{s}" if not s.startswith("NFO:") else s
+                                    if qualified.startswith("NFO:NIFTY"):
+                                        latest_symbols.add(qualified)
                         else:
                             latest_symbols = set(
                                 ctx.option_universe.get_current_universe()
@@ -6161,11 +5707,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                         for sym in add_symbols:
                             if ctx.market_data_manager:
                                 ctx.market_data_manager.ensure_tracking(sym)
-                            tok = (
-                                ctx.instrument_resolver.resolve(sym)
-                                if ctx.instrument_resolver
-                                else None
-                            )
+                            tok = None
+                            if _im and _im.is_loaded():
+                                try:
+                                    tok = _im.get_token(sym)
+                                except RuntimeError:
+                                    tok = None
                             if tok is None:
                                 LOGGER.warning(
                                     f"⚠️ Universe sync: no token for {sym}, skipping"
@@ -6185,11 +5732,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.strategy_runner.add_symbol(sym)
 
                         for sym in drop_symbols:
-                            tok = (
-                                ctx.instrument_resolver.resolve(sym)
-                                if ctx.instrument_resolver
-                                else None
-                            )
+                            tok = None
+                            if _im and _im.is_loaded():
+                                try:
+                                    tok = _im.get_token(sym)
+                                except RuntimeError:
+                                    tok = None
                             if (
                                 tok
                                 and ctx.streamer

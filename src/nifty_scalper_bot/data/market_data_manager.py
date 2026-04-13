@@ -14,7 +14,6 @@ from random import uniform
 import threading
 import time
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Deque,
@@ -42,9 +41,7 @@ from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
 
 # NOTE: resolver is attached at runtime by app.py (ctx.market_data_manager._resolver).
-# Avoid importing resolver modules here to prevent circular imports or path issues.
-if TYPE_CHECKING:
-    from nifty_scalper_bot.data.instruments import InstrumentResolver
+# InstrumentManager is used as the resolver (Any type accepted).
 
 TickCallback = Callable[[dict[str, Any]], None]
 

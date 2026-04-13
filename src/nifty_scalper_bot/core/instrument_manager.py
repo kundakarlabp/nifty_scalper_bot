@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.instrument_manager")
@@ -296,6 +296,19 @@ class InstrumentManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def resolve_by_symbol(self, symbol: str) -> Optional[dict]:
+        """Resolve full instrument data by symbol (compatibility shim for OrderManager).
+
+        Args: symbol – bare or exchange-qualified tradingsymbol.
+        Returns: instrument dict or None if not found.
+        Raises: None.
+        """
+        return self.lookup(symbol)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
     def _symbol_by_token_set(
         self, token: int, tradingsymbol: str, exchange: str
     ) -> None:
@@ -304,7 +317,7 @@ class InstrumentManager:
         self._exchange_map[token] = exchange
 
     # ------------------------------------------------------------------
-    # Additional helpers to replace InstrumentResolver functionality
+    # Helpers replacing InstrumentResolver functionality
     # ------------------------------------------------------------------
 
     def get_option_contracts(self, underlying: str) -> List[Dict[str, Any]]:

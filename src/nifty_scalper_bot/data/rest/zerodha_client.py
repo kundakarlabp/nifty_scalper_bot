@@ -36,11 +36,11 @@ except ImportError:  # pragma: no cover - compatibility for stubs/older versions
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kiteconnect import KiteTicker as KiteTickerType
-
-    from nifty_scalper_bot.data.instruments import InstrumentResolver
 else:  # pragma: no cover - fallback type when kiteconnect missing
     KiteTickerType = Any
-    InstrumentResolver = Any  # type: ignore[misc]
+
+# InstrumentManager is used as the resolver at runtime (typed as Any).
+InstrumentResolver = Any  # type: ignore[misc]
 
 from nifty_scalper_bot.data.rest.client import BaseBrokerClient
 from nifty_scalper_bot.utils.env import get_float, get_int, get_str
