@@ -12,7 +12,7 @@ from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 
 
 @pytest.mark.asyncio
-async def test_publish_tick_drops_oldest_under_backpressure() -> None:
+async def test_publish_tick_raises_under_backpressure() -> None:
     bus = MessageBus(max_queue_size=5)
     bus._running = True
 

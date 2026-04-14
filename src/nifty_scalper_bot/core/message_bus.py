@@ -72,18 +72,9 @@ class MessageBus:
     async def publish(self, message: Message) -> None:
         """Publish a message to subscribed handlers."""
         if not self._running:
-            try:
-                self.queues[message.type].put_nowait(message)
-            except asyncio.QueueFull:
-                log_throttled(
-                    LOGGER,
-                    f"message_bus_prestart_full_{message.type.value}",
-                    f"Queue full for pre-start {message.type.value}",
-                    level=logging.ERROR,
-                    interval_sec=30.0,
-                    extra={'event': 'pre_start_queue_full', 'type': message.type.value},
-                )
-            return
+            raise RuntimeError(
+                f"Publishing {message.type} before MessageBus.start()"
+            )
         try:
             self.queues[message.type].put_nowait(message)
         except asyncio.QueueFull:
@@ -119,14 +110,18 @@ class MessageBus:
             try:
                 # Wait for message
                 message = await queue.get()
-                queue.task_done()
 
                 # Dispatch without head-of-line blocking.
                 for handler in handlers:
                     try:
                         result = handler(message)
                         if asyncio.iscoroutine(result):
-                            safe_task(result)
+                            task = safe_task(result)
+                            task.add_done_callback(
+                                lambda t: LOGGER.error("Handler failed", exc_info=t.exception())
+                                if t.exception()
+                                else None
+                            )
                     except Exception as exc:
                         LOGGER.error(
                             "Failure in MessageBus handler dispatch: %s",
@@ -134,6 +129,8 @@ class MessageBus:
                             extra={"event": "message_bus_handler_dispatch_error"},
                             exc_info=exc,
                         )
+
+                queue.task_done()
 
             except asyncio.CancelledError:
                 LOGGER.debug("%s dispatch loop cancelled.", message_type.value)
