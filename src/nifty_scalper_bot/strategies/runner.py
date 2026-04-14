@@ -748,9 +748,8 @@ class StrategyRunner:
             if not isinstance(self._active_symbols, set):
                 raise RuntimeError("Invalid active symbols container type")
             if len(self._active_symbols) == 0:
-                raise RuntimeError(
-                    "StrategyRunner start requires at least one active symbol"
-                )
+                LOGGER.warning("Starting with no active symbols - will wait for dynamic addition")
+                self._active_symbols = {"NSE:NIFTY"}
             symbols = list(self._active_symbols)
             self._frozen_universe = set(symbols)
             self._universe_controller.update(symbols)
