@@ -23,7 +23,7 @@ from typing import Any
 LOGGER = logging.getLogger("nifty_scalper_bot.core.hydration")
 
 # Conservative default: 3-day window ensures same-day gaps don't produce 0 bars
-_DEFAULT_LOOKBACK_DAYS = 3
+_DEFAULT_LOOKBACK_DAYS = 7
 _DEFAULT_MIN_BARS = 50
 _HARD_MIN_BARS = 20
 
