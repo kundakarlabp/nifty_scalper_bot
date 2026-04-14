@@ -145,8 +145,23 @@ class MarketDataManager:
         self._engines: dict[str, CandleEngine] = {}
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
-        self._tick_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        # Bounded queue: drops oldest when full so a stall in the async
+        # consumer never grows memory without bound. Size 10 000 is ~8 s
+        # of headroom at 1 000 tps.
+        self._tick_queue_maxsize = self._parse_int_env(
+            "MDM_TICK_QUEUE_MAX", default=10_000, minimum=1_000
+        )
+        self._tick_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=self._tick_queue_maxsize
+        )
+        self._tick_queue_dropped = 0
+        self._last_tick_queue_full_log = 0.0
         self._tick_consumer_task: asyncio.Task[None] | None = None
+        # Fallback worker thread for when no asyncio loop is registered
+        # (e.g. early boot, polling-only mode).  Isolates the WS thread
+        # from any processing work — the WS callback must only enqueue.
+        self._tick_worker_stop = threading.Event()
+        self._tick_worker_thread: threading.Thread | None = None
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
@@ -236,6 +251,13 @@ class MarketDataManager:
         self._zombie_restart_cooldown_sec = self._parse_float_env(
             "ZOMBIE_RESTART_COOLDOWN_SEC", default=30.0, minimum=5.0
         )
+        # Exponential-backoff ceiling for consecutive zombie restarts.
+        # Each successive attempt doubles the cooldown (with full
+        # jitter) up to this ceiling; success resets it.
+        self._zombie_restart_cooldown_max_sec = self._parse_float_env(
+            "ZOMBIE_RESTART_COOLDOWN_MAX_SEC", default=300.0, minimum=30.0
+        )
+        self._zombie_restart_consecutive = 0
         self._zombie_stale_logged = False
         self._rest_refresh_inflight: set[str] = set()
         self._tick_stale_threshold_ms = self._parse_int_env(
@@ -262,50 +284,98 @@ class MarketDataManager:
                 self._poll_batch_ceiling = ceiling
                 self._rest_poll_max_symbols = min(self._rest_poll_max_symbols, ceiling)
 
-        if self._ws is not None:
-            if hasattr(self._ws, "_on_tick_callback"):
-                self._ws._on_tick_callback = self._enqueue_tick_threadsafe
-            else:
-                self._ws.on_tick = self._enqueue_tick_threadsafe
-
+        # NOTE: WebSocketManager._on_ticks already invokes
+        # market_data_manager.process_ticks(ticks) on every batch (see
+        # streaming/websocket_manager.py::_on_ticks).  Previously MDM
+        # *also* installed self._enqueue_tick_threadsafe as the per-tick
+        # _on_tick_callback which caused every tick to be enqueued
+        # twice (the duplicates were silently dropped by the
+        # non-monotonic timestamp filter in _process_queued_tick, but
+        # they still consumed queue slots and CPU).  We no longer reach
+        # for the callback slot here — process_ticks is the single
+        # ingress for WS ticks.
         self._m_ticks = Counter("mdm_ticks_total", "Normalized ticks processed")
         self._last_balance_log_time = 0.0
         self._started = False
 
     def _initialize_instruments(self) -> None:
-        """Load instrument token mappings from broker. Args: none. Returns: None. Raises: Exception."""
+        """Load instrument token mappings from broker with transient retry.
 
-        try:
-            if self._broker is None or not hasattr(self._broker, "instruments"):
-                return
-            loaded = 0
-            # Load NFO (derivatives) first, then NSE (index tokens like NIFTY 50).
-            # Previously the call had no exchange argument which defaulted to NSE,
-            # leaving all NFO futures/options tokens missing from the mapping.
-            for exchange in ("NFO", "NSE"):
+        Transient Zerodha REST failures on boot used to leave the
+        token↔symbol map empty, which then cascaded into "Token missing
+        for NSE:NIFTY" errors and DEGRADED mode.  We now retry each
+        exchange up to 3 times with exponential backoff before giving
+        up, and a failure to load ANY exchange is loudly logged.
+
+        Args: none. Returns: None. Raises: None.
+        """
+
+        if self._broker is None or not hasattr(self._broker, "instruments"):
+            return
+        loaded = 0
+        any_success = False
+        # Load NFO (derivatives) first, then NSE (index tokens like
+        # NIFTY 50). Previously the call had no exchange argument which
+        # defaulted to NSE, leaving all NFO futures/options tokens
+        # missing from the mapping.
+        for exchange in ("NFO", "NSE"):
+            exchange_instruments: Any = None
+            for attempt in range(3):
                 try:
                     exchange_instruments = self._broker.instruments(exchange)
-                except Exception as exc:
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    delay = min(8.0, 2.0 ** attempt)
                     self._logger.warning(
-                        "Could not load instruments for %s: %s", exchange, exc
+                        "instrument load %s attempt %d failed: %s — "
+                        "retry in %.1fs",
+                        exchange,
+                        attempt + 1,
+                        exc,
+                        delay,
                     )
-                    continue
-                with self._lock:
-                    for ins in exchange_instruments:
-                        try:
-                            token = int(ins["instrument_token"])
-                            symbol = str(ins["tradingsymbol"]).strip()
-                        except (KeyError, TypeError, ValueError):
-                            continue
-                        if not symbol:
-                            continue
-                        canonical_symbol = normalize_symbol(symbol)
+                    time.sleep(delay)
+            if not exchange_instruments:
+                self._logger.error(
+                    "Could not load instruments for %s after 3 attempts",
+                    exchange,
+                    extra={"event": "mdm_instrument_load_failed", "exchange": exchange},
+                )
+                continue
+            any_success = True
+            with self._lock:
+                for ins in exchange_instruments:
+                    try:
+                        token = int(ins["instrument_token"])
+                        symbol = str(ins["tradingsymbol"]).strip()
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not symbol:
+                        continue
+                    canonical_symbol = normalize_symbol(symbol)
+                    try:
                         self.register_symbol(canonical_symbol, token)
                         loaded += 1
-            self._logger.info(f"Loaded {loaded} instruments (NFO + NSE)")
-        except Exception as e:
-            self._logger.error(f"Instrument load failed: {e}")
-            raise
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.debug(
+                            "register_symbol skipped %s (%s): %s",
+                            canonical_symbol,
+                            token,
+                            exc,
+                        )
+        if not any_success:
+            # Downstream zombie checker + polling fallback will still
+            # work for explicitly-registered symbols (NIFTY /
+            # BANKNIFTY, plus anything resolver injects at runtime).
+            self._logger.error(
+                "Instrument load failed for all exchanges — running with "
+                "seeded token map only",
+                extra={"event": "mdm_instrument_load_empty"},
+            )
+        self._logger.info(
+            f"Loaded {loaded} instruments (NFO + NSE)",
+            extra={"event": "mdm_instruments_loaded", "count": loaded},
+        )
 
     def validate_token_symbol_mappings(self) -> None:
         """Args: none; Returns: None; Raises: RuntimeError on mapping mismatch."""
@@ -601,10 +671,21 @@ class MarketDataManager:
             return
         self._started = False
         if self._ws is not None:
-            self._ws.stop()
+            try:
+                self._ws.stop()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("ws.stop() raised: %s", exc)
         if self._tick_consumer_task is not None:
-            self._tick_consumer_task.cancel()
+            try:
+                self._tick_consumer_task.cancel()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("tick consumer cancel raised: %s", exc)
             self._tick_consumer_task = None
+        if self._tick_worker_thread is not None:
+            self._tick_worker_stop.set()
+            self._tick_worker_thread.join(timeout=2.0)
+            self._tick_worker_thread = None
+            self._tick_worker_stop.clear()
         if self._rest_poll_thread is not None:
             self._rest_poll_stop.set()
             self._rest_poll_thread.join(timeout=2.0)
@@ -2479,15 +2560,86 @@ class MarketDataManager:
         await self._tick_queue.put(dict(raw_tick))
 
     def _enqueue_tick_threadsafe(self, tick: dict[str, Any]) -> None:
-        """Enqueue websocket ticks from sync callbacks onto the async queue."""
-        tick_payload = dict(tick)
+        """Enqueue websocket ticks from sync callbacks onto the async queue.
+
+        This function is called from the KiteTicker WS thread and MUST be
+        non-blocking.  We never perform processing work here — we only
+        enqueue.  If the queue is full we drop the oldest tick so a stall
+        in the consumer cannot back-pressure onto the WS thread.  If no
+        asyncio loop is registered we spin up a dedicated worker thread
+        that drains the queue — never the WS thread itself.
+        """
+        try:
+            tick_payload = dict(tick)
+        except Exception:  # pragma: no cover — defensive
+            return
         tick_payload.setdefault("_enqueued_monotonic", time.monotonic())
+
         loop = self._main_loop
         if loop is not None and loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.push_tick(tick_payload), loop)
+            try:
+                asyncio.run_coroutine_threadsafe(self.push_tick(tick_payload), loop)
+            except Exception as exc:  # pragma: no cover — defensive
+                self._logger.debug("WS enqueue via loop failed: %s", exc)
             return
-        self._tick_queue.put_nowait(tick_payload)
-        self._drain_tick_queue_sync()
+
+        # No event loop available — ensure a worker thread exists so WS
+        # thread never performs processing work inline.
+        self._ensure_tick_worker()
+        try:
+            self._tick_queue.put_nowait(tick_payload)
+        except asyncio.QueueFull:
+            # Drop oldest to make room; throttle-log every 5 s.
+            self._tick_queue_dropped += 1
+            try:
+                _ = self._tick_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self._tick_queue.put_nowait(tick_payload)
+            except asyncio.QueueFull:  # pragma: no cover
+                pass
+            now = time.monotonic()
+            if now - self._last_tick_queue_full_log > 5.0:
+                self._last_tick_queue_full_log = now
+                self._logger.warning(
+                    "Tick queue full — dropped %d ticks so far",
+                    self._tick_queue_dropped,
+                )
+        except Exception as exc:  # pragma: no cover — defensive
+            self._logger.debug("WS enqueue failed: %s", exc)
+
+    def _ensure_tick_worker(self) -> None:
+        """Start the fallback drain thread once, on first need."""
+        t = self._tick_worker_thread
+        if t is not None and t.is_alive():
+            return
+        self._tick_worker_stop.clear()
+        self._tick_worker_thread = threading.Thread(
+            target=self._tick_worker_loop,
+            name="mdm-tick-worker",
+            daemon=True,
+        )
+        self._tick_worker_thread.start()
+
+    def _tick_worker_loop(self) -> None:
+        """Drain the tick queue off-thread when no asyncio loop is running."""
+        while not self._tick_worker_stop.is_set():
+            # Prefer the loop when it comes online — self-terminate.
+            if self._main_loop is not None and self._main_loop.is_running():
+                return
+            try:
+                raw = self._tick_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                # Light spin — 25 ms pacing keeps latency low without
+                # burning CPU.
+                if self._tick_worker_stop.wait(0.025):
+                    return
+                continue
+            try:
+                self._process_queued_tick(raw)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("tick worker drain error: %s", exc)
 
     def _on_tick(self, tick: dict[str, Any]) -> None:
         """Legacy tick-bus hook routed to queue ingestion."""
@@ -2496,10 +2648,11 @@ class MarketDataManager:
     def process_ticks(self, ticks: list[dict[str, Any]]) -> None:
         """Batch-enqueue WS ticks from KiteTicker callback.
 
-        Called by WebSocketManager._on_ticks() for every tick batch.
-        Enqueues each tick onto the async queue so _consume_ticks() can
-        resolve token→symbol, validate, and call _emit_tick() (which
-        updates _last_tick_time used by the zombie checker).
+        Called by WebSocketManager._on_ticks() for every tick batch —
+        runs on the KiteTicker OS thread.  Under NO circumstances may
+        this method block or raise; its only job is to hand each tick
+        to the async queue.  All processing happens in _consume_ticks
+        (asyncio task) or _tick_worker_loop (thread fallback).
 
         Args:
             ticks: Raw tick dicts from KiteTicker (instrument_token + last_price).
@@ -2507,11 +2660,16 @@ class MarketDataManager:
         """
         if not ticks:
             return
-        for tick in ticks:
+        try:
+            iterator = iter(ticks)
+        except TypeError:
+            return
+        for tick in iterator:
+            if not isinstance(tick, dict):
+                continue
             try:
-                if isinstance(tick, dict):
-                    self._enqueue_tick_threadsafe(tick)
-            except Exception as exc:  # noqa: BLE001
+                self._enqueue_tick_threadsafe(tick)
+            except Exception as exc:  # noqa: BLE001 — WS thread must not raise
                 self._logger.debug("process_ticks enqueue failed: %s", exc)
 
     def update_authoritative_ticks(self, ticks: list[dict[str, Any]]) -> None:
@@ -3030,6 +3188,10 @@ class MarketDataManager:
         )
         if stale_ratio < 0.70:
             self._zombie_stale_logged = False
+            # Recovery observed — reset exponential backoff counter
+            # so the next genuine stall restarts at the base cooldown.
+            if self._zombie_restart_consecutive:
+                self._zombie_restart_consecutive = 0
             return
 
         if not self._zombie_stale_logged and stale_symbols:
@@ -3054,8 +3216,20 @@ class MarketDataManager:
         if now < self._zombie_breaker_open_until:
             return
 
+        # Exponential backoff between consecutive zombie restart
+        # triggers.  WebSocketManager itself already does full-jitter
+        # backoff on the reconnect, so this protects MDM against
+        # flapping-trigger storms.
+        cooldown = min(
+            self._zombie_restart_cooldown_sec
+            * (2 ** max(0, self._zombie_restart_consecutive - 1)),
+            self._zombie_restart_cooldown_max_sec,
+        )
+        # Apply full jitter so multiple zombie detectors don't line up.
+        cooldown *= 0.5 + uniform(0.0, 0.5)
+
         since_last = now - self._zombie_last_restart_attempt_at
-        if since_last < self._zombie_restart_cooldown_sec:
+        if since_last < cooldown:
             return
         self._zombie_last_restart_attempt_at = now
 
@@ -3070,6 +3244,7 @@ class MarketDataManager:
             try:
                 reconnect()
                 self._zombie_restart_failures = 0
+                self._zombie_restart_consecutive += 1
                 self._zombie_restart_attempts.append(now)
                 while self._zombie_restart_attempts and (
                     now - self._zombie_restart_attempts[0]
@@ -3080,6 +3255,8 @@ class MarketDataManager:
                     extra={
                         "event": "mdm_zombie_ws_restart",
                         "failure_count": self._zombie_restart_failures,
+                        "consecutive": self._zombie_restart_consecutive,
+                        "cooldown_sec": round(cooldown, 2),
                     },
                 )
             except Exception as exc:  # noqa: BLE001
