@@ -5165,7 +5165,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 _sync_broker_for_hydration,
                 _atm_tokens,
                 min_bars=50,
-                lookback_days=3,
+                lookback_days=7,
                 fail_fast=False,  # Continue with other tokens even if some fail
             )
             LOGGER.info(
