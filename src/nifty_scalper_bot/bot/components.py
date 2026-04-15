@@ -491,7 +491,6 @@ class StrategyRunner:
         self._positions = position_manager
         self._config = config or StrategyRunnerConfig()
         self.datahub = datahub
-        self.datahub = datahub
         self._symbols: set[str] = set()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -560,7 +559,7 @@ class StrategyRunner:
         # self._thread = threading.Thread(
         #     target=self._run_loop, daemon=True, name="StrategyRunner"
         # )
-        # # self._thread.start()
+        # self._thread.start()
         LOGGER.info("Strategy runner started")
 
     def stop(self) -> None:
