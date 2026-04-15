@@ -80,6 +80,19 @@ class TickBus:
     def publish(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
         self._event_bus.publish("tick", tick)
+        if getattr(self, "bus", None) is not None:
+            try:
+                import asyncio
+                from nifty_scalper_bot.core.message_bus import Message, MessageType
+                msg = Message(
+                    type=MessageType.DATA_READY,
+                    timestamp=datetime.now(timezone.utc),
+                    data=tick,
+                    source="data_hub"
+                )
+                asyncio.create_task(self.bus.publish(msg))
+            except Exception as e:
+                LOGGER.error("Failed to publish DATA_READY: %s", e)
 
     def subscribe_event(
         self,
@@ -280,6 +293,10 @@ class DataHub:
         # 2. Correct thread-safe async scheduling across OS threads
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(self.ingest_tick(tick), loop)
+
+
+    async def on_tick(self, message: "Message") -> None:
+        await self.ingest_tick(message.data)
 
     async def ingest_tick(self, tick: Tick) -> None:
         """Process an incoming market tick (Unified Pipeline)."""

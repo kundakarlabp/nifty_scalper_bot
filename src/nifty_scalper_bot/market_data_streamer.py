@@ -2,10 +2,12 @@ import asyncio
 from collections.abc import Sequence
 from datetime import datetime
 import time
+import asyncio
 from typing import Any
 
 from nifty_scalper_bot.core.message_bus import Message, MessageType
 from nifty_scalper_bot.data.market_state import MarketState
+from nifty_scalper_bot.core.message_bus import Message, MessageType
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -22,6 +24,7 @@ class MarketDataStreamer:
         self.bus = bus
         self._subscribed_tokens: set[int] = set()
         self._last_heartbeat: float | None = None
+        self.bus = None
 
     @property
     def last_heartbeat(self) -> float | None:
@@ -34,14 +37,20 @@ class MarketDataStreamer:
 
         for t in ticks:
             try:
+                token = int(tick.get("instrument_token"))
+                price = float(tick.get("last_price") or tick.get("ltp"))
+                if token == 256265:
+                    self._market_state.set_spot_ltp(price, source="ws")
+                self._market_state.update_tick(token, price, source="ws")
+
                 if self.bus is not None:
                     msg = Message(
                         type=MessageType.TICK,
-                        timestamp=datetime.now(),
+                        timestamp=now,
                         data={
-                            "token": int(t.get("instrument_token")),
-                            "ltp": float(t.get("last_price") or t.get("ltp")),
-                            "ts": t.get("exchange_timestamp")
+                            "token": token,
+                            "ltp": price,
+                            "ts": tick.get("exchange_timestamp", now)
                         },
                         source="market_data_streamer"
                     )

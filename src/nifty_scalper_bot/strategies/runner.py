@@ -617,6 +617,7 @@ class StrategyRunner:
             getattr(get_settings(), "universe_dynamic_mode", True)
         )
         self._history_gate_failed: bool = False
+        self._backfill_task_started = False
         self._history_ready_by_symbol: dict[str, bool] = {}
         self._required_symbol_count: int = int(os.getenv("REQUIRED_SYMBOL_COUNT", "1"))
         self._symbol_states: dict[str, SymbolState] = {}
@@ -803,16 +804,18 @@ class StrategyRunner:
 
         # ✅ FIX: Launch Backfill Task (EMERGENCY FALLBACK ONLY)
         # BUG W4 FIX: _backfill_history() was scheduled immediately in runner.start(),
-        # which races against app.py's primary hydration loop. If _backfill_history runs
-        # first (indicator_engine still empty), it triggers a duplicate API fetch consuming
-        # rate-limit budget. _backfill_history already checks indicator bar counts and skips
-        # if fully warmed up — but only AFTER at least one check cycle completes.
-        # Fix: delay the fallback task by 60s so app.py startup_sequence always finishes
-        # primary hydration first. The fallback remains for edge cases where app.py fails.
-        if self._config.fetch_history_on_startup and self._main_loop:
+        # which races with core/app.py EngineWarmupTask. We only need the backfill task
+        # as an emergency fallback if EngineWarmupTask fails.
+        if (
+            self._config.fetch_history_on_startup
+            and self._main_loop
+            and not self._backfill_task_started
+        ):
+            self._backfill_task_started = True
 
             async def _deferred_backfill() -> None:
-                await asyncio.sleep(60.0)  # wait for app.py primary hydration to finish
+                # Fix: delay the fallback task by 60s so app.py startup_sequence always finishes
+                await asyncio.sleep(60.0)
                 await self._backfill_history()
 
             self._main_loop.create_task(_deferred_backfill())
@@ -3264,6 +3267,9 @@ class StrategyRunner:
             )
         except Exception as e:
             self._logger.error("Failure in StrategyRunner._on_tick_from_bus: %s", e)
+
+    async def on_data(self, message: "Message") -> None:
+        self.on_tick_event(message.data)
 
     def on_tick_event(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
