@@ -1,11 +1,10 @@
-"""WebSocket streamer adapter with MarketState synchronization."""
-
-from __future__ import annotations
-
+import asyncio
 from collections.abc import Sequence
+from datetime import datetime
 import time
 from typing import Any
 
+from nifty_scalper_bot.core.message_bus import Message, MessageType
 from nifty_scalper_bot.data.market_state import MarketState
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -15,11 +14,12 @@ LOGGER = get_logger(__name__)
 class MarketDataStreamer:
     """Manage WS callbacks and token subscriptions with deterministic state sync."""
 
-    def __init__(self, websocket: Any, market_state: MarketState) -> None:
+    def __init__(self, websocket: Any, market_state: MarketState, bus: Any = None) -> None:
         """Initialize streamer. Args: websocket/market_state. Returns: none. Raises: none."""
 
         self._ws = websocket
         self._market_state = market_state
+        self.bus = bus
         self._subscribed_tokens: set[int] = set()
         self._last_heartbeat: float | None = None
 
@@ -29,18 +29,23 @@ class MarketDataStreamer:
 
         return self._last_heartbeat
 
-    def on_ticks(self, ticks: Sequence[dict[str, Any]]) -> None:
-        """Update market state from websocket ticks. Args: ticks. Returns: none. Raises: none."""
+    def on_ticks(self, ws: Any, ticks: Sequence[dict[str, Any]]) -> None:
+        """Update market state from websocket ticks. Args: ws, ticks. Returns: none. Raises: none."""
 
-        now = time.time()
-        self._last_heartbeat = now
-        for tick in ticks:
+        for t in ticks:
             try:
-                token = int(tick.get("instrument_token"))
-                price = float(tick.get("last_price") or tick.get("ltp"))
-                if token == 256265:
-                    self._market_state.set_spot_ltp(price, source="ws")
-                self._market_state.update_tick(token, price, source="ws")
+                if self.bus is not None:
+                    msg = Message(
+                        type=MessageType.TICK,
+                        timestamp=datetime.now(),
+                        data={
+                            "token": int(t.get("instrument_token")),
+                            "ltp": float(t.get("last_price") or t.get("ltp")),
+                            "ts": t.get("exchange_timestamp")
+                        },
+                        source="market_data_streamer"
+                    )
+                    asyncio.create_task(self.bus.publish(msg))
             except Exception as e:
                 LOGGER.exception("Failure in MarketDataStreamer.on_ticks: %s", e)
 
