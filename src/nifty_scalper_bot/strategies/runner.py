@@ -617,6 +617,7 @@ class StrategyRunner:
             getattr(get_settings(), "universe_dynamic_mode", True)
         )
         self._history_gate_failed: bool = False
+        self._backfill_task_started = False
         self._history_ready_by_symbol: dict[str, bool] = {}
         self._required_symbol_count: int = int(os.getenv("REQUIRED_SYMBOL_COUNT", "1"))
         self._symbol_states: dict[str, SymbolState] = {}
@@ -737,6 +738,45 @@ class StrategyRunner:
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
+
+    async def on_data(self, message):
+        token = message.data.get("token")
+        if not token:
+            return
+
+        if not self._data_hub or not self._data_hub.is_ready(token):
+            return
+
+        candles, indicators = self._data_hub.get_data(token)
+        if candles is None:
+            return
+
+        await self._process_token(token, candles, indicators)
+
+    async def _process_token(self, token, candles, indicators):
+        symbol = None
+        if self._market_data and hasattr(self._market_data, "_symbol_by_token"):
+            symbol = self._market_data._symbol_by_token.get(token)
+
+        if not symbol:
+            return
+
+        try:
+            if candles.empty:
+                return
+            latest_candle = candles.iloc[-1]
+            price = float(latest_candle['close'])
+
+            signal = self._strategy_manager.generate_signal(symbol, price)
+            if signal:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                self._handle_signal(signal, price, now)
+
+            # print(f"STRATEGY TRIGGERED: {token}")
+        except Exception as e:
+            self._logger.error(f"Error in _process_token for {symbol}: {e}")
+
     def start(self) -> None:
         """Start processing market data events."""
         # 🚨 ALL GATES REMOVED: Runner starts unconditionally
@@ -788,8 +828,8 @@ class StrategyRunner:
             pass
 
         self._market_data.start()
-        worker = threading.Thread(target=self._strategy_worker, daemon=True)
-        worker.start()
+        # worker = threading.Thread(target=self._strategy_worker, daemon=True)
+        # worker.start()
 
         if self._data_hub is not None:
             reset = getattr(self._data_hub, "reset_warmup", None)
@@ -803,16 +843,18 @@ class StrategyRunner:
 
         # ✅ FIX: Launch Backfill Task (EMERGENCY FALLBACK ONLY)
         # BUG W4 FIX: _backfill_history() was scheduled immediately in runner.start(),
-        # which races against app.py's primary hydration loop. If _backfill_history runs
-        # first (indicator_engine still empty), it triggers a duplicate API fetch consuming
-        # rate-limit budget. _backfill_history already checks indicator bar counts and skips
-        # if fully warmed up — but only AFTER at least one check cycle completes.
-        # Fix: delay the fallback task by 60s so app.py startup_sequence always finishes
-        # primary hydration first. The fallback remains for edge cases where app.py fails.
-        if self._config.fetch_history_on_startup and self._main_loop:
+        # which races with core/app.py EngineWarmupTask. We only need the backfill task
+        # as an emergency fallback if EngineWarmupTask fails.
+        if (
+            self._config.fetch_history_on_startup
+            and self._main_loop
+            and not self._backfill_task_started
+        ):
+            self._backfill_task_started = True
 
             async def _deferred_backfill() -> None:
-                await asyncio.sleep(60.0)  # wait for app.py primary hydration to finish
+                # Fix: delay the fallback task by 60s so app.py startup_sequence always finishes
+                await asyncio.sleep(60.0)
                 await self._backfill_history()
 
             self._main_loop.create_task(_deferred_backfill())

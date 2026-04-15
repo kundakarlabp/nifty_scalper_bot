@@ -5838,7 +5838,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                             raise
                     if not _data_ready(ctx.market_data_manager):
                         LOGGER.debug("startup_tick_gate: waiting_for_live_ticks (expected at boot)")
-                    ctx.strategy_runner.start()
+                    # ctx.strategy_runner.start()
+                    if hasattr(ctx, 'message_bus') and getattr(ctx.message_bus, 'subscribe', None):
+                        from nifty_scalper_bot.core.message_bus import MessageType
+                        ctx.message_bus.subscribe(MessageType.DATA_READY, ctx.strategy_runner.on_data)
 
                 if ctx.telegram_bot:
                     LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
