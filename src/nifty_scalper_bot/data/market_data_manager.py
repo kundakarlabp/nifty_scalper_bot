@@ -1,6 +1,7 @@
 """Central market data manager responsible for tick fan-out and broker cache."""
 
 from __future__ import annotations
+from nifty_scalper_bot.core.message_bus import Message, MessageType
 
 import asyncio
 from collections import defaultdict, deque
@@ -137,6 +138,7 @@ class MarketDataManager:
         self._last_hb_mono: float | None = None
         self._heartbeat_callbacks: list[Callable[[float], None]] = []
         self._fallback_enabled = False
+        self.bus = None
         self._poll_jitter_pct = 0.0
         self._poll_batch_ceiling = 0
         self._ohlc: dict[str, Deque[dict[str, Any]]] = defaultdict(
@@ -2646,6 +2648,27 @@ class MarketDataManager:
         self._enqueue_tick_threadsafe(tick)
 
     def process_ticks(self, ticks: list[dict[str, Any]]) -> None:
+        if getattr(self, "bus", None) is not None:
+            try:
+                import asyncio
+                import time
+                now = time.time()
+                for t in ticks:
+                    token = t.get("instrument_token")
+                    price = float(t.get("last_price", t.get("ltp", 0.0)))
+                    msg = Message(
+                        type=MessageType.TICK,
+                        timestamp=now,
+                        data={
+                            "token": token,
+                            "ltp": price,
+                            "ts": t.get("exchange_timestamp", now)
+                        },
+                        source="market_data_manager"
+                    )
+                    asyncio.create_task(self.bus.publish(msg))
+            except Exception as e:
+                pass
         """Batch-enqueue WS ticks from KiteTicker callback.
 
         Called by WebSocketManager._on_ticks() for every tick batch —

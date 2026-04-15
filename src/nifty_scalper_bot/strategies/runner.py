@@ -3265,6 +3265,9 @@ class StrategyRunner:
         except Exception as e:
             self._logger.error("Failure in StrategyRunner._on_tick_from_bus: %s", e)
 
+    async def on_data(self, message: "Message") -> None:
+        self.on_tick_event(message.data)
+
     def on_tick_event(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
         try:
