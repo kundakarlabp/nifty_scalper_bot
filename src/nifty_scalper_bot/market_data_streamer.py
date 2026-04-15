@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import time
+import asyncio
 from typing import Any
 
 from nifty_scalper_bot.data.market_state import MarketState
+from nifty_scalper_bot.core.message_bus import Message, MessageType
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -22,6 +24,7 @@ class MarketDataStreamer:
         self._market_state = market_state
         self._subscribed_tokens: set[int] = set()
         self._last_heartbeat: float | None = None
+        self.bus = None
 
     @property
     def last_heartbeat(self) -> float | None:
@@ -41,6 +44,19 @@ class MarketDataStreamer:
                 if token == 256265:
                     self._market_state.set_spot_ltp(price, source="ws")
                 self._market_state.update_tick(token, price, source="ws")
+
+                if self.bus is not None:
+                    msg = Message(
+                        type=MessageType.TICK,
+                        timestamp=now,
+                        data={
+                            "token": token,
+                            "ltp": price,
+                            "ts": tick.get("exchange_timestamp", now)
+                        },
+                        source="market_data_streamer"
+                    )
+                    asyncio.create_task(self.bus.publish(msg))
             except Exception as e:
                 LOGGER.exception("Failure in MarketDataStreamer.on_ticks: %s", e)
 

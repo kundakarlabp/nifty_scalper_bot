@@ -5783,6 +5783,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                 
 
                 # 🚨 CRITICAL: Start MessageBus AFTER subscribers are registered 🚨
+                if ctx.message_bus and ctx.data_hub and ctx.strategy_runner:
+                    ctx.data_hub.bus = ctx.message_bus
+                    if getattr(ctx, 'market_data_streamer', None):
+                        ctx.market_data_streamer.bus = ctx.message_bus
+                    if getattr(ctx, 'market_data_manager', None):
+                        ctx.market_data_manager.bus = ctx.message_bus
+                    ctx.message_bus.subscribe(MessageType.TICK, ctx.data_hub.on_tick)
+                    ctx.message_bus.subscribe(MessageType.DATA_READY, ctx.strategy_runner.on_data)
+
                 if ctx.message_bus:
                     LOGGER.info("🚀 Starting MessageBus Dispatchers...")
                     ctx.message_bus.start()
@@ -5790,6 +5799,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "✅ MessageBus running with %d active dispatchers",
                         len(ctx.message_bus._tasks),
                     )
+
+                if ctx.market_data_manager is not None and hasattr(ctx.market_data_manager, "start"):
+                    try:
+                        ctx.market_data_manager.start()
+                        LOGGER.info("✅ MarketDataManager started — tick consumer active")
+                    except Exception as _mdm_start_exc:
+                        LOGGER.error("MarketDataManager.start() failed: %s", _mdm_start_exc)
+
+
 
                 if ctx.order_manager:
                     ctx.order_manager.start_monitoring()
@@ -5838,7 +5856,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             raise
                     if not _data_ready(ctx.market_data_manager):
                         LOGGER.debug("startup_tick_gate: waiting_for_live_ticks (expected at boot)")
-                    ctx.strategy_runner.start()
+
 
                 if ctx.telegram_bot:
                     LOGGER.info("🚀 Starting Telegram Bot (Polling Mode)...")
