@@ -641,17 +641,19 @@ class WebSocketManager:
                 mdm = getattr(self, "_market_data_manager", None)
                 validate_mapping = getattr(mdm, "validate_token_symbol_mappings", None)
                 if callable(validate_mapping):
-                    validate_mapping()
+                    try:
+                        validate_mapping()
+                    except RuntimeError as map_err:
+                        self._logger.warning(
+                            "Token/symbol mapping mismatch on connect (non-fatal): %s",
+                            map_err,
+                        )
                 ws.subscribe(token_list)
                 ws.set_mode(ws.MODE_FULL, token_list)
                 self._logger.info(
                     "WebSocket subscribed to %d tokens", len(self._tokens)
                 )
-                symbol_map = getattr(
-                    getattr(self, "_market_data_manager", None),
-                    "_symbol_by_token",
-                    {},
-                )
+                symbol_map = getattr(mdm, "_symbol_by_token", {})
                 self._logger.info(
                     "WebSocket subscribed tokens=%d symbols=%d",
                     len(self._tokens),

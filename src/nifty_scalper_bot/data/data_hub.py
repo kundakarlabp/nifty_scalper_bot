@@ -80,17 +80,32 @@ class TickBus:
     def publish(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
         self._event_bus.publish("tick", tick)
-        if getattr(self, "bus", None) is not None:
+        bus = getattr(self, "bus", None)
+        if bus is not None:
             try:
-                import asyncio
-                from nifty_scalper_bot.core.message_bus import Message, MessageType
                 msg = Message(
                     type=MessageType.DATA_READY,
                     timestamp=datetime.now(timezone.utc),
                     data=tick,
-                    source="data_hub"
+                    source="data_hub",
                 )
-                asyncio.create_task(self.bus.publish(msg))
+                loop: asyncio.AbstractEventLoop | None = None
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+                if loop is not None and loop.is_running():
+                    asyncio.ensure_future(bus.publish(msg))
+                else:
+                    # Called from sync (WS) thread — schedule safely
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.call_soon_threadsafe(
+                                asyncio.ensure_future, bus.publish(msg)
+                            )
+                    except RuntimeError:
+                        pass  # No loop available — skip bus publish
             except Exception as e:
                 LOGGER.error("Failed to publish DATA_READY: %s", e)
 
@@ -282,13 +297,17 @@ class DataHub:
     def ingest_tick_sync(self, tick: dict) -> None:
         """Called from KiteConnect OS thread; schedules tick ingest safely."""
         loop = self._main_loop
-        
+
         # 1. Fallback if the main loop was not explicitly injected
         if loop is None or not loop.is_running():
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                return  # Drop tick gracefully if no loop exists yet
+                LOGGER.debug(
+                    "ingest_tick_sync: no event loop — tick dropped for %s",
+                    tick.get("symbol", tick.get("instrument_token", "?")),
+                )
+                return
 
         # 2. Correct thread-safe async scheduling across OS threads
         if loop and loop.is_running():
@@ -449,9 +468,8 @@ class DataHub:
                     if ws_connected and not poll_enabled:
                         return None
                 return self._mdm.pull_quote(symbol)
-            except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
-                raise
+            except Exception:
+                LOGGER.error("pull_quote failed for %s", symbol, exc_info=True)
 
         return None
 
@@ -565,42 +583,45 @@ class DataHub:
         }
 
     async def warmup_indicators(self, symbol: str, interval: str = "minute", bars: int = 100) -> None:
-        self._logger.info(f"Starting true history warmup for {symbol}")
-        
+        LOGGER.info("Starting true history warmup for %s", symbol)
+
+        source = getattr(self, "_source", None)
+        if source is None or not hasattr(source, "get_historical_data"):
+            LOGGER.warning("warmup_indicators: no _source available for %s", symbol)
+            return
+
         try:
-            # FIX: Ensure this is explicitly awaited. If this is a blocking HTTP request,
-            # it must be wrapped in asyncio.to_thread() or use an async client (aiohttp).
-            # If your client is synchronous (e.g., standard requests):
             candles = await asyncio.to_thread(
-                self._source.get_historical_data, 
-                symbol, 
-                interval, 
-                bars + 20
+                source.get_historical_data,
+                symbol,
+                interval,
+                bars + 20,
             )
-            
+
             if not candles:
-                self._logger.warning(f"No history returned for {symbol}. Warmup aborted.")
+                LOGGER.warning("No history returned for %s. Warmup aborted.", symbol)
                 return
 
-            # FIX: Prime the Live Quote Cache so the bot doesn't think data is "Stale"
+            # Prime the Live Quote Cache so the bot doesn't think data is "Stale"
             last_candle = candles[-1]
             last_close = float(last_candle.get("close", 0.0))
-            
-            # Prime the quote cache
+
             self.store_quote(
                 symbol=symbol,
                 quote_data={"ltp": last_close, "timestamp": time.time(), "source": "warmup"},
-                seed=True
+                seed=True,
             )
 
-            # Feed to CandleEngine
-            for candle in candles:
-                self._candle_engine.update(symbol, candle)
-                
-            self._logger.info(f"✅ True warmup complete for {symbol}. {len(candles)} bars loaded.")
-            
+            # Feed to CandleEngine if available
+            candle_engine = getattr(self, "_candle_engine", None)
+            if candle_engine is not None:
+                for candle in candles:
+                    candle_engine.update(symbol, candle)
+
+            LOGGER.info("True warmup complete for %s. %d bars loaded.", symbol, len(candles))
+
         except Exception as e:
-            self._logger.error(f"Warmup critically failed for {symbol}: {e}")
+            LOGGER.error("Warmup critically failed for %s: %s", symbol, e)
 
     # ----------------------------------------------------------------
     # Subscription Management
@@ -698,9 +719,8 @@ class DataHub:
 
             self._last_greeks_update[symbol] = now
 
-        except Exception as e:
-            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
-            raise
+        except Exception:
+            LOGGER.error("Greeks/IV computation failed for %s", symbol, exc_info=True)
 
     def _get_underlying_price(self, base: str) -> float | None:
         candidates = [canonical(base)]
@@ -736,9 +756,8 @@ class DataHub:
                     )
                     base = "NIFTY" if "NIFTY" in clean_sym else "BANKNIFTY"
                     return base, ts, strike, is_call
-            except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
-                raise
+            except Exception:
+                LOGGER.error("Option symbol parse failed for %s", symbol, exc_info=True)
         return None
 
     def _clock(self) -> float:
@@ -770,17 +789,8 @@ class DataHub:
     def get_option_chain(
         self, symbol: str, option_type: str | None = None
     ) -> list[dict]:
-        """Retrieves option chain with Traceability Logs."""
-
-        # LOG 1: Entry
-        if hasattr(self, "_logger"):
-            self._logger.info(f"🔍 DataHub: Fetching chain for {symbol}...")
-
-        mdm = (
-            getattr(self, "_market_data", None)
-            or getattr(self, "_mdm", None)
-            or getattr(self, "_market_data_manager", None)
-        )
+        """Retrieves option chain via MDM or provider fallback."""
+        mdm = self._mdm
 
         result = []
         source = "None"
@@ -794,15 +804,11 @@ class DataHub:
                 result = provider.get_option_chain(symbol)
                 source = "Provider"
 
-        # LOG 2: Result
         count = len(result) if result else 0
-        if hasattr(self, "_logger"):
-            if count > 0:
-                self._logger.info(f"✅ DataHub: Found {count} strikes via {source}.")
-            else:
-                self._logger.warning(
-                    f"⚠️ DataHub: Chain is EMPTY! Source: {source}. (Symbol: {symbol})"
-                )
+        if count > 0:
+            LOGGER.debug("DataHub: option chain for %s — %d strikes via %s", symbol, count, source)
+        else:
+            LOGGER.warning("DataHub: option chain EMPTY for %s (source=%s)", symbol, source)
 
         return result
 

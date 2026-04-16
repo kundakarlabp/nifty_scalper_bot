@@ -37,9 +37,13 @@ def normalize_symbol(symbol: str) -> str:
     raw = str(symbol or "").strip().upper()
     if not raw:
         return ""
-    if ":" not in raw:
+    if ":" in raw:
+        return raw
+    # Infer exchange the same way canonical() does: derivatives get NFO,
+    # everything else (indices, equities) gets NSE.
+    if raw.endswith(("CE", "PE", "FUT")):
         return f"NFO:{raw}"
-    return raw
+    return f"NSE:{raw}"
 
 
 def unique_normalized_symbols(symbols: Iterable[str]) -> list[str]:
