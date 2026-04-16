@@ -23,14 +23,14 @@ from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
 #from nifty_scalper_bot.utils.options_math import (
-    black_scholes_greeks,
-    implied_volatility,
-)
+#    black_scholes_greeks,
+#    implied_volatility,
+#)
 #from nifty_scalper_bot.utils.symbols import (
-    canonical,
-    enforce_canonical,
-    normalize_symbol,
-)
+#   canonical,
+#    enforce_canonical,
+#    normalize_symbol,
+#)
 
 LOGGER = get_logger(__name__)
 
@@ -40,51 +40,25 @@ OrderListener = Callable[[dict[str, Any]], None]
 TickListener = Callable[[dict[str, Any]], None]
 
 
-class EventBus:
-    """Generic in-process event bus.
-
-    Args: none; Returns: none; Raises: none.
-    """
-
-    def __init__(self) -> None:
-        """Args: none; Returns: none; Raises: none."""
-        self._handlers: dict[str, list[Callable[[dict[str, Any]], None]]] = defaultdict(
-            list
-        )
-        self._lock = RLock()
-
-    def subscribe(
-        self, event_name: str, handler: Callable[[dict[str, Any]], None]
-    ) -> None:
-        """Args: event_name, handler; Returns: none; Raises: none."""
-        with self._lock:
-            self._handlers[event_name].append(handler)
-
-    def publish(self, event_name: str, payload: dict[str, Any]) -> None:
-        """Args: event_name, payload; Returns: none; Raises: none."""
-        with self._lock:
-            handlers = list(self._handlers.get(event_name, ()))
-        for handler in handlers:
-            try:
-                handler(payload)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.error("Handler failed: %s", exc, exc_info=exc)
-
-
 class TickBus:
     """Backward-compatible tick bus wrapper around :class:`EventBus`."""
 
     def __init__(self) -> None:
         """Args: none; Returns: none; Raises: none."""
-        self._event_bus = EventBus()
+        self._handlers: list[TickListener] = []
 
     def subscribe(self, handler: TickListener) -> None:
         """Args: handler; Returns: none; Raises: none."""
-        self._event_bus.subscribe("tick", handler)
-
+        self._handlers.append(handler)
+        
     def publish(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
-        self._event_bus.publish("tick", tick)
+        for handler in list(self._handlers):
+            try:
+                handler(tick)
+            except Exception as exc:
+                LOGGER.error("Tick handler failed: %s", exc, exc_info=exc)
+    
         bus = getattr(self, "bus", None)
         if bus is not None:
             try:
@@ -113,18 +87,6 @@ class TickBus:
                         pass  # No loop available — skip bus publish
             except Exception as e:
                 LOGGER.error("Failed to publish DATA_READY: %s", e)
-
-    def subscribe_event(
-        self,
-        event_name: str,
-        handler: Callable[[dict[str, Any]], None],
-    ) -> None:
-        """Args: event_name, handler; Returns: none; Raises: none."""
-        self._event_bus.subscribe(event_name, handler)
-
-    def publish_event(self, event_name: str, payload: dict[str, Any]) -> None:
-        """Args: event_name, payload; Returns: none; Raises: none."""
-        self._event_bus.publish(event_name, payload)
 
 
 class Freshness(TypedDict, total=False):
