@@ -610,7 +610,10 @@ class WebSocketManager:
         if hasattr(ticker, "on_pong"):
             ticker.on_pong = self._on_pong
         if self._on_tick_callback is None:
-            self._logger.warning("Condition met: websocket_tick_callback_unbound")
+            self._logger.debug(
+                "Condition met: websocket_tick_callback_unbound "
+                "(expected — process_ticks is the single WS ingress)"
+            )
         else:
             self._logger.debug(
                 "Condition met: websocket_handlers_bound callback=%s",
@@ -710,7 +713,9 @@ class WebSocketManager:
 
         callback = self._on_tick_callback
         if not callable(callback):
-            self._logger.error("Tick callback not set — dropping ticks")
+            # process_ticks() already enqueued all ticks into MDM's queue —
+            # the per-tick callback slot is intentionally unset to prevent
+            # double-enqueue (see MarketDataManager.__init__ comment).
             return
 
         # Log first tick received — confirms pipeline is alive
