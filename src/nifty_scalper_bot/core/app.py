@@ -4802,7 +4802,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 instrument_resolver=ctx.instrument_manager,
                 resolver=ctx.instrument_manager,
                 instrument_universe=ctx.instrument_universe,
-                settings = get_settings()
+                settings = get_settings(),
                 cache_settings = getattr(settings, "cache", None)
 
                 instrument_db_path = None
