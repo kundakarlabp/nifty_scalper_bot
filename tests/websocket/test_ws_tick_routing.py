@@ -49,6 +49,7 @@ async def test_manager_routes_ticks_to_callback(
 
     monkeypatch.setattr(ws_module, 'KiteTicker', FakeKiteTicker)
     manager = ws_module.WebSocketManager('key', 'token', on_tick=_callback)
+    monkeypatch.setattr(manager, '_is_within_trading_window', lambda: True)
     await manager.connect()
 
     assert manager.ticker.on_ticks is not None

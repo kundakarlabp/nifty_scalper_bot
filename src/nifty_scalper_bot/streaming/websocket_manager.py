@@ -610,7 +610,10 @@ class WebSocketManager:
         if hasattr(ticker, "on_pong"):
             ticker.on_pong = self._on_pong
         if self._on_tick_callback is None:
-            self._logger.warning("Condition met: websocket_tick_callback_unbound")
+            self._logger.debug(
+                "Condition met: websocket_tick_callback_unbound "
+                "(expected — process_ticks is the single WS ingress)"
+            )
         else:
             self._logger.debug(
                 "Condition met: websocket_handlers_bound callback=%s",
@@ -638,17 +641,19 @@ class WebSocketManager:
                 mdm = getattr(self, "_market_data_manager", None)
                 validate_mapping = getattr(mdm, "validate_token_symbol_mappings", None)
                 if callable(validate_mapping):
-                    validate_mapping()
+                    try:
+                        validate_mapping()
+                    except RuntimeError as map_err:
+                        self._logger.warning(
+                            "Token/symbol mapping mismatch on connect (non-fatal): %s",
+                            map_err,
+                        )
                 ws.subscribe(token_list)
                 ws.set_mode(ws.MODE_FULL, token_list)
                 self._logger.info(
                     "WebSocket subscribed to %d tokens", len(self._tokens)
                 )
-                symbol_map = getattr(
-                    getattr(self, "_market_data_manager", None),
-                    "_symbol_by_token",
-                    {},
-                )
+                symbol_map = getattr(mdm, "_symbol_by_token", {})
                 self._logger.info(
                     "WebSocket subscribed tokens=%d symbols=%d",
                     len(self._tokens),
@@ -710,7 +715,9 @@ class WebSocketManager:
 
         callback = self._on_tick_callback
         if not callable(callback):
-            self._logger.error("Tick callback not set — dropping ticks")
+            # process_ticks() already enqueued all ticks into MDM's queue —
+            # the per-tick callback slot is intentionally unset to prevent
+            # double-enqueue (see MarketDataManager.__init__ comment).
             return
 
         # Log first tick received — confirms pipeline is alive

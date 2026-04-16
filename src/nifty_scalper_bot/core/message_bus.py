@@ -19,7 +19,8 @@ LOGGER = get_logger(__name__)
 class MessageType(Enum):
     """Message types flowing through the bus."""
 
-    TICK = "tick"  # Deprecated: disallowed for publish/subscribe
+    TICK = "tick"
+    DATA_READY = "data_ready"
     SIGNAL = "signal"  # Strategy signal/request
     ORDER_REQUEST = "order_request"  # Order to execute
     ORDER_UPDATE = "order_update"  # Execution confirmation (Fill/Cancel/Reject)
@@ -70,39 +71,19 @@ class MessageBus:
 
     async def publish(self, message: Message) -> None:
         """Publish a message to subscribed handlers."""
-        if message.type.value == 'tick':
-            raise RuntimeError('MessageBus does not carry tick events')
         if not self._running:
-            try:
-                self.queues[message.type].put_nowait(message)
-            except asyncio.QueueFull:
-                log_throttled(
-                    LOGGER,
-                    f"message_bus_prestart_full_{message.type.value}",
-                    f"Queue full for pre-start {message.type.value}",
-                    level=logging.ERROR,
-                    interval_sec=30.0,
-                    extra={'event': 'pre_start_queue_full', 'type': message.type.value},
-                )
-            return
+            raise RuntimeError(
+                f"Publishing {message.type} before MessageBus.start()"
+            )
         try:
             self.queues[message.type].put_nowait(message)
         except asyncio.QueueFull:
             self._dropped_counts[message.type] += 1
-            log_throttled(
-                LOGGER,
-                f"message_bus_queue_full_{message.type.value}",
-                f"Queue full for {message.type.value} - dropping message.",
-                level=logging.ERROR,
-                interval_sec=15.0,
-                extra={'event': 'message_drop', 'type': message.type.value, 'dropped': self._dropped_counts[message.type]},
-            )
+            raise RuntimeError(f"Queue full for {message.type}")
     def subscribe(
         self, message_type: MessageType, handler: Callable[[Message], Awaitable[None]]
     ) -> None:
         """Subscribe an async handler function to a message type."""
-        if message_type.value == 'tick':
-            raise RuntimeError('MessageBus does not carry tick events')
         if not asyncio.iscoroutinefunction(handler):
             raise TypeError(
                 f"Handler for {message_type.value} must be an async function."
@@ -129,14 +110,18 @@ class MessageBus:
             try:
                 # Wait for message
                 message = await queue.get()
-                queue.task_done()
 
                 # Dispatch without head-of-line blocking.
                 for handler in handlers:
                     try:
                         result = handler(message)
                         if asyncio.iscoroutine(result):
-                            safe_task(result)
+                            task = safe_task(result)
+                            task.add_done_callback(
+                                lambda t: LOGGER.error("Handler failed", exc_info=t.exception())
+                                if t.exception()
+                                else None
+                            )
                     except Exception as exc:
                         LOGGER.error(
                             "Failure in MessageBus handler dispatch: %s",
@@ -144,6 +129,8 @@ class MessageBus:
                             extra={"event": "message_bus_handler_dispatch_error"},
                             exc_info=exc,
                         )
+
+                queue.task_done()
 
             except asyncio.CancelledError:
                 LOGGER.debug("%s dispatch loop cancelled.", message_type.value)
@@ -158,6 +145,8 @@ class MessageBus:
 
     def start(self) -> None:
         """Start all dispatch loops."""
+        if not any(self.subscribers.values()):
+            raise RuntimeError("MessageBus started without subscribers")
         if self._running:
             return
         self._running = True
