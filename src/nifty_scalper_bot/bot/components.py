@@ -161,8 +161,7 @@ class MarketDataManager:
 
     async def on_data(self, message):
         token = message.data.get("token")
-
-        if getattr(self, "datahub", None) is None:
+        if token is None or not self.datahub:
             return
 
         if not self.datahub.is_ready(token):
@@ -176,12 +175,14 @@ class MarketDataManager:
 
     def _process_token(self, token, candles, indicators):
         try:
+            # We map token back to symbol if needed or just pull the latest close price
             if candles.empty:
                 return
             latest = candles.iloc[-1]
             price = float(latest['close'])
-            symbol = str(token)
+            symbol = str(token)  # Simplified if components.py doesn't have symbol map
 
+            # The components StrategyRunner uses self._on_tick
             self._on_tick(symbol, price)
         except Exception as e:
             import logging
@@ -491,6 +492,9 @@ class StrategyRunner:
         self._positions = position_manager
         self._config = config or StrategyRunnerConfig()
         self.datahub = datahub
+        self.datahub = datahub
+        self.datahub = datahub
+        self.datahub = datahub
         self._symbols: set[str] = set()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -522,8 +526,7 @@ class StrategyRunner:
 
     async def on_data(self, message):
         token = message.data.get("token")
-
-        if getattr(self, "datahub", None) is None:
+        if token is None or not self.datahub:
             return
 
         if not self.datahub.is_ready(token):
@@ -537,12 +540,14 @@ class StrategyRunner:
 
     def _process_token(self, token, candles, indicators):
         try:
+            # We map token back to symbol if needed or just pull the latest close price
             if candles.empty:
                 return
             latest = candles.iloc[-1]
             price = float(latest['close'])
-            symbol = str(token)
+            symbol = str(token)  # Simplified if components.py doesn't have symbol map
 
+            # The components StrategyRunner uses self._on_tick
             self._on_tick(symbol, price)
         except Exception as e:
             import logging
@@ -556,10 +561,10 @@ class StrategyRunner:
         self._market_data.start()
         self._market_close_exit_triggered = False
         self._emergency_exit_requested = False
-        # self._thread = threading.Thread(
-        #     target=self._run_loop, daemon=True, name="StrategyRunner"
-        # )
-        # self._thread.start()
+        self._thread = threading.Thread(
+            target=self._run_loop, daemon=True, name="StrategyRunner"
+        )
+        # # self._thread.start()
         LOGGER.info("Strategy runner started")
 
     def stop(self) -> None:

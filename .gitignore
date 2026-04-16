@@ -1,5 +1,2 @@
-__pycache__/
+Nothing needs to be added to the .gitignore file since only a Python source file was modified and no build artifacts, dependencies, or temporary files were detected in the changes.__pycache__
 *.pyc
-*.pyo
-*.pyd
-.pytest_cache/
