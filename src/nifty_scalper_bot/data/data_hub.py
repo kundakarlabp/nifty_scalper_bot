@@ -37,53 +37,6 @@ TickListener = Callable[[dict[str, Any]], None]
 ENABLE_PERSISTENCE = False
 ENABLE_ASYNC_BUS = False
 
-class TickBus:
-    """Backward-compatible tick bus wrapper around :class:`EventBus`."""
-
-    def __init__(self) -> None:
-        """Args: none; Returns: none; Raises: none."""
-        self._handlers: list[TickListener] = []
-
-    def subscribe(self, handler: TickListener) -> None:
-        """Args: handler; Returns: none; Raises: none."""
-        self._handlers.append(handler)
-        
-    def publish(self, tick: dict[str, Any]) -> None:
-        """Args: tick; Returns: none; Raises: none."""
-        for handler in list(self._handlers):
-            try:
-                handler(tick)
-            except Exception as exc:
-                LOGGER.error("Tick handler failed: %s", exc, exc_info=exc)
-    
-        bus = getattr(self, "bus", None)
-        if bus is not None:
-            try:
-                msg = Message(
-                    type=MessageType.DATA_READY,
-                    timestamp=datetime.now(timezone.utc),
-                    data=tick,
-                    source="data_hub",
-                )
-                loop: asyncio.AbstractEventLoop | None = None
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    pass
-                if loop is not None and loop.is_running():
-                    asyncio.ensure_future(bus.publish(msg))
-                else:
-                    # Called from sync (WS) thread — schedule safely
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            loop.call_soon_threadsafe(
-                                asyncio.ensure_future, bus.publish(msg)
-                            )
-                    except RuntimeError:
-                        pass  # No loop available — skip bus publish
-            except Exception as e:
-                LOGGER.error("Failed to publish DATA_READY: %s", e)
 
 
 class Freshness(TypedDict, total=False):
@@ -186,13 +139,12 @@ class DataHub:
         self._options_only = options_only
         self._store = store
         self._lock = RLock()
-        self.tick_bus = TickBus()
-        attach_tick_bus = getattr(self._mdm, "attach_tick_bus", None)
-        if callable(attach_tick_bus):
+        attach_cb = getattr(self._mdm, "attach_tick_handler", None)
+        if callable(attach_cb):
             try:
-                attach_tick_bus(self.tick_bus)
+                attach_cb(self.ingest_tick_sync)
             except Exception as exc:  # noqa: BLE001
-                LOGGER.error("Failure in DataHub.__init__: %s", exc, exc_info=exc)
+                LOGGER.error("Failure attaching tick handler: %s", exc, exc_info=exc)
 
         self._ticks: dict[int, dict] = {}
         self._subscribers: list = []
