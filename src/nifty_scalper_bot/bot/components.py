@@ -158,6 +158,36 @@ class MarketDataManager:
         self._ws.unsubscribe([symbol])
         self._latest.pop(symbol, None)
 
+
+    async def on_data(self, message):
+        token = message.data.get("token")
+        if token is None or not self.datahub:
+            return
+
+        if not self.datahub.is_ready(token):
+            return
+
+        candles, indicators = self.datahub.get_data(token)
+        if candles is None:
+            return
+
+        self._process_token(token, candles, indicators)
+
+    def _process_token(self, token, candles, indicators):
+        try:
+            # We map token back to symbol if needed or just pull the latest close price
+            if candles.empty:
+                return
+            latest = candles.iloc[-1]
+            price = float(latest['close'])
+            symbol = str(token)  # Simplified if components.py doesn't have symbol map
+
+            # The components StrategyRunner uses self._on_tick
+            self._on_tick(symbol, price)
+        except Exception as e:
+            import logging
+            logging.error(f"Error in components._process_token: {e}")
+
     def start(self) -> None:
         if not self._ws.connected:
             self._ws.connect()
@@ -452,6 +482,7 @@ class StrategyRunner:
         order_manager: OrderManager,
         position_manager: PositionManager,
         config: StrategyRunnerConfig | None = None,
+        datahub=None,
     ) -> None:
         self._market_data = market_data_manager
         self._indicator_engine = indicator_engine
@@ -460,6 +491,10 @@ class StrategyRunner:
         self._orders = order_manager
         self._positions = position_manager
         self._config = config or StrategyRunnerConfig()
+        self.datahub = datahub
+        self.datahub = datahub
+        self.datahub = datahub
+        self.datahub = datahub
         self._symbols: set[str] = set()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -488,6 +523,36 @@ class StrategyRunner:
         self._symbols.remove(symbol)
         self._market_data.unsubscribe(symbol)
 
+
+    async def on_data(self, message):
+        token = message.data.get("token")
+        if token is None or not self.datahub:
+            return
+
+        if not self.datahub.is_ready(token):
+            return
+
+        candles, indicators = self.datahub.get_data(token)
+        if candles is None:
+            return
+
+        self._process_token(token, candles, indicators)
+
+    def _process_token(self, token, candles, indicators):
+        try:
+            # We map token back to symbol if needed or just pull the latest close price
+            if candles.empty:
+                return
+            latest = candles.iloc[-1]
+            price = float(latest['close'])
+            symbol = str(token)  # Simplified if components.py doesn't have symbol map
+
+            # The components StrategyRunner uses self._on_tick
+            self._on_tick(symbol, price)
+        except Exception as e:
+            import logging
+            logging.error(f"Error in components._process_token: {e}")
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -499,7 +564,7 @@ class StrategyRunner:
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True, name="StrategyRunner"
         )
-        self._thread.start()
+        # # self._thread.start()
         LOGGER.info("Strategy runner started")
 
     def stop(self) -> None:

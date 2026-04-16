@@ -464,6 +464,7 @@ class StrategyRunner:
         position_manager: PositionManager,
         message_bus: MessageBus | None = None,
         config: StrategyRunnerConfig | None = None,
+        datahub=None,
         data_hub: "DataHub | None" = None,
         strike_selector: StrikeSelector | None = None,
         bracket_manager: Any | None = None,
@@ -488,6 +489,7 @@ class StrategyRunner:
         except Exception as e:
             self._logger.error(f"❌ Failed to create 'data/' directory: {e}")
         self._data_hub = data_hub
+        self.datahub = datahub or data_hub
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
         self._symbol_source: MarketDataManager | None = None
@@ -738,6 +740,46 @@ class StrategyRunner:
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
+
+
+    async def on_data(self, message):
+        token = message.data.get("token")
+        if not token:
+            return
+
+        if not self._data_hub or not self._data_hub.is_ready(token):
+            return
+
+        candles, indicators = self._data_hub.get_data(token)
+        if candles is None:
+            return
+
+        await self._process_token(token, candles, indicators)
+
+    async def _process_token(self, token, candles, indicators):
+        symbol = None
+        if self._market_data and hasattr(self._market_data, "_symbol_by_token"):
+            symbol = self._market_data._symbol_by_token.get(token)
+
+        if not symbol:
+            return
+
+        try:
+            if candles.empty:
+                return
+            latest_candle = candles.iloc[-1]
+            price = float(latest_candle['close'])
+
+            signal = self._strategy_manager.generate_signal(symbol, price)
+            if signal:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                self._handle_signal(signal, price, now)
+
+            print(f"STRATEGY TRIGGERED: {token}")
+        except Exception as e:
+            self._logger.error(f"Error in _process_token for {symbol}: {e}")
+
     def start(self) -> None:
         """Start processing market data events."""
         # 🚨 ALL GATES REMOVED: Runner starts unconditionally
@@ -788,9 +830,9 @@ class StrategyRunner:
         except RuntimeError:
             pass
 
-        self._market_data.start()
-        worker = threading.Thread(target=self._strategy_worker, daemon=True)
-        worker.start()
+        # self._market_data.start()
+        # worker = threading.Thread(target=self._strategy_worker, daemon=True)
+        # worker.start()
 
         if self._data_hub is not None:
             reset = getattr(self._data_hub, "reset_warmup", None)
