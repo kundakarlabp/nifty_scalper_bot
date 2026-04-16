@@ -4805,8 +4805,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 settings = get_settings(),
                 cache_settings = getattr(settings, "cache", None),
 
-                instrument_db_path = None
-                instrument_csv_path = None
+                instrument_db_path = None,
+                instrument_csv_path = None,
 
                 if cache_settings:
                     db_path = getattr(cache_settings, "db_path", None)
