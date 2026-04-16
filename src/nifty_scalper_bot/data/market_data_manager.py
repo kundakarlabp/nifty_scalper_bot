@@ -84,6 +84,7 @@ class MarketDataManager:
         """
         MarketDataManager constructor.
         """
+        self._external_tick_handler: Callable[[dict[str, Any]], None] | None = None
         self._broker = broker
         self._rest_client = broker
         self._websocket = websocket
