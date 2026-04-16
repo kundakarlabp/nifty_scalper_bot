@@ -1,13 +1,11 @@
 import asyncio
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 import time
-import asyncio
 from typing import Any
 
 from nifty_scalper_bot.core.message_bus import Message, MessageType
 from nifty_scalper_bot.data.market_state import MarketState
-from nifty_scalper_bot.core.message_bus import Message, MessageType
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -24,7 +22,6 @@ class MarketDataStreamer:
         self.bus = bus
         self._subscribed_tokens: set[int] = set()
         self._last_heartbeat: float | None = None
-        self.bus = None
 
     @property
     def last_heartbeat(self) -> float | None:
@@ -35,10 +32,12 @@ class MarketDataStreamer:
     def on_ticks(self, ws: Any, ticks: Sequence[dict[str, Any]]) -> None:
         """Update market state from websocket ticks. Args: ws, ticks. Returns: none. Raises: none."""
 
+        now = datetime.now(timezone.utc)
+        now_epoch = time.time()
         for t in ticks:
             try:
-                token = int(tick.get("instrument_token"))
-                price = float(tick.get("last_price") or tick.get("ltp"))
+                token = int(t.get("instrument_token"))
+                price = float(t.get("last_price") or t.get("ltp"))
                 if token == 256265:
                     self._market_state.set_spot_ltp(price, source="ws")
                 self._market_state.update_tick(token, price, source="ws")
@@ -50,11 +49,15 @@ class MarketDataStreamer:
                         data={
                             "token": token,
                             "ltp": price,
-                            "ts": tick.get("exchange_timestamp", now)
+                            "ts": t.get("exchange_timestamp", now_epoch),
                         },
-                        source="market_data_streamer"
+                        source="market_data_streamer",
                     )
-                    asyncio.create_task(self.bus.publish(msg))
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.call_soon_threadsafe(
+                            asyncio.ensure_future, self.bus.publish(msg)
+                        )
             except Exception as e:
                 LOGGER.exception("Failure in MarketDataStreamer.on_ticks: %s", e)
 

@@ -2648,27 +2648,6 @@ class MarketDataManager:
         self._enqueue_tick_threadsafe(tick)
 
     def process_ticks(self, ticks: list[dict[str, Any]]) -> None:
-        if getattr(self, "bus", None) is not None:
-            try:
-                import asyncio
-                import time
-                now = time.time()
-                for t in ticks:
-                    token = t.get("instrument_token")
-                    price = float(t.get("last_price", t.get("ltp", 0.0)))
-                    msg = Message(
-                        type=MessageType.TICK,
-                        timestamp=now,
-                        data={
-                            "token": token,
-                            "ltp": price,
-                            "ts": t.get("exchange_timestamp", now)
-                        },
-                        source="market_data_manager"
-                    )
-                    asyncio.create_task(self.bus.publish(msg))
-            except Exception as e:
-                pass
         """Batch-enqueue WS ticks from KiteTicker callback.
 
         Called by WebSocketManager._on_ticks() for every tick batch —
@@ -2683,6 +2662,31 @@ class MarketDataManager:
         """
         if not ticks:
             return
+
+        # Publish to MessageBus (thread-safe: schedule onto the async loop)
+        bus = getattr(self, "bus", None)
+        if bus is not None:
+            loop = self._main_loop
+            if loop is not None and loop.is_running():
+                try:
+                    now = time.time()
+                    for t in ticks:
+                        token = t.get("instrument_token")
+                        price = float(t.get("last_price", t.get("ltp", 0.0)))
+                        msg = Message(
+                            type=MessageType.TICK,
+                            timestamp=now,
+                            data={
+                                "token": token,
+                                "ltp": price,
+                                "ts": t.get("exchange_timestamp", now),
+                            },
+                            source="market_data_manager",
+                        )
+                        asyncio.run_coroutine_threadsafe(bus.publish(msg), loop)
+                except Exception:  # noqa: BLE001 — WS thread must not raise
+                    pass
+
         try:
             iterator = iter(ticks)
         except TypeError:
@@ -2737,13 +2741,21 @@ class MarketDataManager:
             self._event_loop_lag_seconds = max(0.0, time.monotonic() - float(enqueued_mono))
         if not raw.get("symbol"):
             token = raw.get("instrument_token")
-            if token is None: return
-            
+            if token is None:
+                return
+
             token_int = int(token)
-            symbol_from_map = self._symbol_by_token.get(token_int)
-            
+            with self._lock:
+                symbol_from_map = self._symbol_by_token.get(token_int)
+
             if not symbol_from_map:
-                self._logger.warning("Unmapped token %s", token_int)
+                log_throttled(
+                    self._logger,
+                    f"unmapped_token_{token_int}",
+                    "Unmapped token %s — tick dropped" % token_int,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
                 return
             raw = {**raw, "symbol": symbol_from_map}
 
