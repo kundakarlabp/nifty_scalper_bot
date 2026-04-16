@@ -348,6 +348,11 @@ class DataHub:
         if "timestamp" not in payload:
             payload["timestamp"] = int(time.time() * 1000)
 
+        if "instrument_token" not in payload:
+            mapped = self._token_by_symbol.get(str(symbol).upper().strip())
+            if isinstance(mapped, int):
+                payload["instrument_token"] = mapped
+
         # Route through thread-safe sync ingest
         self.ingest_tick_sync(payload)
 
