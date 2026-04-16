@@ -1,10 +1,5 @@
 """Canonical data hub for cached ticks, orders, and positions."""
 
-ENABLE_PERSISTENCE = False
-ENABLE_ASYNC_BUS = False
-
-
-
 from __future__ import annotations
 
 import asyncio
@@ -39,6 +34,8 @@ Tick = dict[str, Any]
 OrderListener = Callable[[dict[str, Any]], None]
 TickListener = Callable[[dict[str, Any]], None]
 
+ENABLE_PERSISTENCE = False
+ENABLE_ASYNC_BUS = False
 
 class TickBus:
     """Backward-compatible tick bus wrapper around :class:`EventBus`."""
