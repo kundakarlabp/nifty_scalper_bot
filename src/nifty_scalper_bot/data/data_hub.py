@@ -39,15 +39,6 @@ ENABLE_ASYNC_BUS = False
 
 
 
-class Freshness(TypedDict, total=False):
-    """Container describing cached quote freshness metrics."""
-
-    ok: bool
-    mono_age_ms: float | None
-    server_age_ms: float | None
-    effective_ms: float | None
-    threshold_ms: float
-    reason: str | None
 
 
 _ORDER_STATE_MACHINE: dict[str, set[str]] = {
