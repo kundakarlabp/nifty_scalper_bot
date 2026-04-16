@@ -221,8 +221,10 @@ class DataHub:
 
         # 2. Correct thread-safe async scheduling across OS threads
         if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.ingest_tick(tick), loop)
-
+            try:
+                asyncio.run_coroutine_threadsafe(self.ingest_tick(tick), loop)
+            except Exception as exc:
+                LOGGER.error("Failed to schedule ingest_tick: %s", exc, exc_info=exc)
 
     async def on_tick(self, message: "Message") -> None:
         await self.ingest_tick(message.data)
@@ -239,7 +241,12 @@ class DataHub:
         if source == "rest":
             source = "poll"
             
-        normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
+        normalized_symbol = str(symbol).upper().strip()
+        # Ensure instrument_token exists (best-effort backfill)
+        if "instrument_token" not in tick or not isinstance(tick.get("instrument_token"), int):
+            mapped = self._token_by_symbol.get(normalized_symbol)
+            if isinstance(mapped, int):
+                tick["instrument_token"] = mapped
         
         # 2. Timestamp Normalization (Broker Time)
         ts = tick.get("timestamp")
@@ -287,8 +294,14 @@ class DataHub:
             canonical_tick["source"] = source
             canonical_tick["timestamp"] = ts_ms
             canonical_tick["arrival_time"] = now_ms
+            token = canonical_tick.get("instrument_token")
+            if isinstance(token, int):
+                self._ticks[token] = canonical_tick
+                self._symbol_by_token[token] = normalized_symbol
+                self._token_by_symbol[normalized_symbol] = token
             self._quotes[normalized_symbol] = canonical_tick
 
+        
         # 4. Update Metrics (Outside Lock - Math only)
         try:
             self._capture_option_metrics(normalized_symbol, canonical_tick)
@@ -307,7 +320,7 @@ class DataHub:
 
     def is_ws_fresh(self, symbol: str) -> bool:
         """Return True if the WebSocket feed for symbol is currently fresh (local time)."""
-        normalized = enforce_canonical(normalize_symbol(str(symbol)))
+        normalized = str(symbol).upper().strip()
         with self._lock:
             last_ws_arrival = self._last_ws_arrival_time.get(normalized, 0.0)
         return (time.time() * 1000.0 - last_ws_arrival) < self._ws_staleness_threshold_ms
@@ -361,12 +374,14 @@ class DataHub:
             symbol: Trading symbol.
             allow_pull: If True and cache is empty, try fetching from broker via MDM.
         """
-        lookup_symbol = canonical(symbol)
+        lookup_symbol = str(symbol).upper().strip()
         with self._lock:
+            token = self._token_by_symbol.get(lookup_symbol)
+            if isinstance(token, int):
+                tick = self._ticks.get(token)
+                if tick is not None:
+                    return dict(tick)
             tick = self._quotes.get(lookup_symbol)
-
-        if tick is not None:
-            return tick
 
         if allow_pull and self._mdm and hasattr(self._mdm, "pull_quote"):
             try:
@@ -443,6 +458,14 @@ class DataHub:
                 }
 
         quote = self.get_quote(symbol)
+        lookup_symbol = str(symbol).upper().strip()
+        with self._lock:
+            token = self._token_by_symbol.get(lookup_symbol)
+            if isinstance(token, int):
+                token_tick = self._ticks.get(token)
+                if token_tick:
+                    quote = token_tick
+            
         if not quote:
             return False, {
                 "ok": False,
