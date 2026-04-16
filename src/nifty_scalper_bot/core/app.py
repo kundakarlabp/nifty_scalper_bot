@@ -4802,17 +4802,21 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 instrument_resolver=ctx.instrument_manager,
                 resolver=ctx.instrument_manager,
                 instrument_universe=ctx.instrument_universe,
-                instrument_db_path=(
-                    str(cache_settings.db_path) if cache_settings is not None else None
-                ),
-                instrument_csv_path=(
-                    str(cache_settings.csv_path)
-                    if (
-                        cache_settings is not None
-                        and cache_settings.csv_path is not None
-                    )
-                    else None
-                ),
+                settings = get_settings()
+                cache_settings = getattr(settings, "cache", None)
+
+                instrument_db_path = None
+                instrument_csv_path = None
+
+                if cache_settings:
+                    db_path = getattr(cache_settings, "db_path", None)
+                    csv_path = getattr(cache_settings, "csv_path", None)
+
+                    if db_path:
+                        instrument_db_path = str(db_path)
+
+                    if csv_path:
+                        instrument_csv_path = str(csv_path)
                 metrics=None,
                 session_guard=ctx.session_guard,
                 rate_limiter=ctx.rate_limiter,
