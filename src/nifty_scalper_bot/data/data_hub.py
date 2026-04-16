@@ -1,5 +1,10 @@
 """Canonical data hub for cached ticks, orders, and positions."""
 
+ENABLE_PERSISTENCE = False
+ENABLE_ASYNC_BUS = False
+
+
+
 from __future__ import annotations
 
 import asyncio
@@ -14,14 +19,14 @@ from typing import Any, Callable, Iterable, Mapping, TypedDict, cast
 
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.data.source import DataIntegrityError
-from nifty_scalper_bot.storage.hub_store import HubStore
+#from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
-from nifty_scalper_bot.utils.options_math import (
+#from nifty_scalper_bot.utils.options_math import (
     black_scholes_greeks,
     implied_volatility,
 )
-from nifty_scalper_bot.utils.symbols import (
+#from nifty_scalper_bot.utils.symbols import (
     canonical,
     enforce_canonical,
     normalize_symbol,
@@ -229,6 +234,9 @@ class DataHub:
                 attach_tick_bus(self.tick_bus)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error("Failure in DataHub.__init__: %s", exc, exc_info=exc)
+
+        self._ticks: dict[int, dict] = {}
+        self._subscribers: list = []
 
         # State Caches
         self._quotes: dict[str, Tick] = {}
