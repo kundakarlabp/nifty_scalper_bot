@@ -4767,11 +4767,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
                 paper_mode_getters["stream"] = _stream_paper_getter
                 paper_mode_setters["stream"] = _stream_paper_setter
-            settings = get_settings(),
-            cache_settings = getattr(settings, "cache", None),
+            cache_settings = getattr(settings, "cache", None)
 
-            instrument_db_path = None,
-            instrument_csv_path = None,
+            instrument_db_path: str | None = None
+            instrument_csv_path: str | None = None
 
             if cache_settings:
                 db_path = getattr(cache_settings, "db_path", None)
@@ -4978,9 +4977,10 @@ async def startup_sequence(ctx: BotContext) -> None:
     )
 
     loop = asyncio.get_running_loop()
+    # DataHub forwards to MDM internally; keep MDM call as fallback when DH absent.
     if ctx.data_hub is not None:
         ctx.data_hub.set_event_loop(loop)
-    if ctx.market_data_manager is not None and hasattr(
+    elif ctx.market_data_manager is not None and hasattr(
         ctx.market_data_manager, "set_event_loop"
     ):
         ctx.market_data_manager.set_event_loop(loop)

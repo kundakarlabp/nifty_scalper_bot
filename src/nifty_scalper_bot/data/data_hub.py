@@ -77,9 +77,31 @@ class DataHub:
         self._poll_block_ms = 800
 
         # ===========================
+        # EVENT LOOP (wired at startup)
+        # ===========================
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # ===========================
         # 🔗 BIND MDM → DATAHUB (CRITICAL FIX)
         # ===========================
         self._bind_to_mdm()
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Wire the main asyncio loop and forward to MDM if supported.
+
+        Idempotent: first call wins; subsequent calls are ignored so
+        reconnects don't swap the loop out from under pending tasks.
+        """
+        if self._main_loop is not None:
+            LOGGER.warning("DataHub event loop already wired — ignoring rewire")
+            return
+        self._main_loop = loop
+        mdm_set = getattr(self._mdm, "set_event_loop", None)
+        if callable(mdm_set):
+            try:
+                mdm_set(loop)
+            except Exception as exc:
+                LOGGER.error("DataHub.set_event_loop → MDM failed: %s", exc)
 
 
     def replace_positions(self, positions: list[dict]) -> None:
