@@ -1268,7 +1268,8 @@ class StrategyRunner:
         snapshot: dict[str, float] = {}
 
         try:
-            quote = self._market_data.get_quote(base_symbol)
+            data_source = self._data_hub or self._market_data
+            quote = data_source.get_quote(base_symbol)
         except Exception as exc:
             self._logger.warning(
                 "underlying_snapshot_error",
@@ -2837,10 +2838,13 @@ class StrategyRunner:
 
     def _get_spot_price(self) -> float:
         """Resilient spot price fetcher checking canonical variants."""
-        if not self._market_data: return 0.0
+        source = self._data_hub or self._market_data
+        if not source:
+            return 0.0
         for sym in ("NSE:NIFTY 50", "NSE:NIFTY", "256265"):
-            p = self._market_data.get_latest_price(sym)
-            if p and p > 0: return p
+            p = source.get_latest_price(sym)
+            if p and p > 0:
+                return p
         return 0.0
 
     def _execute_order(self, *, symbol: str, base_symbol: str, side: Literal["BUY", "SELL"], quantity: int, price: float, stop_loss: float | None, take_profit: float | None, timestamp: datetime, reference_price: float | None = None, metadata: Mapping[str, Any] | None = None, ) -> tuple[str, int]:
@@ -5890,7 +5894,8 @@ class StrategyRunner:
         if not is_strategy_instrument(symbol):
             raise RuntimeError("ATR requested for non-strategy instrument")
 
-        bars = self._market_data.get_ohlc_bars(symbol) if self._market_data else []
+        _bars_source = self._data_hub or self._market_data
+        bars = _bars_source.get_ohlc_bars(symbol) if _bars_source else []
         if len(bars) < self._required_candles:
             raise RuntimeError("ATR unavailable due to insufficient data")
 
@@ -5954,7 +5959,8 @@ class StrategyRunner:
 
         spread = 0.0
         try:
-            quote = self._market_data.get_quote(symbol) if self._market_data else None
+            _quote_source = self._data_hub or self._market_data
+            quote = _quote_source.get_quote(symbol) if _quote_source else None
             if quote:
                 ask_price = float(quote.get("ask") or quote.get("ask_price") or 0.0)
                 bid_price = float(quote.get("bid") or quote.get("bid_price") or 0.0)

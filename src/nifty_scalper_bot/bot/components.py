@@ -491,10 +491,9 @@ class StrategyRunner:
         self._orders = order_manager
         self._positions = position_manager
         self._config = config or StrategyRunnerConfig()
-        self.datahub = datahub
-        self.datahub = datahub
-        self.datahub = datahub
-        self.datahub = datahub
+        # DataHub is the single source of truth; fall back to MDM if caller omitted it.
+        self._data_hub = datahub or getattr(market_data_manager, "data_hub", None) or market_data_manager
+        self.datahub = self._data_hub
         self._symbols: set[str] = set()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -515,13 +514,13 @@ class StrategyRunner:
         if symbol in self._symbols:
             return
         self._symbols.add(symbol)
-        self._market_data.subscribe(symbol)
+        self._data_hub.subscribe(symbol)
 
     def remove_symbol(self, symbol: str) -> None:
         if symbol not in self._symbols:
             return
         self._symbols.remove(symbol)
-        self._market_data.unsubscribe(symbol)
+        self._data_hub.unsubscribe(symbol)
 
 
     async def on_data(self, message):
@@ -592,7 +591,7 @@ class StrategyRunner:
                 continue
             for symbol in list(self._symbols):
                 try:
-                    price = self._market_data.get_latest_price(symbol)
+                    price = self._data_hub.get_latest_price(symbol)
                     self._on_tick(symbol, price)
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.exception("Strategy runner error for %s: %s", symbol, exc)
@@ -792,7 +791,7 @@ class StrategyRunner:
     ) -> bool:
         executed = False
         for sym, pos in list(open_positions.items()):
-            price = self._market_data.get_latest_price(sym)
+            price = self._data_hub.get_latest_price(sym)
             if self._dispatch_exit(sym, pos, price, reason, open_positions):
                 executed = True
         return executed
