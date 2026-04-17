@@ -80,6 +80,50 @@ class DataHub:
         # ===========================
         self._bind_to_mdm()
 
+
+    def replace_positions(self, positions: list[dict]) -> None:
+        """
+        Replace entire position state (used during restore/startup sync).
+        This makes DataHub the SSOT for positions.
+        """
+        if not hasattr(self, "_positions"):
+            self._positions = {}
+
+        # Normalize → dict keyed by instrument/token
+        new_positions = {}
+        for pos in positions:
+            key = pos.get("instrument_token") or pos.get("symbol")
+            if key is None:
+                continue
+            new_positions[key] = pos
+
+        self._positions = new_positions
+
+        # Optional: persist if store exists
+        if hasattr(self, "_store") and self._store:
+            try:
+                self._store.save_positions(self._positions)
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to persist positions: {e}")
+
+        logger.info(f"✅ Positions replaced in DataHub | count={len(self._positions)}")
+
+    def get_positions(self) -> dict:
+        return getattr(self, "_positions", {})
+
+    def update_position(self, position: dict) -> None:
+        if not hasattr(self, "_positions"):
+            self._positions = {}
+
+        key = position.get("instrument_token") or position.get("symbol")
+        if key is None:
+            return
+
+        self._positions[key] = position
+
+    def clear_positions(self) -> None:
+        self._positions = {}
+
     # =========================================================
     # 🔗 BINDING (CRITICAL)
     # =========================================================
