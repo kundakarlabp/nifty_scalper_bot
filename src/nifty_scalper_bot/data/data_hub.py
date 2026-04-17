@@ -68,6 +68,8 @@ class DataHub:
         # SUBSCRIBERS
         # ===========================
         self._tick_subscribers: Dict[str, set[TickListener]] = defaultdict(set)
+        # Tracks which symbols DataHub has subscribed to MDM for (to avoid double-register)
+        self._mdm_subscribed_symbols: set = set()
 
         # ===========================
         # LOCK
@@ -165,38 +167,29 @@ class DataHub:
     # 🔗 BINDING (CRITICAL)
     # =========================================================
     def _bind_to_mdm(self):
-
-        try:
-            attach_cb = getattr(self._mdm, "attach_tick_handler", None)
-            if callable(attach_cb):
-                attach_cb(self.ingest_tick_sync)
-
-            # HARD BIND (guarantees delivery)
-            setattr(self._mdm, "_external_tick_handler", self.ingest_tick_sync)
-
-            LOGGER.info("DataHub successfully bound to MDM")
-
-        except Exception as exc:
-            LOGGER.error("Failed binding to MDM: %s", exc, exc_info=exc)
+        # Per-symbol binding happens in subscribe() — nothing global to wire at init time.
+        LOGGER.info("DataHub bound to MDM (per-symbol subscription on demand)")
 
     # =========================================================
     # INGESTION ENTRY
     # =========================================================
     def ingest_tick_sync(self, tick: Tick):
-
+        # Called from MDM's _emit_tick (sync thread context). Schedule onto the
+        # main asyncio event loop if available; otherwise fall back to a
+        # one-shot loop (acceptable for startup/test, bad for hot path —
+        # ensure set_event_loop() is called during startup).
+        loop = self._main_loop
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.ingest_tick(tick), loop)
+            return
         try:
-            loop = asyncio.get_running_loop()
+            running = asyncio.get_running_loop()
         except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(self.ingest_tick(tick), loop)
-                return
-            except Exception:
-                pass
-
-        asyncio.run(self.ingest_tick(tick))
+            running = None
+        if running is not None and running.is_running():
+            asyncio.run_coroutine_threadsafe(self.ingest_tick(tick), running)
+        else:
+            asyncio.run(self.ingest_tick(tick))
 
     async def ingest_tick_from_bus(self, message: "Message") -> None:
         """Async handler for MessageBus TICK messages."""
@@ -327,8 +320,9 @@ class DataHub:
     def subscribe(self, symbol: str, callback: Optional[TickListener] = None):
         """Register a tick listener for *symbol*.
 
-        When ``callback`` is omitted the call is forwarded to MDM so existing
-        MDM-only subscribers (REST tracking) still work.
+        DataHub subscribes its own ``ingest_tick`` to MDM once per symbol so
+        the SSOT ``_ticks`` dict is always kept up-to-date.  Caller callbacks
+        live in ``_tick_subscribers`` and are notified by ``ingest_tick``.
         """
 
         symbol = str(symbol).upper().strip()
@@ -336,18 +330,20 @@ class DataHub:
         if callback is not None:
             self._tick_subscribers[symbol].add(callback)
 
-        mdm_sub = getattr(self._mdm, "subscribe", None)
-        if callable(mdm_sub):
-            try:
-                if callback is None:
-                    mdm_sub(symbol)
-                else:
-                    mdm_sub(symbol, callback)
-            except TypeError:
-                # MDM.subscribe may require callback; ignore signature mismatch
-                pass
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.debug("MDM subscribe delegation failed for %s: %s", symbol, exc)
+        # Subscribe DataHub itself to MDM once per symbol.  MDM calls
+        # ingest_tick (async-aware) which updates the SSOT and then fans out
+        # to _tick_subscribers.  We must NOT pass the caller's callback to MDM
+        # directly because that would bypass SSOT updates and produce a split
+        # delivery path.
+        if symbol not in self._mdm_subscribed_symbols:
+            mdm_sub = getattr(self._mdm, "subscribe", None)
+            if callable(mdm_sub):
+                try:
+                    mdm_sub(symbol, self.ingest_tick_sync)
+                    self._mdm_subscribed_symbols.add(symbol)
+                    LOGGER.debug("DataHub subscribed to MDM for symbol=%s", symbol)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("MDM subscribe failed for %s: %s", symbol, exc)
 
     # Aliases used by some callers (runner/lifecycle_manager)
     subscribe_ticks = subscribe
@@ -359,17 +355,15 @@ class DataHub:
         if callback is not None and callback in self._tick_subscribers.get(symbol, set()):
             self._tick_subscribers[symbol].remove(callback)
 
-        mdm_unsub = getattr(self._mdm, "unsubscribe", None)
-        if callable(mdm_unsub):
-            try:
-                if callback is None:
-                    mdm_unsub(symbol)
-                else:
-                    mdm_unsub(symbol, callback)
-            except TypeError:
-                pass
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.debug("MDM unsubscribe delegation failed for %s: %s", symbol, exc)
+        # Only unsubscribe DataHub from MDM when no listeners remain for this symbol.
+        if not self._tick_subscribers.get(symbol):
+            self._mdm_subscribed_symbols.discard(symbol)
+            mdm_unsub = getattr(self._mdm, "unsubscribe", None)
+            if callable(mdm_unsub):
+                try:
+                    mdm_unsub(symbol, self.ingest_tick_sync)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.debug("MDM unsubscribe failed for %s: %s", symbol, exc)
 
     unsubscribe_ticks = unsubscribe
 
