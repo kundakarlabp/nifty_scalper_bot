@@ -1265,7 +1265,7 @@ class OrderManager:
             "bid_size": 0.0,
             "ask_size": 0.0,
         }
-        mdm = self._market_data
+        mdm = self._data_hub or self._market_data
         if mdm is None:
             self._logger.info(
                 "Condition met: depth_unavailable",
@@ -1392,7 +1392,7 @@ class OrderManager:
         )
         if price is None or price <= 0:
             return 0
-        mdm = self._market_data
+        mdm = self._data_hub or self._market_data
         if mdm is None:
             return 0
         try:
@@ -1489,7 +1489,7 @@ class OrderManager:
                 "quantity": quantity,
             },
         )
-        mdm = self._market_data
+        mdm = self._data_hub or self._market_data
         if mdm is None or quantity <= 0:
             return (None, None, None)
         try:
@@ -6059,7 +6059,7 @@ class OrderManager:
         return float(number)
 
     def _resolve_available_margin(self) -> tuple[float | None, str]:
-        mdm = self._market_data
+        mdm = self._data_hub or self._market_data
         if mdm is not None:
             try:
                 mdm.refresh_margin_snapshot()
@@ -6367,7 +6367,7 @@ class OrderManager:
             trace_id = None
         resolved_price: float | None
         meta = RefPriceMeta(source="unknown", age_ms=1_000_000_000)
-        mdm = cast("MarketDataManager | None", self._market_data)
+        mdm = self._data_hub or cast("MarketDataManager | None", self._market_data)
 
         if mdm is not None:
             try:
