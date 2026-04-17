@@ -5790,7 +5790,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     ctx.data_hub.bus = ctx.message_bus
                     if getattr(ctx, 'market_data_manager', None):
                         ctx.market_data_manager.bus = ctx.message_bus
-                    ctx.message_bus.subscribe(MessageType.TICK, ctx.data_hub.on_tick)
+                    ctx.message_bus.subscribe(MessageType.TICK, ctx.data_hub.ingest_tick_sync)
                     ctx.message_bus.subscribe(MessageType.DATA_READY, ctx.strategy_runner.on_data)
 
                 if ctx.message_bus:
