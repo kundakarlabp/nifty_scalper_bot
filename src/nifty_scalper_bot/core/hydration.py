@@ -25,7 +25,6 @@ LOGGER = logging.getLogger("nifty_scalper_bot.core.hydration")
 # Conservative default: 3-day window ensures same-day gaps don't produce 0 bars
 _DEFAULT_LOOKBACK_DAYS = 7
 _DEFAULT_MIN_BARS = 50
-_HARD_MIN_BARS = 20
 
 
 def assert_valid_token(token: Any) -> int:
@@ -90,7 +89,7 @@ def hydrate(
                       are returned (stops execution — do not swallow this).
     """
     token = assert_valid_token(token)
-    effective_min = max(_HARD_MIN_BARS, int(min_bars))
+    effective_min = max(1, int(min_bars))
 
     to_dt = datetime.now()
     from_dt = to_dt - timedelta(days=lookback_days)
@@ -114,14 +113,14 @@ def hydrate(
         data = kite.historical_data(token, from_dt, to_dt, interval)
     except Exception as exc:
         raise RuntimeError(
-            f"[FATAL] Hydration API call failed for token={token}: {exc}"
+            f"Hydration API call failed for token={token}: {exc}"
         ) from exc
 
     if not data or len(data) < effective_min:
         bar_count = len(data) if data else 0
         raise RuntimeError(
-            f"[FATAL] STOP: insufficient bars for token={token}. "
-            f"Got {bar_count}, need {effective_min}. "
+            f"Insufficient historical bars for token={token}: "
+            f"got {bar_count}, need {effective_min}. "
             "Extend lookback_days or check broker authentication."
         )
 

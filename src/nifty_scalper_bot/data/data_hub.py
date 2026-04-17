@@ -9,7 +9,10 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+
+if TYPE_CHECKING:
+    from nifty_scalper_bot.core.message_bus import Message
 
 LOGGER = logging.getLogger(__name__)
 
@@ -194,6 +197,10 @@ class DataHub:
                 pass
 
         asyncio.run(self.ingest_tick(tick))
+
+    async def ingest_tick_from_bus(self, message: "Message") -> None:
+        """Async handler for MessageBus TICK messages."""
+        await self.ingest_tick(message.data)
 
     # =========================================================
     # CORE INGESTION ENGINE

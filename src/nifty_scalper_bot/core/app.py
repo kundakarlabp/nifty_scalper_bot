@@ -3016,7 +3016,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             on_error=lambda err: LOGGER.error("WebSocket manager error: %s", err),
             backoff_min_sec=1.0,
             backoff_max_sec=30.0,
-            stale_threshold_seconds=5.0,
+            stale_threshold_seconds=30.0,
         )
 
         # WebSocketManager is the primary streamer in WS mode.
@@ -5475,13 +5475,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                         )
             # =========================================================
 
-            await ctx.market_regime_manager.refresh_from_indicators()
-            # ✅ FIX: Explicitly start the regime background loop
-            await ctx.market_regime_manager.start()
-            # -------------------------------------------------
-            # MARK INDICATORS AS WARM / READY
-            # -------------------------------------------------
-            ctx.market_regime_manager.indicators_ready = bool(ready_symbols)
+            try:
+                await ctx.market_regime_manager.refresh_from_indicators()
+                await ctx.market_regime_manager.start()
+                ctx.market_regime_manager.indicators_ready = bool(ready_symbols)
+            except Exception as _mrm_exc:
+                LOGGER.warning(
+                    "market_regime_manager init failed (non-fatal): %s",
+                    _mrm_exc,
+                    exc_info=True,
+                )
             # BUG 1 FIX: data_hub.indicators_ready was never set after BUG-δ removed
             # warmup_indicators(). Both signal_generator.py:1205 and strategy_manager.py:1716
             # check this flag as the FIRST gate in generate_signal() — if False, every call
@@ -5767,10 +5770,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             asyncio.create_task(_option_universe_sync_loop())
         except Exception as e:
-            if ctx.market_data_manager and not ctx.market_data_manager.ws_connected:
-                LOGGER.info("tracking_validation_deferred_ws_not_ready")
-            else:
-                LOGGER.error("Hydration/Tracking failed", exc_info=True)
+            LOGGER.error("Hydration/Tracking failed: %s", e, exc_info=True)
 
     # ---------------------------------------------------------
     # 4. Start subsystems (guarded singleton startup)
@@ -5790,7 +5790,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     ctx.data_hub.bus = ctx.message_bus
                     if getattr(ctx, 'market_data_manager', None):
                         ctx.market_data_manager.bus = ctx.message_bus
-                    ctx.message_bus.subscribe(MessageType.TICK, ctx.data_hub.ingest_tick_sync)
+                    ctx.message_bus.subscribe(MessageType.TICK, ctx.data_hub.ingest_tick_from_bus)
                     ctx.message_bus.subscribe(MessageType.DATA_READY, ctx.strategy_runner.on_data)
 
                 if ctx.message_bus:
