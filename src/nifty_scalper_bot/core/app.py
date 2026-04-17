@@ -2035,13 +2035,13 @@ def _get_symbols(
 
     contracts = resolver.get_option_contracts(underlying="NIFTY")
     today = datetime.now().date()
-    valid_contracts = [c for c in contracts if c.expiry >= today]
+    valid_contracts = [c for c in contracts if c.get("expiry") >= today]
     if not valid_contracts:
         raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
 
-    nearest_expiry = min(c.expiry for c in valid_contracts)
-    filtered = [c for c in valid_contracts if c.expiry == nearest_expiry]
-    unique_strikes = sorted({c.strike for c in filtered})
+    nearest_expiry = min(c["expiry"] for c in valid_contracts)
+    filtered = [c for c in valid_contracts if c["expiry"] == nearest_expiry]
+    unique_strikes = sorted({c["strike"] for c in filtered})
     if len(unique_strikes) < 2:
         raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
     strike_step = unique_strikes[1] - unique_strikes[0]
@@ -2049,8 +2049,8 @@ def _get_symbols(
         raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
 
     atm = round(ltp / strike_step) * strike_step
-    selected = [c for c in filtered if abs(c.strike - atm) <= 200]
-    final_symbols = [c.tradingsymbol for c in selected]
+    selected = [c for c in filtered if abs(c["strike"] - atm) <= 200]
+    final_symbols = [c["tradingsymbol"] for c in selected]
     final_symbols = list(dict.fromkeys(sym for sym in final_symbols if sym))
 
     if not final_symbols:
@@ -5473,6 +5473,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                         LOGGER.error(
                             "Startup hydration incomplete for all symbols — runner remains unready"
                         )
+                # Start the runner after hydration so get_status()["running"] is True
+                if hasattr(runner, "start") and not getattr(runner, "_running", False):
+                    try:
+                        runner.start()
+                        LOGGER.info("✅ StrategyRunner started")
+                    except Exception as _runner_start_exc:
+                        LOGGER.error("StrategyRunner.start() failed: %s", _runner_start_exc, exc_info=True)
             # =========================================================
 
             try:
