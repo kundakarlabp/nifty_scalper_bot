@@ -683,3 +683,114 @@ class DataHub:
                 "last_ws_age_sec": time.time()
                 - (self._last_global_ws_arrival / 1000),
             }
+
+    # =========================================================
+    # MDM FACADE — let callers talk to DataHub instead of MDM directly.
+    # Every method here is a thin, safe delegate with a sensible fallback.
+    # =========================================================
+    def _mdm_call(self, name: str, *args, default: Any = None, **kwargs) -> Any:
+        fn = getattr(self._mdm, name, None)
+        if not callable(fn):
+            return default
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - facade must never raise
+            LOGGER.debug("DataHub MDM delegate %s failed: %s", name, exc)
+            return default
+
+    # --- WS/transport state ---
+    @property
+    def ws_connected(self) -> bool:
+        return bool(getattr(self._mdm, "ws_connected", False))
+
+    def set_ws_connected(self, connected: bool) -> None:
+        self._mdm_call("set_ws_connected", bool(connected))
+
+    def bump_heartbeat(self) -> None:
+        self._mdm_call("bump_heartbeat")
+
+    def register_heartbeat_callback(self, cb) -> None:
+        self._mdm_call("register_heartbeat_callback", cb)
+
+    def heartbeat_age(self) -> Optional[float]:
+        return self._mdm_call("heartbeat_age")
+
+    # --- quote accessors used by execution/order_manager ---
+    def get_latest_tick(self, symbol: str) -> Optional[Tick]:
+        return self._mdm_call("get_latest_tick", symbol) or self.get_quote(symbol)
+
+    def get_last_tick(self, symbol: str) -> Optional[Tick]:
+        return self._mdm_call("get_last_tick", symbol) or self.get_quote(symbol)
+
+    def get_ltp(self, symbol: str) -> Optional[float]:
+        val = self._mdm_call("get_ltp", symbol)
+        return val if val is not None else self.get_latest_price(symbol)
+
+    def has_quote(self, symbol: str) -> bool:
+        val = self._mdm_call("has_quote", symbol)
+        if val is not None:
+            return bool(val)
+        return self.get_quote(symbol) is not None
+
+    def quote_age_ms(self, symbol: str) -> Optional[float]:
+        return self._mdm_call("quote_age_ms", symbol)
+
+    def refresh_quote_now(self, symbol: str, *args, **kwargs) -> Any:
+        return self._mdm_call("refresh_quote_now", symbol, *args, **kwargs)
+
+    def cached_mid(self, symbol: str) -> Optional[float]:
+        return self._mdm_call("cached_mid", symbol)
+
+    def ingest_rest_quote(self, *args, **kwargs) -> Any:
+        return self._mdm_call("ingest_rest_quote", *args, **kwargs)
+
+    # --- tracking / hydration ---
+    def register_symbol(self, symbol: str, token: Optional[int] = None) -> Any:
+        return self._mdm_call("register_symbol", symbol, token)
+
+    def untrack(self, symbol: str) -> Any:
+        return self._mdm_call("untrack", symbol)
+
+    def is_tracked(self, symbol: str) -> bool:
+        return bool(self._mdm_call("is_tracked", symbol, default=False))
+
+    def list_tracked(self) -> list:
+        return list(self._mdm_call("list_tracked", default=[]) or [])
+
+    def tracked_snapshot(self) -> Dict[str, Any]:
+        return dict(self._mdm_call("tracked_snapshot", default={}) or {})
+
+    def wait_for_symbol(self, *args, **kwargs) -> Any:
+        return self._mdm_call("wait_for_symbol", *args, **kwargs)
+
+    def update_hydration_status(self, *args, **kwargs) -> Any:
+        return self._mdm_call("update_hydration_status", *args, **kwargs)
+
+    def get_hydration_status(self, *args, **kwargs) -> Any:
+        return self._mdm_call("get_hydration_status", *args, **kwargs)
+
+    # --- OHLC / margin ---
+    def get_ohlc(self, *args, **kwargs) -> Any:
+        return self._mdm_call("get_ohlc", *args, **kwargs)
+
+    def get_orderbook(self, *args, **kwargs) -> Any:
+        return self._mdm_call("get_orderbook", *args, **kwargs)
+
+    def refresh_margin_snapshot(self, *args, **kwargs) -> Any:
+        return self._mdm_call("refresh_margin_snapshot", *args, **kwargs)
+
+    def get_margin_snapshot(self, *args, **kwargs) -> Any:
+        return self._mdm_call("get_margin_snapshot", *args, **kwargs)
+
+    # --- lifecycle / status ---
+    def is_live(self) -> bool:
+        return bool(self._mdm_call("is_live", default=False))
+
+    def is_data_stale(self, *args, **kwargs) -> bool:
+        return bool(self._mdm_call("is_data_stale", *args, default=False, **kwargs))
+
+    def transport_status(self) -> Dict[str, Any]:
+        return dict(self._mdm_call("transport_status", default={}) or {})
+
+    def mdm_status(self) -> Dict[str, Any]:
+        return dict(self._mdm_call("mdm_status", default={}) or {})
