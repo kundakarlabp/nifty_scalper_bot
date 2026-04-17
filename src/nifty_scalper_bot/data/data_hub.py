@@ -30,7 +30,7 @@ class DataHub:
     - Backward compatibility with symbol APIs
     """
 
-    def __init__(self, market_data_manager: Any):
+    def __init__(self, market_data_manager: Any, options_only: bool = False, **kwargs):
 
         self._mdm = market_data_manager
 
@@ -44,6 +44,7 @@ class DataHub:
         # ===========================
         self._quotes: Dict[str, Tick] = {}  # ⚠️ legacy support
 
+        self._options_only = options_only
         self._token_by_symbol: Dict[str, int] = {}
         self._symbol_by_token: Dict[int, str] = {}
 
