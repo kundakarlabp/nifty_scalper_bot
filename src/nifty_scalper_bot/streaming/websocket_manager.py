@@ -531,26 +531,34 @@ class WebSocketManager:
                 if self._connected.is_set() and self._last_tick_mono > 0.0:
                     last_tick_age = now - self._last_tick_mono
                     if last_tick_age > self._stale_threshold:
-                        now_wall = time.time()
-                        if now_wall - self._last_stale_log_time > 5.0:
-                            self._last_stale_log_time = now_wall
-                            self._logger.warning(
-                                "WebSocket stale. Reconnecting... age=%.2fs threshold=%.2fs",
+                        if not self._is_within_trading_window():
+                            # Outside market hours: no ticks are expected.
+                            # Real dead-socket failures are handled by the pong-timeout path above.
+                            self._logger.debug(
+                                "WS stale outside trading window — skipping reconnect age=%.2fs",
                                 last_tick_age,
-                                self._stale_threshold,
                             )
-                        if (
-                            not self._fallback_active
-                            and self._fallback_start_callback is not None
-                        ):
-                            self._fallback_active = True
-                            try:
-                                self._fallback_start_callback()
-                            except Exception as e:
-                                self._logger.error(
-                                    "Failure in _watchdog_loop.fallback_start: %s", e
+                        else:
+                            now_wall = time.time()
+                            if now_wall - self._last_stale_log_time > 5.0:
+                                self._last_stale_log_time = now_wall
+                                self._logger.warning(
+                                    "WebSocket stale. Reconnecting... age=%.2fs threshold=%.2fs",
+                                    last_tick_age,
+                                    self._stale_threshold,
                                 )
-                        self._schedule_reconnect("watchdog_tick_stale")
+                            if (
+                                not self._fallback_active
+                                and self._fallback_start_callback is not None
+                            ):
+                                self._fallback_active = True
+                                try:
+                                    self._fallback_start_callback()
+                                except Exception as e:
+                                    self._logger.error(
+                                        "Failure in _watchdog_loop.fallback_start: %s", e
+                                    )
+                            self._schedule_reconnect("watchdog_tick_stale")
         except asyncio.CancelledError:
             return
         except Exception as e:
