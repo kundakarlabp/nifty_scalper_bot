@@ -57,6 +57,9 @@ class DataHub:
         self._last_ws_arrival: Dict[str, float] = {}
         self._last_global_ws_arrival: float = 0.0
 
+        self._store = kwargs.get("store")
+        self._event_bus = kwargs.get("event_bus")
+
         # ===========================
         # SUBSCRIBERS
         # ===========================
