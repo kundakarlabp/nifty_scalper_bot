@@ -384,18 +384,7 @@ class WebSocketManager:
             async with self._connect_lock:
                 if self._shutdown or self._manual_disconnect:
                     return
-                within_window = self._is_within_trading_window()
-                if not within_window:
-                    from datetime import datetime
-                    from zoneinfo import ZoneInfo
-
-                    ist = ZoneInfo("Asia/Kolkata")
-                    self._logger.warning(
-                        "WS connect blocked | within_window=%s | now=%s",
-                        within_window,
-                        datetime.now(ist),
-                    )
-                    return
+        
                 self._state = ConnectionState.CONNECTING
                 self._connected.clear()
                 self._connect_started_mono = time.monotonic()
