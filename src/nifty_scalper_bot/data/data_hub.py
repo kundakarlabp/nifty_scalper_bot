@@ -452,6 +452,192 @@ class DataHub:
                 LOGGER.error("process_ticks delegate failed: %s", exc, exc_info=exc)
 
     # =========================================================
+    # ACCOUNT / BALANCE FACADE
+    # =========================================================
+    def get_available_balance(self, *, force: bool = False) -> Optional[float]:
+        """Return latest available margin balance from MDM's cache.
+
+        Safe to call from any thread / event loop. Returns ``None`` when the
+        underlying broker has not populated a snapshot yet.
+        """
+
+        mdm_fn = getattr(self._mdm, "get_available_balance", None)
+        if callable(mdm_fn):
+            try:
+                return mdm_fn(force=force)
+            except TypeError:
+                try:
+                    return mdm_fn()
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.debug("get_available_balance fallback failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("get_available_balance delegate failed: %s", exc)
+
+        # Fallback: read cached snapshot dict directly
+        snapshot = self.get_account_snapshot(force=False)
+        if snapshot:
+            for key in ("available", "net", "cash"):
+                value = snapshot.get(key)
+                if value is not None:
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        continue
+        return None
+
+    def get_account_snapshot(self, *, force: bool = False) -> Dict[str, Any]:
+        """Return the broker margin snapshot synchronously.
+
+        MDM exposes this coroutine, so we read the cached dict directly. When
+        ``force=True`` we best-effort schedule an async refresh without blocking
+        the caller.
+        """
+
+        mdm = self._mdm
+        cached = getattr(mdm, "_account_snapshot", None)
+        snapshot: Dict[str, Any] = dict(cached) if isinstance(cached, dict) else {}
+
+        if force:
+            refresher = getattr(mdm, "get_account_snapshot", None)
+            if callable(refresher):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None and loop.is_running():
+                    try:
+                        asyncio.run_coroutine_threadsafe(refresher(force=True), loop)
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.debug("account_snapshot refresh schedule failed: %s", exc)
+                # if no running loop we simply return the cached value;
+                # a blocking asyncio.run from a non-async thread is too risky.
+
+        return snapshot
+
+    # =========================================================
+    # READINESS / FRESHNESS
+    # =========================================================
+    def is_ready(self, symbol: Optional[Any] = None) -> bool:
+        """Delegate to MDM's readiness check.
+
+        Accepts an optional symbol/token for callers that used the richer
+        DataHub contract; MDM's ``is_ready`` ignores the argument.
+        """
+
+        mdm_fn = getattr(self._mdm, "is_ready", None)
+        if callable(mdm_fn):
+            try:
+                return bool(mdm_fn())
+            except Exception:  # noqa: BLE001
+                return False
+        return bool(self._ticks)
+
+    def is_fresh(
+        self, symbol: str, *, threshold_ms: Optional[float] = None
+    ) -> tuple[bool, Dict[str, Any]]:
+        """Return (fresh?, meta) using WS arrival timestamps tracked in SSOT."""
+
+        sym = str(symbol or "").upper().strip()
+        threshold = float(threshold_ms) if threshold_ms is not None else 2000.0
+
+        with self._lock:
+            last_ws = self._last_ws_arrival.get(sym)
+            last_any = self._last_arrival.get(sym)
+
+        last = last_ws or last_any
+        if not last:
+            return False, {"reason": "no_tick", "symbol": sym}
+
+        age_ms = (time.time() * 1000) - last
+        fresh = age_ms <= threshold
+        return fresh, {"age_ms": age_ms, "threshold_ms": threshold, "symbol": sym}
+
+    # =========================================================
+    # OPTIONAL DELEGATES (return safe defaults when absent)
+    # =========================================================
+    def get_iv(self, symbol: str) -> Optional[float]:
+        mdm_fn = getattr(self._mdm, "get_iv", None)
+        if callable(mdm_fn):
+            try:
+                return mdm_fn(symbol)
+            except Exception:  # noqa: BLE001
+                return None
+        tick = self.get_quote(symbol) or {}
+        value = tick.get("iv") or tick.get("implied_volatility")
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def get_indicator(self, symbol: str, name: str) -> Optional[float]:
+        mdm_fn = getattr(self._mdm, "get_indicator", None)
+        if callable(mdm_fn):
+            try:
+                return mdm_fn(symbol, name)
+            except Exception:  # noqa: BLE001
+                return None
+        return None
+
+    def get_position_state(self, symbol: str) -> Optional[Dict[str, Any]]:
+        mdm_fn = getattr(self._mdm, "get_position_state", None)
+        if callable(mdm_fn):
+            try:
+                return mdm_fn(symbol)
+            except Exception:  # noqa: BLE001
+                return None
+        return None
+
+    def get_data(self, token: Any):
+        """Return (candles, indicators) for *token* when available."""
+        mdm_fn = getattr(self._mdm, "get_data", None)
+        if callable(mdm_fn):
+            try:
+                return mdm_fn(token)
+            except Exception:  # noqa: BLE001
+                return None, None
+        return None, None
+
+    def fetch_history(self, *args, **kwargs):
+        mdm_fn = getattr(self._mdm, "fetch_history", None)
+        if callable(mdm_fn):
+            return mdm_fn(*args, **kwargs)
+        return None
+
+    def get_stats(self) -> Dict[str, Any]:
+        return self.stats()
+
+    # =========================================================
+    # ORDER / LIFECYCLE SUBSCRIPTIONS
+    # =========================================================
+    def subscribe_orders(self, callback) -> None:
+        """Register an order-state listener; safe no-op when MDM lacks one."""
+
+        if callback is None:
+            return
+        if not hasattr(self, "_order_subscribers"):
+            self._order_subscribers: set = set()
+        self._order_subscribers.add(callback)
+        mdm_fn = getattr(self._mdm, "subscribe_orders", None)
+        if callable(mdm_fn):
+            try:
+                mdm_fn(callback)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("subscribe_orders delegate failed: %s", exc)
+
+    def unsubscribe_orders(self, callback) -> None:
+        if callback is None:
+            return
+        subs = getattr(self, "_order_subscribers", None)
+        if subs is not None:
+            subs.discard(callback)
+        mdm_fn = getattr(self._mdm, "unsubscribe_orders", None)
+        if callable(mdm_fn):
+            try:
+                mdm_fn(callback)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("unsubscribe_orders delegate failed: %s", exc)
+
+    # =========================================================
     # HEALTH CHECKS
     # =========================================================
     def is_ws_fresh(self, symbol: str, threshold_sec: float = 2.0) -> bool:
