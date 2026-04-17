@@ -2882,7 +2882,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         data_hub = DataHub(
             market_data_manager,
-            instrument_manager,
             options_only=True,
             store=hub_store,
             event_bus=message_bus,
@@ -3041,7 +3040,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         LOGGER.info("✅ WS: MDM reference injected into WebSocketManager")
         data_hub = DataHub(
             market_data_manager,
-            instrument_manager,
             options_only=True,
             store=hub_store,
             event_bus=message_bus,
@@ -3079,7 +3077,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         # ✅ FIX: Create DataHub BEFORE PollingStreamer so it's not None
         data_hub = DataHub(
             market_data_manager,
-            instrument_manager,
             options_only=True,
             store=hub_store,
             event_bus=message_bus,
