@@ -38,6 +38,7 @@ class DataHub:
         # SSOT STORAGE
         # ===========================
         self._ticks: Dict[int, Tick] = {}  # ✅ PRIMARY TRUTH
+        self._positions: Dict[int, dict] = {}
 
         # ===========================
         # COMPATIBILITY LAYER
@@ -92,37 +93,48 @@ class DataHub:
         # Normalize → dict keyed by instrument/token
         new_positions = {}
         for pos in positions:
-            key = pos.get("instrument_token") or pos.get("symbol")
+            token = pos.get("instrument_token")
+            if token is None:
+                continue
+
+            key = int(token)
             if key is None:
                 continue
             new_positions[key] = pos
 
-        self._positions = new_positions
-
+        with self._lock:
+            self._positions = new_positions
         # Optional: persist if store exists
-        if hasattr(self, "_store") and self._store:
+        if self._store and hasattr(self._store, "save_positions"):
             try:
                 self._store.save_positions(self._positions)
             except Exception as e:
                 logger.warning(f"⚠️ Failed to persist positions: {e}")
 
-        logger.info(f"✅ Positions replaced in DataHub | count={len(self._positions)}")
-
+        LOGGER.info(f"✅ Positions replaced in DataHub | count={len(self._positions)}")
     def get_positions(self) -> dict:
-        return getattr(self, "_positions", {})
+        with self._lock:
+            return dict(self._positions)
 
     def update_position(self, position: dict) -> None:
         if not hasattr(self, "_positions"):
             self._positions = {}
 
-        key = position.get("instrument_token") or position.get("symbol")
-        if key is None:
+        token = position.get("instrument_token")
+        if token is None:
             return
 
-        self._positions[key] = position
+        try:
+            key = int(token)
+        except (TypeError, ValueError):
+            return
+
+        with self._lock:
+            self._positions[key] = position
 
     def clear_positions(self) -> None:
-        self._positions = {}
+        with self._lock:
+            self._positions = {}
 
     # =========================================================
     # 🔗 BINDING (CRITICAL)
