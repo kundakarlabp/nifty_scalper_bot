@@ -7,3 +7,9 @@ dist/
 build/
 .env
 .venv/
+
+# Runtime artifacts (sqlite state created at bot startup)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
