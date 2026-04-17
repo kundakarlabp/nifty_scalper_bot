@@ -1211,8 +1211,8 @@ class OrderManager:
                 self._tp_controllers = {}
             self._tp_controllers[tp_order_id] = controller
 
-            # Subscribe to ticks
-            self._market_data.subscribe(symbol, controller.on_tick)
+            # Subscribe to ticks via DataHub (SSOT), fall back to MDM if unset.
+            (self._data_hub or self._market_data).subscribe(symbol, controller.on_tick)
             self._logger.info(f"🚀 Dynamic TP attached to {tp_order_id}")
 
         except Exception as e:
@@ -1225,7 +1225,7 @@ class OrderManager:
 
         controller = self._tp_controllers.pop(tp_order_id, None)
         if controller:
-            self._market_data.unsubscribe(controller.symbol, controller.on_tick)
+            (self._data_hub or self._market_data).unsubscribe(controller.symbol, controller.on_tick)
 
     def stop_trailing(self, entry_order_id: str) -> bool:
         """Stop and remove a trailing stop controller if it exists."""
@@ -1235,8 +1235,9 @@ class OrderManager:
             return False
         controller, callback = record
         try:
-            if self._market_data is not None:
-                self._market_data.unsubscribe(controller.symbol, callback)
+            hub = self._data_hub or self._market_data
+            if hub is not None:
+                hub.unsubscribe(controller.symbol, callback)
             self._trailing_journal.delete(controller.order_id)
         finally:
             return True
@@ -2260,11 +2261,10 @@ class OrderManager:
                                 # Use expected price for pre-activation
                                 activation_price = float(price or 0.0)
                                 if activation_price <= 0:
-                                    # Fallback: Try to get fresh quote
-                                    if self._market_data:
-                                        q = self._market_data.get_quote(
-                                            normalized_symbol
-                                        )
+                                    # Fallback: Try to get fresh quote via DataHub (SSOT)
+                                    _hub = self._data_hub or self._market_data
+                                    if _hub:
+                                        q = _hub.get_quote(normalized_symbol)
                                         if q:
                                             activation_price = float(
                                                 q.get("ltp")
@@ -4879,8 +4879,9 @@ class OrderManager:
             # not veto it.
             _exit_ltp: float | None = None
             try:
-                if self._market_data is not None:
-                    _exit_ltp = self._market_data.get_latest_price(symbol)
+                _price_source = self._data_hub or self._market_data
+                if _price_source is not None:
+                    _exit_ltp = _price_source.get_latest_price(symbol)
             except Exception as e:
                 __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
@@ -5198,10 +5199,9 @@ class OrderManager:
                 side = pos.side  # "LONG" or "SHORT"
                 tag = getattr(pos, "tag", "Manual/Unknown")
 
-                # Get Live Market Data
-                ltp = 0.0
-                if self._market_data:
-                    ltp = self._market_data.get_latest_price(symbol) or 0.0
+                # Get Live Market Data via DataHub (SSOT)
+                _src = self._data_hub or self._market_data
+                ltp = (_src.get_latest_price(symbol) or 0.0) if _src else 0.0
 
                 # Calculate P&L
                 raw_pnl = 0.0
@@ -5807,8 +5807,9 @@ class OrderManager:
                 if getattr(pos, "state", None) == "force_closed_by_sl":
                     continue
                 ltp = None
-                if self._market_data is not None:
-                    ltp = self._market_data.get_latest_price(symbol)
+                _src = self._data_hub or self._market_data
+                if _src is not None:
+                    ltp = _src.get_latest_price(symbol)
                 if ltp is None:
                     ltp = getattr(pos, "current_price", None)
                 if ltp is None:
@@ -10791,14 +10792,14 @@ class OrderManager:
                             __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
                             raise
 
-                    if self._market_data:
-                        self._market_data.ensure_tracking(symbol, seed=True)
-
-                        if hasattr(self._market_data, "subscribe"):
-                            self._market_data.subscribe(symbol, bracket_tick_handler)
-
+                    _hub = self._data_hub or self._market_data
+                    if _hub:
+                        try:
+                            _hub.ensure_tracking(symbol, seed=True)
+                        except Exception:
+                            pass
+                        _hub.subscribe(symbol, bracket_tick_handler)
                         self._bracket_tick_subscriptions.add(symbol)
-
                         self._logger.info(f"📡 Subscribed to {symbol} for guarding.")
         except Exception as e:
             self._logger.warning(f"Subscription attempt warning: {e}")
@@ -10810,9 +10811,10 @@ class OrderManager:
             base_price = 0.0
         current_ltp = 0.0
 
-        # Try to get fresh LTP from Cache (might be empty if cold start)
-        if self._market_data:
-            quote = self._market_data.get_quote(symbol)
+        # Try to get fresh LTP from Cache via DataHub (SSOT); might be empty on cold start.
+        _quote_src = self._data_hub or self._market_data
+        if _quote_src:
+            quote = _quote_src.get_quote(symbol)
             if quote:
                 current_ltp = float(quote.get("last_price") or quote.get("ltp") or 0.0)
 

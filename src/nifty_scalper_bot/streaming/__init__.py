@@ -1,14 +1,19 @@
-"""Streaming utilities for resilient market data delivery."""
+"""Streaming utilities for resilient market data delivery.
+
+Architecture:
+    - WebSocketManager: primary real-time tick source (Zerodha KiteTicker).
+    - PollingStreamer: REST fallback when WebSocket is unavailable.
+    - StreamSupervisor: lifecycle/autostart/health manager for the active streamer.
+
+All streamers feed MarketDataManager, which re-emits into DataHub (SSOT).
+"""
 
 from .polling_streamer import PollingStreamer
-from .resilient_streamer import ResilientStreamer, StreamMetrics
 from .stream_supervisor import StreamHealth, StreamSupervisor
 from .websocket_manager import WebSocketManager
 
 __all__ = [
     "PollingStreamer",
-    "ResilientStreamer",
-    "StreamMetrics",
     "StreamSupervisor",
     "StreamHealth",
     "WebSocketManager",

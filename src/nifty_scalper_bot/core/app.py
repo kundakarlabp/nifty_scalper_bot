@@ -130,7 +130,6 @@ from nifty_scalper_bot.strategies.orchestrator import StrategyOrchestrator
 from nifty_scalper_bot.strategies.runner import StrategyRunner, StrategyRunnerConfig
 from nifty_scalper_bot.streaming import (
     PollingStreamer,
-    ResilientStreamer,
     StreamSupervisor,
 )
 from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
@@ -3446,7 +3445,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             bracket_manager = BracketManager(
                 order_manager=order_manager,
                 indicator_engine=indicator_engine,
-                market_data=market_data_manager,
+                # Pass DataHub (SSOT) as the market-data facade; bracket manager
+                # only needs subscribe/unsubscribe + quote access, which DataHub
+                # exposes and transparently delegates to MDM.
+                market_data=data_hub if 'data_hub' in locals() and data_hub else market_data_manager,
                 trade_journal=trade_journal,
             )
 
@@ -5789,8 +5791,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # 🚨 CRITICAL: Start MessageBus AFTER subscribers are registered 🚨
                 if ctx.message_bus and ctx.data_hub and ctx.strategy_runner:
                     ctx.data_hub.bus = ctx.message_bus
-                    if getattr(ctx, 'market_data_streamer', None):
-                        ctx.market_data_streamer.bus = ctx.message_bus
                     if getattr(ctx, 'market_data_manager', None):
                         ctx.market_data_manager.bus = ctx.message_bus
                     ctx.message_bus.subscribe(MessageType.TICK, ctx.data_hub.on_tick)
