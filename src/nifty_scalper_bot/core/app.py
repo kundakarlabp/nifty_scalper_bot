@@ -545,6 +545,74 @@ def _fetch_positions_with_retry(
     return []
 
 
+def _sync_data_hub_positions(
+    data_hub: Any | None,
+    position_manager: Any | None,
+    *,
+    logger: Any = LOGGER,
+) -> None:
+    if data_hub is None or position_manager is None:
+        return
+    try:
+        rows = [
+            {
+                "symbol": pos.symbol,
+                "quantity": pos.quantity if pos.side == "LONG" else -pos.quantity,
+                "average_price": pos.entry_price,
+            }
+            for pos in position_manager.get_open_positions()
+        ]
+        data_hub.replace_positions(rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "data_hub_position_sync_failed",
+            extra={"event": "data_hub_position_sync_failed", "error": str(exc)},
+            exc_info=exc,
+        )
+
+
+def _hydrate_positions(
+    *,
+    position_manager: Any,
+    persistent_state: Any,
+    broker_client: Any,
+    data_hub: Any | None,
+    logger: Any = LOGGER,
+    max_attempts: int,
+    backoff_min: float,
+    backoff_max: float,
+    backoff_multiplier: float,
+    jitter_fraction: float,
+    total_timeout_sec: float,
+) -> list[Mapping[str, object]] | None:
+    persisted_positions = persistent_state.load_positions()
+    broker_positions: list[Mapping[str, object]] | None
+    try:
+        broker_positions = _fetch_positions_with_retry(
+            broker_client,
+            max_attempts=max_attempts,
+            backoff_min=backoff_min,
+            backoff_max=backoff_max,
+            backoff_multiplier=backoff_multiplier,
+            jitter_fraction=jitter_fraction,
+            total_timeout_sec=total_timeout_sec,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "broker_position_sync_failed",
+            extra={"event": "broker_position_sync_failed", "error": str(exc)},
+        )
+        broker_positions = None
+
+    if broker_positions is None:
+        position_manager.restore_positions(persisted_positions)
+    else:
+        position_manager.synchronize_with_broker(broker_positions)
+
+    _sync_data_hub_positions(data_hub, position_manager, logger=logger)
+    return broker_positions
+
+
 def get_latest_bot_context() -> "BotContext | None":
     """Return the most recently initialized bot context, if any."""
 
@@ -3230,15 +3298,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     position_state_path = Path(data_dir) / "positions.json"
     position_manager = PositionManager(state_file=str(position_state_path))
     position_manager.attach_persistent_state(persistent_state)
-    position_manager.restore_positions(persistent_state.load_positions())
-    data_hub.replace_positions(
-        {
-            "symbol": pos.symbol,
-            "quantity": pos.quantity if pos.side == "LONG" else -pos.quantity,
-            "average_price": pos.entry_price,
-        }
-        for pos in position_manager.get_open_positions()
-    )
 
     broker_sync_attempts = max(
         1,
@@ -3280,25 +3339,19 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ),
     )
 
-    try:
-        # [FIX] Indented correctly inside try
-        broker_positions = _fetch_positions_with_retry(
-            broker_client,
-            max_attempts=broker_sync_attempts,
-            backoff_min=broker_sync_backoff_min,
-            backoff_max=broker_sync_backoff_max,
-            backoff_multiplier=broker_sync_backoff_multiplier,
-            jitter_fraction=broker_sync_jitter,
-            total_timeout_sec=60.0,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.error(
-            "broker_position_sync_failed",
-            extra={"event": "broker_position_sync_failed", "error": str(exc)},
-        )
-        broker_positions = []
-    if broker_positions:
-        position_manager.synchronize_with_broker(broker_positions)
+    _hydrate_positions(
+        position_manager=position_manager,
+        persistent_state=persistent_state,
+        broker_client=broker_client,
+        data_hub=data_hub,
+        logger=LOGGER,
+        max_attempts=broker_sync_attempts,
+        backoff_min=broker_sync_backoff_min,
+        backoff_max=broker_sync_backoff_max,
+        backoff_multiplier=broker_sync_backoff_multiplier,
+        jitter_fraction=broker_sync_jitter,
+        total_timeout_sec=60.0,
+    )
 
     initial_balance = float(
         getattr(config, "initial_balance", 1_000_000.0) or 1_000_000.0
@@ -6321,6 +6374,8 @@ async def _reconcile_state(ctx: BotContext) -> None:
 
         except Exception as exc:
             LOGGER.error(f"Position Sync/Adoption Failed: {exc}", exc_info=True)
+
+    _sync_data_hub_positions(getattr(ctx, "data_hub", None), ctx.position_manager)
 
     # 3. SITUATION REPORT
     if ctx.order_manager:

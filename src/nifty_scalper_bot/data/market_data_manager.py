@@ -221,7 +221,13 @@ class MarketDataManager:
 
         ws_disabled = os.getenv("WEBSOCKET__DISABLED", "false").lower() == "true"
         poll_src = os.getenv("DATA_READINESS_SOURCE", "").upper() == "POLL"
-        self._rest_poll_enabled = ws_disabled or poll_src
+        poll_fallback_env = os.getenv("MDM_POLL_FALLBACK", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._rest_poll_enabled = ws_disabled or poll_src or poll_fallback_env
         self._rest_poll_interval = self._parse_float_env(
             "MDM_POLL_INTERVAL_SECONDS", default=1.5, minimum=0.5
         )
@@ -409,21 +415,23 @@ class MarketDataManager:
             return
         try:
             symbol = normalize_symbol(str(symbol))
+            source = str(quote.get("source") or "poll").lower()
+            prepared = self._prepare_rest_tick(quote, source=source)
             with self._lock:
                 previous = self._latest_ticks.get(symbol)
-            normalized = self._normalize_tick(symbol, dict(quote), previous)
+            normalized = self._normalize_tick(symbol, prepared, previous)
             if normalized is None:
                 return
-            # Ensure timestamp present for downstream validator
-            if "timestamp" not in normalized:
-                normalized["timestamp"] = time.time()
             poll_ts = normalized.get("timestamp")
             if isinstance(poll_ts, (int, float)):
                 poll_bucket = int(float(poll_ts) // 60)
                 current_live_bucket = int(time.time() // 60)
                 if poll_bucket > current_live_bucket:
                     return
-            normalized.setdefault("source", "poll")
+            if self._is_duplicate(symbol, normalized):
+                self._store_tick(symbol, normalized)
+            else:
+                self._emit_tick(symbol, normalized, source=source)
             self._process_poll_quote(symbol, normalized)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
@@ -1397,6 +1405,7 @@ class MarketDataManager:
                 quote = dict(raw_quote)
         if quote is None:
             return {"symbol": symbol}
+        quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:
             previous = self._latest_ticks.get(symbol)
 
@@ -4300,11 +4309,28 @@ class MarketDataManager:
         Raises:
             None.
         """
-
-        del symbol
-        return
+        quote = self._broker.get_quote(symbol)
+        if not isinstance(quote, dict):
+            return
+        quote = self._prepare_rest_tick(quote, source="rest")
+        with self._lock:
+            previous = self._latest_ticks.get(symbol)
+        normalized = self._normalize_tick(symbol, quote, previous)
+        if normalized is None:
+            return
+        if self._is_duplicate(symbol, normalized):
+            self._store_tick(symbol, normalized)
+        else:
+            self._emit_tick(symbol, normalized, source="rest")
+        self._process_poll_quote(symbol, normalized)
 
     def _has_recent_rest_ticks(self) -> bool:
+        cutoff = time.time() - max(self._rest_poll_interval * 2.0, 5.0)
+        with self._lock:
+            for symbol, ts in self._last_tick_wallclock.items():
+                source = self._last_tick_source.get(symbol)
+                if source in {"rest", "poll"} and ts >= cutoff:
+                    return True
         return False
 
     @staticmethod
@@ -4509,6 +4535,12 @@ class MarketDataManager:
             "ltq": tick.get("last_quantity"),
             "oi": self._coerce_float(tick, "oi", "open_interest"),
         }
+        source = tick.get("source")
+        if isinstance(source, str) and source:
+            normalized["source"] = source
+        broker_timestamp = tick.get("broker_timestamp")
+        if broker_timestamp is not None:
+            normalized["broker_timestamp"] = broker_timestamp
 
         # 5. Volume Handling
         volume = self._coerce_float(
@@ -4572,6 +4604,24 @@ class MarketDataManager:
                 val /= 1000.0
             return val
         return time.time()
+
+    @staticmethod
+    def _prepare_rest_tick(tick: Mapping[str, Any], *, source: str) -> dict[str, Any]:
+        payload = dict(tick)
+        broker_timestamp = payload.get("broker_timestamp")
+        if broker_timestamp is None:
+            broker_timestamp = (
+                payload.get("timestamp") or payload.get("ts") or payload.get("ts_ms")
+            )
+        if broker_timestamp is not None:
+            payload["broker_timestamp"] = broker_timestamp
+        observed_at = payload.pop("_local_timestamp", None)
+        payload["source"] = source
+        if isinstance(observed_at, (int, float)):
+            payload["timestamp"] = float(observed_at)
+        else:
+            payload["timestamp"] = time.time()
+        return payload
 
     def _is_duplicate(
         self,

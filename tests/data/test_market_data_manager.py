@@ -203,6 +203,35 @@ def test_rest_poll_fallback_dispatches_ticks(
         manager.stop()
 
 
+def test_rest_poll_uses_observed_time_for_freshness(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    observed_at = 10_000.0
+    broker.set_quote(
+        "NIFTY23",
+        {
+            "ltp": 100.0,
+            "bid": 99.5,
+            "ask": 100.5,
+            "timestamp": 1_000.0,
+        },
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.time.time",
+        lambda: observed_at,
+    )
+    manager = MarketDataManager(broker, ws)
+
+    manager._poll_symbol("NIFTY23")
+
+    latest = manager.get_latest_tick("NIFTY23")
+    assert latest is not None
+    assert latest["timestamp"] == pytest.approx(observed_at)
+    assert latest["broker_timestamp"] == pytest.approx(1_000.0)
+    assert latest["source"] == "rest"
+    assert manager._has_recent_rest_ticks()
+
+
 def test_ohlc_builder_generates_minute_bars(
     monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
 ) -> None:
