@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
 
 from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.risk.risk_manager import RiskManager
@@ -68,3 +69,24 @@ def test_record_rejection_margin_is_soft() -> None:
     assert risk.cooldown_remaining() == 0.0
     assert risk._cooldown_until is None
     assert risk._last_rejection == "MARGIN"
+
+
+def test_refresh_account_balance_returns_cached_value_within_ttl() -> None:
+    class _Hub:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_available_balance(self, *, force: bool = False) -> float:
+            self.calls += 1
+            return 75_000.0
+
+    risk = _make_risk_manager()
+    hub = _Hub()
+    risk._data_hub = hub
+    risk._cached_balance = 50_000.0
+    risk.account_balance = 50_000.0
+    risk._last_balance_refresh = time.time()
+    risk._balance_cache_ttl = 60.0
+
+    assert risk.refresh_account_balance() == 50_000.0
+    assert hub.calls == 0

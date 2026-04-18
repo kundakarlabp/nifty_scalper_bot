@@ -51,7 +51,7 @@ class ResilientStreamer:
         self._ws = websocket
         self._rest = rest_client
         self._settings = settings
-        self._loop = loop or asyncio.get_event_loop()
+        self._loop = loop
         self._logger = get_logger(__name__)
         self._queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(
             maxsize=settings.streamer.queue_size
@@ -103,6 +103,7 @@ class ResilientStreamer:
 
         if self._dispatcher_task is not None:
             return
+        self._loop = asyncio.get_running_loop()
         self._dispatcher_task = self._loop.create_task(self._dispatch_loop())
         self._ws.start()
 
@@ -120,6 +121,7 @@ class ResilientStreamer:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        self._loop = None
 
     # ------------------------------------------------------------------
     # Public helpers exposed to tests/health endpoints
@@ -140,6 +142,27 @@ class ResilientStreamer:
 
     # ------------------------------------------------------------------
     def _handle_tick(self, tick: dict[str, object]) -> None:  # pragma: no cover
+        payload = dict(tick)
+        loop = self._loop
+        if loop is None:
+            self._enqueue_tick(payload)
+            return
+        if loop.is_closed():
+            self._logger.debug("Dropping tick because resilient loop is closed")
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            self._enqueue_tick(payload)
+            return
+        try:
+            loop.call_soon_threadsafe(self._enqueue_tick, payload)
+        except RuntimeError:
+            self._logger.debug("Dropping tick because resilient loop is unavailable")
+
+    def _enqueue_tick(self, tick: dict[str, object]) -> None:
         symbol = str(tick.get("symbol") or tick.get("tradingsymbol") or "")
         timestamp = self._extract_timestamp_ms(tick)
         price = self._extract_price(tick)
@@ -207,6 +230,8 @@ class ResilientStreamer:
             self._gaps.inc()
         except Exception:  # pragma: no cover - optional metrics
             pass
+        if self._loop is None or self._loop.is_closed():
+            return
         task = self._loop.create_task(
             self._request_backfill(symbol, timestamp_ms, gap_seconds)
         )

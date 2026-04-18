@@ -9,6 +9,7 @@ import inspect
 import os
 from pathlib import Path
 import random
+from types import SimpleNamespace
 import time as time_module
 from typing import (
     TYPE_CHECKING,
@@ -1408,11 +1409,40 @@ def _bind_ws_mdm(ctx: BotContext) -> None:
         ws.set_callbacks(on_connect=_on_connect, on_disconnect=_on_disconnect)
 
 
-async def reconcile_positions_on_startup(
+def _sync_data_hub_positions(
+    data_hub: Any | None,
+    position_manager: Any,
+    *,
+    logger: Any = LOGGER,
+) -> None:
+    if data_hub is None:
+        return
+    try:
+        rows = [
+            {
+                "symbol": pos.symbol,
+                "quantity": pos.quantity if pos.side == "LONG" else -pos.quantity,
+                "average_price": pos.entry_price,
+            }
+            for pos in position_manager.get_open_positions()
+        ]
+        data_hub.replace_positions(rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "data_hub_position_sync_failed",
+            extra={"event": "data_hub_position_sync_failed", "error": str(exc)},
+            exc_info=exc,
+        )
+
+
+def reconcile_positions_on_startup(
     broker_client: Any,
     position_manager: Any,
     order_manager: Any,
     logger: Any,
+    *,
+    data_hub: Any | None = None,
+    broker_positions: list[Mapping[str, Any]] | None = None,
 ) -> None:
     """Reconcile local positions with broker state on startup.
 
@@ -1438,160 +1468,21 @@ async def reconcile_positions_on_startup(
             ).__name__,
         },
     )
-    logger.info(
-        "Starting position reconciliation",
-        extra={"event": "reconcile.start"},
-    )
-
     try:
-        broker_snapshot: list[Mapping[str, Any]] = []
-        raw_positions = broker_client.get_positions()
-        for entry in raw_positions:
-            if isinstance(entry, Mapping):
-                broker_snapshot.append(entry)
-
-        local_positions = position_manager.get_all_positions()
-
-        def _normalize_symbol(payload: Mapping[str, Any]) -> str:
-            raw_symbol = (
-                payload.get("tradingsymbol")
-                or payload.get("symbol")
-                or payload.get("instrument")
-                or ""
-            )
-            symbol = str(raw_symbol).strip().upper()
-            if ":" in symbol:
-                symbol = symbol.split(":", maxsplit=1)[-1].strip().upper()
-            return symbol
-
-        def _extract_quantity(payload: Mapping[str, Any]) -> int:
-            """Return the integer quantity from a broker payload.
-
-            Args:
-                payload: Raw broker position payload.
-
-            Returns:
-                Normalised signed quantity as an integer.
-
-            Raises:
-                None.
-            """
-
-            quantity_candidate = (
-                payload.get("net_qty")
-                or payload.get("net_quantity")
-                or payload.get("netQuantity")
-                or payload.get("quantity")
-                or payload.get("net")
-            )
-            if quantity_candidate is None:
-                return 0
-            try:
-                numeric_quantity = float(quantity_candidate)
-            except (TypeError, ValueError):
-                return 0
-            return int(numeric_quantity)
-
-        def _extract_average_price(payload: Mapping[str, Any]) -> float:
-            """Return the average price from a broker payload.
-
-            Args:
-                payload: Raw broker position payload.
-
-            Returns:
-                Average price when available, otherwise ``0.0``.
-
-            Raises:
-                None.
-            """
-
-            price_candidate = (
-                payload.get("average_price")
-                or payload.get("avg_price")
-                or payload.get("price")
-                or payload.get("buy_price")
-                or payload.get("sell_price")
-            )
-            if price_candidate is None:
-                return 0.0
-            try:
-                return float(price_candidate)
-            except (TypeError, ValueError):
-                return 0.0
-
-        broker_symbols: dict[str, dict[str, Any]] = {}
-        for payload in broker_snapshot:
-            symbol = _normalize_symbol(payload)
-            if not symbol:
-                continue
-            quantity = _extract_quantity(payload)
-            if quantity == 0:
-                continue
-            broker_symbols[symbol] = {
-                "quantity": quantity,
-                "average_price": _extract_average_price(payload),
-                "raw": payload,
-            }
-
-        local_symbols = {pos.symbol: pos for pos in local_positions}
-        orphaned = set(broker_symbols) - set(local_symbols)
-
-        if orphaned:
-            logger.warning(
-                "Found orphaned positions in broker",
-                extra={
-                    "event": "reconcile.orphaned",
-                    "symbols": sorted(orphaned),
-                    "count": len(orphaned),
-                },
-            )
-            for symbol in sorted(orphaned):
-                broker_position = broker_symbols[symbol]
-                logger.info(
-                    "Imported orphaned position",
-                    extra={
-                        "event": "reconcile.import",
-                        "symbol": symbol,
-                        "quantity": broker_position["quantity"],
-                    },
-                )
-
-        mismatch_symbols: list[str] = []
-        for symbol, local_position in local_symbols.items():
-            broker_pos: dict[str, Any] | None = broker_symbols.get(symbol)
-            if broker_pos is None:
-                continue
-            broker_qty_raw = int(broker_pos.get("quantity", 0))
-            broker_qty = abs(broker_qty_raw)
-            broker_side = "LONG" if broker_qty_raw > 0 else "SHORT"
-            local_qty = int(getattr(local_position, "quantity", 0))
-            local_side = str(getattr(local_position, "side", "LONG")).upper()
-            if broker_qty != local_qty or broker_side != local_side:
-                mismatch_symbols.append(symbol)
-                logger.warning(
-                    "Position quantity mismatch",
-                    extra={
-                        "event": "reconcile.mismatch",
-                        "symbol": symbol,
-                        "broker_qty": broker_qty,
-                        "broker_side": broker_side,
-                        "local_qty": local_qty,
-                        "local_side": local_side,
-                    },
-                )
-
-        if broker_snapshot:
-            position_manager.synchronize_with_broker(broker_snapshot)
-
         logger.info(
-            "Reconciliation complete",
-            extra={
-                "event": "reconcile.complete",
-                "orphaned_count": len(orphaned),
-                "mismatch_count": len(mismatch_symbols),
-            },
+            "Starting position reconciliation",
+            extra={"event": "reconcile.start"},
         )
-
+        broker_source = broker_client
+        if broker_positions is not None:
+            broker_source = SimpleNamespace(get_positions=lambda: list(broker_positions))
+        ctx = SimpleNamespace(
+            broker_client=broker_source,
+            position_manager=position_manager,
+            order_manager=order_manager,
+            data_hub=data_hub,
+        )
+        _reconcile_state(ctx)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "Position reconciliation failed",
@@ -2038,15 +1929,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     position_state_path = Path("data") / "positions.json"
     position_manager = PositionManager(state_file=str(position_state_path))
     position_manager.attach_persistent_state(persistent_state)
-    position_manager.restore_positions(persistent_state.load_positions())
-    data_hub.replace_positions(
-        {
-            "symbol": pos.symbol,
-            "quantity": pos.quantity if pos.side == "LONG" else -pos.quantity,
-            "average_price": pos.entry_price,
-        }
-        for pos in position_manager.get_open_positions()
-    )
+    persisted_positions = persistent_state.load_positions()
 
     broker_sync_attempts = max(
         1,
@@ -2088,6 +1971,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ),
     )
 
+    broker_positions: list[Mapping[str, Any]] | None
     try:
         broker_positions = _fetch_positions_with_retry(
             broker_client,
@@ -2102,9 +1986,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             "broker_position_sync_failed",
             extra={"event": "broker_position_sync_failed", "error": str(exc)},
         )
-        broker_positions = []
-    if broker_positions:
+        broker_positions = None
+    if broker_positions is None:
+        position_manager.restore_positions(persisted_positions)
+    else:
         position_manager.synchronize_with_broker(broker_positions)
+    _sync_data_hub_positions(data_hub, position_manager)
 
     initial_balance = float(
         getattr(config, "initial_balance", 1_000_000.0) or 1_000_000.0
@@ -2596,13 +2483,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
 
     try:
-        asyncio.run(
-            reconcile_positions_on_startup(
-                broker_client=broker_client,
-                position_manager=position_manager,
-                order_manager=order_manager,
-                logger=LOGGER,
-            )
+        reconcile_positions_on_startup(
+            broker_client=broker_client,
+            position_manager=position_manager,
+            order_manager=order_manager,
+            logger=LOGGER,
+            data_hub=data_hub,
+            broker_positions=broker_positions,
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
@@ -2614,13 +2501,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             exc_info=exc,
         )
         if notifier is not None:
-            LOGGER.info(
-                "Skipping startup reconciliation alert while loop is unavailable",
-                extra={
-                    "event": "startup.reconcile.alert_skipped",
-                    "reason": "startup_event_loop_unavailable",
-                },
-            )
+            LOGGER.info("Startup reconciliation alert suppressed", extra={"event": "startup.reconcile.alert_suppressed"})
 
     background_tasks: list[asyncio.Task[Any]] = []
     try:
@@ -3627,16 +3508,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 extra={"event": "instrument_load_failed"},
             )
 
-    if broker_ready:
-        try:
-            _reconcile_state(ctx)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning(
-                "State reconciliation failed: %s",
-                exc,
-                extra={"event": "state_reconcile_failed"},
-            )
-    else:
+    if not broker_ready:
         LOGGER.info("Continuing startup in degraded mode (broker unavailable)")
 
     hub = getattr(ctx, "order_execution_hub", None)
@@ -4036,7 +3908,6 @@ def _reconcile_state(ctx: BotContext) -> None:
         expiry_dt = _parse_expiry(entry)
         underlying = _derive_underlying(symbol)
         option_type = _option_kind(symbol, entry)
-        should_guard = symbol in missing_locally
         cached_contract: ActiveContract | None = None
         if underlying:
             try:
@@ -4063,7 +3934,7 @@ def _reconcile_state(ctx: BotContext) -> None:
                 },
             )
             continue
-        if existing_position is None and should_guard:
+        if existing_position is None:
             entry_price = avg_price or last_price or 0.0
             try:
                 position_manager.open_position(
@@ -4120,7 +3991,7 @@ def _reconcile_state(ctx: BotContext) -> None:
                             "err": str(exc),
                         },
                     )
-        if should_guard and order_manager is not None:
+        if order_manager is not None:
             try:
                 if not order_manager.has_guard_pair(symbol):
                     order_manager.guard_existing_position(
@@ -4140,6 +4011,7 @@ def _reconcile_state(ctx: BotContext) -> None:
                         "err": str(exc),
                     },
                 )
+    _sync_data_hub_positions(getattr(ctx, "data_hub", None), position_manager)
 
 
 def _close_all_positions(ctx: BotContext, *, reason: str) -> None:

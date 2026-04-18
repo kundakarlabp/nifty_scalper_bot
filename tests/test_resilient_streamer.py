@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -83,3 +84,26 @@ def test_handle_tick_replaces_oldest_when_queue_full() -> None:
     assert streamer.backlog_size() == 1
     queued = streamer._queue.get_nowait()  # type: ignore[attr-defined]
     assert queued["symbol"] == "NEW"
+
+
+@pytest.mark.asyncio
+async def test_start_rebinds_dispatch_loop_to_running_loop() -> None:
+    dormant_loop = asyncio.new_event_loop()
+    ws = FakeWS()
+    rest = FakeRest()
+    streamer = ResilientStreamer(ws, rest, DummySettings(), loop=dormant_loop)
+    received: list[dict[str, object]] = []
+    streamer.register_handler(received.append)
+
+    try:
+        await streamer.start()
+        ws.on_tick({"symbol": "NIFTY", "ts_ms": 1_700_000_000_000, "ltp": 10})
+        for _ in range(20):
+            if received:
+                break
+            await asyncio.sleep(0.01)
+        assert received
+        assert received[0]["symbol"] == "NIFTY"
+    finally:
+        await streamer.stop()
+        dormant_loop.close()

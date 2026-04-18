@@ -158,132 +158,8 @@ class MarketDataManager:
         self._cache_len = cache_len
         self._duplicate_window = max(duplicate_window_ms, 0) / 1000.0
         self._resolver = resolver
-        # --- InstrumentResolver warm (WARM_INJECTED_BY_SCRIPT) -----------------
-        # Warm the resolver to populate instrument metadata cache. Background by
-        # default; can be made blocking with env MDM_RESOLVER_WARM_BLOCKING=1 and
-        # timeout via MDM_RESOLVER_WARM_TIMEOUT_SEC (seconds).
-        try:
-            resolver = getattr(self, "_resolver", None)
-            warm_fn = getattr(resolver, "warm", None) if resolver is not None else None
-            if callable(warm_fn):
-                from os import getenv
-                blocking = str(getenv("MDM_RESOLVER_WARM_BLOCKING", "0")).strip().lower() in ("1","true","yes","on")
-                try:
-                    timeout = float(getenv("MDM_RESOLVER_WARM_TIMEOUT_SEC", "10"))
-                except Exception:
-                    timeout = 10.0
-                # non-blocking by default: spawn background thread
-                def _bg_warm() -> None:
-                    try:
-                        warm_fn()
-                        _logger.info("InstrumentResolver warm (background) complete", extra={"event": "mdm_resolver_warm_bg_done"})
-                    except Exception as exc:
-                        _logger.warning("InstrumentResolver warm (background) failed", extra={"event": "mdm_resolver_warm_bg_failed", "error": str(exc)})
-                if blocking:
-                    _logger.info("InstrumentResolver warm (blocking) starting", extra={"event": "mdm_resolver_warm_start"})
-                    t = threading.Thread(target=lambda: warm_fn(), name="mdm-resolver-warm-block", daemon=True)
-                    t.start()
-                    t.join(timeout=timeout)
-                    if t.is_alive():
-                        _logger.warning("InstrumentResolver warm timed out (continuing)", extra={"event": "mdm_resolver_warm_timeout", "timeout": timeout})
-                    else:
-                        _logger.info("InstrumentResolver warm completed", extra={"event": "mdm_resolver_warm_done"})
-                else:
-                    _logger.info("InstrumentResolver warm scheduled (background)", extra={"event": "mdm_resolver_warm_bg_start"})
-                    bg = threading.Thread(target=_bg_warm, name="mdm-resolver-warm-bg", daemon=True)
-                    bg.start()
-        except Exception as exc:
-            # never fail initialization due to resolver warm
-            _logger.warning("InstrumentResolver warm failed to start", extra={"event": "mdm_resolver_warm_error", "error": str(exc)})
-        # WARM_INJECTED_BY_SCRIPT_END
-
-        # --- InstrumentResolver warm (WARM_INJECTED_BY_SCRIPT) -----------------
-        # Warm the resolver to populate instrument metadata cache. Background by
-        # default; can be made blocking with env MDM_RESOLVER_WARM_BLOCKING=1 and
-        # timeout via MDM_RESOLVER_WARM_TIMEOUT_SEC (seconds).
-        try:
-            resolver = getattr(self, "_resolver", None)
-            warm_fn = getattr(resolver, "warm", None) if resolver is not None else None
-            if callable(warm_fn):
-                from os import getenv
-                blocking = str(getenv("MDM_RESOLVER_WARM_BLOCKING", "0")).strip().lower() in ("1","true","yes","on")
-                if blocking:
-                    try:
-                        timeout = float(getenv("MDM_RESOLVER_WARM_TIMEOUT_SEC", "10"))
-                    except Exception:
-                        timeout = 10.0
-                    _logger.info("InstrumentResolver warm (blocking) starting", extra={"event": "mdm_resolver_warm_start"})
-                    t = threading.Thread(target=lambda: warm_fn(), name="mdm-resolver-warm-block", daemon=True)
-                    t.start()
-                    t.join(timeout=timeout)
-                    if t.is_alive():
-                        _logger.warning("InstrumentResolver warm timed out (continuing)", extra={"event": "mdm_resolver_warm_timeout", "timeout": timeout})
-                    else:
-                        _logger.info("InstrumentResolver warm completed", extra={"event": "mdm_resolver_warm_done"})
-                else:
-                    _logger.info("InstrumentResolver warm scheduled (background)", extra={"event": "mdm_resolver_warm_bg_start"})
-                    def _safe_warm():
-                        try:
-                            warm_fn()
-                            _logger.info("InstrumentResolver warm (background) complete", extra={"event": "mdm_resolver_warm_bg_done"})
-                        except Exception as exc:  # noqa: BLE001
-                            _logger.warning("InstrumentResolver warm (background) failed", extra={"event": "mdm_resolver_warm_bg_failed", "error": str(exc)})
-                    bg = threading.Thread(target=_safe_warm, name="mdm-resolver-warm-bg", daemon=True)
-                    bg.start()
-        except Exception as exc:  # defensive: never break MDM init
-            self._logger.warning("InstrumentResolver warm failed to start", extra={"event": "mdm_resolver_warm_error", "error": str(exc)})
-
-
         self._logger = get_logger(__name__)
-
-        # --- InstrumentResolver warm (non-blocking by default) -----------------
-        try:
-            if self._resolver is not None and hasattr(self._resolver, "warm"):
-                # Opt into blocking warm via env, else warm in background.
-                blocking = os.getenv("MDM_RESOLVER_WARM_BLOCKING", "").strip().lower() in {
-                    "1", "true", "yes", "on"
-                }
-                timeout_s = 5.0
-                try:
-                    timeout_s = float(os.getenv("MDM_RESOLVER_WARM_TIMEOUT_SEC", "5.0"))
-                except Exception:
-                    timeout_s = 5.0
-
-                def _do_warm() -> None:
-                    try:
-                        self._logger.info("InstrumentResolver: warm() starting")
-                        self._resolver.warm()
-                        self._logger.info("InstrumentResolver: warm() completed")
-                    except Exception as exc:  # pragma: no cover - resolver warm may fail in some envs
-                        self._logger.warning(
-                            "InstrumentResolver warm() failed: %s",
-                            exc,
-                            extra={"event": "resolver_warm_error"},
-                        )
-
-                if blocking:
-                    thread = threading.Thread(target=_do_warm, name="mdm-resolver-warm", daemon=True)
-                    thread.start()
-                    thread.join(timeout=timeout_s)
-                    if thread.is_alive():
-                        self._logger.warning(
-                            "InstrumentResolver warm() timed out after %.2fs",
-                            timeout_s,
-                            extra={"event": "resolver_warm_timeout"},
-                        )
-                else:
-                    thread = threading.Thread(target=_do_warm, name="mdm-resolver-warm", daemon=True)
-                    thread.start()
-            else:
-                if self._resolver is not None:
-                    self._logger.debug("InstrumentResolver provided but has no warm() method")
-        except Exception as exc:
-            self._logger.error(
-                "Failed to start InstrumentResolver warm task: %s",
-                exc,
-                extra={"event": "resolver_warm_start_error"},
-            )
-        # ---------------------------------------------------------------------
+        self._warm_resolver()
 
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
         self._latest_ticks: dict[str, dict[str, Any]] = {}
@@ -407,6 +283,59 @@ class MarketDataManager:
         """
 
         return time.time() * 1000.0
+
+    def _warm_resolver(self) -> None:
+        resolver = self._resolver
+        warm_fn = getattr(resolver, "warm", None) if resolver is not None else None
+        if not callable(warm_fn):
+            if resolver is not None:
+                self._logger.debug("InstrumentResolver provided but has no warm() method")
+            return
+
+        blocking = os.getenv("MDM_RESOLVER_WARM_BLOCKING", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        try:
+            timeout_s = float(os.getenv("MDM_RESOLVER_WARM_TIMEOUT_SEC", "5.0"))
+        except Exception:
+            timeout_s = 5.0
+
+        def _run_warm() -> None:
+            try:
+                self._logger.info("InstrumentResolver warm() starting")
+                warm_fn()
+                self._logger.info("InstrumentResolver warm() completed")
+            except Exception as exc:  # pragma: no cover - resolver warm may fail in some envs
+                self._logger.warning(
+                    "InstrumentResolver warm() failed: %s",
+                    exc,
+                    extra={"event": "resolver_warm_error"},
+                )
+
+        try:
+            thread = threading.Thread(
+                target=_run_warm,
+                name="mdm-resolver-warm",
+                daemon=True,
+            )
+            thread.start()
+            if blocking:
+                thread.join(timeout=timeout_s)
+                if thread.is_alive():
+                    self._logger.warning(
+                        "InstrumentResolver warm() timed out after %.2fs",
+                        timeout_s,
+                        extra={"event": "resolver_warm_timeout"},
+                    )
+        except Exception as exc:
+            self._logger.error(
+                "Failed to start InstrumentResolver warm task: %s",
+                exc,
+                extra={"event": "resolver_warm_start_error"},
+            )
 
     # ------------------------------------------------------------------
     # Option chain helpers
@@ -1068,6 +997,7 @@ class MarketDataManager:
         quote = self._broker.get_quote(symbol)
         if not isinstance(quote, dict):
             return {"symbol": symbol}
+        quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:
             previous = self._latest_ticks.get(symbol)
 
@@ -2193,6 +2123,7 @@ class MarketDataManager:
         quote = self._broker.get_quote(symbol)
         if not isinstance(quote, dict):
             return
+        quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:
             previous = self._latest_ticks.get(symbol)
         normalized = self._normalize_tick(symbol, quote, previous)
@@ -2345,6 +2276,12 @@ class MarketDataManager:
             "ask": ask,
             "timestamp": timestamp,
         }
+        source = tick.get("source")
+        if isinstance(source, str) and source:
+            normalized["source"] = source
+        broker_timestamp = tick.get("broker_timestamp")
+        if broker_timestamp is not None:
+            normalized["broker_timestamp"] = broker_timestamp
         volume = self._coerce_float(
             tick,
             "volume_traded_today",
@@ -2400,6 +2337,18 @@ class MarketDataManager:
                 val /= 1000.0
             return val
         return time.time()
+
+    @staticmethod
+    def _prepare_rest_tick(tick: Mapping[str, Any], *, source: str) -> dict[str, Any]:
+        payload = dict(tick)
+        broker_timestamp = (
+            payload.get("timestamp") or payload.get("ts") or payload.get("ts_ms")
+        )
+        if broker_timestamp is not None:
+            payload["broker_timestamp"] = broker_timestamp
+        payload["source"] = source
+        payload["timestamp"] = time.time()
+        return payload
 
     def _is_duplicate(
         self,

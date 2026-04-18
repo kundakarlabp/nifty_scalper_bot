@@ -339,80 +339,87 @@ class RiskManager:
             extra={"event": "risk_balance_refresh_start", "force": force},
         )
 
-    now = time.time()
-    if not force and now - self._last_balance_refresh < self._balance_cache_ttl:
-        self._logger.debug(
-            "Condition met: risk_balance_cache_hit",
-            extra={"event": "risk_balance_cache_hit"},
-        )
-
-    hub = self._data_hub
-    if hub is None:
-        self._logger.error(
-            "RiskManager data hub not attached: refusing to trade with missing realtime account balance.",
-            extra={"event": "risk_balance_no_data_hub"},
-        )
-        raise RuntimeError(
-            "RiskManager: No data hub attached, cannot proceed with live trading. Balance unavailable."
-        )
-
-    # small retry wrapper
-    def _try_get_balance(attempts=3):
-        delay = 0.5
-        last_exc = None
-        for _ in range(attempts):
-            try:
-                return hub.get_available_balance(force=force)
-            except Exception as e:
-                last_exc = e
-                self._logger.warning("balance_fetch_retry", extra={"err": str(e)})
-                time.sleep(delay)
-                delay *= 2
-        raise last_exc
-
-    try:
-        balance_ret = _try_get_balance()
-        # handle tuple return (value, meta) or direct numeric
-        if isinstance(balance_ret, tuple):
-            balance = balance_ret[0]
-        else:
-            balance = balance_ret
-
-        if balance is None:
-            snapshot = hub.get_account_snapshot(force=force)
-            balance = self._extract_balance_from_payload(snapshot)
-
-        if balance is not None and balance > 0:
-            self.account_balance = float(balance)
-            self._cached_balance = self.account_balance
-            self._last_balance_refresh = now
-            self._logger.info(
-                "Condition met: balance_updated_from_data_hub",
-                extra={
-                    "event": "balance_updated",
-                    "balance": round(self.account_balance, 2),
-                },
+        now = time.time()
+        if not force and now - self._last_balance_refresh < self._balance_cache_ttl:
+            self._logger.debug(
+                "Condition met: risk_balance_cache_hit",
+                extra={"event": "risk_balance_cache_hit"},
             )
-            return self.account_balance
+            cached = float(self._cached_balance or self.account_balance or 0.0)
+            if cached > 0:
+                self.account_balance = cached
+                return cached
 
-        self._logger.critical(
-            "RiskManager: Broker/API failed to supply balance. Trading is disallowed.",
-            extra={"event": "risk_balance_broker_failure"},
-        )
-        raise RuntimeError(
-            "RiskManager: Broker/API failed to supply account balance. Trading is disallowed."
-        )
+        hub = self._data_hub
+        if hub is None:
+            self._logger.error(
+                "RiskManager data hub not attached: refusing to trade with missing realtime account balance.",
+                extra={"event": "risk_balance_no_data_hub"},
+            )
+            raise RuntimeError(
+                "RiskManager: No data hub attached, cannot proceed with live trading. Balance unavailable."
+            )
 
-    except Exception as exc:
-        self._logger.error(
-            "Failure in RiskManager.refresh_account_balance (exception): %s",
-            exc,
-            extra={"event": "balance_fetch_error"},
-            exc_info=True,
-        )
-        raise RuntimeError(
-            "RiskManager: Exception fetching live broker balance, cannot trade."
-        ) from exc
+        def _try_get_balance(attempts: int = 3) -> Any:
+            delay = 0.5
+            last_exc: Exception | None = None
+            for _ in range(attempts):
+                try:
+                    return hub.get_available_balance(force=force)
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    self._logger.warning(
+                        "balance_fetch_retry",
+                        extra={"err": str(exc)},
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+            if last_exc is None:
+                raise RuntimeError("balance fetch failed without an exception")
+            raise last_exc
+
+        try:
+            balance_ret = _try_get_balance()
+            if isinstance(balance_ret, tuple):
+                balance = balance_ret[0]
+            else:
+                balance = balance_ret
+
+            if balance is None:
+                snapshot = hub.get_account_snapshot(force=force)
+                balance = self._extract_balance_from_payload(snapshot)
+
+            if balance is not None and balance > 0:
+                self.account_balance = float(balance)
+                self._cached_balance = self.account_balance
+                self._last_balance_refresh = now
+                self._logger.info(
+                    "Condition met: balance_updated_from_data_hub",
+                    extra={
+                        "event": "balance_updated",
+                        "balance": round(self.account_balance, 2),
+                    },
+                )
+                return self.account_balance
+
+            self._logger.critical(
+                "RiskManager: Broker/API failed to supply balance. Trading is disallowed.",
+                extra={"event": "risk_balance_broker_failure"},
+            )
+            raise RuntimeError(
+                "RiskManager: Broker/API failed to supply account balance. Trading is disallowed."
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "Failure in RiskManager.refresh_account_balance (exception): %s",
+                exc,
+                extra={"event": "balance_fetch_error"},
+                exc_info=True,
+            )
+            raise RuntimeError(
+                "RiskManager: Exception fetching live broker balance, cannot trade."
+            ) from exc
 
     def _start_balance_refresher(self) -> None:
         """Start background thread that periodically refreshes balance.

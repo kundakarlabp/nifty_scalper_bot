@@ -63,6 +63,9 @@ class _StubOrderManager:
         self.guards: list[dict[str, Any]] = []
         self.cleared: list[str] = []
 
+    def reconcile_open_orders_with_broker(self) -> None:
+        return None
+
     def has_guard_pair(self, symbol: str) -> bool:
         return any(entry["symbol"] == symbol for entry in self.guards)
 
@@ -126,3 +129,55 @@ def test_reconcile_updates_active_contract_and_guard(tmp_path) -> None:
     assert cached.symbol == "NIFTY25O2025450CE"
     assert order_manager.guards
     assert order_manager.guards[0]["symbol"] == "NIFTY25O2025450CE"
+
+
+def test_reconcile_rebuilds_guard_after_broker_sync(tmp_path) -> None:
+    path = tmp_path / "positions.json"
+    manager = PositionManager(state_file=str(path))
+    broker_positions = [
+        {
+            "tradingsymbol": "NIFTY25O2025450CE",
+            "product": "MIS",
+            "quantity": 1,
+            "average_price": 125.0,
+            "last_price": 126.5,
+            "strike": 25450.0,
+            "expiry": datetime(2025, 10, 30, tzinfo=timezone.utc),
+        }
+    ]
+    manager.synchronize_with_broker(broker_positions)
+
+    class _Broker:
+        def get_positions(self) -> list[dict[str, Any]]:
+            return list(broker_positions)
+
+    class _DataHub:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, Any]] = []
+
+        def replace_positions(self, rows: list[dict[str, Any]]) -> None:
+            self.rows = list(rows)
+
+    order_manager = _StubOrderManager()
+    data_hub = _DataHub()
+    ctx = SimpleNamespace(
+        broker_client=_Broker(),
+        position_manager=manager,
+        order_manager=order_manager,
+        data_hub=data_hub,
+    )
+
+    _reconcile_state(ctx)
+
+    assert order_manager.guards
+    assert order_manager.guards[0]["symbol"] == "NIFTY25O2025450CE"
+    cached = manager.get_active_contract("NIFTY")
+    assert cached is not None
+    assert cached.symbol == "NIFTY25O2025450CE"
+    assert data_hub.rows == [
+        {
+            "symbol": "NIFTY25O2025450CE",
+            "quantity": 1,
+            "average_price": 125.0,
+        }
+    ]
