@@ -37,7 +37,7 @@ from nifty_scalper_bot.streaming.websocket_manager import (
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_throttled
-from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
+from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
 
@@ -2298,30 +2298,36 @@ class MarketDataManager:
                 return
             await asyncio.sleep(0.1)
 
-        is_market_hours = is_market_hours_cached()
-        if not is_market_hours:
-            self._logger.warning(
-                "Off-market -> bypassing readiness gate (historical data active)"
+        market_state = get_market_state()
+        if market_state != MarketState.OPEN:
+            self._logger.info(
+                "Readiness bypassed outside live market session "
+                "(state=%s, historical data active)",
+                market_state.value,
             )
             self.ready = True
-            self.degraded = True
+            self.degraded = False
             return
 
-        self._logger.warning(
-            "Entering DEGRADED mode due to insufficient live data "
-            "(timeout=%.1fs, min_bars=%d, bars=%s, hydration_complete=%s)",
-            timeout,
-            min_bars,
-            bars,
-            self.hydration_complete,
-        )
-        # Only arm DEGRADED once hydration has completed at least once.
-        # On a cold start that never received ticks we stay not-ready without
-        # falsely declaring the system degraded.
         if self.hydration_complete:
+            self._logger.warning(
+                "Entering DEGRADED mode due to insufficient live data "
+                "(timeout=%.1fs, min_bars=%d, bars=%s, hydration_complete=%s)",
+                timeout,
+                min_bars,
+                bars,
+                self.hydration_complete,
+            )
             self.ready = False
             self.degraded = True
         else:
+            self._logger.warning(
+                "Readiness timeout before hydration completed "
+                "(timeout=%.1fs, min_bars=%d, bars=%s)",
+                timeout,
+                min_bars,
+                bars,
+            )
             self.ready = False
             self.degraded = False
         return

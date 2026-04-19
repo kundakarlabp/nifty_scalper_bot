@@ -136,6 +136,30 @@ async def test_watchdog_schedules_reconnect_for_missing_pong(
 
 
 @pytest.mark.asyncio
+async def test_watchdog_suppresses_pong_reconnect_outside_trading_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+
+    manager = ws_module.WebSocketManager(
+        "k",
+        "t",
+        heartbeat_interval_seconds=0.01,
+        heartbeat_timeout_seconds=0.03,
+    )
+    manager._is_within_trading_window = lambda: False  # type: ignore[method-assign]
+    await manager.connect()
+
+    fake_ticker = manager.ticker
+    assert isinstance(fake_ticker, FakeKiteTicker)
+    await asyncio.sleep(0.12)
+
+    assert manager.ticker is fake_ticker
+    assert fake_ticker.connect_calls == 1
+    await manager.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_circuit_breaker_opens_after_repeated_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

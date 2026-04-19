@@ -42,13 +42,20 @@ class MarketState(Enum):
     POSTMARKET = 'postmarket'
 
 
+def _override_enabled() -> bool:
+    return os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
+
+
 def get_market_state() -> MarketState:
     """Args: none; Returns: current market state; Raises: none."""
-    override = os.getenv('SESSION_ALLOW_OUT_OF_HOURS', '').lower()
-    if override == 'true':
+    if _override_enabled():
         return MarketState.OPEN
 
-    now = datetime.now(IST)
+    now = _now_ist()
     if now.weekday() >= 5:
         return MarketState.CLOSED
 
@@ -74,23 +81,20 @@ def is_market_hours(allow_override: bool = True) -> bool:
         True if trading is allowed, False otherwise
     """
     # Check environment override for testing
-    if allow_override:
-        override = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower()
-        if override == "true":
-            return True
-    
-    now = datetime.now(IST).time()
+    if allow_override and _override_enabled():
+        return True
+
+    now_dt = _now_ist()
+    if now_dt.weekday() >= 5:
+        return False
+
+    now = now_dt.time()
     return SAFE_START <= now <= SAFE_END
 
 
 def is_market_open() -> bool:
     """Args: none; Returns: bool; Raises: none."""
-    now = datetime.now(IST)
-    if now.weekday() >= 5:
-        return False
-
-    current = now.time()
-    return MARKET_OPEN <= current <= MARKET_CLOSE
+    return get_market_state() == MarketState.OPEN
 
 
 def get_time_status() -> Tuple[bool, str]:
@@ -100,13 +104,15 @@ def get_time_status() -> Tuple[bool, str]:
     Returns:
         Tuple of (is_allowed, reason_string)
     """
-    # Check override first
-    override = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower()
-    if override == "true":
+    if _override_enabled():
         return True, "Override enabled (SESSION_ALLOW_OUT_OF_HOURS=true)"
-    
-    now = datetime.now(IST).time()
-    
+
+    now_dt = _now_ist()
+    if now_dt.weekday() >= 5:
+        return False, f"Weekend closure ({now_dt.strftime('%A')})"
+
+    now = now_dt.time()
+
     if now < MARKET_OPEN:
         return False, f"Pre-market ({now.strftime('%H:%M')} < {MARKET_OPEN.strftime('%H:%M')})"
     
@@ -124,12 +130,12 @@ def get_time_status() -> Tuple[bool, str]:
 
 def get_current_ist_time() -> datetime:
     """Get current time in IST."""
-    return datetime.now(IST)
+    return _now_ist()
 
 
 def format_time_for_log() -> str:
     """Get formatted time string for logging."""
-    return datetime.now(IST).strftime("%H:%M:%S IST")
+    return _now_ist().strftime("%H:%M:%S IST")
 
 
 # Cached version for high-frequency calls (1 second cache)

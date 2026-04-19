@@ -518,6 +518,14 @@ class WebSocketManager:
                     )
                     activity_age = now - last_activity
                     if activity_age > self._heartbeat_timeout:
+                        if not self._is_within_trading_window():
+                            self._logger.debug(
+                                "WS heartbeat idle outside trading window - suppressing reconnect "
+                                "age=%.2fs threshold=%.2fs",
+                                activity_age,
+                                self._heartbeat_timeout,
+                            )
+                            continue
                         self._logger.warning(
                             "Condition met: websocket_pong_timeout "
                             "age=%.2fs threshold=%.2fs",
