@@ -110,5 +110,5 @@ def test_start_background_tasks_creates_tasks(monkeypatch: pytest.MonkeyPatch) -
 
     assert len(tasks) == 2
     assert created == tasks
-    assert logger.messages[-1][0] == "Background tasks started"
+    assert logger.messages[-1][0] == "Scheduled maintenance tasks created"
     assert logger.messages[-1][1]["count"] == 2

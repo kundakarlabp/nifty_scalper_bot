@@ -1549,7 +1549,7 @@ class RuntimeSelfChecker:
             # Pick the most liquid / reliable symbol (Spot index preferred)
             symbol = None
             for s in symbols:
-                if ("NIFTY 50" in s and "NIFTY" in s) and "NSE" in s:
+                if canonical(s) == "NSE:NIFTY":
                     symbol = s
                     break
 
@@ -1969,7 +1969,7 @@ def _get_symbols(
         return None
 
     ltp: float = 0.0
-    spot_symbol = "NSE:NIFTY 50"
+    spot_symbol = "NSE:NIFTY"
 
     _allow_offhours = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
     _wait_timeout = 0.5 if _allow_offhours else 15.0
@@ -1989,7 +1989,7 @@ def _get_symbols(
     if broker:
         try:
             token_candidates = [256265]
-            str_candidates = [spot_symbol, "NIFTY 50", "NIFTY 50 INDEX"]
+            str_candidates = [spot_symbol]
             inner = getattr(broker, "client", getattr(broker, "_broker", broker))
 
             def parse_price(data: Any) -> float:
@@ -2852,7 +2852,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     if raw_syms:
         poll_symbols = unique_normalized_symbols(raw_syms)
     else:
-        poll_symbols = ["NSE:NIFTY 50", "256265"]
+        poll_symbols = ["NSE:NIFTY"]
 
     # InstrumentManager is the single source of truth - no resolver needed
     # Broker client will use instrument_manager directly via unified_manager
@@ -3123,6 +3123,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             require_depth=poll_require_depth,
             warn_on_rate_limit=poll_warn_rate_limit,
         )
+        market_data_manager.disable_rest_polling(reason="polling_streamer_fallback")
         polling_fallback_streamer.set_websocket_mode(True)
         websocket_manager.set_fallback_callbacks(
             on_start=lambda: polling_fallback_streamer.set_websocket_mode(False),
@@ -5293,7 +5294,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 except RuntimeError:
                     LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
 
-            targets.append("NSE:NIFTY 50")
+            targets.append("NSE:NIFTY")
             targets = list(dict.fromkeys(targets))
 
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
@@ -5713,7 +5714,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # Only start MDM polling if there's no streamer
                 asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
             else:
-                LOGGER.info("📡 MDM polling disabled (PollingStreamer is active)")
+                LOGGER.info("📡 MDM REST polling disabled (PollingStreamer owns fallback)")
 
             dynamic_option_symbols = {
                 sym

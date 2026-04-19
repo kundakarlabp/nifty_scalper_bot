@@ -80,10 +80,16 @@ class PollingStreamer:
                 target=self._run, name="polling_streamer", daemon=True
             )
             self._thread.start()
+            mode = "fallback" if self._websocket_mode_enabled else "primary"
             LOGGER.info(
-                "🚀 Scout Polling Started. Target Interval: %.1fs",
+                "REST polling streamer started | mode=%s interval=%.1fs",
+                mode,
                 self._interval_s,
-                extra={"event": "polling_started", "interval": self._interval_s},
+                extra={
+                    "event": "polling_started",
+                    "interval": self._interval_s,
+                    "mode": mode,
+                },
             )
 
     def stop(self) -> None:

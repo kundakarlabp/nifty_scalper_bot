@@ -285,7 +285,7 @@ class OptionsContractStore:
         
         # Add spot
         if include_spot and self._spot_token:
-            symbols.append("NSE:NIFTY 50")
+            symbols.append("NSE:NIFTY")
         
         # Add futures
         if include_futures and active_expiry in self._futures:

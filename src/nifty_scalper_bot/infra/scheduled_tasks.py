@@ -149,8 +149,8 @@ def start_background_tasks(order_manager: Any, logger: Any) -> list[asyncio.Task
     )
 
     logger.info(
-        "Background tasks started",
-        extra={"event": "tasks.started", "count": len(tasks)},
+        "Scheduled maintenance tasks created",
+        extra={"event": "tasks.created", "count": len(tasks)},
     )
 
     return tasks

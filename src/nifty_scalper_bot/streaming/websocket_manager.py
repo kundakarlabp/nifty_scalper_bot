@@ -655,15 +655,22 @@ class WebSocketManager:
                         )
                 ws.subscribe(token_list)
                 ws.set_mode(ws.MODE_FULL, token_list)
-                self._logger.info(
-                    "WebSocket subscribed to %d tokens", len(self._tokens)
-                )
                 symbol_map = getattr(mdm, "_symbol_by_token", {})
+                active_symbols = {
+                    symbol_map.get(token)
+                    for token in token_list
+                    if symbol_map.get(token)
+                }
                 self._logger.info(
-                    "WebSocket subscribed tokens=%d symbols=%d",
-                    len(self._tokens),
-                    len(symbol_map),
+                    "WebSocket subscribed | active_tokens=%d active_symbols=%d",
+                    len(token_list),
+                    len(active_symbols),
                 )
+                if symbol_map:
+                    self._logger.debug(
+                        "WebSocket symbol registry size=%d",
+                        len(symbol_map),
+                    )
                 if len(symbol_map) == 0:
                     self._logger.warning(
                         "Token map is EMPTY after subscribe — ticks will be dropped. "

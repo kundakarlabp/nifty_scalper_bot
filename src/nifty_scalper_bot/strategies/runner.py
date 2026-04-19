@@ -2830,10 +2830,11 @@ class StrategyRunner:
 
     def _get_spot_tick(self) -> dict[str, Any] | None:
         """Resilient spot tick fetcher checking canonical variants."""
-        if not self._market_data: return None
-        for sym in ("NSE:NIFTY 50", "NSE:NIFTY", "256265"):
-            tick = self._market_data.get_latest_tick(sym)
-            if tick: return tick
+        if not self._market_data:
+            return None
+        tick = self._market_data.get_latest_tick("NSE:NIFTY")
+        if tick:
+            return tick
         return None
 
     def _get_spot_price(self) -> float:
@@ -2841,10 +2842,9 @@ class StrategyRunner:
         source = self._data_hub or self._market_data
         if not source:
             return 0.0
-        for sym in ("NSE:NIFTY 50", "NSE:NIFTY", "256265"):
-            p = source.get_latest_price(sym)
-            if p and p > 0:
-                return p
+        price = source.get_latest_price("NSE:NIFTY")
+        if price and price > 0:
+            return price
         return 0.0
 
     def _execute_order(self, *, symbol: str, base_symbol: str, side: Literal["BUY", "SELL"], quantity: int, price: float, stop_loss: float | None, take_profit: float | None, timestamp: datetime, reference_price: float | None = None, metadata: Mapping[str, Any] | None = None, ) -> tuple[str, int]:

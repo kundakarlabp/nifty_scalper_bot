@@ -1741,10 +1741,7 @@ class StrategyManager:
         # ✅ 2. INDEX LTP AND VWAP DATA (NEW)
         # ═══════════════════════════════════════════════════════════
         try:
-            # Try NIFTY 50 spot index first
             index_quote = data_hub.get_quote('NSE:NIFTY', allow_pull=True)
-            if not index_quote:
-                index_quote = data_hub.get_quote('NIFTY 50', allow_pull=True)
             if index_quote:
                 index_ltp = self._extract_float(
                     index_quote, ('last_price', 'ltp', 'close')

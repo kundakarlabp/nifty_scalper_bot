@@ -8,6 +8,8 @@ from datetime import date
 from statistics import median
 from typing import Literal
 
+from nifty_scalper_bot.utils.symbols import canonical
+
 _TICK_SIZE = 0.05
 
 
@@ -196,12 +198,12 @@ class OptionsChainManager:
         broker_client: Any,
         market_data_manager: Any,
         refresh_interval: float = 30.0,
-        underlying_symbol: str = "NSE:NIFTY 50",
+        underlying_symbol: str = "NSE:NIFTY",
     ) -> None:
         self._broker = broker_client
         self._mdm = market_data_manager
         self._refresh_interval = max(refresh_interval, 10.0)
-        self._underlying_symbol = underlying_symbol
+        self._underlying_symbol = canonical(underlying_symbol)
 
         self._lock = threading.Lock()
         self._snapshot: OptionChainSnapshot | None = None
@@ -428,16 +430,15 @@ class OptionsChainManager:
     def _get_spot(self) -> float:
         """Get NIFTY spot price from MDM, falling back to cached value."""
         if self._mdm:
-            for sym in (self._underlying_symbol, "NSE:NIFTY 50", "NSE:NIFTY50", "NIFTY"):
-                try:
-                    p = (
-                        self._mdm.get_ltp(sym)
-                        if hasattr(self._mdm, "get_ltp")
-                        else self._mdm.get_latest_price(sym)
-                    )
-                    if p and float(p) > 0:
-                        return float(p)
-                except Exception:
-                    continue
+            try:
+                p = (
+                    self._mdm.get_ltp(self._underlying_symbol)
+                    if hasattr(self._mdm, "get_ltp")
+                    else self._mdm.get_latest_price(self._underlying_symbol)
+                )
+                if p and float(p) > 0:
+                    return float(p)
+            except Exception:
+                pass
         with self._lock:
             return self._spot_price

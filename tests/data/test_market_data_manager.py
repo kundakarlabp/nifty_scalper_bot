@@ -162,6 +162,37 @@ def test_pull_quote_updates_cache(broker: DummyBroker, ws: DummyWebSocket) -> No
     assert cached["ltp"] == 100.0
 
 
+def test_nifty_alias_subscription_collapses_to_canonical(
+    broker: DummyBroker,
+    ws: DummyWebSocket,
+) -> None:
+    manager = MarketDataManager(broker, ws)
+
+    manager.subscribe("NSE:NIFTY 50", lambda _: None)
+
+    assert ws.subscribed[-1] == ("full", [256265])
+    assert manager._active_subscribed_symbols == {"NSE:NIFTY"}
+
+
+def test_pull_quote_canonicalizes_nifty_spot_alias(
+    broker: DummyBroker,
+    ws: DummyWebSocket,
+) -> None:
+    broker.set_quote(
+        "NSE:NIFTY",
+        {"symbol": "NSE:NIFTY", "ltp": 25100.0, "bid": 25099.5, "ask": 25100.5},
+    )
+    manager = MarketDataManager(broker, ws)
+
+    quote = manager.pull_quote("NSE:NIFTY 50")
+
+    assert broker.calls[-1] == ("get_quote", ("NSE:NIFTY",))
+    assert quote["symbol"] == "NSE:NIFTY"
+    cached = manager.get_latest_tick("NSE:NIFTY")
+    assert cached is not None
+    assert cached["ltp"] == pytest.approx(25100.0)
+
+
 def test_wait_for_symbol_hits_after_tick(
     monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
 ) -> None:

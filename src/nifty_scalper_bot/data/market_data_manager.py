@@ -109,7 +109,6 @@ class MarketDataManager:
         self._token_by_symbol: dict[str, int] = {}
         self._symbol_by_token: dict[int, str] = {}
         self._token_by_symbol["NSE:NIFTY"] = 256265       # canonical
-        self._token_by_symbol["NSE:NIFTY 50"] = 256265  # alias
         self._symbol_by_token[256265] = "NSE:NIFTY"
         self._token_by_symbol["NSE:BANKNIFTY"] = 260105
         self._symbol_by_token[260105] = "NSE:BANKNIFTY"
@@ -1026,12 +1025,28 @@ class MarketDataManager:
 
     # ------------------------------------------------------------------
     # Public API
+    def _canonical_symbol(self, symbol: str) -> str:
+        value = enforce_canonical(normalize_symbol(str(symbol or "")))
+        if value.count(":") != 1:
+            raise RuntimeError(f"Malformed canonical symbol: {value}")
+        return value
+
+    def disable_rest_polling(self, *, reason: str | None = None) -> None:
+        """Disable the background REST poller when another component owns fallback."""
+
+        self._rest_poll_enabled = False
+        self._fallback_enabled = False
+        self._rest_poll_max_symbols = 0
+        if reason:
+            self._logger.info(
+                "mdm_rest_polling_disabled",
+                extra={"event": "mdm_rest_polling_disabled", "reason": reason},
+            )
+
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
-        symbol = normalize_symbol(str(symbol))
-        if symbol.count(":") != 1:
-            raise RuntimeError(f"Malformed canonical symbol: {symbol}")
+        symbol = self._canonical_symbol(symbol)
         with self._lock:
             subscribers = self._subscribers[symbol]
             subscribers.add(callback)
@@ -1068,9 +1083,7 @@ class MarketDataManager:
     def unsubscribe(self, symbol: str, callback: TickCallback) -> None:
         """Remove *callback* from subscribers of *symbol*."""
 
-        symbol = enforce_canonical(normalize_symbol(str(symbol)))
-        if symbol.count(":") != 1:
-            raise RuntimeError(f"Malformed canonical symbol: {symbol}")
+        symbol = self._canonical_symbol(symbol)
         should_unsubscribe = False
         with self._lock:
             callbacks = self._subscribers.get(symbol)
@@ -1094,7 +1107,13 @@ class MarketDataManager:
             if not resolved_symbol:
                 return None
         else:
-            resolved_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
+            if str(symbol).strip().isdigit():
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
+                if not resolved_symbol:
+                    return None
+            else:
+                resolved_symbol = self._canonical_symbol(symbol)
 
         with self._lock:
             tick = self._tick_cache.get(resolved_symbol)
@@ -1196,14 +1215,15 @@ class MarketDataManager:
         Returns:
             float | None: Latest price or None if unavailable from all sources.
         """
+        canonical_symbol = self._canonical_symbol(symbol)
         _STALE_SECONDS = 2.0
         now = time.time()
 
         # 1. Try tick cache with freshness check
-        tick = self.get_latest_tick(symbol)
+        tick = self.get_latest_tick(canonical_symbol)
         tick_age: float | None = None
         if tick is not None:
-            last_ts = self._last_tick_time.get(symbol)
+            last_ts = self._last_tick_time.get(canonical_symbol)
             if last_ts is not None:
                 tick_age = now - last_ts
             try:
@@ -1214,7 +1234,8 @@ class MarketDataManager:
                     # Tick exists but is stale — log and fall through to broker
                     self._logger.warning(
                         "STALE_DATA symbol=%s age=%.2fs — falling back to broker REST",
-                        symbol, tick_age,
+                        canonical_symbol,
+                        tick_age,
                     )
             except (KeyError, TypeError, ValueError):
                 pass
@@ -1223,7 +1244,7 @@ class MarketDataManager:
         broker = getattr(self, "_broker", None)
         if broker:
             try:
-                quote = broker.get_quote(symbol)
+                quote = broker.get_quote(canonical_symbol)
                 if isinstance(quote, dict):
                     price = quote.get("last_price") or quote.get("ltp")
                     if price:
@@ -1231,15 +1252,17 @@ class MarketDataManager:
                         if p > 0:
                             # Refresh cache with fresh REST price
                             self._logger.debug(
-                                "REST_FALLBACK_HIT symbol=%s price=%.2f", symbol, p
+                                "REST_FALLBACK_HIT symbol=%s price=%.2f",
+                                canonical_symbol,
+                                p,
                             )
                             return p
             except Exception as exc:
                 self._logger.warning(
-                    "broker.get_quote failed for %s: %s", symbol, exc
+                    "broker.get_quote failed for %s: %s", canonical_symbol, exc
                 )
 
-        self._logger.warning("get_ltp: no price available for %s", symbol)
+        self._logger.warning("get_ltp: no price available for %s", canonical_symbol)
         return None
 
     def get_latest_price(self, symbol: str) -> float | None:
@@ -1247,14 +1270,15 @@ class MarketDataManager:
         return self.get_ltp(symbol)
 
     def _resolve_underlying_price(self, symbol: str) -> float | None:
-        tick_price = self.get_latest_price(symbol)
+        canonical_symbol = self._canonical_symbol(symbol)
+        tick_price = self.get_latest_price(canonical_symbol)
         if tick_price is not None:
             return tick_price
         broker = getattr(self, "_broker", None)
         if broker is None or not hasattr(broker, "get_quote"):
             return None
         try:
-            quote = broker.get_quote(symbol)
+            quote = broker.get_quote(canonical_symbol)
         except Exception:  # noqa: BLE001
             return None
         if isinstance(quote, Mapping):
@@ -1372,9 +1396,10 @@ class MarketDataManager:
             None.
         """
 
-        candidates: list[str | int] = self._candidate_quote_keys(symbol)
+        canonical_symbol = self._canonical_symbol(symbol)
+        candidates: list[str | int] = self._candidate_quote_keys(canonical_symbol)
         if not candidates:
-            candidates = [symbol]
+            candidates = [canonical_symbol]
         quote: dict[str, Any] | None = None
         for key in candidates:
             broker_key: str | int
@@ -1388,14 +1413,14 @@ class MarketDataManager:
                 break
         if quote is None:
             try:
-                raw_quote = self._broker.get_quote(symbol)
+                raw_quote = self._broker.get_quote(canonical_symbol)
             except Exception as exc:  # noqa: BLE001
                 self._logger.error(
                     "Failure in pull_quote direct get_quote: %s",
                     exc,
                     extra={
                         "event": "mdm_pull_quote_direct_error",
-                        "symbol": symbol,
+                        "symbol": canonical_symbol,
                         "error": str(exc),
                     },
                     exc_info=exc,
@@ -1404,16 +1429,16 @@ class MarketDataManager:
             if isinstance(raw_quote, Mapping):
                 quote = dict(raw_quote)
         if quote is None:
-            return {"symbol": symbol}
+            return {"symbol": canonical_symbol}
         quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:
-            previous = self._latest_ticks.get(symbol)
+            previous = self._latest_ticks.get(canonical_symbol)
 
-        normalized = self._normalize_tick(symbol, quote, previous)
+        normalized = self._normalize_tick(canonical_symbol, quote, previous)
         if normalized is not None:
-            self._store_tick(symbol, normalized)
+            self._store_tick(canonical_symbol, normalized)
             return normalized
-        return {"symbol": symbol, **quote}
+        return {"symbol": canonical_symbol, **quote}
 
     def probe_quote(self, symbol: str) -> dict[str, Any]:
         """Run a deep quote diagnostic across resolver, broker, and cache.
@@ -2859,9 +2884,7 @@ class MarketDataManager:
     def register_symbol(self, symbol: str, token: int) -> None:
         """Args: symbol/token; Returns: none; Raises: RuntimeError on bad data."""
 
-        normalized_symbol = enforce_canonical(normalize_symbol(str(symbol or "")))
-        if normalized_symbol.count(":") != 1:
-            raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
+        normalized_symbol = self._canonical_symbol(symbol)
         token_int = int(token)
         with self._lock:
             if self._token_by_symbol.get(normalized_symbol) == token_int:
@@ -2883,7 +2906,7 @@ class MarketDataManager:
         wallclock = tick.get("timestamp", time.time())
 
         # 🔥 PRODUCTION FIX — enforce canonical key
-        symbol = normalize_symbol(symbol)
+        symbol = self._canonical_symbol(symbol)
 
         cached_tick = dict(tick)
         with self._lock:
@@ -3827,15 +3850,16 @@ class MarketDataManager:
             "Entered get_quote",
             extra={"event": "mdm_get_quote_enter", "symbol": symbol},
         )
+        canonical_symbol = self._canonical_symbol(symbol)
         try:
-            latest = self.get_latest_tick(symbol)
+            latest = self.get_latest_tick(canonical_symbol)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in get_quote: %s",
                 exc,
                 extra={
                     "event": "mdm_get_quote_failed",
-                    "symbol": symbol,
+                    "symbol": canonical_symbol,
                     "error": str(exc),
                 },
             )
@@ -3848,8 +3872,8 @@ class MarketDataManager:
         ask = _coerce_float(quote.get("ask"))
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             mid = (float(bid) + float(ask)) / 2.0
-            self._last_mid[symbol] = (mid, now_ms)
-        self._last_quote_ts_ms[symbol] = now_ms
+            self._last_mid[canonical_symbol] = (mid, now_ms)
+        self._last_quote_ts_ms[canonical_symbol] = now_ms
         return quote
 
     def get_orderbook(self, symbol: str, *, levels: int = 5) -> dict[str, Any] | None:
@@ -3863,7 +3887,7 @@ class MarketDataManager:
                 "levels": levels,
             },
         )
-        normalized = (symbol or "").strip().upper()
+        normalized = self._canonical_symbol(symbol)
         if not normalized:
             self._logger.info(
                 "Condition met: get_orderbook_missing_symbol",
@@ -3973,7 +3997,10 @@ class MarketDataManager:
             None.
         """
 
-        normalized = (symbol or "").strip().upper()
+        raw_symbol = str(symbol or "").strip()
+        if raw_symbol.isdigit():
+            return [int(raw_symbol)]
+        normalized = self._canonical_symbol(raw_symbol)
         if not normalized:
             return []
         base_symbol = normalized.split(":", 1)[-1]
@@ -4061,25 +4088,32 @@ class MarketDataManager:
         broker = getattr(self, "_broker", None)
         if broker is None:
             return None
+        normalized_key: str | int = key
+        if isinstance(key, str) and not key.strip().isdigit():
+            normalized_key = self._canonical_symbol(key)
         try:
             quote_any_fn = getattr(broker, "quote_any", None)
             if callable(quote_any_fn):
                 try:
-                    raw_any = quote_any_fn([key])  # type: ignore[arg-type]
+                    raw_any = quote_any_fn([normalized_key])  # type: ignore[arg-type]
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in _broker_quote_any quote_any: %s",
                         exc,
-                        extra={"event": "mdm_quote_any_error", "key": key},
+                        extra={"event": "mdm_quote_any_error", "key": normalized_key},
                         exc_info=exc,
                     )
                 else:
                     if isinstance(raw_any, Mapping) and raw_any:
                         key_candidates: list[str] = []
-                        if isinstance(key, int):
-                            key_candidates.append(str(int(key)))
-                        elif isinstance(key, str):
-                            symbol_aliases = [key, key.upper(), key.split(":", 1)[-1]]
+                        if isinstance(normalized_key, int):
+                            key_candidates.append(str(int(normalized_key)))
+                        elif isinstance(normalized_key, str):
+                            symbol_aliases = [
+                                normalized_key,
+                                normalized_key.upper(),
+                                normalized_key.split(":", 1)[-1],
+                            ]
                             for alias in symbol_aliases:
                                 if alias not in key_candidates:
                                     key_candidates.append(alias)
@@ -4090,18 +4124,18 @@ class MarketDataManager:
                         for value in raw_any.values():
                             if isinstance(value, Mapping):
                                 return dict(value)
-            if isinstance(key, int):
+            if isinstance(normalized_key, int):
                 if hasattr(broker, "get_quote_by_token"):
-                    quote = broker.get_quote_by_token(key)
+                    quote = broker.get_quote_by_token(normalized_key)
                 else:
                     return None
             else:
-                quote = broker.get_quote(key)
+                quote = broker.get_quote(normalized_key)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
                 "Failure in _broker_quote_any: %s",
                 exc,
-                extra={"event": "mdm_quote_fetch_failed", "key": key},
+                extra={"event": "mdm_quote_fetch_failed", "key": normalized_key},
             )
             return None
         if isinstance(quote, Mapping) and quote:
@@ -4315,6 +4349,7 @@ class MarketDataManager:
         Raises:
             None.
         """
+        symbol = self._canonical_symbol(symbol)
         quote = self._broker.get_quote(symbol)
         if not isinstance(quote, dict):
             return
@@ -4364,6 +4399,7 @@ class MarketDataManager:
         if self._ws is None:
             return
         try:
+            symbol = self._canonical_symbol(symbol)
             token = self._token_by_symbol.get(symbol)
             if not token:
                 raise RuntimeError(f"Token missing for {symbol}")
@@ -4383,6 +4419,7 @@ class MarketDataManager:
     def _release_subscription(self, symbol: str) -> None:
         if self._ws is None:
             return
+        symbol = self._canonical_symbol(symbol)
         token = self._token_by_symbol.get(symbol)
         if token is None:
             return
@@ -4395,6 +4432,7 @@ class MarketDataManager:
             )
 
     def _resolve_token(self, symbol: str) -> int | None:
+        symbol = self._canonical_symbol(symbol)
         # 1. Check local cache
         token = self._token_by_symbol.get(symbol)
         if token:

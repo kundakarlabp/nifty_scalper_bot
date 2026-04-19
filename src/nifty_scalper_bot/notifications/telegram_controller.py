@@ -106,6 +106,7 @@ from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 from nifty_scalper_bot.utils.response_builder import EMOJI, RB, ResponseBuilder
+from nifty_scalper_bot.utils.symbols import canonical as canonical_symbol
 from telegram import Bot, Chat, InputFile, Message, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
@@ -525,7 +526,6 @@ class TelegramBot:
         self.mode = "polling"
         self.application = self.builder().build()
         self._app: Application | None = self.application
-        log.info("telegram_application_attached")
         self._shutdown_event: asyncio.Event | None = None
         self._fallback_lock: asyncio.Lock | None = None
         self._webhook_server: "TelegramWebhookServer" | None = None
@@ -611,7 +611,7 @@ class TelegramBot:
                     self._heartbeat_loop(), name="telegram-heartbeat-loop"
                 )
                 self._bg_task_started = True
-                log.info("Background tasks started")
+                log.info("telegram_heartbeat_task_started")
 
         except Exception as exc:  # noqa: BLE001
             self._started = False
@@ -1378,25 +1378,25 @@ class TelegramBot:
 
     def _get_nifty_spot_price(self) -> float | None:
         """Get NIFTY spot price with multi-tier fallback."""
-        
+        spot_symbol = canonical_symbol("NSE:NIFTY")
+
         # Tier 1: Market data manager
         mdm = getattr(self.deps, "market_data_manager", None)
         if mdm:
-            for symbol in ["NIFTY", "NSE:NIFTY", "NSE:NIFTY50"]:
-                try:
-                    tick = mdm.get_latest_tick(symbol)
-                    if tick and isinstance(tick, dict):
-                        ltp = tick.get("ltp") or tick.get("last_price")
-                        if ltp and ltp > 0:
-                            return float(ltp)
-                except Exception:
-                    continue
+            try:
+                tick = mdm.get_latest_tick(spot_symbol)
+                if tick and isinstance(tick, dict):
+                    ltp = tick.get("ltp") or tick.get("last_price")
+                    if ltp and ltp > 0:
+                        return float(ltp)
+            except Exception:
+                pass
                     
         # Tier 2: Data hub
         hub = getattr(self.deps, "data_hub", None)
         if hub:
             try:
-                snapshot = hub.snapshot("NIFTY")
+                snapshot = hub.snapshot(spot_symbol)
                 if snapshot and snapshot.get("ltp"):
                     return float(snapshot["ltp"])
             except Exception as e:

@@ -511,10 +511,6 @@ class TelegramWebhookController:
         self._application = application
         self._application_active = False
         self._application_ready.clear()
-        self.logger.info(
-            "telegram_application_attached",
-            extra={"event": "application_attached"},
-        )
 
     def is_polling_active(self) -> bool:
         """Return ``True`` if the polling fallback task is running."""

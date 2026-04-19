@@ -4,6 +4,24 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+_NIFTY_SPOT_ALIASES = {
+    "NIFTY",
+    "NIFTY50",
+    "NIFTY50INDEX",
+}
+
+
+def _collapse_nifty_spot_alias(
+    exchange: str,
+    tradingsymbol: str,
+) -> tuple[str, str]:
+    exchange_value = str(exchange or "").strip().upper()
+    trading_value = " ".join(str(tradingsymbol or "").replace("_", " ").split()).upper()
+    compact = "".join(trading_value.split())
+    if exchange_value in {"", "NSE"} and compact in _NIFTY_SPOT_ALIASES:
+        return "NSE", "NIFTY"
+    return exchange_value, trading_value
+
 
 def canonical(symbol: str) -> str:
     """Args: symbol; Returns: canonical EXCHANGE:SYMBOL; Raises: none."""
@@ -13,13 +31,16 @@ def canonical(symbol: str) -> str:
     normalized = raw.replace("_", " ")
     if ":" in normalized:
         exchange, tradingsymbol = normalized.split(":", 1)
-        tradingsymbol = " ".join(tradingsymbol.split())
+        exchange, tradingsymbol = _collapse_nifty_spot_alias(exchange, tradingsymbol)
         if not exchange:
-            exchange = "NFO" if tradingsymbol.endswith(("CE", "PE", "FUT")) else "NSE"
+            compact = "".join(tradingsymbol.split())
+            exchange = "NFO" if compact.endswith(("CE", "PE", "FUT")) else "NSE"
         return f"{exchange}:{tradingsymbol}"
     compact = "".join(normalized.split())
     if compact.isdigit():
         return compact
+    if compact in _NIFTY_SPOT_ALIASES:
+        return "NSE:NIFTY"
     exchange = "NFO" if compact.endswith(("CE", "PE", "FUT")) else "NSE"
     return f"{exchange}:{compact}"
 
@@ -37,13 +58,24 @@ def normalize_symbol(symbol: str) -> str:
     raw = str(symbol or "").strip().upper()
     if not raw:
         return ""
+    normalized = raw.replace("_", " ")
     if ":" in raw:
-        return raw
+        exchange, tradingsymbol = normalized.split(":", 1)
+        exchange, tradingsymbol = _collapse_nifty_spot_alias(exchange, tradingsymbol)
+        if not exchange:
+            compact = "".join(tradingsymbol.split())
+            exchange = "NFO" if compact.endswith(("CE", "PE", "FUT")) else "NSE"
+        return f"{exchange}:{tradingsymbol}"
+    compact = "".join(normalized.split())
+    if compact.isdigit():
+        return compact
+    if compact in _NIFTY_SPOT_ALIASES:
+        return "NSE:NIFTY"
     # Infer exchange the same way canonical() does: derivatives get NFO,
     # everything else (indices, equities) gets NSE.
-    if raw.endswith(("CE", "PE", "FUT")):
-        return f"NFO:{raw}"
-    return f"NSE:{raw}"
+    if compact.endswith(("CE", "PE", "FUT")):
+        return f"NFO:{normalized}"
+    return f"NSE:{normalized}"
 
 
 def unique_normalized_symbols(symbols: Iterable[str]) -> list[str]:
