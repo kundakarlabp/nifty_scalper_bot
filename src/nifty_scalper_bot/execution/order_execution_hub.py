@@ -900,4 +900,6 @@ class ExecutionEngine:
         except (TypeError, ValueError): return float(default)
 
 
-__all__ = ["ExecutionEngine"]
+OrderExecutionHub = ExecutionEngine
+
+__all__ = ["ExecutionEngine", "OrderExecutionHub"]
