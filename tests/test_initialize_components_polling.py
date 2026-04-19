@@ -22,6 +22,7 @@ from nifty_scalper_bot.config.settings import (
     StreamerSettings,
 )
 from nifty_scalper_bot.core.app import initialize_components
+from nifty_scalper_bot.data.symbols import NIFTY_SPOT_CANONICAL_SYMBOL
 
 
 class DummyBroker:
@@ -39,7 +40,11 @@ class DummyResolver:
     def __init__(self, broker_client) -> None:  # noqa: ANN001
         self.broker_client = broker_client
         self.warmed = False
-        self._mapping = {"NIFTY": 111, "BANKNIFTY": 222}
+        self._mapping = {
+            NIFTY_SPOT_CANONICAL_SYMBOL: 111,
+            "NIFTY": 111,
+            "BANKNIFTY": 222,
+        }
 
     def warm(self) -> None:
         self.warmed = True
@@ -216,7 +221,7 @@ def test_poll_tick_normalization_backfills_price(
 ) -> None:
     ctx, _dummy_notifier = _initialize_polling_context(monkeypatch)
     mdm: DummyMarketDataManager = ctx.market_data_manager  # type: ignore[assignment]
-    mdm._symbol_by_token[256265] = "NIFTY"
+    mdm._symbol_by_token[256265] = NIFTY_SPOT_CANONICAL_SYMBOL
 
     caplog.set_level("WARNING")
 
@@ -226,7 +231,7 @@ def test_poll_tick_normalization_backfills_price(
     tick = mdm._handle_tick_calls[-1]
     assert tick["instrument_token"] == 256265
     assert tick["ltp"] == 195.5
-    assert tick["symbol"] == "NIFTY"
+    assert tick["symbol"] == NIFTY_SPOT_CANONICAL_SYMBOL
     assert tick["source"] == "polling"
     warnings = [record.message for record in caplog.records]
     assert "poll_tick_missing_price" not in warnings

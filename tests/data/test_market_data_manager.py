@@ -7,6 +7,7 @@ from typing import Any, Iterable
 import pytest
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.data.symbols import NIFTY_SPOT_CANONICAL_SYMBOL
 from nifty_scalper_bot.data.websocket.manager import ConnectionState
 
 
@@ -356,3 +357,25 @@ def test_heartbeat_callback_invoked(broker: DummyBroker, ws: DummyWebSocket) -> 
     manager.bump_heartbeat(2.5)
     assert captured[-1] == 2.5
     assert len(captured) == 2
+
+
+def test_nifty_spot_aliases_canonicalize_for_quote_and_subscription() -> None:
+    broker = DummyBroker()
+    ws = DummyWebSocket()
+    broker.set_token(NIFTY_SPOT_CANONICAL_SYMBOL, 256265)
+    broker.set_quote(
+        NIFTY_SPOT_CANONICAL_SYMBOL,
+        {"symbol": NIFTY_SPOT_CANONICAL_SYMBOL, "ltp": 22500.0, "timestamp": 1.0},
+    )
+    manager = MarketDataManager(broker, ws)
+
+    received: list[dict[str, Any]] = []
+    manager.subscribe("NSE:NIFTY", received.append)
+
+    assert ws.subscribed[-1] == ("ltp", [256265])
+    pulled = manager.pull_quote("NIFTY")
+    assert pulled["symbol"] == NIFTY_SPOT_CANONICAL_SYMBOL
+    assert broker.calls[-1] == ("get_quote", (NIFTY_SPOT_CANONICAL_SYMBOL,))
+    cached = manager.get_latest_tick("NSE:NIFTY")
+    assert cached is not None
+    assert cached["symbol"] == NIFTY_SPOT_CANONICAL_SYMBOL

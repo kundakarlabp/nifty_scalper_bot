@@ -42,6 +42,10 @@ from nifty_scalper_bot.data.market_regime import MarketRegimeDetector
 from nifty_scalper_bot.data.persistent_state import PersistentStateManager
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
 from nifty_scalper_bot.data.rest.zerodha_ws_adapter import build_kite_ticker
+from nifty_scalper_bot.data.symbols import (
+    NIFTY_SPOT_CANONICAL_SYMBOL,
+    canonicalize_market_symbol,
+)
 from nifty_scalper_bot.data.websocket.manager import WebSocketManager
 from nifty_scalper_bot.execution.bracket_manager import (
     BracketManager,
@@ -1587,13 +1591,17 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         default=True,
     )
     # Normalize symbols (quotes tolerated) and default fallback
+    trade_symbol = canonicalize_market_symbol(
+        coalesce_str("INSTRUMENTS__TRADE_SYMBOL", default="NIFTY")
+    )
     raw_syms = get_csv("POLLING__SYMBOLS")
     if raw_syms:
-        poll_symbols = [s.strip().upper() for s in raw_syms if s.strip()]
+        poll_symbols = [
+            canonicalize_market_symbol(s) for s in raw_syms if str(s).strip()
+        ]
     else:
-        trade_symbol = coalesce_str("INSTRUMENTS__TRADE_SYMBOL", default="NIFTY")
         poll_symbols = (
-            [trade_symbol.strip().upper()] if trade_symbol.strip() else ["NIFTY"]
+            [trade_symbol] if trade_symbol.strip() else [NIFTY_SPOT_CANONICAL_SYMBOL]
         )
 
     instrument_resolver = InstrumentResolver(broker_client)
@@ -1736,7 +1744,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         stream_supervisor = StreamSupervisor(
             streamer=streamer,
             resolver=instrument_resolver,
-            default_symbols=list(poll_symbols or ["NIFTY"]),
+            default_symbols=list(poll_symbols or [NIFTY_SPOT_CANONICAL_SYMBOL]),
             autostart=True,
         )
         stream_supervisor.bootstrap()
@@ -1855,7 +1863,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     ):
         os.environ.setdefault(env_key, env_default)
 
-    regime_symbol = "NIFTY"
+    regime_symbol = NIFTY_SPOT_CANONICAL_SYMBOL
     if poll_symbols:
         regime_symbol = poll_symbols[0]
 
@@ -2192,7 +2200,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         risk_symbol = coalesce_str(
             "RISK_STATE_SYMBOL",
             "RISK_STATE__SYMBOL",
-            default=trade_symbol or "NIFTY",
+            default=trade_symbol or NIFTY_SPOT_CANONICAL_SYMBOL,
         )
         attach = getattr(risk_state, "attach_data_hub", None)
         if callable(attach):
@@ -2506,13 +2514,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     background_tasks: list[asyncio.Task[Any]] = []
     try:
         background_tasks = start_background_tasks(order_manager, LOGGER)
-        LOGGER.info(
-            "Background tasks started",
-            extra={
-                "event": "background_tasks.started",
-                "count": len(background_tasks),
-            },
-        )
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failed to start background tasks",
@@ -3324,6 +3325,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 get_ws_token=_resolve_ws_token,
                 get_ws_token_issued_at=_ws_token_issued_at,
                 ws_host=ws_host,
+                spot_symbol=trade_symbol or NIFTY_SPOT_CANONICAL_SYMBOL,
                 set_shadow_mode=set_shadow,
                 get_shadow_mode=get_shadow,
                 paper_mode_getters=paper_mode_getters or None,
@@ -3353,10 +3355,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 else:
                     ctx.telegram_application = application
                     controller.attach_application(application)
-                    LOGGER.info(
-                        "telegram_application_attached",
-                        extra={"event": "telegram_application_attached"},
-                    )
                     version_info = {
                         "build": str(getattr(config, "version", "unknown")),
                         "sha": str(getattr(settings, "git_sha", "unknown")),

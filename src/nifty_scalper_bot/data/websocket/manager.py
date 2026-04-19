@@ -570,17 +570,29 @@ class WebSocketManager:
             if not new_tokens:
                 return
             self._subscription_tokens.update(new_tokens)
+            active_tokens = len(self._subscription_tokens)
 
             if state != ConnectionState.CONNECTED:
-                self._logger.debug(
-                    "Deferring WS subscribe until connected",
-                    extra={"tokens": new_tokens, "mode": mode, "state": state.value},
+                self._logger.info(
+                    "WebSocket subscription queued",
+                    extra={
+                        "event": "ws_subscription_queued",
+                        "queued_tokens": len(new_tokens),
+                        "active_tokens": active_tokens,
+                        "mode": mode,
+                        "state": state.value,
+                    },
                 )
                 return
 
-            self._logger.debug(
-                "Subscribing websocket tokens",
-                extra={"tokens": new_tokens, "mode": mode},
+            self._logger.info(
+                "WebSocket subscribed",
+                extra={
+                    "event": "ws_subscription_updated",
+                    "added_tokens": len(new_tokens),
+                    "active_tokens": active_tokens,
+                    "mode": mode,
+                },
             )
             if getattr(self._client, "subscribe", None) is not None:
                 self._client.subscribe(list(new_tokens))
@@ -602,11 +614,20 @@ class WebSocketManager:
             )
             for token in to_remove:
                 self._subscription_tokens.discard(token)
+            active_tokens = len(self._subscription_tokens)
             if (
                 self._client_is_connected()
                 and getattr(self._client, "unsubscribe", None) is not None
             ):
                 self._client.unsubscribe(list(to_remove))
+        self._logger.info(
+            "WebSocket unsubscribed",
+            extra={
+                "event": "ws_unsubscription_updated",
+                "removed_tokens": len(to_remove),
+                "active_tokens": active_tokens,
+            },
+        )
 
     def connection_state(self) -> ConnectionState:
         """Return the current websocket connection state."""
@@ -692,7 +713,8 @@ class WebSocketManager:
                     extra={
                         "event": "ws_subs_flushed",
                         "mode": mode,
-                        "count": total,
+                        "resubscribed_tokens": total,
+                        "active_tokens": len(self._subscription_tokens),
                     },
                 )
 

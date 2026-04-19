@@ -24,6 +24,7 @@ from typing import (
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.data.symbols import canonicalize_market_symbol
 from nifty_scalper_bot.execution.order_manager import ExitIntent, OrderType
 from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import SelectedContract, StrikeSelector
@@ -1798,7 +1799,7 @@ class StrategyRunner:
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
-        normalized = symbol.strip().upper()
+        normalized = canonicalize_market_symbol(symbol)
         if not normalized:
             msg = "symbol must not be empty"
             raise ValueError(msg)

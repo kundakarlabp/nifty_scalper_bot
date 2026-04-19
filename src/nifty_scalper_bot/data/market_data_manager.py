@@ -15,6 +15,7 @@ from typing import Any, Callable, Deque, Iterable, Mapping, Sequence, cast
 
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.data.resolver import InstrumentResolver
+from nifty_scalper_bot.data.symbols import canonicalize_market_symbol
 from nifty_scalper_bot.data.websocket.manager import ConnectionState, WebSocketManager
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.env import get_str
@@ -796,6 +797,9 @@ class MarketDataManager:
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return
         with self._lock:
             subscribers = self._subscribers[symbol]
             subscribers.add(callback)
@@ -849,6 +853,9 @@ class MarketDataManager:
     def unsubscribe(self, symbol: str, callback: TickCallback) -> None:
         """Remove *callback* from subscribers of *symbol*."""
 
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return
         should_unsubscribe = False
         with self._lock:
             callbacks = self._subscribers.get(symbol)
@@ -863,11 +870,17 @@ class MarketDataManager:
             self._release_subscription(symbol)
 
     def get_latest_tick(self, symbol: str) -> dict[str, Any] | None:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return None
         with self._lock:
             tick = self._latest_ticks.get(symbol)
             return None if tick is None else dict(tick)
 
     def get_latest_price(self, symbol: str) -> float | None:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return None
         tick = self.get_latest_tick(symbol)
         if tick is None:
             return None
@@ -877,16 +890,13 @@ class MarketDataManager:
             return None
 
     def _resolve_underlying_price(self, symbol: str) -> float | None:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return None
         tick_price = self.get_latest_price(symbol)
         if tick_price is not None:
             return tick_price
-        broker = getattr(self, "_broker", None)
-        if broker is None or not hasattr(broker, "get_quote"):
-            return None
-        try:
-            quote = broker.get_quote(symbol)
-        except Exception:  # noqa: BLE001
-            return None
+        quote = self.pull_quote(symbol)
         if isinstance(quote, Mapping):
             price_value = _coerce_float(
                 quote.get("ltp")
@@ -945,6 +955,9 @@ class MarketDataManager:
         return results
 
     def get_tick_history(self, symbol: str) -> list[dict[str, Any]]:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return []
         with self._lock:
             history = self._history.get(symbol)
             if history is None:
@@ -977,6 +990,9 @@ class MarketDataManager:
             timeout elapsed, ``False`` otherwise.
         """
 
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return False
         if self.get_latest_tick(symbol) is not None:
             return True
 
@@ -993,9 +1009,27 @@ class MarketDataManager:
 
         return False
 
-    def pull_quote(self, symbol: str) -> dict[str, Any]:
-        quote = self._broker.get_quote(symbol)
+    def pull_quote(
+        self, symbol: str, *, trace_id: str | None = None
+    ) -> dict[str, Any]:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return {"symbol": ""}
+        quote: dict[str, Any] | None = None
+        for key in self._candidate_quote_keys(symbol):
+            payload = self._broker_quote_any(key)
+            if payload:
+                quote = payload
+                break
         if not isinstance(quote, dict):
+            self._logger.error(
+                "pull_quote_failed",
+                extra={
+                    "event": "mdm_pull_quote_failed",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                },
+            )
             return {"symbol": symbol}
         quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:
@@ -1003,6 +1037,13 @@ class MarketDataManager:
 
         normalized = self._normalize_tick(symbol, quote, previous)
         if normalized is not None:
+            now_ms = self._now_ms()
+            bid = _coerce_float(normalized.get("bid"))
+            ask = _coerce_float(normalized.get("ask"))
+            with self._lock:
+                self._last_quote_ts_ms[symbol] = now_ms
+                if bid is not None and ask is not None and bid > 0 and ask > 0:
+                    self._last_mid[symbol] = ((bid + ask) / 2.0, now_ms)
             if not self._is_duplicate(symbol, normalized):
                 self._emit_tick(symbol, normalized, source="rest")
             else:
@@ -1464,6 +1505,9 @@ class MarketDataManager:
     # ------------------------------------------------------------------
     # Internal plumbing
     def _seed_mapping(self, symbol: str, token: int | None) -> None:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return
         if token is None:
             return
         try:
@@ -1494,6 +1538,7 @@ class MarketDataManager:
         if not symbol:
             self._logger.debug("Dropping tick without symbol", extra={"raw": tick})
             return
+        symbol = canonicalize_market_symbol(symbol)
 
         raw_ltp = tick.get("last_price")
         if raw_ltp is None:
@@ -1695,6 +1740,11 @@ class MarketDataManager:
             candidates = list(self._subscribers.keys())
             if not candidates:
                 candidates = list(self._latest_ticks.keys())
+        candidates = [
+            symbol
+            for symbol in map(canonicalize_market_symbol, candidates)
+            if symbol
+        ]
         limit = self._rest_poll_max_symbols
         if limit > 0 and len(candidates) > limit:
             candidates = candidates[:limit]
@@ -1716,6 +1766,9 @@ class MarketDataManager:
             None.
         """
 
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return None
         self._logger.debug(
             "Entered get_quote",
             extra={"event": "mdm_get_quote_enter", "symbol": symbol},
@@ -1756,7 +1809,7 @@ class MarketDataManager:
                 "levels": levels,
             },
         )
-        normalized = (symbol or "").strip().upper()
+        normalized = canonicalize_market_symbol(symbol)
         if not normalized:
             self._logger.info(
                 "Condition met: get_orderbook_missing_symbol",
@@ -1857,7 +1910,7 @@ class MarketDataManager:
         """
 
         symbols: list[str | int] = []
-        normalized = (symbol or "").strip().upper()
+        normalized = canonicalize_market_symbol(symbol)
         if not normalized:
             return symbols
         symbols.append(normalized)
@@ -1880,8 +1933,11 @@ class MarketDataManager:
                     exchange = str(meta.get("exchange") or "NFO").upper()
                     token = meta.get("instrument_token")
                     if tradingsymbol:
-                        symbols.append(tradingsymbol)
-                        symbols.append(f"{exchange}:{tradingsymbol}")
+                        exchange_symbol = canonicalize_market_symbol(
+                            f"{exchange}:{tradingsymbol}"
+                        )
+                        if exchange_symbol and exchange_symbol != normalized:
+                            symbols.append(exchange_symbol)
                     if token is not None:
                         try:
                             symbols.append(int(token))
@@ -1922,7 +1978,7 @@ class MarketDataManager:
                 else:
                     return None
             else:
-                quote = broker.get_quote(key)
+                quote = broker.get_quote(canonicalize_market_symbol(key))
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
                 "Failure in _broker_quote_any: %s",
@@ -1958,49 +2014,8 @@ class MarketDataManager:
                 "trace_id": trace_id,
             },
         )
-        candidates = self._candidate_quote_keys(symbol)
-        _logger.info(
-            "reference_price_refresh",
-            extra={
-                "symbol": symbol,
-                "age_ms": self.quote_age_ms(symbol) if symbol else None,
-                "trace_id": trace_id,
-            },
-        )
-        for key in candidates:
-            quote = self._broker_quote_any(key)
-            _logger.info(
-                "refresh_attempt",
-                extra={
-                    "symbol": symbol,
-                    "key": key,
-                    "ok": bool(quote),
-                    "trace_id": trace_id,
-                },
-            )
-            if not quote:
-                continue
-            now_ms = self._now_ms()
-            bid = _coerce_float(quote.get("bid"))
-            ask = _coerce_float(quote.get("ask"))
-            mid: float | None = None
-            if bid is not None and ask is not None:
-                mid = (bid + ask) / 2.0
-            with self._lock:
-                self._latest_ticks[symbol] = dict(quote)
-                self._last_quote_ts_ms[symbol] = now_ms
-                if mid is not None:
-                    self._last_mid[symbol] = (mid, now_ms)
-            return dict(quote)
-        self._logger.error(
-            "refresh_quote_failed_all_candidates",
-            extra={
-                "symbol": symbol,
-                "candidates": candidates,
-                "trace_id": trace_id,
-            },
-        )
-        return None
+        quote = self.pull_quote(symbol, trace_id=trace_id)
+        return quote if quote.get("ltp") is not None else None
 
     def has_quote(self, symbol: str) -> bool:
         """Return whether cached quote data appears usable.
@@ -2015,6 +2030,7 @@ class MarketDataManager:
             None.
         """
 
+        symbol = canonicalize_market_symbol(symbol)
         quote = self.get_quote(symbol)
         if not isinstance(quote, Mapping):
             return False
@@ -2036,6 +2052,9 @@ class MarketDataManager:
             None.
         """
 
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return 1_000_000_000
         self._logger.debug(
             "Entered quote_age_ms",
             extra={"event": "mdm_quote_age_enter", "symbol": symbol},
@@ -2073,6 +2092,9 @@ class MarketDataManager:
             None.
         """
 
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return None, None
         self._logger.debug(
             "Entered cached_mid",
             extra={"event": "mdm_cached_mid_enter", "symbol": symbol},
@@ -2120,18 +2142,7 @@ class MarketDataManager:
         return max(interval, 0.01)
 
     def _poll_symbol(self, symbol: str) -> None:
-        quote = self._broker.get_quote(symbol)
-        if not isinstance(quote, dict):
-            return
-        quote = self._prepare_rest_tick(quote, source="rest")
-        with self._lock:
-            previous = self._latest_ticks.get(symbol)
-        normalized = self._normalize_tick(symbol, quote, previous)
-        if normalized is None:
-            return
-        if self._is_duplicate(symbol, normalized):
-            return
-        self._emit_tick(symbol, normalized, source="rest")
+        self.pull_quote(symbol)
 
     def _has_recent_rest_ticks(self) -> bool:
         cutoff = time.time() - max(self._rest_poll_interval * 2.0, 5.0)
@@ -2163,6 +2174,9 @@ class MarketDataManager:
         return max(value, minimum)
 
     def _ensure_subscription(self, symbol: str) -> None:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return
         if self._ws is None:
             return
         try:
@@ -2191,6 +2205,9 @@ class MarketDataManager:
             )
 
     def _release_subscription(self, symbol: str) -> None:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return
         if self._ws is None:
             return
         token = self._token_by_symbol.get(symbol)
@@ -2205,6 +2222,9 @@ class MarketDataManager:
             )
 
     def _resolve_token(self, symbol: str) -> int | None:
+        symbol = canonicalize_market_symbol(symbol)
+        if not symbol:
+            return None
         try:
             if hasattr(self._broker, "get_instrument_token"):
                 instrument_token = self._broker.get_instrument_token(symbol)
@@ -2241,7 +2261,7 @@ class MarketDataManager:
         for key in ("symbol", "tradingsymbol", "instrument"):
             value = tick.get(key)
             if isinstance(value, str) and value:
-                return value
+                return canonicalize_market_symbol(value)
         return None
 
     def _normalize_tick(

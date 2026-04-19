@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any, Iterable, Sequence
 
+from nifty_scalper_bot.data.symbols import NIFTY_SPOT_CANONICAL_SYMBOL
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOG = get_logger(__name__)
@@ -80,7 +81,7 @@ class StreamSupervisor:
     def bootstrap(self) -> None:
         """Subscribe default symbols and start the poller if configured."""
 
-        symbols = list(self._default_symbols) or ["NIFTY"]
+        symbols = list(self._default_symbols) or [NIFTY_SPOT_CANONICAL_SYMBOL]
         self.subscribe_symbols(symbols)
         if self._autostart:
             self.ensure_started()

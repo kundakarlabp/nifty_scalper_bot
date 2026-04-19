@@ -84,6 +84,7 @@ from nifty_scalper_bot.core.performance_metrics import build_performance_snapsho
 from nifty_scalper_bot.core.trading_switch import trading_switch
 from nifty_scalper_bot.data.assess_data import assess_datahub_fresh
 from nifty_scalper_bot.data.data_hub import DataHub
+from nifty_scalper_bot.data.symbols import NIFTY_SPOT_CANONICAL_SYMBOL
 from nifty_scalper_bot.diagnostics.assess import assess_suite
 from nifty_scalper_bot.infra.diagnostics import LOG_TAP
 from nifty_scalper_bot.infra.metrics import METRICS, MetricsCollector
@@ -409,6 +410,7 @@ class TelegramDeps:
     get_ws_token: t.Callable[[], str] | None = None
     get_ws_token_issued_at: t.Callable[[], float | None] | None = None
     ws_host: str | None = None
+    spot_symbol: str | None = None
     # Shadow mode toggler (optional): Callable[[bool], bool] | None
     set_shadow_mode: t.Callable[[bool], bool] | None = None
     get_shadow_mode: t.Callable[[], bool] | None = None
@@ -3492,7 +3494,7 @@ class TelegramBot:
             spot_symbol = getattr(self.deps, "spot_symbol", None)
             if spot_symbol:
                 return str(spot_symbol)
-        return "NIFTY"
+        return NIFTY_SPOT_CANONICAL_SYMBOL
 
     def _poll_interval_seconds(self) -> float:
         """Return the polling interval used for adaptive freshness bounds."""

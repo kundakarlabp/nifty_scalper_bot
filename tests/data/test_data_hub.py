@@ -6,6 +6,7 @@ from typing import Any, Callable
 import pytest
 
 from nifty_scalper_bot.data.data_hub import DataHub
+from nifty_scalper_bot.data.symbols import NIFTY_SPOT_CANONICAL_SYMBOL
 from nifty_scalper_bot.storage import HubStore
 
 
@@ -94,8 +95,8 @@ def test_replace_positions_filters_and_normalises(hub: DataHub) -> None:
     assert positions["NIFTY25OCT25000CE"]["quantity"] == 50
     assert positions["NIFTY25OCT25000CE"]["average_price"] == pytest.approx(201.5)
     assert "BANKNIFTY25NOVFUT" not in positions
-    assert positions["NIFTY"]["quantity"] == 0
-    assert positions["NIFTY"]["side"] == "FLAT"
+    assert positions[NIFTY_SPOT_CANONICAL_SYMBOL]["quantity"] == 0
+    assert positions[NIFTY_SPOT_CANONICAL_SYMBOL]["side"] == "FLAT"
     assert positions["NIFTY25OCT25000PE"]["side"] == "SHORT"
     assert positions["NIFTY25OCT25000PE"]["quantity"] == 25
 
@@ -200,6 +201,11 @@ def test_is_fresh_reports_metrics_for_cached_tick(hub: DataHub) -> None:
     assert meta["effective_ms"] is not None
     assert meta["threshold_ms"] >= 0
     assert meta["reason"] in {None, "warmup_grace"}
+
+
+def test_normalize_canonicalizes_nifty_spot_aliases() -> None:
+    assert DataHub.normalize("NIFTY") == NIFTY_SPOT_CANONICAL_SYMBOL
+    assert DataHub.normalize("NSE:NIFTY") == NIFTY_SPOT_CANONICAL_SYMBOL
 
 
 def test_upsert_order_rejects_invalid_transition(hub: DataHub) -> None:

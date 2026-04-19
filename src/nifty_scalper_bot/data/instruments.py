@@ -7,6 +7,11 @@ from math import ceil, floor
 import os
 from typing import Any, Iterable
 
+from nifty_scalper_bot.data.symbols import (
+    NIFTY_SPOT_CANONICAL_SYMBOL,
+    NIFTY_SPOT_CANONICAL_TRADINGSYMBOL,
+    NIFTY_SPOT_TOKEN,
+)
 from nifty_scalper_bot.utils.errors import BrokerError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.options_math import black_scholes_greeks
@@ -16,13 +21,13 @@ log = get_logger(__name__)
 # Common index tokens (Zerodha). Keep here as fallbacks.
 WELL_KNOWN = {
     # NSE Index tokens
-    "NIFTY": 256265,  # NIFTY 50 spot
+    "NIFTY": NIFTY_SPOT_TOKEN,  # NIFTY 50 spot
     # Robust aliases people often use
-    "NIFTY50": 256265,
-    "NIFTY-50": 256265,
-    "NSE:NIFTY": 256265,
-    "NSE:NIFTY 50": 256265,
-    "NIFTY 50": 256265,
+    "NIFTY50": NIFTY_SPOT_TOKEN,
+    "NIFTY-50": NIFTY_SPOT_TOKEN,
+    "NSE:NIFTY": NIFTY_SPOT_TOKEN,
+    NIFTY_SPOT_CANONICAL_SYMBOL: NIFTY_SPOT_TOKEN,
+    NIFTY_SPOT_CANONICAL_TRADINGSYMBOL: NIFTY_SPOT_TOKEN,
     "BANKNIFTY": 260105,  # NIFTY BANK spot
     "NIFTY BANK": 260105,
     "FINNIFTY": 257801,  # NIFTY FIN SERVICE spot
@@ -31,7 +36,7 @@ WELL_KNOWN = {
 
 # Canonical trading symbols used when formatting tokens for REST calls.
 CANONICAL_TOKENS: dict[int, str] = {
-    256265: "NIFTY 50",
+    NIFTY_SPOT_TOKEN: NIFTY_SPOT_CANONICAL_TRADINGSYMBOL,
     260105: "NIFTY BANK",
     257801: "NIFTY FIN SERVICE",
     288009: "NIFTY MIDCAP SELECT",

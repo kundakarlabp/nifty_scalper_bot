@@ -437,7 +437,7 @@ class TelegramWebhookController:
         self._application_ready.clear()
         self.logger.info(
             "telegram_application_attached",
-            extra={"event": "application_attached"},
+            extra={"event": "telegram_application_attached"},
         )
 
     def is_polling_active(self) -> bool:

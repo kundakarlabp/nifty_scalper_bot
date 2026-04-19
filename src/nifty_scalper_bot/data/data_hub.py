@@ -9,6 +9,10 @@ from threading import RLock
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional, TypedDict, cast
 
+from nifty_scalper_bot.data.symbols import (
+    NIFTY_SPOT_CANONICAL_SYMBOL,
+    normalize_hub_symbol,
+)
 from nifty_scalper_bot.storage.hub_store import HubStore, WalEntry
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.options_math import (
@@ -114,7 +118,7 @@ class DataHub:
         self._last_snapshot_ts = 0.0
         self._option_chain_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._option_chain_ttl = 5.0
-        self._spot_symbol = "NIFTY"
+        self._spot_symbol = NIFTY_SPOT_CANONICAL_SYMBOL
         self._risk_free_rate = 0.06
 
         error_cooldown = self._parse_env_float("TICK_ERROR_LOG_COOLDOWN_SEC")
@@ -171,19 +175,18 @@ class DataHub:
     def normalize(sym: Any) -> str:
         """Normalise trading symbol with prefix trimming."""
 
-        if sym is None:
-            return ""
-        text = str(sym).strip().upper()
-        if ":" in text:
-            text = text.split(":", 1)[-1].strip()
-        return text
+        return normalize_hub_symbol(sym)
 
     def _allow(self, symbol: str) -> bool:
         if not symbol:
             return False
         if not self._options_only:
             return True
-        return symbol.endswith("CE") or symbol.endswith("PE") or symbol == "NIFTY"
+        return (
+            symbol.endswith("CE")
+            or symbol.endswith("PE")
+            or symbol == NIFTY_SPOT_CANONICAL_SYMBOL
+        )
 
     def reset_warmup(self) -> None:
         """Restart the warm-up grace period for stale tick evaluation."""
