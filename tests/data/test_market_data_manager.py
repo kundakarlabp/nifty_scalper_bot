@@ -10,6 +10,7 @@ import pytest
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.streaming.websocket_manager import ConnectionState
+from nifty_scalper_bot.utils.market_hours import MarketState
 
 
 class DummyBroker:
@@ -501,10 +502,11 @@ async def test_wait_until_ready_enters_degraded_during_market_hours(
     manager = MarketDataManager(broker, ws, cache_len=5)
     manager._min_required_bars = 2
     manager._active_subscribed_symbols = {"NSE:NIFTY23"}
+    manager.hydration_complete = True
 
     with patch(
-        "nifty_scalper_bot.data.market_data_manager.is_market_hours_cached",
-        return_value=True,
+        "nifty_scalper_bot.data.market_data_manager.get_market_state",
+        return_value=MarketState.OPEN,
     ):
         await manager.wait_until_ready(timeout=0.1)
 
@@ -522,17 +524,35 @@ async def test_wait_until_ready_bypasses_off_market(
     manager._history["NSE:NIFTY23"].append({"ltp": 100.0, "timestamp": time.time()})
 
     with patch(
-        "nifty_scalper_bot.data.market_data_manager.is_market_hours_cached",
-        return_value=False,
+        "nifty_scalper_bot.data.market_data_manager.get_market_state",
+        return_value=MarketState.CLOSED,
     ):
         await manager.wait_until_ready(timeout=0.1)
 
     assert manager.ready is True
-    assert manager.degraded is True
+    assert manager.degraded is False
 
     manager._history["NSE:NIFTY23"].append({"ltp": 101.0, "timestamp": time.time()})
     await manager.wait_until_ready(timeout=0.2)
     assert manager.ready is True
+    assert manager.degraded is False
+
+
+@pytest.mark.asyncio
+async def test_wait_until_ready_stays_not_degraded_before_first_hydration(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws, cache_len=5)
+    manager._min_required_bars = 2
+    manager._active_subscribed_symbols = {"NSE:NIFTY23"}
+
+    with patch(
+        "nifty_scalper_bot.data.market_data_manager.get_market_state",
+        return_value=MarketState.OPEN,
+    ):
+        await manager.wait_until_ready(timeout=0.1)
+
+    assert manager.ready is False
     assert manager.degraded is False
 
 
