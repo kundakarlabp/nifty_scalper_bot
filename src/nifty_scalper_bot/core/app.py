@@ -1544,20 +1544,19 @@ class RuntimeSelfChecker:
             if not symbols:
                 return True, "no_symbols_yet", {}
 
-            # Pick the most liquid / reliable symbol (Spot index preferred)
-            symbol = None
-            for s in symbols:
-                if canonical(s) == "NSE:NIFTY":
-                    symbol = s
-                    break
-
-            # Fallback to any available symbol if index not found
-            if symbol is None:
-                symbol = symbols[0]
-
             interval = getattr(self._context.streamer, "_interval_s", 0.7) or 0.7
             # Adaptive threshold: 2.5x poll interval, clamped 2s-5s
             adaptive_ms = max(2000, min(5000, int(float(interval) * 1000.0 * 2.5)))
+
+            symbol = None
+            for s in symbols:
+                ok, _ = hub.is_fresh(s, threshold_ms=float(adaptive_ms))
+                if ok:
+                    symbol = s
+                    break
+
+            if symbol is None:
+                symbol = symbols[0]
 
             if hasattr(hub, "is_fresh"):
                 try:
@@ -5320,7 +5319,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                 except RuntimeError:
                     LOGGER.warning(f"⚠️ Could not resolve Futures: {future_symbol}")
 
-            targets.append("NSE:NIFTY")
+            if "NSE:NIFTY" not in targets:
+                targets.append("NSE:NIFTY")
             targets = list(dict.fromkeys(targets))
 
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
@@ -5560,17 +5560,14 @@ async def startup_sequence(ctx: BotContext) -> None:
             if runner and hasattr(runner, "mark_ready"):
                 if ready_symbols:
                     runner.mark_ready(ready_symbols)
+                    if hasattr(runner, "start") and not getattr(runner, "_running", False):
+                        try:
+                            runner.start()
+                            LOGGER.info("✅ StrategyRunner started")
+                        except Exception as _runner_start_exc:
+                            LOGGER.error("StrategyRunner.start() failed: %s", _runner_start_exc, exc_info=True)
                 else:
-                    LOGGER.error(
-                        "Startup hydration incomplete for all symbols — runner remains unready"
-                    )
-                # Start the runner after hydration so get_status()["running"] is True
-                if hasattr(runner, "start") and not getattr(runner, "_running", False):
-                    try:
-                        runner.start()
-                        LOGGER.info("✅ StrategyRunner started")
-                    except Exception as _runner_start_exc:
-                        LOGGER.error("StrategyRunner.start() failed: %s", _runner_start_exc, exc_info=True)
+                    LOGGER.error("No symbols ready after hydration — runner NOT started")
             # =========================================================
 
             try:

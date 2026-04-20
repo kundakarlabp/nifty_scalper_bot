@@ -57,6 +57,34 @@ def test_validate_symbol_universe_accepts_index_and_options() -> None:
     assert runner._validate_symbol_universe() is True
 
 
+def test_start_deferred_when_no_hydrated_symbols() -> None:
+    runner = _runner()
+    runner._active_symbols = set()
+    runner.ready = False
+    runner._startup_hydrated = False
+    runner._hydration_complete = False
+
+    runner.start()
+
+    assert runner._runner_state == RunnerState.STARTING
+    assert runner._running is False
+    assert runner.ready is False
+    assert runner._startup_hydrated is False
+    assert runner._hydration_complete is False
+
+
+def test_mark_ready_controls_readiness_not_start() -> None:
+    runner = _runner()
+    symbol = "NIFTY25JAN25000CE"
+    runner._indicator_engine.has_min_bars.return_value = True
+    runner._active_symbols = set()
+
+    runner.mark_ready([symbol])
+
+    assert runner.ready is True
+    assert symbol in runner._active_symbols
+
+
 def test_mark_symbol_unready_sets_state_flags() -> None:
     runner = _runner()
     symbol = "NIFTY25JAN25000CE"
