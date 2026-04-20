@@ -2153,6 +2153,7 @@ def _data_ready(mdm: MarketDataManager | None) -> bool:
 def _build_canonical_active_basket(
     *,
     instrument_manager: InstrumentManager | None,
+    spot_token_resolver: Callable[[str], int] | None,
     spot_ltp: float,
     futures_symbol: str,
     strike_step: int = 50,
@@ -2188,7 +2189,22 @@ def _build_canonical_active_basket(
     if not ce_symbols or not pe_symbols:
         raise RuntimeError("failed to resolve canonical option basket")
     futures_token = instrument_manager.get_token(futures_symbol)
-    spot_token = instrument_manager.get_token(spot_symbol)
+    spot_token: int | None = None
+    if callable(spot_token_resolver):
+        try:
+            spot_token = int(spot_token_resolver(spot_symbol))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "spot_token_resolver_failed symbol=%s err=%s",
+                spot_symbol,
+                exc,
+                extra={"event": "spot_token_resolver_failed", "symbol": spot_symbol},
+            )
+    if spot_token is None:
+        well_known_spot_tokens = {"NSE:NIFTY": 256265}
+        spot_token = well_known_spot_tokens.get(spot_symbol)
+    if spot_token is None:
+        raise RuntimeError(f"failed to resolve spot token for {spot_symbol}")
     symbols = [spot_symbol, futures_symbol, *ce_symbols, *pe_symbols]
     return {
         "spot_symbol": spot_symbol,
@@ -5208,6 +5224,9 @@ async def startup_sequence(ctx: BotContext) -> None:
     # 2. Pre-load broker instrument caches (NSE + NFO)
     # InstrumentManager.load() in section 2b fetches directly from broker.
     # ---------------------------------------------------------
+    startup_trade_ready = False
+    polling_fallback = ctx.polling_fallback_streamer
+
     if broker_ready:
         try:
             inner = getattr(
@@ -5404,6 +5423,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             try:
                 basket = _build_canonical_active_basket(
                     instrument_manager=ctx.instrument_manager,
+                    spot_token_resolver=lambda symbol: int(
+                        ctx.broker_client.get_instrument_token(symbol)
+                    ),
                     spot_ltp=spot_ltp,
                     futures_symbol=future_symbol,
                     strike_step=int(ctx.settings.option_universe.strike_step or 50),
@@ -5736,7 +5758,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         tokens_to_poll.append(t)
 
             # --- Objective 5: Fail-fast Validation ---
-            min_tokens = 10 # Enforce institutional-grade minimum
+            min_tokens = 10
             if len(tokens_to_poll) < min_tokens:
                 msg = f"⚠️ WARNING: Subscribed tokens ({len(tokens_to_poll)}) < MIN_TOKEN_COUNT ({min_tokens})"
                 if not ctx.settings.enable_paper:
@@ -5839,8 +5861,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "✅ Wired %d tokens to PollingStreamer",
                         len(tokens_to_poll),
                     )
-            if polling_fallback_streamer is not None and tokens_to_poll:
-                polling_fallback_streamer.subscribe(tokens_to_poll)
+            if polling_fallback is not None and tokens_to_poll:
+                polling_fallback.subscribe(tokens_to_poll)
                 if ctx.websocket_manager is not None and ctx.market_data_manager is not None:
                     async def _polling_failover_supervisor() -> None:
                         """Supervise WS health and toggle polling fallback with hysteresis."""
@@ -5861,7 +5883,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     degraded_since = degraded_since or now_mono
                                     if (
                                         now_mono - degraded_since >= activate_after
-                                        and not polling_fallback_streamer.is_running()
+                                        and not polling_fallback.is_running()
                                     ):
                                         LOGGER.warning(
                                             "Polling fallback activate (supervisor) ws_ok=%s stale=%s spot_quote_age_ms=%s",
@@ -5870,21 +5892,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             spot_age,
                                             extra={"event": "polling_fallback_activated"},
                                         )
-                                        polling_fallback_streamer.set_websocket_mode(False)
-                                        polling_fallback_streamer.start()
+                                        polling_fallback.set_websocket_mode(False)
+                                        polling_fallback.start()
                                 else:
                                     degraded_since = None
                                     recovered_since = recovered_since or now_mono
                                     if (
                                         now_mono - recovered_since >= recover_cooldown
-                                        and polling_fallback_streamer.is_running()
+                                        and polling_fallback.is_running()
                                     ):
                                         LOGGER.info(
                                             "Polling fallback deactivate (supervisor) after ws recovery cooldown",
                                             extra={"event": "polling_fallback_deactivated"},
                                         )
-                                        polling_fallback_streamer.set_websocket_mode(True)
-                                        polling_fallback_streamer.stop()
+                                        polling_fallback.set_websocket_mode(True)
+                                        polling_fallback.stop()
                             except Exception as failover_exc:  # noqa: BLE001
                                 LOGGER.error(
                                     "Failure in polling failover supervisor: %s",
@@ -6017,6 +6039,52 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.streamer.subscribe([tok])
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.add_symbol(sym)
+                            if ctx.broker_client and ctx.market_data_manager:
+                                try:
+                                    end_dt = datetime.now()
+                                    start_dt = end_dt - timedelta(hours=2)
+                                    records = await asyncio.to_thread(
+                                        ctx.broker_client.get_ohlc,
+                                        sym,
+                                        "minute",
+                                        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                        end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                    )
+                                    for row in list(records or [])[-30:]:
+                                        ts = row.get("date") or row.get("timestamp")
+                                        if isinstance(ts, str):
+                                            ts = datetime.fromisoformat(
+                                                ts.replace("Z", "+00:00")
+                                            )
+                                        if isinstance(ts, datetime) and ts.tzinfo is None:
+                                            ts = ts.replace(tzinfo=timezone.utc)
+                                        if not isinstance(ts, datetime):
+                                            continue
+                                        ctx.market_data_manager.ingest_historical_bar(
+                                            {
+                                                "symbol": sym,
+                                                "open": float(row.get("open") or 0.0),
+                                                "high": float(row.get("high") or 0.0),
+                                                "low": float(row.get("low") or 0.0),
+                                                "close": float(row.get("close") or 0.0),
+                                                "volume": int(row.get("volume") or 0),
+                                                "timestamp": ts,
+                                            }
+                                        )
+                                    ctx.market_data_manager.update_hydration_status(
+                                        sym,
+                                        ctx.market_data_manager.get_ohlc_bars(sym),
+                                    )
+                                except Exception as hydration_exc:  # noqa: BLE001
+                                    LOGGER.warning(
+                                        "option_symbol_hydration_failed symbol=%s err=%s",
+                                        sym,
+                                        hydration_exc,
+                                        extra={
+                                            "event": "option_symbol_hydration_failed",
+                                            "symbol": sym,
+                                        },
+                                    )
 
                         for sym in drop_symbols:
                             tok = None
@@ -6033,6 +6101,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 res = ctx.streamer.unsubscribe([tok])
                                 if asyncio.iscoroutine(res):
                                     await res
+                            if tok and ctx.websocket_manager is not None:
+                                ctx.websocket_manager.unsubscribe_tokens([tok])
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.remove_symbol(sym)
 
@@ -6046,6 +6116,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     await asyncio.sleep(60) # Objective 7: 60s interval
 
             asyncio.create_task(_option_universe_sync_loop())
+            startup_trade_ready = True
         except Exception as e:
             LOGGER.error("Hydration/Tracking failed: %s", e, exc_info=True)
 
@@ -6354,7 +6425,12 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error("Failed to schedule EOD flatten: %s", e)
 
-    LOGGER.info("✅ Startup sequence fully complete.")
+    if startup_trade_ready:
+        LOGGER.info("✅ Startup sequence fully complete.")
+    else:
+        LOGGER.warning(
+            "Startup completed in degraded mode; trading remains inactive until basket/data readiness recovers"
+        )
 
 
 async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> None:
@@ -6716,7 +6792,22 @@ def _health_check(ctx: BotContext) -> None:
     strategy_runner = _require_component(ctx.strategy_runner, "strategy_runner")
     status: Mapping[str, Any] = strategy_runner.get_status()
     if not bool(status.get("running")):
-        LOGGER.warning("Strategy runner is not active")
+        state = get_market_state()
+        expected_active = bool(
+            ctx.settings.enable_live and state == MarketState.OPEN and not ctx.shadow_mode_enabled
+        )
+        log_throttled(
+            LOGGER,
+            key="strategy_runner_inactive_health",
+            msg="Strategy runner is not active",
+            level=logging.WARNING if expected_active else logging.INFO,
+            interval_sec=60.0,
+            extra={
+                "event": "strategy_runner_inactive_health",
+                "expected_active": expected_active,
+                "market_state": state.value if hasattr(state, "value") else str(state),
+            },
+        )
 
 
 def _must_ok(condition: bool, message: str) -> None:
