@@ -593,16 +593,26 @@ class TelegramBot:
     async def start(self) -> None:
         """Start Telegram polling once; Args: none. Returns: None. Raises: None."""
         if self._started:
+            log.debug("Telegram bot start skipped: already started")
             return
         self._started = True
         self._running = True
 
         try:
+            log.info("Telegram bot startup initiated", extra={"event": "telegram_start_enter"})
             self._register_handlers()
             await self.application.initialize()
             await self.application.start()
             if self.application.updater is not None:
+                log.info(
+                    "Telegram updater polling start requested",
+                    extra={"event": "telegram_updater_start_polling"},
+                )
                 await self.application.updater.start_polling()
+                log.info(
+                    "Telegram updater polling started",
+                    extra={"event": "telegram_updater_polling_started"},
+                )
             await self._safe_send("🤖 Telegram bot started")
             log.info("Telegram bot started")
             self._ensure_alert_worker()
@@ -616,7 +626,13 @@ class TelegramBot:
         except Exception as exc:  # noqa: BLE001
             self._started = False
             self._running = False
-            log.error("Telegram bot start failed: %s", exc, exc_info=True)
+            log.error(
+                "Telegram bot start failed type=%s err=%s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+                extra={"event": "telegram_start_failed"},
+            )
 
     async def stop(self) -> None:
         """
@@ -769,6 +785,10 @@ class TelegramBot:
                 return
             self._active_poller_instance = my_id
         self._mark_polling_started()
+        log.info(
+            "Telegram manual polling loop started",
+            extra={"event": "telegram_manual_polling_started"},
+        )
         self._polling_task = asyncio.create_task(
             self._polling_loop(),
             name="telegram-manual-polling",
@@ -4028,7 +4048,13 @@ class TelegramBot:
                         )
                         await asyncio.sleep(max(self.deps.polling_interval_seconds, 1.0))
                         continue
-                    log.error("Telegram polling error: %s", exc)
+                    log.error(
+                        "Telegram polling error type=%s err=%s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                        extra={"event": "telegram_polling_error"},
+                    )
                     await asyncio.sleep(2)
         except asyncio.CancelledError:
             raise

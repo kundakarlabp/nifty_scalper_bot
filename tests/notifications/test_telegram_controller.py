@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import types
 from datetime import datetime, timezone
@@ -1565,3 +1566,44 @@ async def test_polling_loop_recovers_from_conflict(
 
     assert bot._polling_conflict_count == 1
     assert bot._metrics.polling_errors == 1
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_logs_exception_context(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    deps = TelegramDeps(token='x', chat_id=1, app_version='test')
+    bot = TelegramBot(deps)
+    bot._shutdown_event = asyncio.Event()
+
+    class _FakeAppBot:
+        def __init__(self, owner: TelegramBot) -> None:
+            self._owner = owner
+            self.calls = 0
+
+        async def get_updates(self, **_: Any) -> list[Any]:
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError('boom')
+            self._owner._shutdown_event.set()
+            return []
+
+    class _FakeApp:
+        def __init__(self, owner: TelegramBot) -> None:
+            self.bot = _FakeAppBot(owner)
+
+        async def process_update(self, _update: Any) -> None:
+            return None
+
+    bot._app = _FakeApp(bot)
+
+    async def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(telegram_module.asyncio, 'sleep', _noop_sleep)
+    caplog.set_level(logging.ERROR, logger='nifty_scalper_bot.notifications.telegram_controller')
+    await bot._polling_loop()
+
+    assert bot._metrics.polling_errors == 1
+    assert any('Telegram polling error type=ValueError err=boom' in rec.message for rec in caplog.records)

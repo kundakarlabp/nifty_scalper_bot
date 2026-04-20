@@ -5341,19 +5341,41 @@ async def startup_sequence(ctx: BotContext) -> None:
             # ✅ FIX: Combine Spot and final options for multi-symbol hydration
             # Validate tokens before hydration — skip symbols with no resolvable
             # token so we don't waste API quota on unresolvable contracts.
+            def _is_nfo_symbol(symbol: str) -> bool:
+                """Return True when symbol belongs to NFO. Args: symbol. Returns: bool. Raises: None."""
+                return str(symbol or "").strip().upper().startswith("NFO:")
+
+            def _resolve_startup_token(symbol: str) -> int | None:
+                """Resolve startup token by symbol class. Args: symbol. Returns: token or None. Raises: None."""
+                if _is_nfo_symbol(symbol):
+                    if ctx.instrument_manager and ctx.instrument_manager.is_loaded():
+                        try:
+                            return int(ctx.instrument_manager.get_token(symbol))
+                        except RuntimeError:
+                            return None
+                    return None
+                if ctx.broker_client and hasattr(ctx.broker_client, "get_instrument_token"):
+                    try:
+                        return int(ctx.broker_client.get_instrument_token(symbol))
+                    except Exception as exc:  # noqa: BLE001 - resolver miss is handled by caller
+                        LOGGER.warning(
+                            "startup_spot_token_unresolved symbol=%s err=%s",
+                            symbol,
+                            exc,
+                            extra={
+                                "event": "startup_spot_token_unresolved",
+                                "symbol": symbol,
+                            },
+                        )
+                        return None
+                return None
+
             symbols_to_hydrate_raw = [sym for sym in targets if sym]
             symbols_to_hydrate: list[str] = []
             for _sym in symbols_to_hydrate_raw:
-                _tok = None
-                if ctx.instrument_manager and ctx.instrument_manager.is_loaded() and _sym.startswith("NFO:"):
-                    try:
-                        _tok = ctx.instrument_manager.get_token(_sym)
-                    except RuntimeError:
-                        _tok = None
-                elif not _sym.startswith("NFO:"):
-                    _tok = 1  # Well-known index, always valid
+                _tok = _resolve_startup_token(_sym)
                 # Skip unknown NFO options with no token
-                if _tok is None and _sym.startswith("NFO:"):
+                if _tok is None and _is_nfo_symbol(_sym):
                     LOGGER.warning(
                         "hydration_skip_no_token: skipping %s (no instrument token found)",
                         _sym,
@@ -5495,7 +5517,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     "hydrated_counts": hydrated_counts,
                 },
             )
-            if get_settings().enable_live and ctx.market_data_manager is not None:
+            if ctx.settings.enable_live and ctx.market_data_manager is not None:
                 failed = [
                     s
                     for s, status in ctx.market_data_manager._hydration_status.items()
@@ -5539,20 +5561,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ready_symbols:
                     runner.mark_ready(ready_symbols)
                 else:
-                    fallback_symbols = [s for s in targets if s]
-                    if fallback_symbols:
-                        LOGGER.warning(
-                            "startup_hydration_incomplete_forcing_ready symbols=%s",
-                            fallback_symbols,
-                            extra={
-                                "event": "startup_hydration_incomplete_forcing_ready"
-                            },
-                        )
-                        runner.mark_ready(fallback_symbols)
-                    else:
-                        LOGGER.error(
-                            "Startup hydration incomplete for all symbols — runner remains unready"
-                        )
+                    LOGGER.error(
+                        "Startup hydration incomplete for all symbols — runner remains unready"
+                    )
                 # Start the runner after hydration so get_status()["running"] is True
                 if hasattr(runner, "start") and not getattr(runner, "_running", False):
                     try:
@@ -5603,12 +5614,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             if im and im.is_loaded():
                 # Add Spot and mandatory targets
                 for sym in targets:
-                    try:
-                        tok = im.get_token(sym)
-                        if tok and tok not in tokens_to_poll:
-                            tokens_to_poll.append(tok)
-                    except RuntimeError:
-                        pass
+                    tok = _resolve_startup_token(sym)
+                    if tok and tok not in tokens_to_poll:
+                        tokens_to_poll.append(tok)
 
                 # Add ATM Options and Futures
                 spot_price = 0.0
@@ -5622,8 +5630,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                 extra_tokens = im.select_tokens_for_universe(
                     base="NIFTY",
                     spot_price=spot_price,
-                    strikes_around_atm=settings.option_universe.strikes_around_atm,
-                    strike_step=settings.option_universe.strike_step
+                    strikes_around_atm=ctx.settings.option_universe.strikes_around_atm,
+                    strike_step=ctx.settings.option_universe.strike_step
                 )
                 for t in extra_tokens:
                     if t and t not in tokens_to_poll:
@@ -5633,7 +5641,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             min_tokens = 10 # Enforce institutional-grade minimum
             if len(tokens_to_poll) < min_tokens:
                 msg = f"⚠️ WARNING: Subscribed tokens ({len(tokens_to_poll)}) < MIN_TOKEN_COUNT ({min_tokens})"
-                if not settings.enable_paper:
+                if not ctx.settings.enable_paper:
                     LOGGER.critical(f"❌ FAIL-FAST: {msg}")
                     raise RuntimeError(f"❌ CRITICAL: Insufficient tokens for trading ({len(tokens_to_poll)} < {min_tokens})")
                 else:
@@ -5657,25 +5665,23 @@ async def startup_sequence(ctx: BotContext) -> None:
                     mdm.ensure_tracking(sym, seed=not websocket_enabled)
 
                 tok = None
-                if ctx.instrument_manager and ctx.instrument_manager.is_loaded():
-                    # BUG-α FIX: Never raise here — a missing token for one symbol
-                    # must NOT abort streaming/subscription wiring for all others.
-                    try:
-                        tok = ctx.instrument_manager.get_token(sym)
-                    except RuntimeError:
-                        tok = None
-                    if tok:
-                        if mdm:
-                            mdm.register_symbol(sym, tok)
+                # BUG-α FIX: Never raise here — a missing token for one symbol
+                # must NOT abort streaming/subscription wiring for all others.
+                tok = _resolve_startup_token(sym)
+                if tok:
+                    if mdm:
+                        mdm.register_symbol(sym, tok)
+                    if tok not in tokens_to_poll:
                         tokens_to_poll.append(tok)
-                        active_symbols.append(sym)
-                        resolved_count += 1
-                        LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
-                    else:
-                        unresolved_symbols.append(sym)
-                        LOGGER.warning(
-                            f"⚠️ UNRESOLVED (no token, skipping subscription): {sym}"
-                        )
+                    active_symbols.append(sym)
+                    resolved_count += 1
+                    LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
+                else:
+                    unresolved_symbols.append(sym)
+                    LOGGER.warning(
+                        "⚠️ UNRESOLVED (no token for symbol class, skipping subscription): %s",
+                        sym,
+                    )
 
                 ctx.strategy_runner.add_symbol(sym)
 
@@ -5772,8 +5778,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                             target_tokens = _im.select_tokens_for_universe(
                                 base="NIFTY",
                                 spot_price=float(spot),
-                                strikes_around_atm=settings.option_universe.strikes_around_atm,
-                                strike_step=settings.option_universe.strike_step
+                                strikes_around_atm=ctx.settings.option_universe.strikes_around_atm,
+                                strike_step=ctx.settings.option_universe.strike_step
                             )
                             latest_symbols = set()
                             for t in target_tokens:
