@@ -147,6 +147,7 @@ class MarketDataManager:
         self._engines: dict[str, CandleEngine] = {}
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
+        self._readiness_requirements: dict[str, Any] = {}
         # Bounded queue: drops oldest when full so a stall in the async
         # consumer never grows memory without bound. Size 10 000 is ~8 s
         # of headroom at 1 000 tps.
@@ -499,12 +500,95 @@ class MarketDataManager:
             self._logger.error("Poll candle build failed for %s: %s", symbol, e)
 
     def _emit_poll_candle(self, candle: Mapping[str, Any]) -> None:
-        """Send poll-built candles through runner ingestion. Args: candle. Returns: None. Raises: Exception."""
+        """Ingest poll-built candle into MDM historical buffers.
+
+        Args: candle mapping.
+        Returns: None.
+        Raises: None.
+        """
         try:
-            if self._runner:
-                self._runner.ingest_historical_bar(dict(candle))
+            self.ingest_historical_bar(dict(candle))
         except Exception as e:
             self._logger.error("Poll candle emit failed: %s", e)
+
+    def ingest_historical_bar(self, bar: Mapping[str, Any]) -> None:
+        """Ingest one historical OHLC bar into MDM-owned state.
+
+        Args: bar payload containing symbol/open/high/low/close/volume/timestamp.
+        Returns: None.
+        Raises: None.
+        """
+        try:
+            symbol = normalize_symbol(str(bar.get("symbol") or ""))
+            if not symbol:
+                return
+            ts = bar.get("timestamp")
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if isinstance(ts, (int, float)):
+                ts = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            if isinstance(ts, datetime) and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            payload = {
+                "symbol": symbol,
+                "open": float(bar.get("open", 0.0) or 0.0),
+                "high": float(bar.get("high", 0.0) or 0.0),
+                "low": float(bar.get("low", 0.0) or 0.0),
+                "close": float(bar.get("close", 0.0) or 0.0),
+                "volume": int(float(bar.get("volume", 0) or 0)),
+                "timestamp": ts,
+                "source": "historical",
+            }
+            self._history[symbol].append(dict(payload))
+            self._ohlc[self._bar_symbol_key(symbol)].append(dict(payload))
+            if isinstance(ts, datetime):
+                self._last_historical_ts[symbol] = ts.timestamp()
+            self.update_hydration_status(symbol, self._ohlc[self._bar_symbol_key(symbol)])
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("Failure in ingest_historical_bar: %s", exc, exc_info=exc)
+
+    def ingest_historical_ohlc(
+        self, symbol: str, bars: Sequence[Mapping[str, Any]]
+    ) -> int:
+        """Ingest historical OHLC bars into MDM and return accepted count.
+
+        Args: symbol, bars.
+        Returns: accepted bar count.
+        Raises: None.
+        """
+        accepted = 0
+        try:
+            for row in bars:
+                data = dict(row)
+                data["symbol"] = symbol
+                self.ingest_historical_bar(data)
+                accepted += 1
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("Failure in ingest_historical_ohlc: %s", exc, exc_info=exc)
+        return accepted
+
+    def set_readiness_requirements(
+        self,
+        *,
+        spot_symbol: str,
+        futures_symbol: str,
+        atm_ce_symbol: str | None,
+        atm_pe_symbol: str | None,
+        option_symbols: Sequence[str],
+    ) -> None:
+        """Set explicit required-symbol/quorum readiness rules.
+
+        Args: canonical symbols and option set.
+        Returns: None.
+        Raises: None.
+        """
+        self._readiness_requirements = {
+            "spot": normalize_symbol(spot_symbol),
+            "futures": normalize_symbol(futures_symbol),
+            "atm_ce": normalize_symbol(atm_ce_symbol or "") if atm_ce_symbol else None,
+            "atm_pe": normalize_symbol(atm_pe_symbol or "") if atm_pe_symbol else None,
+            "options": [normalize_symbol(s) for s in option_symbols if s],
+        }
 
     def set_unified_manager(self, manager: Any | None) -> None:
         """Retain compatibility hook. Args: manager. Returns: None. Raises: None."""
@@ -1473,6 +1557,15 @@ class MarketDataManager:
                 cached_quote = dict(cached_tick)
                 cached_quote.setdefault("source", "cache")
                 return cached_quote
+            if canonical_symbol == "NSE:NIFTY":
+                self._logger.warning(
+                    "nifty_quote_pull_failed",
+                    extra={
+                        "event": "nifty_quote_pull_failed",
+                        "symbol": canonical_symbol,
+                        "reason": "no_quote_from_broker_or_cache",
+                    },
+                )
             return {"symbol": canonical_symbol}
         quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:
@@ -2355,14 +2448,19 @@ class MarketDataManager:
                     )
                     for symbol in subscribed_symbols
                 }
+            requirements = dict(self._readiness_requirements)
             valid_symbols = [s for s, count in bars.items() if count >= min_bars]
-            if valid_symbols:
+            if self._readiness_passes(bars, min_bars, requirements):
                 self.ready = True
                 self.degraded = False
                 self.hydration_complete = True
                 self._logger.info(
                     "Condition met: mdm_ready",
-                    extra={"event": "mdm_ready", "symbols": valid_symbols},
+                    extra={
+                        "event": "mdm_ready",
+                        "symbols": valid_symbols,
+                        "requirements": requirements,
+                    },
                 )
                 return
             await asyncio.sleep(0.1)
@@ -2392,14 +2490,43 @@ class MarketDataManager:
         else:
             self._logger.warning(
                 "Readiness timeout before hydration completed "
-                "(timeout=%.1fs, min_bars=%d, bars=%s)",
+                "(timeout=%.1fs, min_bars=%d, bars=%s, requirements=%s)",
                 timeout,
                 min_bars,
                 bars,
+                self._readiness_requirements,
             )
             self.ready = False
             self.degraded = False
         return
+
+    def _readiness_passes(
+        self,
+        bars: Mapping[str, int],
+        min_bars: int,
+        requirements: Mapping[str, Any],
+    ) -> bool:
+        """Evaluate strict readiness rules for startup/live gating."""
+        if not requirements:
+            return any(count >= min_bars for count in bars.values())
+        spot = str(requirements.get("spot") or "")
+        futures = str(requirements.get("futures") or "")
+        atm_ce = requirements.get("atm_ce")
+        atm_pe = requirements.get("atm_pe")
+        options = [str(s) for s in requirements.get("options") or []]
+        if bars.get(spot, 0) < min_bars or bars.get(futures, 0) < min_bars:
+            return False
+        if atm_ce and bars.get(str(atm_ce), 0) < min_bars:
+            return False
+        if atm_pe and bars.get(str(atm_pe), 0) < min_bars:
+            return False
+        ce_ready = [
+            sym for sym in options if sym.endswith("CE") and bars.get(sym, 0) >= min_bars
+        ]
+        pe_ready = [
+            sym for sym in options if sym.endswith("PE") and bars.get(sym, 0) >= min_bars
+        ]
+        return len(ce_ready) >= 2 and len(pe_ready) >= 2
 
     def get_hydration_status(self, symbol: str) -> str:
         """Return hydration status. Args: symbol. Returns: status string. Raises: None."""
@@ -3173,25 +3300,17 @@ class MarketDataManager:
                             validated_ts.timestamp()
                         )
                     hydrated_count += 1
-                    runner = getattr(self, "_runner", None)
-                    if runner is not None and hasattr(runner, "ingest_historical_bar"):
-                        try:
-                            runner.ingest_historical_bar(
-                                {
-                                    "symbol": canonical_symbol,
-                                    "open": float(candle.get("open", 0.0)),
-                                    "high": float(candle.get("high", 0.0)),
-                                    "low": float(candle.get("low", 0.0)),
-                                    "close": float(candle.get("close", 0.0)),
-                                    "volume": float(candle.get("volume", 0.0)),
-                                    "timestamp": candle_dt,
-                                }
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            self._logger.error(
-                                "Hydration ingest failed",
-                                exc_info=exc,
-                            )
+                    self.ingest_historical_bar(
+                        {
+                            "symbol": canonical_symbol,
+                            "open": float(candle.get("open", 0.0)),
+                            "high": float(candle.get("high", 0.0)),
+                            "low": float(candle.get("low", 0.0)),
+                            "close": float(candle.get("close", 0.0)),
+                            "volume": float(candle.get("volume", 0.0)),
+                            "timestamp": candle_dt,
+                        }
+                    )
                 self._logger.info("Hydrated %s: %d bars", canonical_symbol, hydrated_count)
 
             self._logger.info("WARMUP_COMPLETE")
