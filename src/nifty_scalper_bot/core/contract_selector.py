@@ -23,12 +23,27 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import logging
+import os
 from typing import Any
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.contract_selector")
 
 _STRIKE_BAND = 200      # include strikes ATM ± this many points
 _STRIKE_STEP_DEFAULT = 50  # fallback step when no instruments loaded
+
+# Liquidity check knobs — the old 3-day / 10-bar gate was too strict and
+# repeatedly rejected ATM contracts for freshly listed weekly series.  The
+# defaults are now configurable and lean forgiving, and transient historical
+# fetch failures no longer disqualify a contract.
+_LIQUIDITY_LOOKBACK_DAYS = max(
+    1, int(os.getenv("OPTION_LIQUIDITY_LOOKBACK_DAYS", "7") or 7)
+)
+_LIQUIDITY_MIN_BARS = max(
+    1, int(os.getenv("OPTION_LIQUIDITY_MIN_BARS", "3") or 3)
+)
+_LIQUIDITY_ENABLED = os.getenv(
+    "OPTION_LIQUIDITY_HISTORY_CHECK", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _coerce_expiry(value: Any) -> date | None:
@@ -178,29 +193,68 @@ def get_atm_contracts(
             }
         )
 
-    interval = 'minute'
-    to_dt = datetime.now()
-    from_dt = to_dt - timedelta(days=3)
-    valid_tokens: list[dict[str, Any]] = []
-    for contract in selected:
-        token = contract['instrument_token']
-        try:
-            data = kite.historical_data(token, from_dt, to_dt, interval)
-            if data and len(data) >= 10:
-                valid_tokens.append(contract)
-            else:
-                LOGGER.warning(
-                    'Skipping illiquid token=%s (no usable history)',
+    # ── best-effort liquidity screen ─────────────────────────────────────────
+    # Historical data gating was previously opt-out and rejected any contract
+    # with fewer than 10 minute-bars in the last 3 trading days.  This failed
+    # on freshly listed strikes (common on expiry day) and on any transient
+    # broker error.  We now run the check as a "demotion" filter: tokens with
+    # proven activity move to the head of the list, everything else stays
+    # available as an ATM fallback so downstream selection never starves.
+    if _LIQUIDITY_ENABLED and selected:
+        interval = 'minute'
+        to_dt = datetime.now()
+        from_dt = to_dt - timedelta(days=_LIQUIDITY_LOOKBACK_DAYS)
+        liquid: list[dict[str, Any]] = []
+        fallback: list[dict[str, Any]] = []
+        skipped_no_history: list[int] = []
+        skipped_errors: list[int] = []
+        for contract in selected:
+            token = contract['instrument_token']
+            try:
+                data = kite.historical_data(token, from_dt, to_dt, interval)
+            except Exception as exc:  # noqa: BLE001 - best effort
+                # Transient broker error — keep the contract but log once.
+                skipped_errors.append(token)
+                LOGGER.debug(
+                    'liquidity_history_fetch_failed token=%s err=%s',
                     token,
+                    exc,
                 )
-        except Exception as exc:  # noqa: BLE001 - best effort liquidity check
-            LOGGER.warning(
-                'Skipping token=%s (history fetch failed): %s',
-                token,
-                exc,
+                fallback.append(contract)
+                continue
+            if data and len(data) >= _LIQUIDITY_MIN_BARS:
+                liquid.append(contract)
+            else:
+                skipped_no_history.append(token)
+                fallback.append(contract)
+        if skipped_no_history:
+            LOGGER.info(
+                'liquidity_demotion: %d tokens lack %d+ bars over %d days '
+                '(kept as ATM fallback)',
+                len(skipped_no_history),
+                _LIQUIDITY_MIN_BARS,
+                _LIQUIDITY_LOOKBACK_DAYS,
+                extra={
+                    'event': 'contract_selector_liquidity_demotion',
+                    'tokens': skipped_no_history,
+                    'lookback_days': _LIQUIDITY_LOOKBACK_DAYS,
+                    'min_bars': _LIQUIDITY_MIN_BARS,
+                },
             )
-
-    selected = valid_tokens
+        if skipped_errors:
+            LOGGER.info(
+                'liquidity_probe_errors: %d tokens had transient history errors '
+                '(kept as ATM fallback)',
+                len(skipped_errors),
+                extra={
+                    'event': 'contract_selector_liquidity_errors',
+                    'tokens': skipped_errors,
+                },
+            )
+        # Liquid contracts first, then the demotion bucket — callers that only
+        # need the best strikes use the prefix; full universe subscribers keep
+        # everything.
+        selected = liquid + fallback
 
     if not selected:
         raise RuntimeError(

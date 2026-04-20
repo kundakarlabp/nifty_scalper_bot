@@ -40,12 +40,14 @@ class DummyWebSocket:
         self.on_tick = None
         self.subscribed: list[tuple[str, Iterable[Any]]] = []
         self.unsubscribed: list[Iterable[Any]] = []
+        self.start_calls: int = 0
+        self.stop_calls: int = 0
 
-    def start(self) -> None:  # pragma: no cover - no behaviour
-        return None
+    def start(self) -> None:
+        self.start_calls += 1
 
-    def stop(self) -> None:  # pragma: no cover - no behaviour
-        return None
+    def stop(self) -> None:
+        self.stop_calls += 1
 
     def subscribe_tokens(self, tokens: Iterable[Any], mode: str = "ltp") -> None:
         self.subscribed.append((mode, list(tokens)))
@@ -685,3 +687,37 @@ def test_all_ticks_are_processed_without_burst_throttle(
     latest = manager.get_latest_tick("NIFTY23")
     assert latest is not None
     assert latest["ltp"] == pytest.approx(102.0)
+
+
+def test_start_with_defer_ws_does_not_connect_websocket(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    """``start(defer_ws=True)`` must not call ``ws.start``.
+
+    This guards the startup ordering fix: the WebSocket must stay offline
+    until the full token universe is resolved so the initial ``_on_connect``
+    handshake never subscribes with only the spot token.
+    """
+
+    manager = MarketDataManager(broker, ws)
+    manager.start(defer_ws=True)
+    assert ws.start_calls == 0
+
+    manager.start_websocket()
+    assert ws.start_calls == 1
+
+    # Idempotent — calling again must not reconnect
+    manager.start_websocket()
+    assert ws.start_calls == 1
+
+
+def test_start_without_defer_ws_starts_websocket_immediately(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager.start()
+    assert ws.start_calls == 1
+
+    # Second start() call with defer_ws=False is a no-op because ws already up
+    manager.start()
+    assert ws.start_calls == 1

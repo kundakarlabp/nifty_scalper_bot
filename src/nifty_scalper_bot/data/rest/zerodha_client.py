@@ -384,12 +384,50 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
     # BaseBrokerClient protocol methods
     def get_quote(self, symbol: str) -> dict[str, Any]:
-        """Get quote for symbol."""
+        """Get quote for symbol.
+
+        Kite's ``/quote`` endpoint keys the response by the exact instrument
+        identifier it recognises (e.g. ``NSE:NIFTY 50`` for the index).  A
+        caller-facing alias like ``NSE:NIFTY`` is not accepted by the API and
+        results in an empty ``data`` payload.  We therefore send every known
+        alias for index-style symbols in a single GET and accept whichever
+        variant Kite returns.
+        """
 
         self._acquire_bucket(self._QUOTE_BUCKET)
         kite_symbol = self._format_symbol(symbol)
+        raw_symbol = str(symbol or "").strip().upper()
+        formatted_symbol = str(kite_symbol or "").strip().upper()
+
+        variants: list[str] = []
+        for candidate in (
+            formatted_symbol,
+            raw_symbol,
+            formatted_symbol.split(":", 1)[-1],
+            raw_symbol.split(":", 1)[-1],
+        ):
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+
+        # Known index aliases Kite accepts under different keys.
+        _INDEX_ALIASES = {
+            "NSE:NIFTY": ("NSE:NIFTY 50", "NIFTY 50"),
+            "NIFTY": ("NSE:NIFTY 50", "NIFTY 50"),
+            "NIFTY50": ("NSE:NIFTY 50", "NIFTY 50"),
+            "NSE:BANKNIFTY": ("NSE:NIFTY BANK", "NIFTY BANK"),
+            "BANKNIFTY": ("NSE:NIFTY BANK", "NIFTY BANK"),
+            "NSE:FINNIFTY": ("NSE:NIFTY FIN SERVICE", "NIFTY FIN SERVICE"),
+            "FINNIFTY": ("NSE:NIFTY FIN SERVICE", "NIFTY FIN SERVICE"),
+        }
+        for alias_key in (formatted_symbol, raw_symbol):
+            for extra in _INDEX_ALIASES.get(alias_key, ()):
+                if extra not in variants:
+                    variants.append(extra)
+
+        # Send every alias to Kite so a single round-trip covers any naming
+        # mismatch.  Kite silently drops unknown keys from the response.
         response = self._ensure_json(
-            self._make_request("GET", "/quote", params={"i": [kite_symbol]})
+            self._make_request("GET", "/quote", params={"i": variants})
         )
         data = response.get("data", {})
         quote_data: Mapping[str, Any] | None = None
@@ -398,27 +436,13 @@ class ZerodhaKiteClient(BaseBrokerClient):
             if isinstance(direct, Mapping):
                 quote_data = direct
             else:
-                variants: list[str] = []
-                raw_symbol = str(symbol or "").strip().upper()
-                formatted_symbol = str(kite_symbol or "").strip().upper()
-                for candidate in (
-                    formatted_symbol,
-                    raw_symbol,
-                    formatted_symbol.split(":", 1)[-1],
-                    raw_symbol.split(":", 1)[-1],
-                ):
-                    if candidate and candidate not in variants:
-                        variants.append(candidate)
-                if "NSE:NIFTY" in variants:
-                    variants.extend(["NSE:NIFTY 50", "NIFTY 50", "NIFTY50"])
-                if "NIFTY" in variants:
-                    variants.extend(["NIFTY 50", "NIFTY50"])
                 for key, payload in data.items():
                     if not isinstance(payload, Mapping):
                         continue
                     key_text = str(key).strip().upper()
-                    normalized_key = key_text.replace(" ", "")
-                    normalized_key = normalized_key.replace("NIFTY50", "NIFTY")
+                    normalized_key = key_text.replace(" ", "").replace(
+                        "NIFTY50", "NIFTY"
+                    )
                     if key_text in variants:
                         quote_data = payload
                         break
@@ -431,6 +455,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
                             break
                     if quote_data is not None:
                         break
+                if quote_data is None:
+                    # Kite may also return the payload keyed by instrument
+                    # token (happens for some newly-listed series).  Any single
+                    # payload back is still authoritative for this request.
+                    for payload in data.values():
+                        if isinstance(payload, Mapping) and payload:
+                            quote_data = payload
+                            break
         if quote_data is None:  # pragma: no cover - API invariant
             raise BrokerError(f"Quote data missing for {symbol}")
 
