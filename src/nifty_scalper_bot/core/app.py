@@ -1267,6 +1267,7 @@ class BotContext:
     websocket_manager: WebSocketManager | None
     streamer: Any
     stream_supervisor: StreamSupervisor | None
+    polling_fallback_streamer: PollingStreamer | None
     message_bus: MessageBus
     data_hub: DataHub | None = None
     market_data_manager: MarketDataManager | None = None
@@ -2147,6 +2148,59 @@ def _data_ready(mdm: MarketDataManager | None) -> bool:
         if not mdm.get_latest_tick(sym):
             return False
     return True
+
+
+def _build_canonical_active_basket(
+    *,
+    instrument_manager: InstrumentManager | None,
+    spot_ltp: float,
+    futures_symbol: str,
+    strike_step: int = 50,
+    strikes_around_atm: int = 3,
+) -> dict[str, Any]:
+    """Build canonical live basket (spot + futures + ATM±N CE/PE).
+
+    Args: instrument_manager, spot_ltp, futures_symbol, strike_step, strikes_around_atm.
+    Returns: basket dict.
+    Raises: RuntimeError.
+    """
+    spot_symbol = "NSE:NIFTY"
+    if instrument_manager is None or not instrument_manager.is_loaded():
+        raise RuntimeError("instrument manager unavailable for basket resolution")
+    atm = int(round(float(spot_ltp) / float(strike_step)) * strike_step)
+    option_tokens = instrument_manager.select_tokens_for_universe(
+        base="NIFTY",
+        spot_price=float(spot_ltp),
+        strikes_around_atm=int(strikes_around_atm),
+        strike_step=int(strike_step),
+    )
+    option_symbols: list[str] = []
+    for token in option_tokens:
+        symbol = instrument_manager.get_symbol(int(token))
+        if not symbol:
+            continue
+        qualified = symbol if symbol.startswith("NFO:") else f"NFO:{symbol}"
+        if qualified.endswith("CE") or qualified.endswith("PE"):
+            option_symbols.append(qualified)
+    option_symbols = sorted(set(option_symbols))
+    ce_symbols = sorted([s for s in option_symbols if s.endswith("CE")])
+    pe_symbols = sorted([s for s in option_symbols if s.endswith("PE")])
+    if not ce_symbols or not pe_symbols:
+        raise RuntimeError("failed to resolve canonical option basket")
+    futures_token = instrument_manager.get_token(futures_symbol)
+    spot_token = instrument_manager.get_token(spot_symbol)
+    symbols = [spot_symbol, futures_symbol, *ce_symbols, *pe_symbols]
+    return {
+        "spot_symbol": spot_symbol,
+        "spot_token": int(spot_token),
+        "futures_symbol": futures_symbol,
+        "futures_token": int(futures_token),
+        "atm_strike": atm,
+        "ce_symbols": ce_symbols,
+        "pe_symbols": pe_symbols,
+        "option_symbols": [*ce_symbols, *pe_symbols],
+        "symbols": symbols,
+    }
 
 
 def _get_strategy_config(config: AppConfig) -> StrategyRunnerConfig:
@@ -4268,6 +4322,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         websocket_manager=websocket_manager,
         streamer=streamer,
         stream_supervisor=stream_supervisor,
+        polling_fallback_streamer=polling_fallback_streamer,
         data_hub=data_hub,
         market_data_manager=market_data_manager,
         market_regime=market_regime_detector,
@@ -5338,6 +5393,44 @@ async def startup_sequence(ctx: BotContext) -> None:
                 targets.append("NSE:NIFTY")
             targets = list(dict.fromkeys(targets))
 
+            # Canonical live basket for trading path: spot + futures + ATM±3 CE/PE.
+            spot_ltp = 0.0
+            if ctx.market_data_manager is not None:
+                spot_ltp = float(
+                    ctx.market_data_manager.get_latest_price("NSE:NIFTY") or 0.0
+                )
+            if spot_ltp <= 0:
+                spot_ltp = 25600.0
+            try:
+                basket = _build_canonical_active_basket(
+                    instrument_manager=ctx.instrument_manager,
+                    spot_ltp=spot_ltp,
+                    futures_symbol=future_symbol,
+                    strike_step=int(ctx.settings.option_universe.strike_step or 50),
+                    strikes_around_atm=3,
+                )
+                targets = list(dict.fromkeys(basket["symbols"]))
+                LOGGER.info(
+                    "ACTIVE_BASKET summary size=%d spot=%s fut=%s ce=%d pe=%d",
+                    len(targets),
+                    basket["spot_symbol"],
+                    basket["futures_symbol"],
+                    len(basket["ce_symbols"]),
+                    len(basket["pe_symbols"]),
+                    extra={
+                        "event": "active_basket_built",
+                        "size": len(targets),
+                        "atm": basket["atm_strike"],
+                    },
+                )
+            except Exception as basket_exc:  # noqa: BLE001
+                LOGGER.error(
+                    "Failed building canonical active basket: %s",
+                    basket_exc,
+                    exc_info=True,
+                )
+                raise
+
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
 
             # ---------- HISTORICAL HYDRATION (SEQUENTIAL FETCH + SERIAL COMMIT) ----------
@@ -5505,12 +5598,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                             "volume": int(v or 0),
                             "timestamp": ts,
                         }
-                        if runner is not None and hasattr(runner, "safe_ingest"):
-                            await runner.safe_ingest(bar_data)
-                        elif runner is not None and hasattr(
-                            runner, "ingest_historical_bar"
-                        ):
-                            runner.ingest_historical_bar(bar_data)
+                        if ctx.market_data_manager is not None:
+                            ctx.market_data_manager.ingest_historical_bar(bar_data)
                         count += 1
                     except Exception as candle_err:
                         LOGGER.debug(f"Skipping bad candle for {sym}: {candle_err}")
@@ -5549,11 +5638,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
 
-            # =========================================================
-            # ✅ WORLD CLASS FIX: FINALIZE RUNNER STATE
-            # =========================================================
-            # This commits the hydration so Runner doesn't trigger fallback backfill.
-            runner = ctx.strategy_runner
             ready_symbols: list[str] = []
             min_required_bars = int(
                 getattr(runner, "_required_candles", 20) if runner else 20
@@ -5571,18 +5655,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                             "required": min_required_bars,
                         },
                     )
-            if runner and hasattr(runner, "mark_ready"):
-                if ready_symbols:
-                    runner.mark_ready(ready_symbols)
-                    if hasattr(runner, "start") and not getattr(runner, "_running", False):
-                        try:
-                            runner.start()
-                            LOGGER.info("✅ StrategyRunner started")
-                        except Exception as _runner_start_exc:
-                            LOGGER.error("StrategyRunner.start() failed: %s", _runner_start_exc, exc_info=True)
-                else:
-                    LOGGER.error("No symbols ready after hydration — runner NOT started")
-            # =========================================================
+            if (
+                ctx.market_data_manager is not None
+                and "basket" in locals()
+            ):
+                atm_ce = basket["ce_symbols"][len(basket["ce_symbols"]) // 2]
+                atm_pe = basket["pe_symbols"][len(basket["pe_symbols"]) // 2]
+                ctx.market_data_manager.set_readiness_requirements(
+                    spot_symbol=basket["spot_symbol"],
+                    futures_symbol=basket["futures_symbol"],
+                    atm_ce_symbol=atm_ce,
+                    atm_pe_symbol=atm_pe,
+                    option_symbols=basket["option_symbols"],
+                )
+            if runner and hasattr(runner, "mark_ready") and ready_symbols:
+                runner.mark_ready(ready_symbols)
 
             try:
                 await ctx.market_regime_manager.refresh_from_indicators()
@@ -5641,7 +5728,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 extra_tokens = im.select_tokens_for_universe(
                     base="NIFTY",
                     spot_price=spot_price,
-                    strikes_around_atm=ctx.settings.option_universe.strikes_around_atm,
+                    strikes_around_atm=3,
                     strike_step=ctx.settings.option_universe.strike_step
                 )
                 for t in extra_tokens:
@@ -5718,7 +5805,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info(
                 "WS_SUBSCRIPTION_SUMMARY tokens=%d symbols=%d",
                 len(tokens_to_poll),
-                len(getattr(mdm, "_symbol_by_token", {})) if mdm is not None else 0,
+                len(sorted(set(active_symbols))),
             )
             subscribed_symbols = sorted({sym for sym in targets})
             LOGGER.critical(
@@ -5754,6 +5841,59 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
             if polling_fallback_streamer is not None and tokens_to_poll:
                 polling_fallback_streamer.subscribe(tokens_to_poll)
+                if ctx.websocket_manager is not None and ctx.market_data_manager is not None:
+                    async def _polling_failover_supervisor() -> None:
+                        """Supervise WS health and toggle polling fallback with hysteresis."""
+                        degraded_since: float | None = None
+                        recovered_since: float | None = None
+                        activate_after = 3.0
+                        recover_cooldown = 10.0
+                        quote_stale_ms = 5000
+                        while True:
+                            try:
+                                ws_ok = bool(ctx.websocket_manager.is_connected())
+                                stale = bool(ctx.market_data_manager.is_data_stale())
+                                spot_age = ctx.market_data_manager.quote_age_ms("NSE:NIFTY")
+                                degraded = (not ws_ok) or stale or spot_age > quote_stale_ms
+                                now_mono = time_module.monotonic()
+                                if degraded:
+                                    recovered_since = None
+                                    degraded_since = degraded_since or now_mono
+                                    if (
+                                        now_mono - degraded_since >= activate_after
+                                        and not polling_fallback_streamer.is_running()
+                                    ):
+                                        LOGGER.warning(
+                                            "Polling fallback activate (supervisor) ws_ok=%s stale=%s spot_quote_age_ms=%s",
+                                            ws_ok,
+                                            stale,
+                                            spot_age,
+                                            extra={"event": "polling_fallback_activated"},
+                                        )
+                                        polling_fallback_streamer.set_websocket_mode(False)
+                                        polling_fallback_streamer.start()
+                                else:
+                                    degraded_since = None
+                                    recovered_since = recovered_since or now_mono
+                                    if (
+                                        now_mono - recovered_since >= recover_cooldown
+                                        and polling_fallback_streamer.is_running()
+                                    ):
+                                        LOGGER.info(
+                                            "Polling fallback deactivate (supervisor) after ws recovery cooldown",
+                                            extra={"event": "polling_fallback_deactivated"},
+                                        )
+                                        polling_fallback_streamer.set_websocket_mode(True)
+                                        polling_fallback_streamer.stop()
+                            except Exception as failover_exc:  # noqa: BLE001
+                                LOGGER.error(
+                                    "Failure in polling failover supervisor: %s",
+                                    failover_exc,
+                                    exc_info=failover_exc,
+                                )
+                            await asyncio.sleep(1.0)
+
+                    asyncio.create_task(_polling_failover_supervisor())
 
             # ── Bring the WebSocket online now that tokens are registered ──
             # MDM.start() earlier ran with defer_ws=True so the initial
@@ -5816,7 +5956,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             target_tokens = _im.select_tokens_for_universe(
                                 base="NIFTY",
                                 spot_price=float(spot),
-                                strikes_around_atm=ctx.settings.option_universe.strikes_around_atm,
+                                strikes_around_atm=3,
                                 strike_step=ctx.settings.option_universe.strike_step
                             )
                             latest_symbols = set()
@@ -5839,10 +5979,16 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                         if add_symbols or drop_symbols:
                             LOGGER.info(
-                                "UNIVERSE_SYNC: added=%d removed=%d",
+                                "ACTIVE_BASKET_REFRESH added=%d removed=%d reason=%s",
                                 len(add_symbols),
                                 len(drop_symbols),
-                                extra={"event": "universe_sync", "added": list(add_symbols), "removed": list(drop_symbols)}
+                                "atm_shift_or_expiry",
+                                extra={
+                                    "event": "active_basket_refresh",
+                                    "added": list(add_symbols),
+                                    "removed": list(drop_symbols),
+                                    "reason": "atm_shift_or_expiry",
+                                },
                             )
 
                         for sym in add_symbols:

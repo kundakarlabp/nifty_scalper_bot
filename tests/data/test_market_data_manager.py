@@ -35,6 +35,14 @@ class DummyBroker:
         return self._tokens[symbol]
 
 
+class _RunnerProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def ingest_historical_bar(self, _bar: dict[str, Any]) -> None:
+        self.calls += 1
+
+
 class DummyWebSocket:
     def __init__(self) -> None:
         self.on_tick = None
@@ -243,6 +251,133 @@ def test_wait_for_symbol_hits_after_tick(
 def test_wait_for_symbol_times_out(broker: DummyBroker, ws: DummyWebSocket) -> None:
     manager = MarketDataManager(broker, ws)
     assert not manager.wait_for_symbol("NIFTY23", timeout=0.0)
+
+
+def test_startup_hydration_ingests_into_mdm_not_runner(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    probe = _RunnerProbe()
+    manager._runner = probe  # noqa: SLF001
+    accepted = manager.ingest_historical_ohlc(
+        "NSE:NIFTY",
+        [
+            {
+                "open": 1,
+                "high": 2,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10,
+                "timestamp": datetime.now(timezone.utc),
+            }
+        ],
+    )
+    assert accepted == 1
+    assert probe.calls == 0
+    assert manager.get_ohlc_bars("NSE:NIFTY")
+
+
+@pytest.mark.asyncio
+async def test_readiness_requires_spot_and_futures_even_when_option_ready(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.get_market_state",
+        lambda: MarketState.OPEN,
+    )
+    manager = MarketDataManager(broker, ws)
+    manager._min_required_bars = 1  # noqa: SLF001
+    manager._active_subscribed_symbols = {  # noqa: SLF001
+        "NSE:NIFTY",
+        "NFO:NIFTY26MAYFUT",
+        "NFO:NIFTY26MAY25000CE",
+        "NFO:NIFTY26MAY24950CE",
+        "NFO:NIFTY26MAY25000PE",
+        "NFO:NIFTY26MAY24950PE",
+    }
+    manager.set_readiness_requirements(
+        spot_symbol="NSE:NIFTY",
+        futures_symbol="NFO:NIFTY26MAYFUT",
+        atm_ce_symbol="NFO:NIFTY26MAY25000CE",
+        atm_pe_symbol="NFO:NIFTY26MAY25000PE",
+        option_symbols=[
+            "NFO:NIFTY26MAY25000CE",
+            "NFO:NIFTY26MAY24950CE",
+            "NFO:NIFTY26MAY25000PE",
+            "NFO:NIFTY26MAY24950PE",
+        ],
+    )
+    manager.ingest_historical_bar(
+        {
+            "symbol": "NFO:NIFTY26MAY25000CE",
+            "open": 1,
+            "high": 2,
+            "low": 1,
+            "close": 1.5,
+            "volume": 1,
+            "timestamp": datetime.now(timezone.utc),
+        }
+    )
+    await manager.wait_until_ready(timeout=0.15)
+    assert manager.ready is False
+
+
+@pytest.mark.asyncio
+async def test_readiness_passes_with_required_quorum(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.get_market_state",
+        lambda: MarketState.OPEN,
+    )
+    manager = MarketDataManager(broker, ws)
+    manager._min_required_bars = 1  # noqa: SLF001
+    symbols = [
+        "NSE:NIFTY",
+        "NFO:NIFTY26MAYFUT",
+        "NFO:NIFTY26MAY25000CE",
+        "NFO:NIFTY26MAY24950CE",
+        "NFO:NIFTY26MAY25000PE",
+        "NFO:NIFTY26MAY24950PE",
+    ]
+    manager._active_subscribed_symbols = set(symbols)  # noqa: SLF001
+    manager.set_readiness_requirements(
+        spot_symbol="NSE:NIFTY",
+        futures_symbol="NFO:NIFTY26MAYFUT",
+        atm_ce_symbol="NFO:NIFTY26MAY25000CE",
+        atm_pe_symbol="NFO:NIFTY26MAY25000PE",
+        option_symbols=symbols[2:],
+    )
+    for symbol in symbols:
+        manager.ingest_historical_bar(
+            {
+                "symbol": symbol,
+                "open": 1,
+                "high": 2,
+                "low": 1,
+                "close": 1.5,
+                "volume": 1,
+                "timestamp": datetime.now(timezone.utc),
+            }
+        )
+    await manager.wait_until_ready(timeout=0.5)
+    assert manager.ready is True
+
+
+def test_nifty_pull_quote_logs_structured_warning_on_total_failure(
+    ws: DummyWebSocket, caplog: pytest.LogCaptureFixture
+) -> None:
+    class _NoQuoteBroker(DummyBroker):
+        def get_quote(self, symbol: str) -> dict[str, Any]:
+            raise RuntimeError(f"missing quote {symbol}")
+
+    broker = _NoQuoteBroker()
+    broker.set_token("NSE:NIFTY", 256265)
+    manager = MarketDataManager(broker, ws)
+    caplog.set_level("WARNING")
+    quote = manager.pull_quote("NSE:NIFTY")
+    assert quote.get("symbol") == "NSE:NIFTY"
+    assert any("nifty_quote_pull_failed" in rec.message for rec in caplog.records)
 
 
 def test_rest_poll_fallback_dispatches_ticks(

@@ -88,3 +88,66 @@ def test_get_current_nifty_futures_symbol_has_no_logging_side_effect(
     assert symbol.startswith("NFO:NIFTY")
     assert symbol.endswith("FUT")
     assert all("Using futures symbol" not in rec.message for rec in caplog.records)
+
+
+class _BasketInstrumentManager:
+    def __init__(self) -> None:
+        self._token_to_symbol = {
+            256265: "NSE:NIFTY",
+            999001: "NFO:NIFTY26MAYFUT",
+            1101: "NFO:NIFTY26MAY24850CE",
+            1102: "NFO:NIFTY26MAY24900CE",
+            1103: "NFO:NIFTY26MAY24950CE",
+            1104: "NFO:NIFTY26MAY25000CE",
+            1105: "NFO:NIFTY26MAY25050CE",
+            1106: "NFO:NIFTY26MAY25100CE",
+            1107: "NFO:NIFTY26MAY25150CE",
+            2101: "NFO:NIFTY26MAY24850PE",
+            2102: "NFO:NIFTY26MAY24900PE",
+            2103: "NFO:NIFTY26MAY24950PE",
+            2104: "NFO:NIFTY26MAY25000PE",
+            2105: "NFO:NIFTY26MAY25050PE",
+            2106: "NFO:NIFTY26MAY25100PE",
+            2107: "NFO:NIFTY26MAY25150PE",
+        }
+
+    def is_loaded(self) -> bool:
+        return True
+
+    def select_tokens_for_universe(
+        self,
+        *,
+        base: str,
+        spot_price: float,
+        strikes_around_atm: int,
+        strike_step: int,
+    ) -> list[int]:
+        assert base == "NIFTY"
+        assert strikes_around_atm == 3
+        assert strike_step == 50
+        return [1101, 1102, 1103, 1104, 1105, 1106, 1107, 2101, 2102, 2103, 2104, 2105, 2106, 2107]
+
+    def get_symbol(self, token: int) -> str | None:
+        return self._token_to_symbol.get(token)
+
+    def get_token(self, symbol: str) -> int:
+        for token, value in self._token_to_symbol.items():
+            if value == symbol:
+                return token
+        raise RuntimeError(symbol)
+
+
+def test_build_canonical_active_basket_is_limited_to_spot_futures_atm_pm3() -> None:
+    manager = _BasketInstrumentManager()
+    basket = app._build_canonical_active_basket(
+        instrument_manager=manager,
+        spot_ltp=25010.0,
+        futures_symbol="NFO:NIFTY26MAYFUT",
+        strike_step=50,
+        strikes_around_atm=3,
+    )
+    assert basket["spot_symbol"] == "NSE:NIFTY"
+    assert basket["futures_symbol"] == "NFO:NIFTY26MAYFUT"
+    assert len(basket["ce_symbols"]) == 7
+    assert len(basket["pe_symbols"]) == 7
+    assert len(basket["symbols"]) == 16
