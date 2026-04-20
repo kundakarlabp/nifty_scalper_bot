@@ -660,21 +660,52 @@ class MarketDataManager:
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
-    def start(self) -> None:
+    def start(self, *, defer_ws: bool = False) -> None:
+        """Start the market data manager.
+
+        Args:
+            defer_ws: When ``True`` the WebSocket transport is **not** started
+                here.  Callers must invoke :meth:`start_websocket` later once
+                the token universe has been resolved — this guarantees the
+                initial ``_on_connect`` handshake observes a populated
+                ``_tokens`` set instead of subscribing with the single spot
+                token only.
+        """
+
         if self._started:
+            if not defer_ws:
+                self.start_websocket()
             return
         self._started = True
         self._initialize_instruments()
-        if self._ws is not None:
-            try:
-                self._ws.start()
-            except Exception:
-                self._logger.exception("Failure in ws.start")
+        if not defer_ws:
+            self.start_websocket()
         if self._main_loop is not None and self._tick_consumer_task is None:
             self._tick_consumer_task = self._main_loop.create_task(self._consume_ticks())
         self._start_health_monitor()
         if self._rest_poll_enabled:
             self._start_rest_poll()
+
+    def start_websocket(self) -> None:
+        """Start the websocket transport if present.
+
+        Separated from :meth:`start` so that callers can first populate the
+        token universe (spot + futures + ATM options) and then bring the WS
+        online — this avoids the misleading ``tokens=1`` banner at connect
+        time and ensures the very first subscribe already covers every token
+        of interest.
+        """
+
+        if self._ws is None:
+            return
+        if getattr(self, "_ws_started", False):
+            return
+        self._ws_started = True
+        try:
+            self._ws.start()
+        except Exception:
+            self._ws_started = False
+            self._logger.exception("Failure in ws.start")
 
     def stop(self) -> None:
         if not self._started:

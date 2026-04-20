@@ -17,9 +17,11 @@ import sys
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.utils.async_helpers import safe_task
+from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 
 # -------------------------------------------------------
 # BASIC PROCESS SETUP - PRODUCTION-GRADE ENV LOADING
@@ -80,6 +82,19 @@ def _ensure_data_directory() -> None:
 
 _load_env_file()
 _ensure_data_directory()
+
+# Prepare the Prometheus multiprocess directory before any child process or
+# metric collector reads the env var.  ``ensure_multiproc_dir`` is idempotent
+# and tolerates read-only filesystems — it falls back to a PID-scoped dir or
+# disables multiprocess mode entirely without raising.
+try:
+    _PROM_DIR = ensure_multiproc_dir(clear_stale=True)
+    if _PROM_DIR is not None:
+        print(f"✅ PROMETHEUS_MULTIPROC_DIR={_PROM_DIR}", flush=True)
+    else:
+        print("⚠️ PROMETHEUS_MULTIPROC_DIR unavailable — metrics in-process only", flush=True)
+except Exception as _prom_exc:  # pragma: no cover - defensive
+    print(f"⚠️ Prometheus dir setup failed: {_prom_exc}", flush=True)
 
 logging.basicConfig(level="INFO", stream=sys.stdout)
 LOG = logging.getLogger("nifty_scalper_bot.main")
@@ -193,6 +208,47 @@ def debug_env():
         "env_file_exists_cwd": os.path.exists(".env"),
         "env_file_exists_app": os.path.exists("/app/.env"),
     }
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics() -> PlainTextResponse:
+    """Prometheus scrape endpoint.
+
+    Exposes every metric registered in-process plus any sibling process
+    metrics when ``PROMETHEUS_MULTIPROC_DIR`` is honoured.  Guarded for the
+    rare case where ``prometheus_client`` is not importable so that a missing
+    dependency never breaks the HTTP server itself.
+    """
+
+    try:
+        from prometheus_client import (  # type: ignore[attr-defined]
+            CONTENT_TYPE_LATEST,
+            CollectorRegistry,
+            generate_latest,
+        )
+    except Exception as exc:  # pragma: no cover - optional dependency
+        LOG.error("prometheus_client unavailable: %s", exc)
+        return PlainTextResponse(
+            "# prometheus_client_unavailable\n",
+            media_type="text/plain; charset=utf-8",
+        )
+
+    registry: CollectorRegistry | None = None
+    try:
+        from prometheus_client import multiprocess  # type: ignore[attr-defined]
+
+        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+            registry = CollectorRegistry()
+            multiprocess.MultiProcessCollector(registry)  # type: ignore[attr-defined]
+    except Exception as exc:  # pragma: no cover - defensive
+        LOG.debug("multiprocess registry unavailable: %s", exc)
+        registry = None
+
+    payload = generate_latest(registry) if registry is not None else generate_latest()
+    return PlainTextResponse(
+        payload.decode("utf-8", errors="replace"),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 @app.get("/trading/status")

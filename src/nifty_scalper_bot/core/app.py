@@ -3238,11 +3238,25 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         stream_supervisor.ensure_started()
         stream_supervisor_started = True
     else:
+        # WebSocket mode: StreamSupervisor (which drives the *active* polling
+        # streamer) is intentionally not created.  The PollingStreamer built
+        # earlier at line ~3113 is armed as a **standby fallback** and is
+        # promoted to active only if the WebSocket degrades (see
+        # ``_activate_polling_fallback`` / ``WebSocketManager.set_fallback_callbacks``).
+        # Log the state explicitly so operators understand fallback remains
+        # available — the legacy ``polling_supervisor_disabled`` wording read
+        # as a regression but was actually normal for WS mode.
         stream_supervisor = None
         stream_supervisor_started = False
+        fallback_ready = polling_fallback_streamer is not None
         LOGGER.info(
-            "polling_supervisor_disabled",
-            extra={"event": "polling_supervisor_disabled", "mode": "websocket"},
+            "polling_supervisor_standby mode=websocket fallback_armed=%s",
+            fallback_ready,
+            extra={
+                "event": "polling_supervisor_standby",
+                "mode": "websocket",
+                "fallback_armed": fallback_ready,
+            },
         )
 
     # Initialize Indicators & Regime
@@ -5065,18 +5079,19 @@ async def startup_sequence(ctx: BotContext) -> None:
         ctx.market_data_manager.set_event_loop(loop)
 
     # ── START MDM (CRITICAL) ─────────────────────────────────────────────────
-    # MDM.start() does two things:
-    #   1. Launches _consume_ticks() coroutine on the running event loop —
-    #      without this, ticks queued by _enqueue_tick_threadsafe() sit in
-    #      _tick_queue forever and _process_queued_tick() never runs.
-    #   2. Calls ws.start() — connects the WebSocket (unless stream_supervisor
-    #      already did so, in which case the guard `if self._started: return`
-    #      makes this a no-op).
-    # Must come AFTER set_event_loop so _main_loop is set before create_task.
+    # MDM.start(defer_ws=True) launches the tick consumer, health monitor,
+    # and optional REST poll thread — but defers the WebSocket connect until
+    # the full universe of tokens (spot + futures + ATM options) is resolved
+    # during the hydration step below.  Bringing up the WebSocket _after_
+    # token resolution is what lets the initial ``_on_connect`` subscribe
+    # observe every instrument instead of just the spot token — this is the
+    # fix for the "WebSocket CONNECTED successfully | tokens=1" boot banner.
     if ctx.market_data_manager is not None and hasattr(ctx.market_data_manager, "start"):
         try:
-            ctx.market_data_manager.start()
-            LOGGER.info("✅ MarketDataManager started — tick consumer active")
+            ctx.market_data_manager.start(defer_ws=True)
+            LOGGER.info(
+                "✅ MarketDataManager started — tick consumer active (WS deferred)"
+            )
         except Exception as _mdm_start_exc:
             LOGGER.error("MarketDataManager.start() failed: %s", _mdm_start_exc)
 
@@ -5723,6 +5738,10 @@ async def startup_sequence(ctx: BotContext) -> None:
             if tokens_to_poll:
                 ws = ctx.websocket_manager
                 if ws is not None:
+                    # Pre-populate the WebSocket token set so the deferred
+                    # WS.start() below connects with the full universe already
+                    # registered — this is the fix for the boot-time
+                    # "WebSocket CONNECTED | tokens=1" under-subscription.
                     ws.subscribe_tokens(list(tokens_to_poll))
                     LOGGER.info(
                         "✅ Wired %d tokens to WebSocket", len(tokens_to_poll)
@@ -5735,6 +5754,29 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
             if polling_fallback_streamer is not None and tokens_to_poll:
                 polling_fallback_streamer.subscribe(tokens_to_poll)
+
+            # ── Bring the WebSocket online now that tokens are registered ──
+            # MDM.start() earlier ran with defer_ws=True so the initial
+            # handshake observes a populated _tokens set.  When WS mode is
+            # enabled this is where we actually open the socket.
+            if (
+                ctx.market_data_manager is not None
+                and hasattr(ctx.market_data_manager, "start_websocket")
+                and ctx.websocket_enabled
+            ):
+                try:
+                    ctx.market_data_manager.start_websocket()
+                    LOGGER.info(
+                        "✅ MarketDataManager websocket brought online "
+                        "with %d pre-registered tokens",
+                        len(tokens_to_poll),
+                    )
+                except Exception as _ws_start_exc:  # noqa: BLE001
+                    LOGGER.error(
+                        "MarketDataManager.start_websocket() failed: %s",
+                        _ws_start_exc,
+                        exc_info=True,
+                    )
 
             # ✅ FIX: Disable MDM polling when PollingStreamer is active
             # MDM polling is redundant - PollingStreamer already feeds DataHub

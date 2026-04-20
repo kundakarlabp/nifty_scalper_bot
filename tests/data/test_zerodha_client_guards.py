@@ -106,3 +106,69 @@ def test_get_quote_accepts_alternate_nifty_key(
     assert quote["symbol"] == "NSE:NIFTY"
     assert quote["ltp"] == pytest.approx(25234.5)
     client._client.close()
+
+
+def test_get_quote_sends_all_nifty_aliases_in_single_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``get_quote`` must ask Kite for every known NIFTY alias in one call.
+
+    Kite rejects the bare ``NSE:NIFTY`` key for the spot index; previously
+    the client only sent the caller-facing alias which produced an empty
+    payload and the caller observed ``Quote data missing for NSE:NIFTY``.
+    """
+
+    client = _make_client()
+    captured: dict[str, list[str]] = {}
+
+    def fake_request(method: str, path: str, params=None, **_kwargs):  # noqa: ANN001
+        captured["method"] = method
+        captured["path"] = path
+        captured["i"] = list((params or {}).get("i", []))
+        return {
+            "data": {
+                "NSE:NIFTY 50": {
+                    "last_price": 25110.75,
+                    "depth": {"buy": [], "sell": []},
+                }
+            }
+        }
+
+    monkeypatch.setattr(client, "_make_request", fake_request)
+    monkeypatch.setattr(client, "_ensure_json", lambda payload: payload)
+
+    quote = client.get_quote("NSE:NIFTY")
+
+    assert quote["ltp"] == pytest.approx(25110.75)
+    assert "NSE:NIFTY 50" in captured["i"], captured
+    assert "NIFTY 50" in captured["i"], captured
+    client._client.close()
+
+
+def test_get_quote_falls_back_to_first_payload_when_keys_are_unexpected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kite occasionally keys the payload by instrument token.
+
+    A non-empty mapping must still resolve to a quote instead of raising
+    ``Quote data missing`` — the payload itself is authoritative.
+    """
+
+    client = _make_client()
+
+    def fake_request(*_args, **_kwargs):  # noqa: ANN001
+        return {
+            "data": {
+                "256265": {
+                    "last_price": 25222.15,
+                    "depth": {"buy": [], "sell": []},
+                }
+            }
+        }
+
+    monkeypatch.setattr(client, "_make_request", fake_request)
+    monkeypatch.setattr(client, "_ensure_json", lambda payload: payload)
+
+    quote = client.get_quote("NSE:NIFTY")
+    assert quote["ltp"] == pytest.approx(25222.15)
+    client._client.close()
