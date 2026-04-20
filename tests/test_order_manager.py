@@ -167,6 +167,38 @@ def test_place_order_tracks_fill(
     assert order_manager.get_fill_price(order_id) == pytest.approx(1501.5)
 
 
+def test_place_order_emits_submitted_not_filled_on_ack(
+    order_manager: OrderManager,
+    fake_broker: FakeBrokerClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    original_log_event = order_manager._log_trade_event
+
+    def _capture(event_type: str, **kwargs: Any) -> None:
+        events.append(event_type)
+        original_log_event(event_type, **kwargs)
+
+    monkeypatch.setattr(order_manager, "_log_trade_event", _capture)
+    monkeypatch.setattr(order_manager, "_confirm_fill_fast", lambda *_args, **_kwargs: False)
+
+    order_id = order_manager.place_order(
+        symbol="NSE:SBIN",
+        side="BUY",
+        quantity=5,
+        order_type=OrderType.LIMIT,
+        price=600.0,
+        stop_loss=585.0,
+        take_profit=630.0,
+    )
+
+    assert order_id in fake_broker.orders
+    assert "ORDER_SUBMIT_ATTEMPT" in events
+    assert "ORDER_SUBMITTED" in events
+    assert "ORDER_FILL_CONFIRMED" not in events
+
+
 def test_place_bracket_order_creates_children(
     order_manager: OrderManager,
     fake_broker: FakeBrokerClient,

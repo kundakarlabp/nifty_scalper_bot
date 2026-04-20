@@ -131,6 +131,8 @@ class _BasketInstrumentManager:
         return self._token_to_symbol.get(token)
 
     def get_token(self, symbol: str) -> int:
+        if symbol == "NSE:NIFTY":
+            raise RuntimeError("spot must not be resolved via instrument manager")
         for token, value in self._token_to_symbol.items():
             if value == symbol:
                 return token
@@ -141,6 +143,7 @@ def test_build_canonical_active_basket_is_limited_to_spot_futures_atm_pm3() -> N
     manager = _BasketInstrumentManager()
     basket = app._build_canonical_active_basket(
         instrument_manager=manager,
+        spot_token_resolver=lambda symbol: 256265 if symbol == "NSE:NIFTY" else 0,
         spot_ltp=25010.0,
         futures_symbol="NFO:NIFTY26MAYFUT",
         strike_step=50,

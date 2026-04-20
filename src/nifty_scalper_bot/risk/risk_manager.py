@@ -551,6 +551,15 @@ class RiskManager:
 
         if not live_enabled:
             self._last_rejection = "TRADING_DISABLED"
+            if time.time() - self._last_log_time >= 30.0:
+                self._logger.warning(
+                    "risk_order_rejected_live_disabled",
+                    extra={
+                        "event": "risk_order_rejected_live_disabled",
+                        "symbol": signal.symbol,
+                    },
+                )
+                self._last_log_time = time.time()
             return False, "Live trading disabled"
 
         override_active = self._soft_override
@@ -611,7 +620,7 @@ class RiskManager:
             try:
                 risk_state.reset_staleness()
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception in risk manager", exc_info=True)
                 raise
 
     def risk_gate_should_trade(self) -> tuple[bool, tuple[str, ...]]:
@@ -872,7 +881,7 @@ class RiskManager:
                 if lot_size > 0:
                     return lot_size
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception in risk manager", exc_info=True)
                 raise  # Fallthrough to settings
 
         # 2. Fallback to Settings (Safety Net)
@@ -932,7 +941,7 @@ class RiskManager:
         try:
             self._switches.engage_cooldown(0.0)
         except Exception as e:
-            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            LOGGER.exception("Unhandled exception in risk state", exc_info=True)
             raise
         self._set_cooldown_metric(0.0)
 
@@ -1104,12 +1113,12 @@ class RiskManager:
         try:
             METRICS.set_live_pnl(book="primary", value=current)
         except Exception as e:
-            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            self._logger.exception("Unhandled exception in risk manager", exc_info=True)
             raise
         try:
             METRICS.set_pnl_breakdown(book="primary", realized=current)
         except Exception as e:
-            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            self._logger.exception("Unhandled exception in risk manager", exc_info=True)
             raise
 
         reason = self._switches.breach_reason()
@@ -1141,7 +1150,7 @@ class RiskManager:
             try:
                 self.alert_callback(reason, snapshot)
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception in risk manager", exc_info=True)
                 raise
 
     def _schedule_breaker_alert(self, reason: str) -> None:
@@ -1247,7 +1256,7 @@ class RiskManager:
         try:
             self._m_blocks.inc()
         except Exception as e:
-            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            self._logger.exception("Unhandled exception in risk manager", exc_info=True)
             raise
         self._logger.warning(
             "RISK GATE BLOCK (soft)",
@@ -1264,7 +1273,7 @@ class RiskManager:
         try:
             self._m_cooldown.set(value)
         except Exception as e:
-            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            self._logger.exception("Unhandled exception in risk manager", exc_info=True)
             raise
 
     def _daily_loss_limit_pct(self) -> float:  # pragma: no cover
@@ -1319,7 +1328,7 @@ class RiskState:
                 book="primary", realized=realized_pnl, unrealized=unrealized_pnl
             )
         except Exception as e:
-            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+            self._logger.exception("Unhandled exception in risk manager", exc_info=True)
             raise
         equity = realized_pnl + unrealized_pnl
         if not self._initialized_equity:

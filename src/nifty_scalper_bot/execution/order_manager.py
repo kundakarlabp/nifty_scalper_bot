@@ -78,6 +78,10 @@ SOFT_BLOCK_CODES: set[str] = {
     "AMO_ONLY",
     "MARKET_CLOSED",
 }
+SAFE_WINDOW_START = (9, 30)
+SAFE_WINDOW_END = (15, 15)
+MARKET_WINDOW_START = (9, 15)
+MARKET_WINDOW_END = (15, 30)
 
 _REFERENCE_LOGGER = get_logger(__name__)
 
@@ -1731,7 +1735,14 @@ class OrderManager:
         is_intraday = current_product == "MIS"
 
         if not is_system_exit:
-            if self._positions.has_open_position(symbol):
+            has_open_local = self._positions.has_open_position(symbol)
+            has_pending_entry = any(
+                o.symbol == normalize_symbol(symbol)
+                and o.side == side
+                and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
+                for o in self._orders.values()
+            )
+            if has_open_local and has_pending_entry:
                 self._logger.critical("ORDER_BLOCKED: duplicate_entry_prevented symbol=%s side=%s", symbol, side)
                 return None
             if not self._signal_arbitrator.allow(symbol, side):
@@ -1786,7 +1797,26 @@ class OrderManager:
                 and (current_time - o.timestamp.timestamp() < 45)
             ]
 
-            if pending_orders and not is_system_exit:
+            broker_has_live_pending = False
+            if pending_orders and hasattr(self._broker, "get_orders"):
+                try:
+                    broker_orders = self._broker.get_orders() or []
+                    broker_has_live_pending = any(
+                        isinstance(order, Mapping)
+                        and str(order.get("status") or "").upper()
+                        in {"OPEN", "TRIGGER PENDING", "PENDING"}
+                        and (
+                            str(order.get("tradingsymbol") or "").upper()
+                            == normalized_symbol.split(":", 1)[-1]
+                            or str(order.get("symbol") or "").upper()
+                            == normalized_symbol
+                        )
+                        for order in broker_orders
+                    )
+                except Exception:
+                    broker_has_live_pending = True
+
+            if pending_orders and broker_has_live_pending and not is_system_exit:
                 self._logger.warning(
                     f"🚫 BLOCKED: Fresh pending order exists for {normalized_symbol}. Ignored to prevent duplicate.",
                     extra={"event": "duplicate_block", "symbol": normalized_symbol},
@@ -1858,10 +1888,10 @@ class OrderManager:
             try:
                 ist = ZoneInfo("Asia/Kolkata")
                 now = datetime.now(ist).time()
-                safe_start = dtime(9, 30)
-                safe_end = dtime(15, 15)
-                market_open = dtime(9, 15)
-                market_close = dtime(15, 30)
+                safe_start = dtime(*SAFE_WINDOW_START)
+                safe_end = dtime(*SAFE_WINDOW_END)
+                market_open = dtime(*MARKET_WINDOW_START)
+                market_close = dtime(*MARKET_WINDOW_END)
 
                 if not (safe_start <= now <= safe_end):
                     reason = "Market Closed"
@@ -1949,7 +1979,7 @@ class OrderManager:
         # Persist Intent to Disk
         self._remember_signal(signal_id)
         self._log_trade_event(
-            "ORDER_SUBMITTED",
+            "ORDER_SUBMIT_ATTEMPT",
             symbol=normalized_symbol,
             side=side,
             qty=quantity,
@@ -1958,7 +1988,7 @@ class OrderManager:
                 "trade_id": trade_id,
                 "signal_id": signal_id,
                 "strategy": strategy_name,
-                "status": "SUBMITTED",
+                "status": "SUBMIT_ATTEMPT",
             },
         )
 
@@ -2150,19 +2180,19 @@ class OrderManager:
                     # ✅ RESET Kill Switch on success
                     self._consecutive_failures = 0
                     self._logger.info(
-                        "ORDER_FILLED order_id=%s symbol=%s",
+                        "ORDER_SUBMITTED order_id=%s symbol=%s",
                         order_id,
                         normalized_symbol,
                     )
 
                     self._log_trade_event(
-                        "ORDER_FILLED",
+                        "ORDER_SUBMITTED",
                         symbol=normalized_symbol,
                         side=side,
                         qty=quantity,
                         price=float(price or 0.0),
                         order_id=order_id,
-                        meta={"trade_id": trade_id, "status": "FILLED"},
+                        meta={"trade_id": trade_id, "status": "SUBMITTED"},
                     )
 
                     # B. Register Order Locally
@@ -2243,7 +2273,16 @@ class OrderManager:
 
                     if fill_confirmed:
                         self._logger.info(
-                            f"🟢 ORDER FILLED & BRACKET ACTIVE: {order_id}"
+                            f"🟢 ORDER_FILL_CONFIRMED & BRACKET ACTIVE: {order_id}"
+                        )
+                        self._log_trade_event(
+                            "ORDER_FILL_CONFIRMED",
+                            symbol=normalized_symbol,
+                            side=side,
+                            qty=quantity,
+                            price=float(price or 0.0),
+                            order_id=order_id,
+                            meta={"trade_id": trade_id, "status": "FILLED"},
                         )
                     else:
                         self._logger.info(

@@ -1724,6 +1724,16 @@ class StrategyManager(_BaseStrategyManager):
         if self._data_hub is not None and not bool(
             getattr(self._data_hub, "indicators_ready", False)
         ):
+            log_throttled(
+                log,
+                key=f"signal_blocked_indicators_not_ready:{symbol}",
+                msg="signal_blocked_indicators_not_ready",
+                interval_sec=30.0,
+                extra={
+                    "event": "signal_blocked_indicators_not_ready",
+                    "symbol": symbol,
+                },
+            )
             return None
 
         def _log_reject(
@@ -1820,10 +1830,10 @@ class StrategyManager(_BaseStrategyManager):
                     )
                 if not allowed and not self._use_regime_adaptive:
                     _log_reject(
-                        "data_invalid",
+                        "regime_gate_block",
                         {"gate_reasons": reasons, "gate": "regime_manager"},
                     )
-                    _emit_no_signal("data_invalid", {"gate_reasons": reasons})
+                    _emit_no_signal("regime_gate_block", {"gate_reasons": reasons})
                     return None
             except Exception as exc:  # noqa: BLE001
                 log.error(
@@ -1908,8 +1918,15 @@ class StrategyManager(_BaseStrategyManager):
                         _mid = (_bid + _ask) / 2.0
                         indicators["spread_pct"] = float((_ask - _bid) / _mid * 100.0)
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
-                raise
+                log.warning(
+                    "quote_enrichment_failed",
+                    extra={
+                        "event": "quote_enrichment_failed",
+                        "symbol": symbol,
+                        "error": str(e),
+                    },
+                    exc_info=e,
+                )
         invalid_reason: str | None = None
         vwap = indicators.get("vwap") or indicators.get("exchange_vwap")
         volume = indicators.get("volume")
@@ -1982,6 +1999,18 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 _emit_no_signal("data_invalid", {"reason_code": invalid_reason})
                 return None
+            log_throttled(
+                log,
+                key=f"signal_invalid_streak:{symbol}",
+                msg="signal_invalid_data_streak",
+                interval_sec=30.0,
+                extra={
+                    "event": "signal_invalid_data_streak",
+                    "symbol": symbol,
+                    "reason_code": invalid_reason,
+                    "invalid_streak": count,
+                },
+            )
         else:
             self._symbol_invalid_counts.pop(symbol, None)
             if symbol in self._symbol_temporarily_ineligible:
