@@ -391,10 +391,48 @@ class ZerodhaKiteClient(BaseBrokerClient):
         response = self._ensure_json(
             self._make_request("GET", "/quote", params={"i": [kite_symbol]})
         )
-        try:
-            quote_data = response["data"][kite_symbol]
-        except KeyError as exc:  # pragma: no cover - API invariant
-            raise BrokerError(f"Quote data missing for {symbol}") from exc
+        data = response.get("data", {})
+        quote_data: Mapping[str, Any] | None = None
+        if isinstance(data, Mapping):
+            direct = data.get(kite_symbol)
+            if isinstance(direct, Mapping):
+                quote_data = direct
+            else:
+                variants: list[str] = []
+                raw_symbol = str(symbol or "").strip().upper()
+                formatted_symbol = str(kite_symbol or "").strip().upper()
+                for candidate in (
+                    formatted_symbol,
+                    raw_symbol,
+                    formatted_symbol.split(":", 1)[-1],
+                    raw_symbol.split(":", 1)[-1],
+                ):
+                    if candidate and candidate not in variants:
+                        variants.append(candidate)
+                if "NSE:NIFTY" in variants:
+                    variants.extend(["NSE:NIFTY 50", "NIFTY 50", "NIFTY50"])
+                if "NIFTY" in variants:
+                    variants.extend(["NIFTY 50", "NIFTY50"])
+                for key, payload in data.items():
+                    if not isinstance(payload, Mapping):
+                        continue
+                    key_text = str(key).strip().upper()
+                    normalized_key = key_text.replace(" ", "")
+                    normalized_key = normalized_key.replace("NIFTY50", "NIFTY")
+                    if key_text in variants:
+                        quote_data = payload
+                        break
+                    for variant in variants:
+                        normalized_variant = variant.replace(" ", "").replace(
+                            "NIFTY50", "NIFTY"
+                        )
+                        if key_text == variant or normalized_key == normalized_variant:
+                            quote_data = payload
+                            break
+                    if quote_data is not None:
+                        break
+        if quote_data is None:  # pragma: no cover - API invariant
+            raise BrokerError(f"Quote data missing for {symbol}")
 
         depth = quote_data.get("depth", {})
         buy_depth = depth.get("buy", [])

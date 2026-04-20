@@ -103,6 +103,7 @@ class DummyPollingStreamer:
         self._tokens: set[int] = set()
         self._interval_s = float(poll_interval_ms) / 1000.0
         self._batch_size = batch_size
+        self.websocket_mode = False
 
     def start(self) -> None:
         self.started = True
@@ -124,8 +125,22 @@ class DummyPollingStreamer:
     def is_running(self) -> bool:
         return self.running
 
+    def set_websocket_mode(self, enabled: bool) -> None:
+        self.websocket_mode = bool(enabled)
+
     def tracked_tokens(self) -> list[int]:
         return sorted(self._tokens)
+
+
+class DummyWebSocketManager:
+    def __init__(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+        self._fallback_on_start = None
+        self._fallback_on_stop = None
+        self._market_data_manager = None
+
+    def set_fallback_callbacks(self, *, on_start=None, on_stop=None) -> None:  # noqa: ANN001
+        self._fallback_on_start = on_start
+        self._fallback_on_stop = on_stop
 
 
 @pytest.fixture(autouse=True)
@@ -154,6 +169,60 @@ def test_initialize_components_uses_polling_by_default(monkeypatch):
     assert ctx.stream_supervisor.is_running() is True
     assert ctx.stream_supervisor.status_line().startswith("tokens=1")
     assert dummy_notifier.events == []
+
+
+def test_initialize_components_ws_arms_polling_fallback_without_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STREAM__MODE", "websocket")
+    monkeypatch.setenv("WEBSOCKET__DISABLED", "false")
+    monkeypatch.setenv("POLLING__ENABLED", "true")
+    monkeypatch.setattr("nifty_scalper_bot.core.app.ZerodhaKiteClient", DummyBroker)
+    monkeypatch.setattr("nifty_scalper_bot.core.app.InstrumentResolver", DummyResolver)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app.MarketDataManager", DummyMarketDataManager
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app.PollingStreamer", DummyPollingStreamer
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app.WebSocketManager", DummyWebSocketManager
+    )
+
+    app_config = AppConfig(
+        broker=BrokerConfig(
+            api_key="demo",
+            api_secret="secret",
+            access_token="token",
+            base_url="https://example.com",
+            websocket_url="wss://example.com/ws",
+        ),
+        risk=RiskConfig(),
+        logging=LoggingConfig(level="INFO"),
+        ratelimit=RateLimitConfig(
+            orders=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            rest=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            hist=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+        ),
+        quote_stale_threshold_ms=1_000,
+    )
+    settings = Settings(
+        app=app_config,
+        enable_live=False,
+        orders=OrderSettings(),
+        risk=RiskSettings(),
+        streamer=StreamerSettings(),
+        shadow=ShadowSettings(drift_threshold_pct=0.0),
+        notifications=NotificationSettings(enabled=False),
+        session_allow_out_of_hours=False,
+        allow_offmarket_trading=False,
+    )
+
+    ctx = initialize_components(settings)
+
+    assert isinstance(ctx.websocket_manager, DummyWebSocketManager)
+    assert isinstance(ctx.polling_fallback_streamer, DummyPollingStreamer)
+    assert ctx.polling_fallback_streamer.start_calls == 0
 
 
 def _initialize_polling_context(

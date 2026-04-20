@@ -76,3 +76,15 @@ def test_get_symbols_remaps_unresolved_option_to_available_contract() -> None:
     )
 
     assert symbols == ["NFO:NIFTY26FEB25050CE"]
+
+
+def test_get_current_nifty_futures_symbol_has_no_logging_side_effect(
+    caplog,
+) -> None:
+    caplog.set_level("INFO")
+
+    symbol = app._get_current_nifty_futures_symbol()
+
+    assert symbol.startswith("NFO:NIFTY")
+    assert symbol.endswith("FUT")
+    assert all("Using futures symbol" not in rec.message for rec in caplog.records)
