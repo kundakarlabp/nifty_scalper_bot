@@ -2094,6 +2094,12 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 ordered.append(c)
                 seen.add(c)
 
+        if raw.upper() in {"NSE:NIFTY", "NIFTY"}:
+            for alias in ("NSE:NIFTY 50", "NIFTY 50", "NIFTY50"):
+                if alias not in seen:
+                    ordered.append(alias)
+                    seen.add(alias)
+
         # Ensure instrument cache for exchange is loaded
         if exchange not in self._instrument_cache:
             try:

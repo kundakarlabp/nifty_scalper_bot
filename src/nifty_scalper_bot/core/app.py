@@ -5374,10 +5374,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             symbols_to_hydrate: list[str] = []
             for _sym in symbols_to_hydrate_raw:
                 _tok = _resolve_startup_token(_sym)
-                # Skip unknown NFO options with no token
-                if _tok is None and _is_nfo_symbol(_sym):
+                if _tok is None:
                     LOGGER.warning(
-                        "hydration_skip_no_token: skipping %s (no instrument token found)",
+                        "Skipping hydration for %s (no token)",
                         _sym,
                         extra={"event": "hydration_skip_no_token", "symbol": _sym},
                     )
@@ -5659,7 +5658,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             for sym in targets:
                 if mdm:
-                    mdm.ensure_tracking(sym, seed=not websocket_enabled)
+                    mdm.ensure_tracking(sym, seed=not ctx.websocket_enabled)
 
                 tok = None
                 # BUG-α FIX: Never raise here — a missing token for one symbol
