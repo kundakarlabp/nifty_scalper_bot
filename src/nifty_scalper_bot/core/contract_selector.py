@@ -21,7 +21,7 @@ Usage::
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import logging
 from typing import Any
 
@@ -177,6 +177,30 @@ def get_atm_contracts(
                 "exchange": str(inst.get("exchange") or "NFO").upper(),
             }
         )
+
+    interval = 'minute'
+    to_dt = datetime.now()
+    from_dt = to_dt - timedelta(days=3)
+    valid_tokens: list[dict[str, Any]] = []
+    for contract in selected:
+        token = contract['instrument_token']
+        try:
+            data = kite.historical_data(token, from_dt, to_dt, interval)
+            if data and len(data) >= 10:
+                valid_tokens.append(contract)
+            else:
+                LOGGER.warning(
+                    'Skipping illiquid token=%s (no usable history)',
+                    token,
+                )
+        except Exception as exc:  # noqa: BLE001 - best effort liquidity check
+            LOGGER.warning(
+                'Skipping token=%s (history fetch failed): %s',
+                token,
+                exc,
+            )
+
+    selected = valid_tokens
 
     if not selected:
         raise RuntimeError(
