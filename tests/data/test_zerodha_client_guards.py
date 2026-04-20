@@ -81,3 +81,28 @@ def test_build_kite_params_accepts_option(monkeypatch: pytest.MonkeyPatch) -> No
     assert params["exchange"] == "NFO"
 
     client._client.close()
+
+
+def test_get_quote_accepts_alternate_nifty_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_client()
+
+    def fake_request(*_args, **_kwargs):  # noqa: ANN001
+        return {
+            "data": {
+                "NSE:NIFTY 50": {
+                    "last_price": 25234.5,
+                    "depth": {"buy": [], "sell": []},
+                }
+            }
+        }
+
+    monkeypatch.setattr(client, "_make_request", fake_request)
+    monkeypatch.setattr(client, "_ensure_json", lambda payload: payload)
+
+    quote = client.get_quote("NSE:NIFTY")
+
+    assert quote["symbol"] == "NSE:NIFTY"
+    assert quote["ltp"] == pytest.approx(25234.5)
+    client._client.close()

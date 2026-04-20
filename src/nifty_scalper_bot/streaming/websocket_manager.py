@@ -406,7 +406,7 @@ class WebSocketManager:
                 )
                 if not self._is_within_trading_window():
                     self._logger.warning(
-                        "WebSocket connected outside trading hours (paper-mode only)"
+                        "WebSocket connected outside trading hours; running in data-observation mode while execution remains runtime-gated"
                     )
         except Exception as e:
             self._record_failure()

@@ -1039,8 +1039,8 @@ class MarketDataManager:
         self._rest_poll_max_symbols = 0
         if reason:
             self._logger.info(
-                "mdm_rest_polling_disabled",
-                extra={"event": "mdm_rest_polling_disabled", "reason": reason},
+                "mdm_internal_rest_poller_disabled",
+                extra={"event": "mdm_internal_rest_poller_disabled", "reason": reason},
             )
 
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
@@ -1415,20 +1415,33 @@ class MarketDataManager:
             try:
                 raw_quote = self._broker.get_quote(canonical_symbol)
             except Exception as exc:  # noqa: BLE001
-                self._logger.error(
+                error_text = str(exc)
+                is_recoverable_miss = "Quote data missing" in error_text
+                log_fn = self._logger.warning if is_recoverable_miss else self._logger.error
+                log_fn(
                     "Failure in pull_quote direct get_quote: %s",
                     exc,
                     extra={
-                        "event": "mdm_pull_quote_direct_error",
+                        "event": (
+                            "mdm_pull_quote_direct_miss"
+                            if is_recoverable_miss
+                            else "mdm_pull_quote_direct_error"
+                        ),
                         "symbol": canonical_symbol,
-                        "error": str(exc),
+                        "error": error_text,
                     },
-                    exc_info=exc,
+                    exc_info=None if is_recoverable_miss else exc,
                 )
                 raw_quote = None
             if isinstance(raw_quote, Mapping):
                 quote = dict(raw_quote)
         if quote is None:
+            with self._lock:
+                cached_tick = self._latest_ticks.get(canonical_symbol)
+            if isinstance(cached_tick, Mapping) and cached_tick:
+                cached_quote = dict(cached_tick)
+                cached_quote.setdefault("source", "cache")
+                return cached_quote
             return {"symbol": canonical_symbol}
         quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:

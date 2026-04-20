@@ -193,6 +193,32 @@ def test_pull_quote_canonicalizes_nifty_spot_alias(
     assert cached["ltp"] == pytest.approx(25100.0)
 
 
+def test_pull_quote_uses_cached_tick_on_recoverable_direct_miss(
+    broker: DummyBroker,
+    ws: DummyWebSocket,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class MissingQuoteBroker(DummyBroker):
+        def get_quote(self, symbol: str) -> dict[str, Any]:
+            self.calls.append(("get_quote", (symbol,)))
+            raise RuntimeError("Quote data missing for NSE:NIFTY")
+
+    miss_broker = MissingQuoteBroker()
+    miss_broker.set_token("NSE:NIFTY", 256265)
+    manager = MarketDataManager(miss_broker, ws)
+    manager._store_tick(  # noqa: SLF001 - explicit cache priming for fallback test
+        "NSE:NIFTY",
+        {"symbol": "NSE:NIFTY", "ltp": 25000.0, "source": "ws"},
+    )
+    caplog.set_level("WARNING")
+
+    quote = manager.pull_quote("NSE:NIFTY")
+
+    assert quote["ltp"] == pytest.approx(25000.0)
+    assert quote["source"] == "ws"
+    assert any("direct get_quote" in rec.message for rec in caplog.records)
+
+
 def test_wait_for_symbol_hits_after_tick(
     monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
 ) -> None:

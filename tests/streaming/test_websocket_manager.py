@@ -160,6 +160,24 @@ async def test_watchdog_suppresses_pong_reconnect_outside_trading_window(
 
 
 @pytest.mark.asyncio
+async def test_outside_trading_hours_log_is_mode_agnostic(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    caplog.set_level("WARNING")
+
+    manager = ws_module.WebSocketManager("k", "t")
+    manager._is_within_trading_window = lambda: False  # type: ignore[method-assign]
+    await manager.connect()
+    await manager.disconnect()
+
+    messages = [record.message for record in caplog.records]
+    assert any("outside trading hours" in message for message in messages)
+    assert all("paper-mode only" not in message for message in messages)
+
+
+@pytest.mark.asyncio
 async def test_circuit_breaker_opens_after_repeated_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

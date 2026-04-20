@@ -213,9 +213,7 @@ def _get_current_nifty_futures_symbol() -> str:
     ]
     m_str = months[month - 1]
 
-    symbol = f"NFO:NIFTY{y_str}{m_str}FUT"
-    LOGGER.info(f"📅 Using futures symbol: {symbol}")
-    return symbol
+    return f"NFO:NIFTY{y_str}{m_str}FUT"
 
 
 def _require_component(component: _ComponentT | None, name: str) -> _ComponentT:
@@ -3125,11 +3123,33 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         )
         market_data_manager.disable_rest_polling(reason="polling_streamer_fallback")
         polling_fallback_streamer.set_websocket_mode(True)
+
+        def _activate_polling_fallback() -> None:
+            polling_fallback_streamer.set_websocket_mode(False)
+            if not polling_fallback_streamer.is_running():
+                LOGGER.warning(
+                    "PollingStreamer fallback activated due to websocket degradation",
+                    extra={"event": "polling_fallback_activated"},
+                )
+                polling_fallback_streamer.start()
+
+        def _deactivate_polling_fallback() -> None:
+            polling_fallback_streamer.set_websocket_mode(True)
+            if polling_fallback_streamer.is_running():
+                LOGGER.info(
+                    "PollingStreamer fallback deactivated after websocket recovery",
+                    extra={"event": "polling_fallback_deactivated"},
+                )
+                polling_fallback_streamer.stop()
+
         websocket_manager.set_fallback_callbacks(
-            on_start=lambda: polling_fallback_streamer.set_websocket_mode(False),
-            on_stop=lambda: polling_fallback_streamer.set_websocket_mode(True),
+            on_start=_activate_polling_fallback,
+            on_stop=_deactivate_polling_fallback,
         )
-        polling_fallback_streamer.start()
+        LOGGER.info(
+            "PollingStreamer standby fallback armed (inactive until websocket degrades)",
+            extra={"event": "polling_fallback_standby"},
+        )
 
     else:
         LOGGER.info("Initializing Polling Streamer...")
@@ -3710,11 +3730,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     LOGGER.warning(
                         f"Failed to inject DataHub into {strategy.name}: {exc}"
                     )
+    futures_symbol = _get_current_nifty_futures_symbol()
+    LOGGER.info("📅 Using futures symbol: %s", futures_symbol)
     orchestrator = StrategyOrchestrator(
         risk_manager=risk_manager,
         order_manager=safe_order_manager,
         data_hub=data_hub,
-        futures_symbol=_get_current_nifty_futures_symbol(),
+        futures_symbol=futures_symbol,
     )
     regime_bias_map: dict[str, dict[str, float]] = {}
     if elite_strategies:
@@ -3812,7 +3834,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         min_confidence=_global_min_conf,
         data_hub=data_hub,
         orchestrator=orchestrator,
-        futures_symbol=_get_current_nifty_futures_symbol(),
+        futures_symbol=futures_symbol,
         score_weights=None,
         regime_signal_getter=_regime_signal_snapshot,
         regime_bias_map=regime_bias_map,
@@ -4692,8 +4714,12 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     ctx.telegram_bot = None
     # Ensure controller exists for telegram setup
     controller = _HTTP_CONTROLLER
-    if controller is None and settings.notifications.enabled:
-        # Create a minimal controller if the HTTP app wasn't started
+    if (
+        controller is None
+        and settings.notifications.enabled
+        and settings.notifications.webhook_enabled
+    ):
+        # Create a minimal webhook controller only when webhook transport is active.
         try:
             from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
                 TelegramWebhookController,
@@ -4705,7 +4731,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                     bot=notifier.bot,
                     settings=settings.notifications,
                 )
-                LOGGER.info("✅ Created fallback TelegramWebhookController")
+                LOGGER.info("✅ Created TelegramWebhookController (webhook mode)")
         except Exception as e:
             LOGGER.warning(f"Could not create fallback controller: {e}")
     telegram_bot_instance: TelegramBot | None = None

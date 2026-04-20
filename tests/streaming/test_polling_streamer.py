@@ -188,3 +188,23 @@ def test_maybe_warn_rate_limits_sets_flag_and_metric():
     # Simulate large token count -> warn
     s._maybe_warn_rate_limits(5000)
     assert s._rate_limit_warned is True
+
+
+def test_start_logs_fallback_standby_role(caplog: pytest.LogCaptureFixture):
+    broker = FakeLtpBroker()
+    streamer = PollingStreamer(
+        broker_client=broker,
+        on_tick=lambda t: None,
+        instrument_resolver=None,
+        poll_interval_ms=500,
+    )
+    streamer.set_websocket_mode(True)
+    caplog.set_level("INFO")
+
+    streamer.start()
+    time.sleep(0.01)
+    streamer.stop()
+
+    assert any(
+        "role=fallback_standby" in record.message for record in caplog.records
+    )

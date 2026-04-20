@@ -80,15 +80,15 @@ class PollingStreamer:
                 target=self._run, name="polling_streamer", daemon=True
             )
             self._thread.start()
-            mode = "fallback" if self._websocket_mode_enabled else "primary"
+            mode = "fallback_standby" if self._websocket_mode_enabled else "primary"
             LOGGER.info(
-                "REST polling streamer started | mode=%s interval=%.1fs",
+                "PollingStreamer activated | role=%s interval=%.1fs",
                 mode,
                 self._interval_s,
                 extra={
                     "event": "polling_started",
                     "interval": self._interval_s,
-                    "mode": mode,
+                    "role": mode,
                 },
             )
 
@@ -112,6 +112,12 @@ class PollingStreamer:
     def set_websocket_mode(self, enabled: bool) -> None:
         """Args: enabled; Returns: none; Raises: none."""
         self._websocket_mode_enabled = bool(enabled)
+
+    def is_running(self) -> bool:
+        """Args: none; Returns: running state; Raises: none."""
+
+        with self._lock:
+            return bool(self._thread and self._thread.is_alive())
 
     def last_poll_heartbeat(self) -> float:
         """Return polling loop heartbeat monotonic timestamp."""
