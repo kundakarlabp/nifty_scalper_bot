@@ -462,7 +462,7 @@ class TelegramService:
         elif isinstance(error, NetworkError):
             _LOG.warning("Telegram network error; continuing.")
         else:
-            _LOG.exception("Telegram handler error")
+            _LOG.error("Telegram error: %s", context.error, exc_info=True)
 
     def _build_application(self) -> Application:
         app = (

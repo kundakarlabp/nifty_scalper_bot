@@ -790,9 +790,6 @@ class StrategyRunner:
             self._trading_paused = False
             if not isinstance(self._active_symbols, set):
                 raise RuntimeError("Invalid active symbols container type")
-            if len(self._active_symbols) == 0:
-                LOGGER.warning("Starting with no active symbols - will wait for dynamic addition")
-                self._active_symbols = {"NSE:NIFTY"}
             symbols = list(self._active_symbols)
             self._frozen_universe = set(symbols)
             self._universe_controller.update(symbols)
@@ -800,11 +797,13 @@ class StrategyRunner:
             # ✅ CRITICAL FIX: Only set HISTORICAL_READY if mark_ready() has NOT already
             # promoted the state to EXECUTION_ENABLED.  The startup sequence calls
             # mark_ready() → EXECUTION_ENABLED, then calls start() seconds later.
+            if not self._active_symbols:
+                LOGGER.warning("Runner start deferred — no active hydrated symbols")
+                self._runner_state = RunnerState.STARTING
+                self._running = False
+                return
             # 🚨 ALL GATES REMOVED: Force execution enabled immediately
             self._runner_state = RunnerState.EXECUTION_ENABLED
-            self.ready = True
-            self._startup_hydrated = True
-            self._hydration_complete = True
             for symbol in symbols:
                 self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
                 self._data_phase.setdefault(symbol, "HYDRATION")
