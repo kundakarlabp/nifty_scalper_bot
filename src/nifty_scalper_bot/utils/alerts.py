@@ -58,6 +58,9 @@ class AlertDeduplicator:
             capacity=bucket_capacity, refill_rate_per_sec=refill_rate
         )
         self._last_seen: MutableMapping[str, datetime] = {}
+        self._last_severity: MutableMapping[str, str] = {}
+        self._last_outage_class: MutableMapping[str, str] = {}
+        self._flood_hold_until: MutableMapping[str, datetime] = {}
 
     def should_immediate(
         self,
@@ -65,6 +68,8 @@ class AlertDeduplicator:
         severity: str,
         *,
         hint_immediate: bool,
+        outage_class: str | None = None,
+        recovery: bool = False,
         now: datetime | None = None,
     ) -> bool:
         """Return ``True`` when an alert should dispatch immediately.
@@ -86,19 +91,59 @@ class AlertDeduplicator:
             moment = now or datetime.now(timezone.utc)
             normalized_key = str(key)
             normalized_severity = (severity or "info").strip().lower()
+            normalized_outage = (outage_class or "").strip().lower()
+            family_key = self._family_key(normalized_key)
             last_seen = self._last_seen.get(normalized_key)
             quiet_elapsed = False
             if last_seen is not None:
                 quiet_elapsed = moment - last_seen >= self._quiet_window
+            family_seen = self._last_seen.get(family_key)
+            family_quiet_elapsed = False
+            if family_seen is not None:
+                family_quiet_elapsed = moment - family_seen >= self._quiet_window
+
+            flood_hold_until = self._flood_hold_until.get(family_key)
+            if (
+                flood_hold_until is not None
+                and moment < flood_hold_until
+                and not recovery
+            ):
+                self._last_seen[normalized_key] = moment
+                self._last_seen[family_key] = moment
+                return False
 
             immediate_requested = hint_immediate or normalized_severity == "critical"
+            severity_changed = self._last_severity.get(family_key) != normalized_severity
+            outage_changed = (
+                bool(normalized_outage)
+                and self._last_outage_class.get(family_key) != normalized_outage
+            )
+            if recovery:
+                immediate_requested = True
+                severity_changed = True
+            if severity_changed or outage_changed:
+                immediate_requested = True
 
             if immediate_requested:
-                if last_seen is None or quiet_elapsed:
+                if (
+                    last_seen is None
+                    or family_seen is None
+                    or quiet_elapsed
+                    or family_quiet_elapsed
+                    or severity_changed
+                    or outage_changed
+                ):
                     if self._acquire_token():
                         self._last_seen[normalized_key] = moment
+                        self._last_seen[family_key] = moment
+                        self._last_severity[family_key] = normalized_severity
+                        if normalized_outage:
+                            self._last_outage_class[family_key] = normalized_outage
+                        if recovery:
+                            self._flood_hold_until.pop(family_key, None)
                         return True
                     self._last_seen[normalized_key] = moment
+                    self._last_seen[family_key] = moment
                     log.debug(
                         "Alert token bucket exhausted; aggregating",
                         extra={
@@ -108,6 +153,7 @@ class AlertDeduplicator:
                     )
                     return False
                 self._last_seen[normalized_key] = moment
+                self._last_seen[family_key] = moment
                 log.debug(
                     "Alert immediate suppressed within quiet window",
                     extra={
@@ -119,13 +165,19 @@ class AlertDeduplicator:
 
             if last_seen is None:
                 self._last_seen[normalized_key] = moment
+                self._last_seen[family_key] = moment
                 return False
 
             if quiet_elapsed and self._acquire_token():
                 self._last_seen[normalized_key] = moment
+                self._last_seen[family_key] = moment
+                self._last_severity[family_key] = normalized_severity
+                if normalized_outage:
+                    self._last_outage_class[family_key] = normalized_outage
                 return True
 
             self._last_seen[normalized_key] = moment
+            self._last_seen[family_key] = moment
             if quiet_elapsed:
                 log.debug(
                     "Alert quiet window reached; aggregating",
@@ -142,6 +194,15 @@ class AlertDeduplicator:
                 extra={"event": "alert_dedupe_error", "key": key},
             )
             return hint_immediate
+
+    def mark_flood_limited(
+        self, key: str, *, now: datetime | None = None
+    ) -> None:
+        """Record send flood-control and suppress immediate retries for family."""
+
+        moment = now or datetime.now(timezone.utc)
+        family_key = self._family_key(str(key))
+        self._flood_hold_until[family_key] = moment + self._quiet_window
 
     def prune(self, *, now: datetime | None = None) -> None:
         """Drop dedupe entries older than the quiet window.
@@ -162,6 +223,13 @@ class AlertDeduplicator:
             stale = [key for key, seen in self._last_seen.items() if seen < threshold]
             for key in stale:
                 self._last_seen.pop(key, None)
+                self._last_severity.pop(key, None)
+                self._last_outage_class.pop(key, None)
+            expired = [
+                key for key, hold_until in self._flood_hold_until.items() if hold_until < moment
+            ]
+            for key in expired:
+                self._flood_hold_until.pop(key, None)
         except Exception as exc:  # noqa: BLE001 - defensive catch
             log.error(
                 "Failure in AlertDeduplicator.prune: %s",
@@ -217,6 +285,17 @@ class AlertDeduplicator:
                 extra={"event": "alert_token_error"},
             )
             return False
+
+    @staticmethod
+    def _family_key(key: str) -> str:
+        """Collapse alert keys into outage-family buckets."""
+
+        normalized = str(key or "").strip().lower()
+        if normalized.startswith("market_data."):
+            parts = normalized.split(".")
+            if len(parts) >= 3:
+                return ".".join(parts[:2]) + f".{parts[2]}"
+        return normalized.split(":", 1)[0] if ":" in normalized else normalized
 
 
 class AlertLogHandler(logging.Handler):

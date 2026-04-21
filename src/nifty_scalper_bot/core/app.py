@@ -5690,25 +5690,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                     atm_pe_symbol=atm_pe,
                     option_symbols=basket["option_symbols"],
                 )
-            if runner and hasattr(runner, "mark_ready") and ready_symbols:
-                runner.mark_ready(ready_symbols)
-
             try:
                 await ctx.market_regime_manager.refresh_from_indicators()
                 await ctx.market_regime_manager.start()
-                ctx.market_regime_manager.indicators_ready = bool(ready_symbols)
             except Exception as _mrm_exc:
                 LOGGER.warning(
                     "market_regime_manager init failed (non-fatal): %s",
                     _mrm_exc,
                     exc_info=True,
                 )
-            # BUG 1 FIX: data_hub.indicators_ready was never set after BUG-δ removed
-            # warmup_indicators(). Both signal_generator.py:1205 and strategy_manager.py:1716
-            # check this flag as the FIRST gate in generate_signal() — if False, every call
-            # returns None silently. Must be set here in sync with market_regime_manager.
-            if ctx.data_hub is not None:
-                ctx.data_hub.indicators_ready = bool(ready_symbols)
             if ready_symbols:
                 LOGGER.info(
                     "Indicators hydration pre-check complete; waiting for live readiness gate"
@@ -6220,10 +6210,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                     if ctx.market_data_manager is not None:
                         try:
                             await ctx.market_data_manager.wait_until_ready(timeout=30.0)
+                            readiness_ready = bool(ctx.market_data_manager.ready)
+                            if ctx.market_regime_manager is not None:
+                                ctx.market_regime_manager.indicators_ready = readiness_ready
+                            if ctx.data_hub is not None:
+                                ctx.data_hub.indicators_ready = readiness_ready
                             LOGGER.info(
                                 "Condition met: startup_pipeline_ready",
                                 extra={
                                     "event": "startup_pipeline_ready",
+                                    "readiness_ready": readiness_ready,
                                     "ws_connected": bool(
                                         ctx.websocket_manager.is_connected()
                                         if ctx.websocket_manager is not None

@@ -19,7 +19,6 @@ from nifty_scalper_bot.utils.symbols import canonical, enforce_canonical
 LOGGER = get_logger(__name__)
 _STARVATION_CANDIDATE_STATUSES = {
     "quote_request_failed",
-    "broker_empty_response",
     "websocket_silent",
     "combined_starvation",
 }
@@ -484,7 +483,6 @@ class PollingStreamer:
             # ✅ CRITICAL FIX: Convert tokens to "exchange:tradingsymbol" format
             # Zerodha returns average_price (VWAP) ONLY for this format!
             symbols_for_api = []
-            token_to_symbol_map = {}
             symbol_to_token_map = {}
 
             for token in tokens:
@@ -502,7 +500,6 @@ class PollingStreamer:
                     if symbol.count(":") != 1:
                         raise RuntimeError(f"Malformed canonical symbol: {symbol}")
                     symbols_for_api.append(symbol)
-                    token_to_symbol_map[token] = symbol
                     symbol_to_token_map[symbol] = token
                 else:
                     if token not in self._symbol_lookup_failed_once:
@@ -523,7 +520,7 @@ class PollingStreamer:
                         "input_tokens": tokens[:8],
                     },
                 )
-                self._last_fetch_status = "mapping_failure"
+                self._last_fetch_status = "canonical_mapping_failure"
                 return []
 
             # Diagnostic Log - show what we're sending to API
@@ -560,8 +557,20 @@ class PollingStreamer:
                         "symbols": symbols_for_api[:8],
                     },
                 )
-                self._last_fetch_status = "broker_empty_response"
+                self._last_fetch_status = "empty_quote_map"
                 return []
+
+            LOGGER.debug(
+                "[POLL] Broker quote payload received symbols=%d quotes=%d",
+                len(symbols_for_api),
+                len(quote_map),
+                extra={
+                    "event": "polling_quote_payload",
+                    "symbols_requested": symbols_for_api[:8],
+                    "symbols_requested_count": len(symbols_for_api),
+                    "quote_count": len(quote_map),
+                },
+            )
 
             # ✅ DIAGNOSTIC: Check if we got VWAP data
             sample_quote = next(iter(quote_map.values()), {})
@@ -717,6 +726,16 @@ class PollingStreamer:
                         "quote_keys": list(quote_map.keys())[:8],
                     },
                 )
+            LOGGER.debug(
+                "[POLL] Parsed tick count=%d status=%s",
+                len(ticks),
+                self._last_fetch_status,
+                extra={
+                    "event": "polling_parse_result",
+                    "parsed_tick_count": len(ticks),
+                    "status": self._last_fetch_status,
+                },
+            )
             return ticks
 
         except Exception as e:

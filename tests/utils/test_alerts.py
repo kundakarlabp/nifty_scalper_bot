@@ -43,3 +43,58 @@ def test_alert_deduplicator_limits_critical_bursts() -> None:
     assert deduper.should_immediate(
         "svc:outage", "critical", hint_immediate=False, now=base + timedelta(seconds=7)
     )
+
+
+def test_alert_deduplicator_suppresses_same_outage_family_during_cooldown() -> None:
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    deduper = AlertDeduplicator(timedelta(seconds=60))
+
+    assert deduper.should_immediate(
+        "market_data.starvation:first",
+        "critical",
+        hint_immediate=True,
+        outage_class="market_data.starvation",
+        now=base,
+    )
+    assert not deduper.should_immediate(
+        "market_data.starvation:repeat",
+        "critical",
+        hint_immediate=True,
+        outage_class="market_data.starvation",
+        now=base + timedelta(seconds=10),
+    )
+
+
+def test_alert_deduplicator_allows_recovery_event_during_same_window() -> None:
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    deduper = AlertDeduplicator(timedelta(seconds=60))
+
+    assert deduper.should_immediate(
+        "market_data.empty_quote_map",
+        "warning",
+        hint_immediate=True,
+        outage_class="market_data.empty_quote_map",
+        now=base,
+    )
+    assert deduper.should_immediate(
+        "market_data.empty_quote_map",
+        "info",
+        hint_immediate=True,
+        outage_class="market_data.empty_quote_map",
+        recovery=True,
+        now=base + timedelta(seconds=15),
+    )
+
+
+def test_alert_deduplicator_flood_hold_suppresses_immediate_retries() -> None:
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    deduper = AlertDeduplicator(timedelta(seconds=60))
+
+    deduper.mark_flood_limited("market_data.mapping_empty", now=base)
+    assert not deduper.should_immediate(
+        "market_data.mapping_empty",
+        "critical",
+        hint_immediate=True,
+        outage_class="market_data.mapping_empty",
+        now=base + timedelta(seconds=5),
+    )
