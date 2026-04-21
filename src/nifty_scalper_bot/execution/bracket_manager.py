@@ -801,7 +801,7 @@ class BracketManager:
             try:
                 self.save_state()
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                LOGGER.exception("Unhandled exception", exc_info=True)
                 raise
 
     # --------------------------------------------------------------------------
@@ -1230,7 +1230,9 @@ class BracketManager:
                 if confirmed:
                     LOGGER.info('EXIT_EXECUTED symbol=%s qty=%s', symbol, qty)
                     self._log_bracket_event(
-                        "POSITION_CLOSED" if bracket.remaining_quantity <= 0 else "ORDER_FILLED",
+                        "POSITION_CLOSED"
+                        if bracket.remaining_quantity <= 0
+                        else "ORDER_FILL_CONFIRMED",
                         bracket,
                         meta={
                             "reason": reason,
@@ -1244,7 +1246,7 @@ class BracketManager:
                         try:
                             hook(symbol)
                         except Exception as e:
-                            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                            LOGGER.exception("Unhandled exception", exc_info=True)
                             raise
                 else:
                     LOGGER.critical('EXIT_FAILED_AFTER_FALLBACK symbol=%s qty=%s', symbol, qty)
@@ -1620,7 +1622,7 @@ class BracketManager:
                 if atr_value is not None and float(atr_value) > 0:
                     return float(atr_value)
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                LOGGER.exception("Unhandled exception", exc_info=True)
                 raise
         
         # Fallback to local cache with type-safe normalization.
@@ -1815,7 +1817,7 @@ class BracketManager:
             try:
                 self.save_state()
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                LOGGER.exception("Unhandled exception", exc_info=True)
                 raise  # Don't let persistence failure block exit
 
         # ═══════════════════════════════════════════════════════════
@@ -1885,7 +1887,7 @@ class BracketManager:
                 try:
                     METRICS.brackets_triggered.inc()
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    LOGGER.exception("Unhandled exception", exc_info=True)
                     raise
                 
             # Cleanup if full exit
@@ -1905,7 +1907,7 @@ class BracketManager:
                 try:
                     self.save_state()
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    LOGGER.exception("Unhandled exception", exc_info=True)
                     raise
                 
             # ✅ FALLBACK: Try MARKET order as last resort
@@ -2347,7 +2349,7 @@ class BracketManager:
                         if ltp and float(ltp) > 0:
                             self.on_tick(_sym, float(ltp))
                     except Exception as e:
-                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                        LOGGER.exception("Unhandled exception", exc_info=True)
                         raise
                 
                 # Register with market data manager

@@ -2053,7 +2053,7 @@ class StrategyRunner:
                     # Provide a list of the correct length; individual items unused.
                     effective_bars = [None] * len(ind_history)  # type: ignore[list-item]
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception(
+                LOGGER.exception(
                     "[CRITICAL] unhandled exception", exc_info=True
                 )
                 raise  # fall through to actual bars — hydration will be HYDRATING
@@ -2259,7 +2259,7 @@ class StrategyRunner:
                         try:
                             ie_vwap = self._indicator_engine.get_vwap(symbol)
                         except Exception as e:
-                            __import__("logging").getLogger(__name__).exception(
+                            LOGGER.exception(
                                 "[CRITICAL] unhandled exception", exc_info=True
                             )
                             raise
@@ -2804,7 +2804,7 @@ class StrategyRunner:
                 )
 
         except Exception as e:
-            __import__("logging").getLogger(__name__).exception(
+            LOGGER.exception(
                 "[CRITICAL] unhandled exception", exc_info=True
             )
             raise
@@ -3013,7 +3013,7 @@ class StrategyRunner:
                     ).set(slippage)
 
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception(
+                LOGGER.exception(
                     "[CRITICAL] unhandled exception", exc_info=True
                 )
                 raise
@@ -3049,7 +3049,7 @@ class StrategyRunner:
                     )
 
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception(
+                LOGGER.exception(
                     "[CRITICAL] unhandled exception", exc_info=True
                 )
                 raise
@@ -3168,7 +3168,7 @@ class StrategyRunner:
                     self._orders_in_flight.pop(underlying, None)
                     self.orders_in_flight.discard(underlying)
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception(
+                LOGGER.exception(
                     "[CRITICAL] unhandled exception", exc_info=True
                 )
                 raise
@@ -4408,7 +4408,7 @@ class StrategyRunner:
                     try:
                         self._position_manager.update_position_price(symbol, price)
                     except Exception as e:
-                        __import__("logging").getLogger(__name__).exception(
+                        LOGGER.exception(
                             "[CRITICAL] unhandled exception", exc_info=True
                         )
                         raise
@@ -4525,7 +4525,7 @@ class StrategyRunner:
                 except ValueError:
                     pass  # ✅ FIX: Ignore expected "No open position" errors
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).error(
+                    LOGGER.error(
                         f"Failed to update position price for {symbol}: {e}"
                     )
 
@@ -5442,7 +5442,7 @@ class StrategyRunner:
                         ),
                     )
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception(
+                    LOGGER.exception(
                         "[CRITICAL] unhandled exception", exc_info=True
                     )
                     raise
@@ -5934,7 +5934,7 @@ class StrategyRunner:
                     if atr_val > 0:
                         source = "indicator_engine"
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception(
+                LOGGER.exception(
                     "[CRITICAL] unhandled exception", exc_info=True
                 )
                 raise

@@ -1583,7 +1583,7 @@ class OrderManager:
                 if info and "exchange" in info:
                     return info["exchange"]
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
         # 3. Default fallback for this bot (mostly trades Options)
@@ -1602,7 +1602,7 @@ class OrderManager:
                 if info and "tradingsymbol" in info:
                     return info["tradingsymbol"]
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
         # 3. Fallback: Return as is (assuming it's already a tradingsymbol)
@@ -4554,7 +4554,7 @@ class OrderManager:
                     try:
                         self._positions.update_from_order(order)
                     except Exception as e:
-                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                        self._logger.exception("Unhandled exception", exc_info=True)
                         raise
 
             # ── FIX (BUG 3): CANCELLED exit orders — reactivate bracket.
@@ -4601,7 +4601,7 @@ class OrderManager:
                 try:
                     self.save_orders()
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    self._logger.exception("Unhandled exception", exc_info=True)
                     raise
 
     def place_atomic_entry(
@@ -4918,7 +4918,7 @@ class OrderManager:
                 if _price_source is not None:
                     _exit_ltp = _price_source.get_latest_price(symbol)
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
             exit_id = self.place_order(
@@ -5461,7 +5461,7 @@ class OrderManager:
             try:
                 self.cancel_order(oid)
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
     # ----------------------------------------------------------------
@@ -8364,7 +8364,7 @@ class OrderManager:
                 ):
                     payload["instrument_token"] = int(instrument_token)
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception", exc_info=True)
                 raise  # Default to not sending if settings fail
 
         return payload
@@ -10824,7 +10824,7 @@ class OrderManager:
                             if ltp and float(ltp) > 0:
                                 self._bracket_manager.on_tick(symbol, float(ltp))
                         except Exception as e:
-                            __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                            self._logger.exception("Unhandled exception", exc_info=True)
                             raise
 
                     _hub = self._data_hub or self._market_data
@@ -10874,7 +10874,7 @@ class OrderManager:
                     symbol, {"qty": quantity, "price": base_price}
                 )
             except Exception as e:
-                __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                self._logger.exception("Unhandled exception", exc_info=True)
                 raise
 
         # --- STEP 3: Fix Protection ---
