@@ -789,7 +789,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 )
 
         # Fallback to the LTP-only endpoint
-        symbols, symbol_map = self._tokens_to_symbols(tokens)
+        canonical_input = all(
+            isinstance(item, str) and ":" in str(item).strip() for item in tokens
+        )
+        if canonical_input:
+            symbols = [str(item).strip() for item in tokens]
+            symbol_map: dict[str, int] = {}
+        else:
+            symbols, symbol_map = self._tokens_to_symbols(tokens)
         if not symbols:
             return {}
         self._acquire_bucket(self._QUOTE_BUCKET)
@@ -2196,9 +2203,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
         symbols: list[str] = []
         symbol_map: dict[str, int] = {}
 
-        if resolver is None:
-            return symbols, symbol_map
-
         for token in tokens:
             # ✅ CRITICAL FIX: Handle symbol strings directly
             if isinstance(token, str):
@@ -2207,23 +2211,35 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 # Check if it's already a valid symbol (contains ":")
                 if ":" in token_str:
                     symbols.append(token_str)
-                    # Try to get the token from resolver for the reverse map
-                    try:
-                        if hasattr(resolver, "get_token_for_symbol"):
-                            resolved_token = resolver.get_token_for_symbol(token_str)
-                            if resolved_token:
-                                symbol_map[token_str] = int(resolved_token)
-                        elif hasattr(resolver, "lookup_by_symbol"):
-                            info = resolver.lookup_by_symbol(token_str)
-                            if info and "instrument_token" in info:
-                                symbol_map[token_str] = int(info["instrument_token"])
-                    except Exception as e:
-                        __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
-                        raise  # Token lookup failed, but we can still use the symbol
+                    # Reverse token enrichment is best-effort only.
+                    if resolver is not None:
+                        try:
+                            if hasattr(resolver, "get_token_for_symbol"):
+                                resolved_token = resolver.get_token_for_symbol(
+                                    token_str
+                                )
+                                if resolved_token:
+                                    symbol_map[token_str] = int(resolved_token)
+                            elif hasattr(resolver, "lookup_by_symbol"):
+                                info = resolver.lookup_by_symbol(token_str)
+                                if info and "instrument_token" in info:
+                                    symbol_map[token_str] = int(
+                                        info["instrument_token"]
+                                    )
+                        except Exception as exc:  # noqa: BLE001
+                            LOGGER.debug(
+                                "Reverse token enrichment failed for %s: %s",
+                                token_str,
+                                exc,
+                            )
                     continue
 
                 # Check if it's a numeric string (token as string)
                 if token_str.isdigit():
+                    if resolver is None:
+                        symbols.append(token_str)
+                        symbol_map[token_str] = int(token_str)
+                        continue
                     try:
                         token_int = int(token_str)
                         formatted = resolver.format_token_as_symbol(token_int)
@@ -2245,6 +2261,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 continue
 
             # Handle integer tokens (original behavior)
+            if resolver is None:
+                try:
+                    s = str(int(token))
+                    symbols.append(s)
+                    symbol_map[s] = int(token)
+                except (ValueError, TypeError):
+                    continue
+                continue
             try:
                 token_int = int(token)
                 formatted = resolver.format_token_as_symbol(token_int)
