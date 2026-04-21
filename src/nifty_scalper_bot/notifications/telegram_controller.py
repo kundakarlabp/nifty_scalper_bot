@@ -1614,6 +1614,8 @@ class TelegramBot:
         key: str,
         severity: str,
         hint_immediate: bool,
+        outage_class: str | None = None,
+        recovery: bool = False,
     ) -> bool:
         """Return ``True`` when an alert should bypass aggregation.
 
@@ -1634,6 +1636,8 @@ class TelegramBot:
                 key,
                 severity,
                 hint_immediate=hint_immediate,
+                outage_class=outage_class,
+                recovery=recovery,
             )
             log.debug(
                 "Entered _evaluate_alert_dispatch",
@@ -1642,6 +1646,8 @@ class TelegramBot:
                     "key": key,
                     "severity": severity,
                     "hint_immediate": hint_immediate,
+                    "outage_class": outage_class,
+                    "recovery": recovery,
                     "decision": decision,
                 },
             )
@@ -1808,6 +1814,10 @@ class TelegramBot:
                 disable_web_page_preview=True,
             )
         except Exception as exc:  # noqa: BLE001 - defensive send guard
+            flood_markers = ("too many requests", "retry after", "flood")
+            lowered = str(exc).lower()
+            if any(marker in lowered for marker in flood_markers):
+                self._alert_deduplicator.mark_flood_limited(f"dispatch:{severity}")
             log.error(
                 "Failure in _dispatch_alert send: %s",
                 exc,

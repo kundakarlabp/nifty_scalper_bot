@@ -25,7 +25,7 @@ def test_fetch_ticks_marks_empty_quote_map_not_transport_failure() -> None:
     ticks = streamer._fetch_ticks([256265])
 
     assert ticks == []
-    assert streamer._last_fetch_status == "broker_empty_response"
+    assert streamer._last_fetch_status == "empty_quote_map"
     assert (
         streamer._should_escalate_starvation(
             tokens_present=True,
