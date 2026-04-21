@@ -53,6 +53,7 @@ class PollingStreamer:
         self._kite_streamer = None  # Optional KiteTicker reference for health checks
         self._websocket_mode_enabled = False
         self._last_poll_heartbeat = time.monotonic()
+        self._last_fetch_status = "idle"
 
         # Metrics
         self._m_poll_ok = Counter("polling_success_total", "Successful poll cycles")
@@ -70,7 +71,9 @@ class PollingStreamer:
     def start(self) -> None:
         """Start the background polling thread."""
         if self._interval_s <= 0:
-            LOGGER.info("Polling disabled (interval <= 0)", extra={"event": "polling_disabled"})
+            LOGGER.info(
+                "Polling disabled (interval <= 0)", extra={"event": "polling_disabled"}
+            )
             return
         with self._lock:
             if self._thread and self._thread.is_alive():
@@ -251,26 +254,28 @@ class PollingStreamer:
                         symbol = self._resolve_instrument(token)
                         if not symbol:
                             continue
-                        
+
                         # Get last arrival time to prioritize oldest data
                         last_arr = 0.0
                         if self._data_hub:
                             quote = self._data_hub.get_quote(symbol)
-                            last_arr = (quote.get("arrival_time") or 0.0) if quote else 0.0
-                        
+                            last_arr = (
+                                (quote.get("arrival_time") or 0.0) if quote else 0.0
+                            )
+
                         # Only poll if WS is not fresh (local arrival time)
                         if not (self._data_hub and self._data_hub.is_ws_fresh(symbol)):
                             candidates.append((token, last_arr))
 
                 # 2. Sort by last_arrival (oldest/missing first)
                 candidates.sort(key=lambda x: x[1])
-                
+
                 # 3. Batch Smoothing: Take only up to ONE batch per cycle
                 # This prevents API burst spikes by spreading the load across cycles
-                active_tokens = [c[0] for c in candidates[:self._batch_size]]
+                active_tokens = [c[0] for c in candidates[: self._batch_size]]
 
                 should_poll_quotes = bool(active_tokens)
-                
+
                 if should_poll_quotes:
                     # Single batch processing (self._chunks is now a safety measure)
                     for batch in self._chunks(active_tokens, self._batch_size):
@@ -282,7 +287,10 @@ class PollingStreamer:
                             log_throttled(
                                 LOGGER,
                                 "poll_empty_batch",
-                                f"[POLL-TRACE] Empty ticks returned for batch {batch[:5]}...",
+                                (
+                                    "[POLL-TRACE] Empty ticks returned for batch "
+                                    f"{batch[:5]} status={self._last_fetch_status}"
+                                ),
                                 level=10,
                                 interval_sec=60.0,
                             )
@@ -315,7 +323,9 @@ class PollingStreamer:
                                 continue
                             symbol = enforce_canonical(canonical(str(symbol)))
                             if symbol.count(":") != 1:
-                                raise RuntimeError(f"Malformed canonical symbol: {symbol}")
+                                raise RuntimeError(
+                                    f"Malformed canonical symbol: {symbol}"
+                                )
                             tick["symbol"] = symbol
 
                             # 4. Update Metrics
@@ -324,7 +334,7 @@ class PollingStreamer:
                             except Exception as metric_err:
                                 LOGGER.debug(f"Metric update error: {metric_err}")
 
-                             # 5. TickBus handoff (authoritative pipeline)
+                            # 5. TickBus handoff (authoritative pipeline)
                             try:
                                 self._on_tick(tick)
                                 self._m_ticks_ingested.inc()
@@ -374,11 +384,20 @@ class PollingStreamer:
                 # we do NOT kill the bot, even if 'last_healthy_ts' is old.
                 # This prevents "Quiet Market" suicide.
 
-                if tokens and not seen_any_tick_this_cycle and not ws_healthy:
+                if self._should_escalate_starvation(
+                    tokens_present=bool(tokens),
+                    seen_any_tick=seen_any_tick_this_cycle,
+                    ws_healthy=ws_healthy,
+                ):
                     if time.monotonic() - last_healthy_ts > 30.0:
                         LOGGER.critical(
                             "💀 FATAL POLLER ERROR: True market data starvation "
-                            "(REST + WS silent for >30s). Escalating to supervisor."
+                            "(REST + WS silent for >30s). Escalating to supervisor.",
+                            extra={
+                                "event": "polling_starvation",
+                                "poll_failure_reason": self._last_fetch_status,
+                                "ws_healthy": ws_healthy,
+                            },
                         )
                         self._stop.set()
                         return
@@ -410,6 +429,14 @@ class PollingStreamer:
             sleep_time = max(0.1, backoff - elapsed)
             time.sleep(sleep_time)
 
+    def _should_escalate_starvation(
+        self, *, tokens_present: bool, seen_any_tick: bool, ws_healthy: bool
+    ) -> bool:
+        """Args: status flags. Returns: starvation escalation decision. Raises: None."""
+        if not tokens_present or seen_any_tick or ws_healthy:
+            return False
+        return self._last_fetch_status in {"quote_request_failed"}
+
     # ----------------------------------------------------------------
     # ✅ FIX: Thread-Safe Fetch with Timeout (Prevents Zombie Hangs)
     # ----------------------------------------------------------------
@@ -435,6 +462,7 @@ class PollingStreamer:
         - ✅ depth
         """
         try:
+            self._last_fetch_status = "started"
             # Clean Batch: Ensure all items are integers
             tokens = []
             for t in batch:
@@ -444,6 +472,7 @@ class PollingStreamer:
                     continue
 
             if not tokens:
+                self._last_fetch_status = "invalid_batch"
                 return []
 
             # ✅ CRITICAL FIX: Convert tokens to "exchange:tradingsymbol" format
@@ -483,6 +512,7 @@ class PollingStreamer:
                 LOGGER.warning(
                     "[POLL] No symbols resolved from tokens - check instrument resolver"
                 )
+                self._last_fetch_status = "mapping_failure"
                 return []
 
             # Diagnostic Log - show what we're sending to API
@@ -495,12 +525,18 @@ class PollingStreamer:
 
             # ✅ API CALL: Pass symbols as "exchange:tradingsymbol" strings
             # This is the KEY FIX - passing symbols instead of integer tokens
-            quote_map = self._broker.quote(symbols_for_api)
+            try:
+                quote_map = self._broker.quote(symbols_for_api)
+            except Exception as exc:  # noqa: BLE001
+                self._last_fetch_status = "quote_request_failed"
+                LOGGER.warning("[POLL] Quote request failed: %s", exc, exc_info=True)
+                return []
 
             if not quote_map:
                 LOGGER.warning(
                     f"[POLL] Empty quote_map returned for symbols: {symbols_for_api[:3]}..."
                 )
+                self._last_fetch_status = "empty_quote_map"
                 return []
 
             # ✅ DIAGNOSTIC: Check if we got VWAP data
@@ -647,9 +683,11 @@ class PollingStreamer:
                     level=logging.DEBUG,
                 )
 
+            self._last_fetch_status = "ok" if ticks else "parse_failure"
             return ticks
 
         except Exception as e:
+            self._last_fetch_status = "quote_request_failed"
             LOGGER.warning(f"[POLL-QUOTE-FAIL] {e}", exc_info=True)
             return []
 

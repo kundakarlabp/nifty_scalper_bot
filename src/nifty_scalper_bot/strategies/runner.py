@@ -5851,13 +5851,13 @@ class StrategyRunner:
 
             if order_id:
                 self._logger.critical(
-                    "ORDER_FILLED order_id=%s symbol=%s side=%s qty=%s",
+                    "ORDER_SUBMITTED order_id=%s symbol=%s side=%s qty=%s",
                     order_id, base_symbol, signal.action, qty,
                 )
                 try:
                     self._record_trade(
                         base_symbol,
-                        TradeRecord(timestamp, signal.action, qty, price or 0.0, "filled", signal.reason, order_id),
+                        TradeRecord(timestamp, signal.action, qty, price or 0.0, "submitted", signal.reason, order_id),
                     )
                 except Exception as rec_exc:
                     self._logger.error("record_trade failed: %s", rec_exc)
@@ -6083,13 +6083,13 @@ class StrategyRunner:
 
             if order_id:
                 self._logger.critical(
-                    "ORDER_FILLED order_id=%s symbol=%s side=%s qty=%s (EXIT)",
+                    "ORDER_SUBMITTED order_id=%s symbol=%s side=%s qty=%s (EXIT)",
                     order_id, base_symbol, exit_side, qty,
                 )
                 try:
                     self._record_trade(
                         base_symbol,
-                        TradeRecord(timestamp, signal.action, qty, trade_price, "filled", signal.reason, order_id),
+                        TradeRecord(timestamp, signal.action, qty, trade_price, "submitted", signal.reason, order_id),
                     )
                 except Exception as rec_exc:
                     self._logger.error("record_trade failed: %s", rec_exc)
