@@ -4901,7 +4901,7 @@ class MarketDataManager:
                         if t:
                             token = int(t)
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    self._logger.exception("Unhandled exception", exc_info=True)
                     raise
 
             # Try Broker Instrument Lookup (Final Fallback)
@@ -4915,7 +4915,7 @@ class MarketDataManager:
                     if t:
                         token = int(t)
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception("[CRITICAL] unhandled exception", exc_info=True)
+                    self._logger.exception("Unhandled exception", exc_info=True)
                     raise
 
         if not token:

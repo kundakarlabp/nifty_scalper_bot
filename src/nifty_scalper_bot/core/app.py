@@ -1918,7 +1918,7 @@ def _find_existing_nifty_option_symbol(
                         s_up if not s_up.startswith("NFO:") else s_up.split(":", 1)[-1]
                     )
     except Exception as e:
-        __import__("logging").getLogger(__name__).exception(
+        LOGGER.exception(
             "[CRITICAL] unhandled exception", exc_info=True
         )
         raise
@@ -2050,7 +2050,7 @@ def _get_symbols(
                                 ltp = price
                                 break
                 except Exception as e:
-                    __import__("logging").getLogger(__name__).exception(
+                    LOGGER.exception(
                         "[CRITICAL] unhandled exception", exc_info=True
                     )
                     raise
@@ -5866,6 +5866,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.websocket_manager is not None and ctx.market_data_manager is not None:
                     async def _polling_failover_supervisor() -> None:
                         """Supervise WS health and toggle polling fallback with hysteresis."""
+                        def _sanitize_quote_age(raw_age: Any) -> tuple[str, int | None]:
+                            """Classify quote freshness age. Args: raw age. Returns: state/age. Raises: none."""
+                            try:
+                                if raw_age is None:
+                                    return ("unknown", None)
+                                age = int(raw_age)
+                            except (TypeError, ValueError):
+                                return ("invalid_sentinel", None)
+                            if age < 0 or age > 60_000_000:
+                                return ("invalid_sentinel", None)
+                            if age <= quote_stale_ms:
+                                return ("fresh", age)
+                            return ("stale", age)
+
                         degraded_since: float | None = None
                         recovered_since: float | None = None
                         activate_after = 3.0
@@ -5876,7 +5890,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ws_ok = bool(ctx.websocket_manager.is_connected())
                                 stale = bool(ctx.market_data_manager.is_data_stale())
                                 spot_age = ctx.market_data_manager.quote_age_ms("NSE:NIFTY")
-                                degraded = (not ws_ok) or stale or spot_age > quote_stale_ms
+                                spot_state, sanitized_spot_age = _sanitize_quote_age(spot_age)
+                                quote_age_degraded = spot_state == "stale"
+                                degraded = (not ws_ok) or stale or quote_age_degraded
                                 now_mono = time_module.monotonic()
                                 if degraded:
                                     recovered_since = None
@@ -5889,11 +5905,30 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             "Polling fallback activate (supervisor) ws_ok=%s stale=%s spot_quote_age_ms=%s",
                                             ws_ok,
                                             stale,
-                                            spot_age,
-                                            extra={"event": "polling_fallback_activated"},
+                                            sanitized_spot_age,
+                                            extra={
+                                                "event": "polling_fallback_activated",
+                                                "reason": (
+                                                    "ws_disconnected"
+                                                    if not ws_ok
+                                                    else "stale_full_basket"
+                                                    if stale
+                                                    else "stale_spot_quote"
+                                                ),
+                                                "spot_state": spot_state,
+                                            },
                                         )
                                         polling_fallback.set_websocket_mode(False)
                                         polling_fallback.start()
+                                elif spot_state in {"unknown", "invalid_sentinel"}:
+                                    LOGGER.info(
+                                        "Polling fallback not activated due to non-actionable spot quote age state=%s",
+                                        spot_state,
+                                        extra={
+                                            "event": "polling_fallback_age_ignored",
+                                            "spot_state": spot_state,
+                                        },
+                                    )
                                 else:
                                     degraded_since = None
                                     recovered_since = recovered_since or now_mono
@@ -6267,7 +6302,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if callable(reset_fn):
                                 reset_fn()
                     except Exception as e:
-                        __import__("logging").getLogger(__name__).exception(
+                        LOGGER.exception(
                             "[CRITICAL] unhandled exception", exc_info=True
                         )
                         raise
@@ -6796,16 +6831,30 @@ def _health_check(ctx: BotContext) -> None:
         expected_active = bool(
             ctx.settings.enable_live and state == MarketState.OPEN and not ctx.shadow_mode_enabled
         )
+        inactive_reason = "runner_task_not_started"
+        if not ctx.settings.enable_live:
+            inactive_reason = "live_disabled"
+        elif state != MarketState.OPEN:
+            inactive_reason = "market_closed"
+        elif status.get("startup_degraded"):
+            inactive_reason = "degraded_startup"
+        elif status.get("readiness_unmet"):
+            inactive_reason = "readiness_unmet"
+        elif status.get("basket_build_failed"):
+            inactive_reason = "basket_build_failure"
+        elif status.get("loop_error"):
+            inactive_reason = "runner_loop_exception"
         log_throttled(
             LOGGER,
             key="strategy_runner_inactive_health",
-            msg="Strategy runner is not active",
+            msg=f"Strategy runner is not active ({inactive_reason})",
             level=logging.WARNING if expected_active else logging.INFO,
             interval_sec=60.0,
             extra={
                 "event": "strategy_runner_inactive_health",
                 "expected_active": expected_active,
                 "market_state": state.value if hasattr(state, "value") else str(state),
+                "reason": inactive_reason,
             },
         )
 

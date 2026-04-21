@@ -863,7 +863,22 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if not tokens:
             return {}
 
-        symbols, symbol_map = self._tokens_to_symbols(tokens)
+        canonical_input = all(
+            isinstance(item, str) and ":" in str(item).strip() for item in tokens
+        )
+        if canonical_input:
+            symbols = [str(item).strip() for item in tokens]
+            symbol_map: dict[str, int] = {}
+            LOGGER.debug(
+                "quote_bulk canonical fast-path",
+                extra={
+                    "event": "quote_bulk_canonical_fast_path",
+                    "symbols": symbols[:8],
+                    "count": len(symbols),
+                },
+            )
+        else:
+            symbols, symbol_map = self._tokens_to_symbols(tokens)
         if not symbols:
             LOGGER.warning(
                 "Token-to-symbol mapping empty",
@@ -2210,27 +2225,32 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
                 # Check if it's already a valid symbol (contains ":")
                 if ":" in token_str:
-                    symbols.append(token_str)
+                    canonical_symbol = token_str.upper()
+                    symbols.append(canonical_symbol)
                     # Reverse token enrichment is best-effort only.
                     if resolver is not None:
                         try:
                             if hasattr(resolver, "get_token_for_symbol"):
                                 resolved_token = resolver.get_token_for_symbol(
-                                    token_str
+                                    canonical_symbol
                                 )
                                 if resolved_token:
-                                    symbol_map[token_str] = int(resolved_token)
+                                    symbol_map[canonical_symbol] = int(resolved_token)
                             elif hasattr(resolver, "lookup_by_symbol"):
-                                info = resolver.lookup_by_symbol(token_str)
+                                info = resolver.lookup_by_symbol(canonical_symbol)
                                 if info and "instrument_token" in info:
-                                    symbol_map[token_str] = int(
+                                    symbol_map[canonical_symbol] = int(
                                         info["instrument_token"]
                                     )
                         except Exception as exc:  # noqa: BLE001
                             LOGGER.debug(
-                                "Reverse token enrichment failed for %s: %s",
-                                token_str,
+                                "Reverse token enrichment failed for canonical symbol %s: %s",
+                                canonical_symbol,
                                 exc,
+                                extra={
+                                    "event": "reverse_token_enrichment_failed",
+                                    "symbol": canonical_symbol,
+                                },
                             )
                     continue
 

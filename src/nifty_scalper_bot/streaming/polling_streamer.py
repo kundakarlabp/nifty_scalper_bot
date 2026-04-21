@@ -17,6 +17,12 @@ from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.symbols import canonical, enforce_canonical
 
 LOGGER = get_logger(__name__)
+_STARVATION_CANDIDATE_STATUSES = {
+    "quote_request_failed",
+    "broker_empty_response",
+    "websocket_silent",
+    "combined_starvation",
+}
 
 
 class PollingStreamer:
@@ -435,7 +441,7 @@ class PollingStreamer:
         """Args: status flags. Returns: starvation escalation decision. Raises: None."""
         if not tokens_present or seen_any_tick or ws_healthy:
             return False
-        return self._last_fetch_status in {"quote_request_failed"}
+        return self._last_fetch_status in _STARVATION_CANDIDATE_STATUSES
 
     # ----------------------------------------------------------------
     # ✅ FIX: Thread-Safe Fetch with Timeout (Prevents Zombie Hangs)
@@ -510,7 +516,12 @@ class PollingStreamer:
 
             if not symbols_for_api:
                 LOGGER.warning(
-                    "[POLL] No symbols resolved from tokens - check instrument resolver"
+                    "[POLL] No symbols resolved from tokens - check instrument resolver",
+                    extra={
+                        "event": "polling_mapping_failure",
+                        "batch_size": len(tokens),
+                        "input_tokens": tokens[:8],
+                    },
                 )
                 self._last_fetch_status = "mapping_failure"
                 return []
@@ -529,14 +540,27 @@ class PollingStreamer:
                 quote_map = self._broker.quote(symbols_for_api)
             except Exception as exc:  # noqa: BLE001
                 self._last_fetch_status = "quote_request_failed"
-                LOGGER.warning("[POLL] Quote request failed: %s", exc, exc_info=True)
+                LOGGER.warning(
+                    "[POLL] Quote request failed: %s",
+                    exc,
+                    exc_info=True,
+                    extra={
+                        "event": "polling_quote_request_failed",
+                        "symbols": symbols_for_api[:8],
+                    },
+                )
                 return []
 
             if not quote_map:
                 LOGGER.warning(
-                    f"[POLL] Empty quote_map returned for symbols: {symbols_for_api[:3]}..."
+                    "[POLL] Empty quote_map returned for symbols=%s",
+                    symbols_for_api[:8],
+                    extra={
+                        "event": "polling_empty_quote_map",
+                        "symbols": symbols_for_api[:8],
+                    },
                 )
-                self._last_fetch_status = "empty_quote_map"
+                self._last_fetch_status = "broker_empty_response"
                 return []
 
             # ✅ DIAGNOSTIC: Check if we got VWAP data
@@ -683,7 +707,16 @@ class PollingStreamer:
                     level=logging.DEBUG,
                 )
 
-            self._last_fetch_status = "ok" if ticks else "parse_failure"
+            self._last_fetch_status = "ok" if ticks else "parser_zero_ticks"
+            if not ticks:
+                LOGGER.warning(
+                    "[POLL] Parser produced zero usable ticks from quote payload",
+                    extra={
+                        "event": "polling_parser_zero_ticks",
+                        "symbols": symbols_for_api[:8],
+                        "quote_keys": list(quote_map.keys())[:8],
+                    },
+                )
             return ticks
 
         except Exception as e:
