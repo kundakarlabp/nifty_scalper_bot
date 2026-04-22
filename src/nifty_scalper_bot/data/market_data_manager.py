@@ -1152,6 +1152,11 @@ class MarketDataManager:
         self._rest_poll_enabled = False
         self._fallback_enabled = False
         self._rest_poll_max_symbols = 0
+        if self._rest_poll_thread is not None:
+            self._rest_poll_stop.set()
+            self._rest_poll_thread.join(timeout=2.0)
+            self._rest_poll_thread = None
+            self._rest_poll_stop.clear()
         if reason:
             self._logger.info(
                 "mdm_internal_rest_poller_disabled",
@@ -2389,7 +2394,7 @@ class MarketDataManager:
                 self._hydration_status[normalized] = "READY"
             else:
                 self._hydration_status[normalized] = "HYDRATING"
-                self._logger.error(
+                self._logger.info(
                     "insufficient_bars_for_strategy",
                     extra={
                         "event": "insufficient_bars_for_strategy",
@@ -2520,13 +2525,15 @@ class MarketDataManager:
             return False
         if atm_pe and bars.get(str(atm_pe), 0) < min_bars:
             return False
-        ce_ready = [
-            sym for sym in options if sym.endswith("CE") and bars.get(sym, 0) >= min_bars
-        ]
-        pe_ready = [
-            sym for sym in options if sym.endswith("PE") and bars.get(sym, 0) >= min_bars
-        ]
-        return len(ce_ready) >= 2 and len(pe_ready) >= 2
+        if atm_ce and atm_pe:
+            return True
+        ce_ready = any(
+            sym.endswith("CE") and bars.get(sym, 0) >= min_bars for sym in options
+        )
+        pe_ready = any(
+            sym.endswith("PE") and bars.get(sym, 0) >= min_bars for sym in options
+        )
+        return ce_ready and pe_ready
 
     def get_hydration_status(self, symbol: str) -> str:
         """Return hydration status. Args: symbol. Returns: status string. Raises: None."""
@@ -3094,6 +3101,7 @@ class MarketDataManager:
             self._ticks_received_per_symbol[symbol] += 1
             self._symbols_with_tick.add(symbol)
             self._last_tick_wallclock[symbol] = float(wallclock)
+            self._last_quote_ts_ms[symbol] = self._now_ms()
         staleness_seconds = 0.0
         try:
             staleness_seconds = max(time.time() - float(wallclock), 0.0)
@@ -4379,7 +4387,7 @@ class MarketDataManager:
                 "candidates": candidates,
                 "trace_id": trace_id,
             },
-            exec_info=True,
+            exc_info=True,
         )
         return None
 

@@ -15,7 +15,9 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from importlib import import_module
+from importlib import metadata as importlib_metadata
 import inspect
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -50,6 +52,62 @@ from nifty_scalper_bot.infra.watchdog import start_watchdog
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 SYNC_LOCK = threading.Lock()
 instrument_cache_ready = threading.Event()
+
+
+def _build_startup_fingerprint() -> dict[str, str]:
+    """Build startup fingerprint metadata. Args: none. Returns: metadata map. Raises: none."""
+
+    version = "unknown"
+    try:
+        version = importlib_metadata.version("nifty_scalper_bot")
+    except Exception:
+        version = str(os.getenv("APP_VERSION", "unknown")).strip() or "unknown"
+
+    release_id = str(
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_SHA")
+        or os.getenv("RELEASE_ID")
+        or ""
+    ).strip()
+    if not release_id:
+        git_head = Path(".git/HEAD")
+        if git_head.exists():
+            try:
+                head_value = git_head.read_text(encoding="utf-8").strip()
+                if head_value.startswith("ref:"):
+                    ref_name = head_value.split(" ", 1)[1].strip()
+                    ref_path = Path(".git") / ref_name
+                    if ref_path.exists():
+                        release_id = ref_path.read_text(encoding="utf-8").strip()[:12]
+                elif head_value:
+                    release_id = head_value[:12]
+            except Exception:
+                release_id = ""
+    if not release_id:
+        digest = hashlib.sha1(version.encode("utf-8"), usedforsecurity=False).hexdigest()
+        release_id = f"cfg-{digest[:12]}"
+
+    return {"version": version, "release": release_id}
+
+
+def _polling_fallback_degraded(
+    *,
+    ws_ok: bool,
+    stale: bool,
+    lagging: bool,
+    quote_age_degraded: bool,
+) -> bool:
+    """Evaluate fallback degrade state. Args: health flags. Returns: bool. Raises: none."""
+
+    if not ws_ok:
+        return True
+    if stale:
+        return True
+    if lagging:
+        return True
+    # Quote-age is secondary: only confirm degradation when another explicit
+    # data-path signal is already unhealthy.
+    return quote_age_degraded and (stale or lagging or (not ws_ok))
 
 
 def _run_sync_locked(operation: Callable[[], Any]) -> Any:
@@ -2802,6 +2860,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     ensure_multiproc_dir(clear_stale=True)
     settings = settings or get_settings()
+    fingerprint = _build_startup_fingerprint()
+    LOGGER.info(
+        "startup_fingerprint version=%s release=%s",
+        fingerprint["version"],
+        fingerprint["release"],
+        extra={"event": "startup_fingerprint", **fingerprint},
+    )
     config = settings.app
     raw_ws_disabled = os.getenv("WEBSOCKET__DISABLED")
     if raw_ws_disabled is None:
@@ -5538,7 +5603,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         extra={"event": "hydration_zero_bars", "symbol": symbol},
                     )
                 elif record_count < 20:
-                    LOGGER.error(
+                    LOGGER.info(
                         "insufficient_bars_for_strategy: %s returned only %d bars (need ≥20) — "
                         "strategy indicators will be unreliable",
                         symbol,
@@ -5660,15 +5725,34 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
 
+            readiness_symbols = list(
+                dict.fromkeys(
+                    [
+                        basket.get("spot_symbol"),
+                        basket.get("futures_symbol"),
+                        basket.get("ce_symbols", [None])[
+                            len(basket.get("ce_symbols", [])) // 2
+                        ]
+                        if basket.get("ce_symbols")
+                        else None,
+                        basket.get("pe_symbols", [None])[
+                            len(basket.get("pe_symbols", [])) // 2
+                        ]
+                        if basket.get("pe_symbols")
+                        else None,
+                    ]
+                )
+            )
+            readiness_symbols = [str(sym) for sym in readiness_symbols if sym]
             ready_symbols: list[str] = []
             min_required_bars = int(
                 getattr(runner, "_required_candles", 20) if runner else 20
             )
-            for sym in targets:
+            for sym in readiness_symbols:
                 if hydrated_counts.get(sym, 0) >= min_required_bars:
                     ready_symbols.append(sym)
                 else:
-                    LOGGER.warning(
+                    LOGGER.info(
                         "Condition met: startup_hydration_incomplete",
                         extra={
                             "event": "startup_hydration_incomplete",
@@ -5704,7 +5788,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     "Indicators hydration pre-check complete; waiting for live readiness gate"
                 )
             else:
-                LOGGER.error(
+                LOGGER.warning(
                     "Indicators remain unready because no symbols passed hydration barrier"
                 )
 
@@ -5882,7 +5966,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 spot_age = ctx.market_data_manager.quote_age_ms("NSE:NIFTY")
                                 spot_state, sanitized_spot_age = _sanitize_quote_age(spot_age)
                                 quote_age_degraded = spot_state == "stale"
-                                degraded = (not ws_ok) or stale or quote_age_degraded
+                                tick_age_ms = ctx.market_data_manager.data_age_ms()
+                                lagging = tick_age_ms > quote_stale_ms
+                                degraded = _polling_fallback_degraded(
+                                    ws_ok=ws_ok,
+                                    stale=stale,
+                                    lagging=lagging,
+                                    quote_age_degraded=quote_age_degraded,
+                                )
                                 now_mono = time_module.monotonic()
                                 if degraded:
                                     recovered_since = None
@@ -5892,9 +5983,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         and not polling_fallback.is_running()
                                     ):
                                         LOGGER.warning(
-                                            "Polling fallback activate (supervisor) ws_ok=%s stale=%s spot_quote_age_ms=%s",
+                                            "Polling fallback activate (supervisor) ws_ok=%s stale=%s lagging=%s spot_quote_age_ms=%s",
                                             ws_ok,
                                             stale,
+                                            lagging,
                                             sanitized_spot_age,
                                             extra={
                                                 "event": "polling_fallback_activated",
@@ -5903,9 +5995,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                                                     if not ws_ok
                                                     else "stale_full_basket"
                                                     if stale
+                                                    else "tick_lag"
+                                                    if lagging
                                                     else "stale_spot_quote"
                                                 ),
                                                 "spot_state": spot_state,
+                                                "lagging": lagging,
                                             },
                                         )
                                         polling_fallback.set_websocket_mode(False)
@@ -6320,7 +6415,6 @@ async def startup_sequence(ctx: BotContext) -> None:
         ctx.strategy_runner, "calculate_portfolio_greeks"
     ):
         import threading
-        import time as time_module
 
         runner = ctx.strategy_runner
 

@@ -74,6 +74,7 @@ class DummyWebSocket:
 def broker() -> DummyBroker:
     broker = DummyBroker()
     broker.set_token("NIFTY23", 123)
+    broker.set_token("NSE:NIFTY23", 123)
     broker.set_quote(
         "NIFTY23", {"ltp": 100.0, "bid": 99.5, "ask": 100.5, "ts": 1_000.0}
     )
@@ -362,6 +363,100 @@ async def test_readiness_passes_with_required_quorum(
         )
     await manager.wait_until_ready(timeout=0.5)
     assert manager.ready is True
+
+
+@pytest.mark.asyncio
+async def test_readiness_allows_outer_option_basket_to_lag(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.get_market_state",
+        lambda: MarketState.OPEN,
+    )
+    manager = MarketDataManager(broker, ws)
+    manager._min_required_bars = 1  # noqa: SLF001
+    symbols = [
+        "NSE:NIFTY",
+        "NFO:NIFTY26MAYFUT",
+        "NFO:NIFTY26MAY25000CE",
+        "NFO:NIFTY26MAY25000PE",
+        "NFO:NIFTY26MAY24950CE",
+        "NFO:NIFTY26MAY24950PE",
+    ]
+    manager._active_subscribed_symbols = set(symbols)  # noqa: SLF001
+    manager.set_readiness_requirements(
+        spot_symbol="NSE:NIFTY",
+        futures_symbol="NFO:NIFTY26MAYFUT",
+        atm_ce_symbol="NFO:NIFTY26MAY25000CE",
+        atm_pe_symbol="NFO:NIFTY26MAY25000PE",
+        option_symbols=symbols[2:],
+    )
+    for symbol in symbols[:4]:
+        manager.ingest_historical_bar(
+            {
+                "symbol": symbol,
+                "open": 1,
+                "high": 2,
+                "low": 1,
+                "close": 1.5,
+                "volume": 1,
+                "timestamp": datetime.now(timezone.utc),
+            }
+        )
+    await manager.wait_until_ready(timeout=0.5)
+    assert manager.ready is True
+
+
+def test_store_tick_refreshes_quote_age_for_live_ticks(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    symbol = "NSE:NIFTY"
+    assert manager.quote_age_ms(symbol) >= 1_000_000_000
+
+    manager._store_tick(  # noqa: SLF001 - verify core cache write path
+        symbol,
+        {"symbol": symbol, "ltp": 25100.0, "timestamp": time.time(), "source": "ws"},
+    )
+
+    assert manager.quote_age_ms(symbol) < 1_000_000_000
+
+
+def test_quote_age_recovers_after_fresh_tick(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    symbol = "NSE:NIFTY"
+    manager._last_quote_ts_ms[symbol] = 0  # noqa: SLF001 - stale sentinel setup
+    assert manager.quote_age_ms(symbol) > 1_000
+
+    manager._store_tick(  # noqa: SLF001 - verify live tick freshness overwrite
+        symbol,
+        {"symbol": symbol, "ltp": 25200.0, "timestamp": time.time(), "source": "ws"},
+    )
+
+    assert manager.quote_age_ms(symbol) < 1_000
+
+
+def test_disable_rest_polling_stops_internal_thread(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    class _ThreadProbe:
+        def __init__(self) -> None:
+            self.join_calls = 0
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls += 1
+
+    manager = MarketDataManager(broker, ws)
+    probe = _ThreadProbe()
+    manager._rest_poll_thread = probe  # type: ignore[assignment]  # noqa: SLF001
+
+    manager.disable_rest_polling(reason="test")
+
+    assert manager._rest_poll_enabled is False  # noqa: SLF001
+    assert manager._rest_poll_thread is None  # noqa: SLF001
+    assert probe.join_calls == 1
 
 
 def test_nifty_pull_quote_logs_structured_warning_on_total_failure(
