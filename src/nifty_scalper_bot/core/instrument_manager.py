@@ -200,6 +200,12 @@ class InstrumentManager:
         with self._lock:
             return len(self._symbol_map)
 
+    def get_nifty_instruments_snapshot(self) -> List[Dict[str, Any]]:
+        """Return cached NIFTY instrument rows. Args: none. Returns: rows. Raises: none."""
+
+        with self._lock:
+            return [dict(row) for row in self._instrument_data.values()]
+
     def get_lot_size(self, token_or_symbol: int | str) -> Optional[int]:
         """Get lot size for a token or symbol.
         

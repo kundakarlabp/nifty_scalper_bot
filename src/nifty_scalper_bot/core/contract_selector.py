@@ -73,6 +73,7 @@ def get_atm_contracts(
     *,
     strike_band: int = _STRIKE_BAND,
     strike_step: int | None = None,
+    preloaded_instruments: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return NIFTY option contracts for the nearest expiry around the ATM strike.
 
@@ -102,11 +103,22 @@ def get_atm_contracts(
             f"underlying_price must be positive, got {underlying_price}"
         )
 
-    LOGGER.info(
-        "ContractSelector: fetching NFO instruments for ATM=%.2f …",
-        underlying_price,
-    )
-    all_instruments: list[dict] = list(kite.instruments("NFO"))
+    if preloaded_instruments:
+        LOGGER.info(
+            "ContractSelector: using preloaded NFO instruments for ATM=%.2f",
+            underlying_price,
+            extra={
+                "event": "contract_selector_cache_hit",
+                "instruments": len(preloaded_instruments),
+            },
+        )
+        all_instruments: list[dict] = list(preloaded_instruments)
+    else:
+        LOGGER.info(
+            "ContractSelector: fetching NFO instruments for ATM=%.2f …",
+            underlying_price,
+        )
+        all_instruments = list(kite.instruments("NFO"))
 
     # ── filter to NIFTY options only ─────────────────────────────────────────
     nifty_opts = [
