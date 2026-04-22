@@ -1212,6 +1212,42 @@ class MarketDataManager:
             self._reconcile_ws_subscriptions()
         return added_count
 
+    def request_token_unsubscription(
+        self,
+        token: int,
+        symbol: str | None = None,
+    ) -> bool:
+        """Record token removal intent. Args: token/symbol. Returns: changed flag. Raises: none."""
+
+        token_int = int(token)
+        if token_int <= 0:
+            return False
+        normalized_symbol: str | None = None
+        if symbol:
+            normalized_symbol = self._canonical_symbol(symbol)
+
+        changed = False
+        with self._lock:
+            if token_int in self._desired_tokens:
+                self._desired_tokens.discard(token_int)
+                changed = True
+            if normalized_symbol and self._symbol_to_token.pop(normalized_symbol, None) is not None:
+                changed = True
+            if self._token_to_symbol.pop(token_int, None) is not None:
+                changed = True
+        if changed:
+            self._reconcile_ws_subscriptions()
+        return changed
+
+    def request_symbol_unsubscription(self, symbol: str) -> bool:
+        """Record symbol removal intent. Args: symbol. Returns: changed flag. Raises: none."""
+
+        normalized = self._canonical_symbol(symbol)
+        token = self._symbol_to_token.get(normalized) or self._token_by_symbol.get(normalized)
+        if token is None:
+            return False
+        return self.request_token_unsubscription(token, symbol=normalized)
+
     def request_symbol_subscription(self, symbol: str) -> bool:
         """Record symbol subscription intent. Args: symbol. Returns: changed flag. Raises: none."""
 
@@ -4819,18 +4855,8 @@ class MarketDataManager:
             )
 
     def _release_subscription(self, symbol: str) -> None:
-        symbol = self._canonical_symbol(symbol)
-        token = self._symbol_to_token.get(symbol) or self._token_by_symbol.get(symbol)
-        if token is None:
-            return
         try:
-            changed = False
-            with self._lock:
-                if token in self._desired_tokens:
-                    self._desired_tokens.discard(token)
-                    changed = True
-            if changed:
-                self._reconcile_ws_subscriptions()
+            self.request_symbol_unsubscription(symbol)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
                 "Unsubscribe failed",
