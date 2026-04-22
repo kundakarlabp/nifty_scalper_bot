@@ -60,6 +60,10 @@ class DummyWebSocket:
     def subscribe_tokens(self, tokens: Iterable[Any], mode: str = "ltp") -> None:
         self.subscribed.append((mode, list(tokens)))
 
+    def set_tokens(self, tokens: Iterable[Any]) -> bool:
+        self.subscribed.append(("full", sorted(int(token) for token in tokens)))
+        return True
+
     def unsubscribe_tokens(self, tokens: Iterable[Any]) -> None:
         self.unsubscribed.append(list(tokens))
 

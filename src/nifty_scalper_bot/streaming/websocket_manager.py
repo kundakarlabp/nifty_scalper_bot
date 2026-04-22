@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import random
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
@@ -239,8 +240,7 @@ class WebSocketManager:
 
         try:
             self._logger.debug("Entered subscribe")
-            self._merge_tokens(tokens)
-            await self._resubscribe_if_connected()
+            self.add_tokens(tokens)
         except Exception as e:
             self._logger.error("Failure in subscribe: %s", e)
             raise
@@ -269,11 +269,59 @@ class WebSocketManager:
             self._logger.error("Failure in stop: %s", e)
             raise
 
-    def subscribe_tokens(self, tokens: Sequence[int], mode: str = "full") -> None:
-        """Args: tokens/mode; Returns: none; Raises: none."""
+    def set_tokens(self, tokens: Sequence[int]) -> bool:
+        """Reconcile websocket transport token state. Args: tokens. Returns: changed flag. Raises: none."""
 
-        self._merge_tokens(tokens)
-        self._schedule_async(self._resubscribe_if_connected())
+        try:
+            new_tokens = {int(token) for token in tokens if int(token) > 0}
+        except Exception as e:
+            self._logger.error("Failure in set_tokens normalization: %s", e)
+            return False
+
+        if new_tokens == self._tokens:
+            return False
+
+        old_tokens = set(self._tokens)
+        to_add = sorted(new_tokens - old_tokens)
+        to_remove = sorted(old_tokens - new_tokens)
+
+        ticker = self._ticker
+        connected = ticker is not None and self._connected.is_set()
+        if connected and to_remove:
+            with suppress(Exception):
+                self._schedule_blocking(lambda: ticker.unsubscribe(to_remove))
+        if connected and to_add:
+            with suppress(Exception):
+                self._schedule_blocking(lambda: ticker.subscribe(to_add))
+                self._schedule_blocking(lambda: ticker.set_mode(ticker.MODE_FULL, to_add))
+                self._log_ws_subscriptions(to_add)
+
+        self._tokens = new_tokens
+        self._logger.info(
+            "ws_tokens_reconciled total=%d added=%d removed=%d",
+            len(self._tokens),
+            len(to_add),
+            len(to_remove),
+        )
+        return True
+
+    def add_tokens(self, tokens: Sequence[int]) -> bool:
+        """Add transport tokens. Args: tokens. Returns: changed flag. Raises: none."""
+
+        incoming = {int(token) for token in tokens if int(token) > 0}
+        return self.set_tokens(sorted(self._tokens | incoming))
+
+    def remove_tokens(self, tokens: Sequence[int]) -> bool:
+        """Remove transport tokens. Args: tokens. Returns: changed flag. Raises: none."""
+
+        outgoing = {int(token) for token in tokens if int(token) > 0}
+        return self.set_tokens(sorted(self._tokens - outgoing))
+
+    def subscribe_tokens(self, tokens: Sequence[int], mode: str = "full") -> None:
+        """Compatibility wrapper for transport token additions. Args: tokens/mode. Returns: none. Raises: none."""
+
+        del mode
+        self.add_tokens(tokens)
 
     def resubscribe(self, tokens: list[int]) -> None:
         """Args: tokens; Returns: none; Raises: none."""
@@ -303,12 +351,7 @@ class WebSocketManager:
         """Args: tokens; Returns: none; Raises: none."""
 
         try:
-            remove_set = {int(token) for token in tokens}
-            self._tokens -= remove_set
-            ticker = self._ticker
-            if ticker is not None and self._connected.is_set() and remove_set:
-                payload = sorted(remove_set)
-                self._schedule_blocking(lambda: ticker.unsubscribe(payload))
+            self.remove_tokens(tokens)
         except Exception as e:
             self._logger.error("Failure in unsubscribe_tokens: %s", e)
 
@@ -644,49 +687,15 @@ class WebSocketManager:
             )
             if self._tokens:
                 token_list = sorted(self._tokens)
-                mdm = getattr(self, "_market_data_manager", None)
-                validate_mapping = getattr(mdm, "validate_token_symbol_mappings", None)
-                if callable(validate_mapping):
-                    try:
-                        validate_mapping()
-                    except RuntimeError as map_err:
-                        self._logger.warning(
-                            "Token/symbol mapping mismatch on connect (non-fatal): %s",
-                            map_err,
-                        )
                 ws.subscribe(token_list)
                 ws.set_mode(ws.MODE_FULL, token_list)
                 self._log_ws_subscriptions(token_list)
-                symbol_map = getattr(mdm, "_symbol_by_token", {})
-                active_symbols = {
-                    symbol_map.get(token)
-                    for token in token_list
-                    if symbol_map.get(token)
-                }
                 self._logger.info(
-                    "WebSocket subscribed | active_tokens=%d active_symbols=%d",
+                    "ws_replay_subscriptions total=%d",
                     len(token_list),
-                    len(active_symbols),
                 )
-                if symbol_map:
-                    self._logger.debug(
-                        "WebSocket symbol registry size=%d",
-                        len(symbol_map),
-                    )
-                if len(symbol_map) == 0:
-                    self._logger.warning(
-                        "Token map is EMPTY after subscribe — ticks will be dropped. "
-                        "Ensure register_symbol() is called before WebSocket connect.",
-                    )
-                elif len(symbol_map) < 5:
-                    self._logger.warning(
-                        "Token map has only %d entries — expected >=5. "
-                        "Some ticks may be unmapped.",
-                        len(symbol_map),
-                    )
             if self._on_connect_callback is not None:
                 self._on_connect_callback()
-            self._schedule_async(self._resubscribe_if_connected())
         except Exception as e:
             self._logger.error("Failure in _on_connect: %s", e)
 

@@ -6070,35 +6070,14 @@ async def startup_sequence(ctx: BotContext) -> None:
             if not subscribed_symbols:
                 LOGGER.critical("⛔ STRATEGY SUBSCRIPTION LIST IS EMPTY")
 
-            # FIX: Use subscribe_tokens() for WebSocket mode instead of the
-            # async subscribe() (which was called without await, silently
-            # dropping the coroutine). subscribe_tokens() merges tokens into
-            # the tracked set and schedules _resubscribe_if_connected() via
-            # asyncio.to_thread() — non-blocking and safe in async context.
-            # resubscribe() was avoided: it calls ticker.subscribe() directly
-            # (blocking) which can stall the event loop when connected.
             if tokens_to_poll:
-                ws = ctx.websocket_manager
-                if ws is not None:
-                    # Pre-populate the WebSocket token set so the deferred
-                    # WS.start() below connects with the full universe already
-                    # registered — this is the fix for the boot-time
-                    # "WebSocket CONNECTED | tokens=1" under-subscription.
-                    ws.subscribe_tokens(list(tokens_to_poll))
+                if mdm is not None:
+                    seeded = mdm.request_token_subscriptions(tokens_to_poll)
                     LOGGER.info(
-                        "✅ Wired %d tokens to WebSocket", len(tokens_to_poll)
+                        "✅ Routed %d/%d startup tokens via MarketDataManager",
+                        seeded,
+                        len(tokens_to_poll),
                     )
-                    for _sym, _tok in sorted(active_symbol_tokens.items()):
-                        LOGGER.info(
-                            "WS SUBSCRIBED: %s (%s)",
-                            _sym,
-                            _tok,
-                            extra={
-                                "event": "ws_subscribed_symbol",
-                                "symbol": _sym,
-                                "token": int(_tok),
-                            },
-                        )
                 elif streamer and hasattr(streamer, "subscribe"):
                     streamer.subscribe(tokens_to_poll)
                     LOGGER.info(
@@ -6365,17 +6344,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 continue
                             if tok and ctx.market_data_manager:
                                 ctx.market_data_manager.register_symbol(sym, tok)
-                            if tok and ctx.websocket_manager is not None:
-                                ctx.websocket_manager.subscribe_tokens([tok])
-                                LOGGER.info(
-                                    "WS SUBSCRIBED: %s (%s)",
-                                    sym,
+                            if tok and ctx.market_data_manager is not None:
+                                ctx.market_data_manager.request_token_subscription(
                                     tok,
-                                    extra={
-                                        "event": "ws_subscribed_symbol",
-                                        "symbol": sym,
-                                        "token": int(tok),
-                                    },
+                                    symbol=sym,
                                 )
                             elif (
                                 tok
@@ -6455,8 +6427,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 res = ctx.streamer.unsubscribe([tok])
                                 if asyncio.iscoroutine(res):
                                     await res
-                            if tok and ctx.websocket_manager is not None:
-                                ctx.websocket_manager.unsubscribe_tokens([tok])
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.remove_symbol(sym)
 
