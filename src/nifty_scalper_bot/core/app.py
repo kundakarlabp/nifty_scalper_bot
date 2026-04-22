@@ -116,6 +116,58 @@ def _run_sync_locked(operation: Callable[[], Any]) -> Any:
         return operation()
 
 
+def _symbol_history_requirement(ctx: Any) -> int:
+    """Compute per-symbol history requirement. Args: ctx. Returns: bars. Raises: none."""
+
+    reqs = [20, 50]
+    strategy_runner = getattr(ctx, "strategy_runner", None)
+    market_data_manager = getattr(ctx, "market_data_manager", None)
+    if strategy_runner is not None:
+        reqs.append(int(getattr(strategy_runner, "_required_candles", 0) or 0))
+    if market_data_manager is not None:
+        reqs.append(int(getattr(market_data_manager, "_min_required_bars", 0) or 0))
+    return max(r for r in reqs if r > 0)
+
+
+def _history_lookback_minutes(required_bars: int) -> int:
+    """Derive hydration lookback window. Args: required bars. Returns: minutes. Raises: none."""
+
+    required = max(1, int(required_bars))
+    buffer_bars = max(20, required // 2)
+    return max(180, required + buffer_bars)
+
+
+def _gate_runner_symbol_add(
+    ctx: Any,
+    symbol: str,
+    pending_runner_symbols: set[str],
+) -> bool:
+    """Gate StrategyRunner add by bar readiness. Args: ctx/symbol/pending. Returns: added flag. Raises: none."""
+
+    if not ctx.strategy_runner or not ctx.market_data_manager:
+        return False
+    bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
+    required = _symbol_history_requirement(ctx)
+    if bars >= required:
+        ctx.strategy_runner.add_symbol(symbol)
+        pending_runner_symbols.discard(symbol)
+        return True
+    pending_runner_symbols.add(symbol)
+    LOGGER.info(
+        "symbol_add_deferred_waiting_for_history symbol=%s bars=%d required=%d",
+        symbol,
+        bars,
+        required,
+        extra={
+            "event": "symbol_add_deferred_waiting_for_history",
+            "symbol": symbol,
+            "bars": bars,
+            "required": required,
+        },
+    )
+    return False
+
+
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -5424,7 +5476,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                     _spot_for_hydration = float(_last_nifty.get("ltp", _spot_for_hydration))
 
             # Select ATM option contracts purely by token — no string building
-            _atm_contracts = get_atm_contracts(_sync_broker_for_hydration, _spot_for_hydration)
+            _preloaded = (
+                ctx.instrument_manager.get_nifty_instruments_snapshot()
+                if hasattr(ctx.instrument_manager, "get_nifty_instruments_snapshot")
+                else None
+            )
+            _atm_contracts = get_atm_contracts(
+                _sync_broker_for_hydration,
+                _spot_for_hydration,
+                preloaded_instruments=_preloaded or None,
+            )
             _atm_tokens = [int(c["instrument_token"]) for c in _atm_contracts]
             # Validate all tokens before hydration
             for _t in _atm_tokens:
@@ -5900,6 +5961,8 @@ async def startup_sequence(ctx: BotContext) -> None:
             unresolved_symbols = []
             live_mode_enabled = bool(ctx.settings.enable_live)
             active_symbols: list[str] = []
+            active_symbol_tokens: dict[str, int] = {}
+            pending_runner_symbols: set[str] = set()
 
             for sym in targets:
                 if mdm:
@@ -5915,10 +5978,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                     if tok not in tokens_to_poll:
                         tokens_to_poll.append(tok)
                     active_symbols.append(sym)
+                    active_symbol_tokens[sym] = int(tok)
                     resolved_count += 1
                     LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
-                    if ctx.strategy_runner:
-                        ctx.strategy_runner.add_symbol(sym)
+                    _gate_runner_symbol_add(ctx, sym, pending_runner_symbols)
                 else:
                     unresolved_symbols.append(sym)
                     LOGGER.warning(
@@ -5976,6 +6039,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                     LOGGER.info(
                         "✅ Wired %d tokens to WebSocket", len(tokens_to_poll)
                     )
+                    for _sym, _tok in sorted(active_symbol_tokens.items()):
+                        LOGGER.info(
+                            "WS SUBSCRIBED: %s (%s)",
+                            _sym,
+                            _tok,
+                            extra={
+                                "event": "ws_subscribed_symbol",
+                                "symbol": _sym,
+                                "token": int(_tok),
+                            },
+                        )
                 elif streamer and hasattr(streamer, "subscribe"):
                     streamer.subscribe(tokens_to_poll)
                     LOGGER.info(
@@ -6133,15 +6207,6 @@ async def startup_sequence(ctx: BotContext) -> None:
             option_universe_controller = UniverseController()
             option_universe_controller.update(dynamic_option_symbols)
             # Symbols waiting for enough MDM bars before being added to runner.
-            pending_runner_symbols: set[str] = set()
-
-            def _symbol_history_requirement() -> int:
-                reqs = [20, 50]
-                if ctx.strategy_runner is not None:
-                    reqs.append(int(getattr(ctx.strategy_runner, "_required_candles", 0) or 0))
-                if ctx.market_data_manager is not None:
-                    reqs.append(int(getattr(ctx.market_data_manager, "_min_required_bars", 0) or 0))
-                return max(r for r in reqs if r > 0)
 
             async def _option_universe_sync_loop() -> None:
                 """Keep option subscriptions aligned with the dynamic option universe."""
@@ -6153,7 +6218,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             still_pending: set[str] = set()
                             for _psym in list(pending_runner_symbols):
                                 _bars = len(ctx.market_data_manager.get_ohlc_bars(_psym) or [])
-                                if _bars >= _symbol_history_requirement():
+                                if _bars >= _symbol_history_requirement(ctx):
                                     ctx.strategy_runner.add_symbol(_psym)
                                     LOGGER.info(
                                         "symbol_add_deferred_ready symbol=%s bars=%d",
@@ -6239,6 +6304,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.market_data_manager.register_symbol(sym, tok)
                             if tok and ctx.websocket_manager is not None:
                                 ctx.websocket_manager.subscribe_tokens([tok])
+                                LOGGER.info(
+                                    "WS SUBSCRIBED: %s (%s)",
+                                    sym,
+                                    tok,
+                                    extra={
+                                        "event": "ws_subscribed_symbol",
+                                        "symbol": sym,
+                                        "token": int(tok),
+                                    },
+                                )
                             elif (
                                 tok
                                 and ctx.streamer
@@ -6252,8 +6327,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                             # immediately evaluating with no history.
                             if ctx.broker_client and ctx.market_data_manager:
                                 try:
+                                    required_bars = _symbol_history_requirement(ctx)
+                                    lookback_minutes = _history_lookback_minutes(required_bars)
                                     end_dt = datetime.now()
-                                    start_dt = end_dt - timedelta(hours=2)
+                                    start_dt = end_dt - timedelta(minutes=lookback_minutes)
                                     records = await asyncio.to_thread(
                                         ctx.broker_client.get_ohlc,
                                         sym,
@@ -6298,28 +6375,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     )
                             # Add to runner only after MDM holds enough bars.
                             # Defer if still under-hydrated; the loop retries.
-                            if ctx.strategy_runner and ctx.market_data_manager:
-                                _bars = len(ctx.market_data_manager.get_ohlc_bars(sym) or [])
-                                _required = _symbol_history_requirement()
-                                if _bars >= _required:
-                                    ctx.strategy_runner.add_symbol(sym)
-                                else:
-                                    LOGGER.info(
-                                        "symbol_add_deferred_waiting_for_history"
-                                        " symbol=%s bars=%d required=%d",
-                                        sym,
-                                        _bars,
-                                        _required,
-                                        extra={
-                                            "event": "symbol_add_deferred_waiting_for_history",
-                                            "symbol": sym,
-                                            "bars": _bars,
-                                            "required": _required,
-                                        },
-                                    )
-                                    pending_runner_symbols.add(sym)
-                            elif ctx.strategy_runner:
-                                ctx.strategy_runner.add_symbol(sym)
+                            _gate_runner_symbol_add(ctx, sym, pending_runner_symbols)
 
                         for sym in drop_symbols:
                             tok = None
