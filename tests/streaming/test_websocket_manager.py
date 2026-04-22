@@ -225,3 +225,37 @@ def test_polling_degrade_ignores_quote_age_when_ws_is_healthy() -> None:
         )
         is True
     )
+
+
+def test_set_tokens_reconciles_added_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    manager = ws_module.WebSocketManager("k", "t", [101], trading_window_enabled=False)
+    manager._ticker = FakeKiteTicker("k", "t")
+    manager._connected.set()
+
+    changed = manager.set_tokens([101, 202, 303])
+
+    assert changed is True
+    assert manager._tokens == {101, 202, 303}  # noqa: SLF001
+    assert set(manager._ticker.subscribed) == {202, 303}
+
+
+def test_set_tokens_noop_for_same_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    manager = ws_module.WebSocketManager("k", "t", [101, 202], trading_window_enabled=False)
+
+    changed = manager.set_tokens([202, 101])
+
+    assert changed is False
+    assert manager._tokens == {101, 202}  # noqa: SLF001
+
+
+def test_on_connect_replays_current_tokens_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    manager = ws_module.WebSocketManager("k", "t", [11, 22], trading_window_enabled=False)
+    ticker = FakeKiteTicker("k", "t")
+
+    manager._on_connect(ticker, {"status": "ok"})  # noqa: SLF001
+
+    assert set(ticker.subscribed) == {11, 22}
+    assert set(manager._tokens) == {11, 22}  # noqa: SLF001

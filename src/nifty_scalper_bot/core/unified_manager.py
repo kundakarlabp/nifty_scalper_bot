@@ -532,9 +532,12 @@ class UnifiedManager:
             instrument = self.resolve(symbol)
             subscribed = False
             polled = False
-            if instrument.token and self.ws is not None:
+            if instrument.token and self.mdm is not None:
                 with suppress(Exception):
-                    self.ws.subscribe_tokens({int(instrument.token)})
+                    self.mdm.request_token_subscription(
+                        int(instrument.token),
+                        symbol=instrument.symbol,
+                    )
                     subscribed = True
             with suppress(Exception):
                 poll = getattr(self.mdm, "enable_poll_tracking", None)

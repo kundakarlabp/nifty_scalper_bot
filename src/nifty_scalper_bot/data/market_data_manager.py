@@ -108,10 +108,15 @@ class MarketDataManager:
         )
         self._token_by_symbol: dict[str, int] = {}
         self._symbol_by_token: dict[int, str] = {}
+        self._desired_tokens: set[int] = set()
+        self._symbol_to_token: dict[str, int] = {}
+        self._token_to_symbol: dict[int, str] = {}
         self._token_by_symbol["NSE:NIFTY"] = 256265       # canonical
         self._symbol_by_token[256265] = "NSE:NIFTY"
         self._token_by_symbol["NSE:BANKNIFTY"] = 260105
         self._symbol_by_token[260105] = "NSE:BANKNIFTY"
+        self._symbol_to_token.update(self._token_by_symbol)
+        self._token_to_symbol.update(self._symbol_by_token)
         self._last_signature: dict[
             str, tuple[tuple[float | None, float | None, float | None], float]
         ] = {}
@@ -827,6 +832,8 @@ class MarketDataManager:
         """Record WebSocket connectivity state for health reporting."""
 
         self._ws_connected = bool(connected)
+        if self._ws_connected:
+            self._reconcile_ws_subscriptions()
 
     def register_heartbeat_callback(self, callback: Callable[[float], None]) -> None:
         """Register callback invoked whenever a heartbeat is recorded.
@@ -1146,6 +1153,82 @@ class MarketDataManager:
         if value.count(":") != 1:
             raise RuntimeError(f"Malformed canonical symbol: {value}")
         return value
+
+    def _reconcile_ws_subscriptions(self) -> None:
+        """Apply desired token set to websocket transport. Args: none. Returns: none. Raises: none."""
+
+        ws = self._ws
+        if ws is None:
+            return
+        if not hasattr(ws, "set_tokens"):
+            return
+        try:
+            ws.set_tokens(sorted(self._desired_tokens))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("ws token reconcile deferred: %s", exc)
+
+    def request_token_subscription(
+        self,
+        token: int,
+        symbol: str | None = None,
+    ) -> bool:
+        """Record token subscription intent. Args: token/symbol. Returns: changed flag. Raises: none."""
+
+        token_int = int(token)
+        if token_int <= 0:
+            return False
+        normalized_symbol: str | None = None
+        if symbol:
+            normalized_symbol = self._canonical_symbol(symbol)
+            self.register_symbol(normalized_symbol, token_int)
+
+        changed = False
+        with self._lock:
+            if token_int not in self._desired_tokens:
+                self._desired_tokens.add(token_int)
+                changed = True
+            if normalized_symbol:
+                if self._symbol_to_token.get(normalized_symbol) != token_int:
+                    self._symbol_to_token[normalized_symbol] = token_int
+                    changed = True
+                if self._token_to_symbol.get(token_int) != normalized_symbol:
+                    self._token_to_symbol[token_int] = normalized_symbol
+                    changed = True
+        if changed:
+            self._reconcile_ws_subscriptions()
+        return changed
+
+    def request_token_subscriptions(self, tokens: Iterable[int]) -> int:
+        """Record token subscription intents. Args: tokens. Returns: number of newly added tokens. Raises: none."""
+
+        normalized = {int(token) for token in tokens if int(token) > 0}
+        if not normalized:
+            return 0
+        with self._lock:
+            before = len(self._desired_tokens)
+            self._desired_tokens.update(normalized)
+            added_count = len(self._desired_tokens) - before
+        if added_count > 0:
+            self._reconcile_ws_subscriptions()
+        return added_count
+
+    def request_symbol_subscription(self, symbol: str) -> bool:
+        """Record symbol subscription intent. Args: symbol. Returns: changed flag. Raises: none."""
+
+        normalized = self._canonical_symbol(symbol)
+        token = self._resolve_token(normalized)
+        if token is None:
+            return False
+        return self.request_token_subscription(token, symbol=normalized)
+
+    def request_symbol_subscriptions(self, symbols: Iterable[str]) -> int:
+        """Record symbol subscription intents. Args: symbols. Returns: newly added token count. Raises: none."""
+
+        changed = 0
+        for symbol in symbols:
+            if self.request_symbol_subscription(symbol):
+                changed += 1
+        return changed
 
     def disable_rest_polling(self, *, reason: str | None = None) -> None:
         """Disable the background REST poller when another component owns fallback."""
@@ -3193,6 +3276,8 @@ class MarketDataManager:
                 return
             self._token_by_symbol[normalized_symbol] = token_int
             self._symbol_by_token[token_int] = normalized_symbol
+            self._symbol_to_token[normalized_symbol] = token_int
+            self._token_to_symbol[token_int] = normalized_symbol
         try:
             if self._resolver is not None and hasattr(self._resolver, "register"):
                 self._resolver.register(normalized_symbol, token_int)
@@ -4716,16 +4801,13 @@ class MarketDataManager:
         return max(value, minimum)
 
     def _ensure_subscription(self, symbol: str) -> None:
-        if self._ws is None:
-            return
         try:
             symbol = self._canonical_symbol(symbol)
-            token = self._token_by_symbol.get(symbol)
-            if not token:
-                raise RuntimeError(f"Token missing for {symbol}")
-            self.validate_token_symbol_mappings()
-            self._logger.info(f"WS SUBSCRIBED: {symbol} ({token})")
-            self._ws.subscribe_tokens([token], mode="full")
+            changed = self.request_symbol_subscription(symbol)
+            if changed:
+                token = self._symbol_to_token.get(symbol)
+                if token:
+                    self._logger.info(f"WS SUBSCRIPTION REQUESTED: {symbol} ({token})")
         except Exception as exc:  # noqa: BLE001
             # Log both message and details so it shows up even if the logger ignores
             # 'extra'.
@@ -4737,14 +4819,18 @@ class MarketDataManager:
             )
 
     def _release_subscription(self, symbol: str) -> None:
-        if self._ws is None:
-            return
         symbol = self._canonical_symbol(symbol)
-        token = self._token_by_symbol.get(symbol)
+        token = self._symbol_to_token.get(symbol) or self._token_by_symbol.get(symbol)
         if token is None:
             return
         try:
-            self._ws.unsubscribe_tokens([token])
+            changed = False
+            with self._lock:
+                if token in self._desired_tokens:
+                    self._desired_tokens.discard(token)
+                    changed = True
+            if changed:
+                self._reconcile_ws_subscriptions()
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
                 "Unsubscribe failed",
