@@ -302,6 +302,17 @@ class PollingStreamer:
                         else:
                             # ✅ CRITICAL FIX 1: Mark that we saw *some* data (even if just NSE)
                             seen_any_tick_this_cycle = True
+                            mdm = getattr(self._data_hub, "_mdm", None)
+                            update_authoritative = getattr(
+                                mdm, "update_authoritative_ticks", None
+                            )
+                            if callable(update_authoritative):
+                                try:
+                                    update_authoritative(ticks)
+                                except Exception as auth_exc:  # noqa: BLE001
+                                    LOGGER.debug(
+                                        "poll authoritative update failed: %s", auth_exc
+                                    )
 
                         # Check for NFO data in this batch (without resetting timestamp yet)
                         if not seen_nfo_this_cycle:

@@ -50,6 +50,10 @@ class DummyResolver:
     def resolve(self, symbol: str):  # noqa: ANN001
         return self._mapping.get(str(symbol).upper())
 
+    def get_symbol(self, token: int) -> str | None:
+        reverse = {v: f"NSE:{k}" for k, v in self._mapping.items()}
+        return reverse.get(int(token))
+
 
 class DummyMarketDataManager:
     def __init__(self, broker_client, ws_manager, *, resolver) -> None:  # noqa: ANN001
@@ -58,11 +62,23 @@ class DummyMarketDataManager:
         self.resolver = resolver
         self._ws_connected = ws_manager is not None
         self._handle_tick_calls: list[dict[str, object]] = []
+        self._enqueue_calls: list[dict[str, object]] = []
         self._symbol_by_token: dict[int, str] = {}
         self._heartbeat_callbacks: list[callable] = []  # type: ignore[var-annotated]
 
     def _handle_tick(self, tick):  # noqa: ANN001
         self._handle_tick_calls.append(dict(tick))
+
+    def _enqueue_tick_threadsafe(self, tick):  # noqa: ANN001
+        self._enqueue_calls.append(dict(tick))
+
+    def _canonical_symbol(self, symbol: str) -> str:
+        if ":" not in symbol:
+            raise RuntimeError("malformed")
+        return symbol
+
+    def get_latest_tick(self, _symbol_or_token):  # noqa: ANN001
+        return None
 
     def set_ws_connected(self, connected: bool) -> None:
         self._ws_connected = bool(connected)
@@ -223,6 +239,60 @@ def test_initialize_components_ws_arms_polling_fallback_without_starting(
     assert isinstance(ctx.websocket_manager, DummyWebSocketManager)
     assert isinstance(ctx.polling_fallback_streamer, DummyPollingStreamer)
     assert ctx.polling_fallback_streamer.start_calls == 0
+
+
+def test_polling_callback_drops_unresolved_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STREAM__MODE", "websocket")
+    monkeypatch.setenv("WEBSOCKET__DISABLED", "false")
+    monkeypatch.setenv("POLLING__ENABLED", "true")
+    monkeypatch.setattr("nifty_scalper_bot.core.app.ZerodhaKiteClient", DummyBroker)
+    monkeypatch.setattr("nifty_scalper_bot.core.app.InstrumentResolver", DummyResolver)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app.MarketDataManager", DummyMarketDataManager
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app.PollingStreamer", DummyPollingStreamer
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app.WebSocketManager", DummyWebSocketManager
+    )
+
+    app_config = AppConfig(
+        broker=BrokerConfig(
+            api_key="demo",
+            api_secret="secret",
+            access_token="token",
+            base_url="https://example.com",
+            websocket_url="wss://example.com/ws",
+        ),
+        risk=RiskConfig(),
+        logging=LoggingConfig(level="INFO"),
+        ratelimit=RateLimitConfig(
+            orders=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            rest=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            hist=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+        ),
+        quote_stale_threshold_ms=1_000,
+    )
+    settings = Settings(
+        app=app_config,
+        enable_live=False,
+        orders=OrderSettings(),
+        risk=RiskSettings(),
+        streamer=StreamerSettings(),
+        shadow=ShadowSettings(drift_threshold_pct=0.0),
+        notifications=NotificationSettings(enabled=False),
+        session_allow_out_of_hours=False,
+        allow_offmarket_trading=False,
+    )
+
+    ctx = initialize_components(settings)
+    assert isinstance(ctx.polling_fallback_streamer, DummyPollingStreamer)
+    assert isinstance(ctx.market_data_manager, DummyMarketDataManager)
+
+    ctx.polling_fallback_streamer.on_tick({"instrument_token": 999, "last_price": 1.0})
+
+    assert ctx.market_data_manager._enqueue_calls == []
 
 
 def _initialize_polling_context(
