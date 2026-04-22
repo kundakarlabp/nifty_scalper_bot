@@ -1365,18 +1365,43 @@ class MarketDataManager:
         broker = getattr(self, "_broker", None)
         if broker:
             try:
+                t_before_rest = time.time()
                 quote = broker.get_quote(canonical_symbol)
                 if isinstance(quote, dict):
                     price = quote.get("last_price") or quote.get("ltp")
                     if price:
                         p = float(price)
                         if p > 0:
-                            # Refresh cache with fresh REST price
                             self._logger.debug(
                                 "REST_FALLBACK_HIT symbol=%s price=%.2f",
                                 canonical_symbol,
                                 p,
                             )
+                            # Repair symbol-level cache so the next call to
+                            # get_ltp does not hit the stale guard again.
+                            # Skip if a live tick arrived while the REST call
+                            # was in flight — that tick is already fresher.
+                            try:
+                                with self._lock:
+                                    live_tick_arrived = (
+                                        self._last_tick_time.get(canonical_symbol, 0)
+                                        > t_before_rest
+                                    )
+                                if not live_tick_arrived:
+                                    prepared = self._prepare_rest_tick(quote, source="rest")
+                                    with self._lock:
+                                        prev = self._latest_ticks.get(canonical_symbol)
+                                    normalized_repair = self._normalize_tick(
+                                        canonical_symbol, prepared, prev
+                                    )
+                                    if normalized_repair is not None:
+                                        self._store_tick(canonical_symbol, normalized_repair)
+                                    else:
+                                        with self._lock:
+                                            self._last_tick_time[canonical_symbol] = time.time()
+                                            self._last_quote_ts_ms[canonical_symbol] = self._now_ms()
+                            except Exception:  # noqa: BLE001
+                                pass
                             return p
             except Exception as exc:
                 self._logger.warning(
@@ -4034,11 +4059,12 @@ class MarketDataManager:
                 "timestamp": ts,
             }
 
-            with self._lock:
-                self._latest_ticks[symbol] = tick
-                self._last_tick_source[symbol] = "rest"
-
-            self._notify_unified_manager(symbol, tick)
+            if ltp is not None:
+                self._emit_tick(symbol, tick, source="rest")
+            else:
+                with self._lock:
+                    self._latest_ticks[symbol] = tick
+                    self._last_tick_source[symbol] = "rest"
             self._seeded_symbols.add(symbol)
             self._seed_completed = True
             outcome = "success"
@@ -4411,7 +4437,7 @@ class MarketDataManager:
         )
         for key in candidates:
             quote = self._broker_quote_any(key)
-            self.logger.info(
+            self._logger.info(
                 "refresh_attempt",
                 extra={
                     "symbol": symbol,
@@ -4433,14 +4459,28 @@ class MarketDataManager:
             mid: float | None = None
             if bid is not None and ask is not None:
                 mid = (bid + ask) / 2.0
-            cached_tick = dict(quote)
+            # Normalize through the standard REST tick pipeline so all
+            # freshness markers (_last_tick_time, _last_tick_wallclock,
+            # _last_quote_ts_ms, _latest_ticks) are updated consistently.
+            canonical_symbol = self._canonical_symbol(symbol)
+            prepared = self._prepare_rest_tick(quote, source="rest")
             with self._lock:
-                self._latest_ticks[symbol] = cached_tick
-                self._last_quote_ts_ms[symbol] = now_ms
+                prev = self._latest_ticks.get(canonical_symbol)
+            normalized_tick = self._normalize_tick(canonical_symbol, prepared, prev)
+            if normalized_tick is not None:
                 if mid is not None:
-                    self._last_mid[symbol] = (mid, now_ms)
-            self._notify_unified_manager(symbol, cached_tick)
-            return dict(cached_tick)
+                    with self._lock:
+                        self._last_mid[canonical_symbol] = (mid, now_ms)
+                self._emit_tick(canonical_symbol, normalized_tick, source="rest")
+                return normalized_tick
+            # Fallback: raw cache update when normalization yields no ltp
+            with self._lock:
+                self._latest_ticks[canonical_symbol] = quote
+                self._last_quote_ts_ms[canonical_symbol] = now_ms
+                self._last_tick_time[canonical_symbol] = time.time()
+                if mid is not None:
+                    self._last_mid[canonical_symbol] = (mid, now_ms)
+            return quote
         self._logger.error(
             "refresh_quote_failed_all_candidates",
             extra={

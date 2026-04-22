@@ -3178,7 +3178,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             return
 
         t = tick.copy()
-        t["source"] = "stream"
+        t["source"] = "poll"
         t["symbol"] = canonical_symbol
         t["instrument_token"] = token
 
@@ -6213,8 +6213,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 and hasattr(ctx.streamer, "subscribe")
                             ):
                                 ctx.streamer.subscribe([tok])
-                            if ctx.strategy_runner:
-                                ctx.strategy_runner.add_symbol(sym)
+                            # Fetch OHLC history into MDM BEFORE adding to
+                            # strategy runner so the runner's internal
+                            # _prehydrate_symbol_history finds bars already
+                            # present and marks the symbol READY instead of
+                            # immediately evaluating with no history.
                             if ctx.broker_client and ctx.market_data_manager:
                                 try:
                                     end_dt = datetime.now()
@@ -6226,7 +6229,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                                         end_dt.strftime("%Y-%m-%d %H:%M:%S"),
                                     )
-                                    for row in list(records or [])[-30:]:
+                                    for row in list(records or []):
                                         ts = row.get("date") or row.get("timestamp")
                                         if isinstance(ts, str):
                                             ts = datetime.fromisoformat(
@@ -6261,6 +6264,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             "symbol": sym,
                                         },
                                     )
+                            # Add to runner only after history is in MDM so
+                            # the symbol starts in HYDRATING state with bars
+                            # already available for the readiness check.
+                            if ctx.strategy_runner:
+                                ctx.strategy_runner.add_symbol(sym)
 
                         for sym in drop_symbols:
                             tok = None
