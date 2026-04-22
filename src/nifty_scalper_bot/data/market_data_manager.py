@@ -1396,6 +1396,10 @@ class MarketDataManager:
                                     )
                                     if normalized_repair is not None:
                                         self._store_tick(canonical_symbol, normalized_repair)
+                                        try:
+                                            self.update_authoritative_ticks([normalized_repair])
+                                        except Exception:
+                                            pass
                                     else:
                                         _now_ts = time.time()
                                         _now_ms_v = self._now_ms()
@@ -1411,6 +1415,20 @@ class MarketDataManager:
                                             self._last_tick_wallclock[canonical_symbol] = _now_ts
                                             self._last_quote_ts_ms[canonical_symbol] = _now_ms_v
                                             self._last_tick_source[canonical_symbol] = "rest"
+                                        try:
+                                            self.update_authoritative_ticks(
+                                                [
+                                                    {
+                                                        "symbol": canonical_symbol,
+                                                        "ltp": p,
+                                                        "price": p,
+                                                        "timestamp": _now_ts,
+                                                        "source": "rest",
+                                                    }
+                                                ]
+                                            )
+                                        except Exception:
+                                            pass
                             except Exception:  # noqa: BLE001
                                 pass
                             return p
