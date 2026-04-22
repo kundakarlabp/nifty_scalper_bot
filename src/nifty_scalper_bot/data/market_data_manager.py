@@ -1397,9 +1397,20 @@ class MarketDataManager:
                                     if normalized_repair is not None:
                                         self._store_tick(canonical_symbol, normalized_repair)
                                     else:
+                                        _now_ts = time.time()
+                                        _now_ms_v = self._now_ms()
                                         with self._lock:
-                                            self._last_tick_time[canonical_symbol] = time.time()
-                                            self._last_quote_ts_ms[canonical_symbol] = self._now_ms()
+                                            self._latest_ticks[canonical_symbol] = {
+                                                "symbol": canonical_symbol,
+                                                "ltp": p,
+                                                "price": p,
+                                                "timestamp": _now_ts,
+                                                "source": "rest",
+                                            }
+                                            self._last_tick_time[canonical_symbol] = _now_ts
+                                            self._last_tick_wallclock[canonical_symbol] = _now_ts
+                                            self._last_quote_ts_ms[canonical_symbol] = _now_ms_v
+                                            self._last_tick_source[canonical_symbol] = "rest"
                             except Exception:  # noqa: BLE001
                                 pass
                             return p
@@ -2425,20 +2436,28 @@ class MarketDataManager:
                 should_log = (now - last_log_ts) >= 15.0
                 if should_log:
                     self._hydration_log_ts[normalized] = now
-                    if self.hydration_complete or self.ready:
+                    _reqs = self._readiness_requirements
+                    _core: set[str] = {
+                        v
+                        for k in ("spot", "futures", "atm_ce", "atm_pe")
+                        if (v := _reqs.get(k))
+                    }
+                    is_core = normalized in _core
+                    if (self.hydration_complete or self.ready) and is_core:
                         self._logger.warning(
                             "insufficient_bars_for_strategy",
                             extra={
                                 "event": "insufficient_bars_for_strategy",
                                 "symbol": normalized,
                                 "bars": bar_count,
+                                "required": self._min_required_bars,
                             },
                         )
                     else:
                         self._logger.debug(
-                            "startup_hydration_in_progress",
+                            "symbol_hydration_in_progress",
                             extra={
-                                "event": "startup_hydration_in_progress",
+                                "event": "symbol_hydration_in_progress",
                                 "symbol": normalized,
                                 "bars": bar_count,
                                 "required": self._min_required_bars,
