@@ -3126,14 +3126,61 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     
     def _on_poll_tick(tick: dict[str, Any]) -> None:
-        if not tick or type(tick) is not dict: return
-        token = tick.get("instrument_token")
-        if not token: return
-            
-        symbol = instrument_manager.get_symbol(token) or "unknown"
+        if not tick or type(tick) is not dict:
+            return
+        token_raw = tick.get("instrument_token", tick.get("token"))
+        try:
+            token = int(token_raw) if token_raw is not None else None
+        except (TypeError, ValueError):
+            token = None
+        if token is None:
+            return
+
+        symbol: str | None = None
+        try:
+            symbol = instrument_manager.get_symbol(token)
+        except Exception:
+            symbol = None
+        if not symbol and market_data_manager is not None:
+            try:
+                symbol_lookup = market_data_manager.get_latest_tick(token)
+                symbol = (
+                    str(symbol_lookup.get("symbol"))
+                    if isinstance(symbol_lookup, dict) and symbol_lookup.get("symbol")
+                    else None
+                )
+            except Exception:
+                symbol = None
+            if not symbol:
+                symbol = market_data_manager._symbol_by_token.get(token)  # noqa: SLF001
+        if not symbol:
+            log_throttled(
+                LOGGER,
+                f"poll_unresolved_token_{token}",
+                f"Dropping polling tick with unresolved token={token}",
+                interval_sec=60.0,
+                level=logging.WARNING,
+            )
+            return
+
+        if market_data_manager is None:
+            return
+        try:
+            canonical_symbol = market_data_manager._canonical_symbol(symbol)  # noqa: SLF001
+        except Exception:
+            log_throttled(
+                LOGGER,
+                f"poll_invalid_symbol_{token}",
+                f"Dropping polling tick with malformed symbol token={token} symbol={symbol}",
+                interval_sec=60.0,
+                level=logging.WARNING,
+            )
+            return
+
         t = tick.copy()
         t["source"] = "stream"
-        t["symbol"] = symbol
+        t["symbol"] = canonical_symbol
+        t["instrument_token"] = token
 
         if "average_price" in t:
             avg_price = t["average_price"]
@@ -5959,15 +6006,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                         activate_after = 3.0
                         recover_cooldown = 10.0
                         quote_stale_ms = 5000
+                        core_symbol = "NSE:NIFTY"
                         while True:
                             try:
                                 ws_ok = bool(ctx.websocket_manager.is_connected())
                                 stale = bool(ctx.market_data_manager.is_data_stale())
-                                spot_age = ctx.market_data_manager.quote_age_ms("NSE:NIFTY")
+                                spot_age = ctx.market_data_manager.quote_age_ms(core_symbol)
                                 spot_state, sanitized_spot_age = _sanitize_quote_age(spot_age)
                                 quote_age_degraded = spot_state == "stale"
-                                tick_age_ms = ctx.market_data_manager.data_age_ms()
-                                lagging = tick_age_ms > quote_stale_ms
+                                core_tick_age_ms = ctx.market_data_manager.symbol_data_age_ms(
+                                    core_symbol
+                                )
+                                auth_tick_age_ms = ctx.market_data_manager.data_age_ms()
+                                lagging = (
+                                    core_tick_age_ms > quote_stale_ms
+                                    and auth_tick_age_ms > quote_stale_ms
+                                )
                                 degraded = _polling_fallback_degraded(
                                     ws_ok=ws_ok,
                                     stale=stale,
@@ -6001,6 +6055,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                                 ),
                                                 "spot_state": spot_state,
                                                 "lagging": lagging,
+                                                "core_tick_age_ms": core_tick_age_ms,
+                                                "authoritative_age_ms": auth_tick_age_ms,
                                             },
                                         )
                                         polling_fallback.set_websocket_mode(False)
@@ -6062,7 +6118,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             # ✅ FIX: Disable MDM polling when PollingStreamer is active
             # MDM polling is redundant - PollingStreamer already feeds DataHub
-            if mdm and not ctx.streamer:
+            if mdm and not ctx.streamer and not ctx.websocket_enabled:
                 # Only start MDM polling if there's no streamer
                 asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
             else:
@@ -6269,12 +6325,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                         len(ctx.message_bus._tasks),
                     )
 
-                if ctx.market_data_manager is not None and hasattr(ctx.market_data_manager, "start"):
-                    try:
-                        ctx.market_data_manager.start()
-                        LOGGER.info("✅ MarketDataManager started — tick consumer active")
-                    except Exception as _mdm_start_exc:
-                        LOGGER.error("MarketDataManager.start() failed: %s", _mdm_start_exc)
+                # MDM internals are started once near startup entry with
+                # defer_ws=True; websocket bring-up is handled explicitly.
 
 
 

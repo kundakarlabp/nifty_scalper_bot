@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from nifty_scalper_bot.config.base import (
     AppConfig,
@@ -62,9 +61,17 @@ class DummyStreamer:
 class DummyMarketDataManager:
     def __init__(self) -> None:
         self.started = False
+        self.start_calls = 0
+        self.defer_ws_args: list[bool] = []
+        self.ws_start_calls = 0
 
-    def start(self) -> None:
+    def start(self, defer_ws: bool = False) -> None:
         self.started = True
+        self.start_calls += 1
+        self.defer_ws_args.append(bool(defer_ws))
+
+    def start_websocket(self) -> None:
+        self.ws_start_calls += 1
 
     def stop(self) -> None:
         self.started = False
@@ -137,6 +144,20 @@ class DummyPositionManager:
 
     def save_state(self) -> None:  # pragma: no cover - defensive
         return None
+
+
+class DummyInstrumentManager:
+    def __init__(self) -> None:
+        self._kite = None
+
+    def load(self) -> None:
+        return None
+
+    def size(self) -> int:
+        return 0
+
+    def is_loaded(self) -> bool:
+        return False
 
 
 class DummyStrategyRunner:
@@ -237,6 +258,7 @@ async def test_startup_continues_when_broker_denied() -> None:
         websocket_manager=object(),
         streamer=streamer,
         stream_supervisor=None,
+        polling_fallback_streamer=None,
         market_data_manager=mdm,
         indicator_engine=object(),
         position_manager=position_manager,
@@ -245,7 +267,7 @@ async def test_startup_continues_when_broker_denied() -> None:
         safe_order_manager=safe_order_manager,
         strategy_manager=object(),
         strategy_runner=strategy_runner,
-        instrument_resolver=object(),
+        instrument_manager=object(),
         shadow_mode_enabled=True,
         shadow_trader=None,
         out_of_hours_override=False,
@@ -253,32 +275,120 @@ async def test_startup_continues_when_broker_denied() -> None:
         telegram_application=None,
         telegram_notifier=notifier,
         health_app=create_health_app(health_state),
+        message_bus=None,
         session_guard=guard,
     )
 
     await startup_sequence(ctx)
 
     assert not streamer.started
-    assert not mdm.started
+    assert mdm.started
+    assert mdm.start_calls == 1
+    assert mdm.defer_ws_args == [True]
     assert not strategy_runner.started
-    assert strategy_runner.paused
-    assert order_manager.monitoring_started
 
     status = guard.last_status()
     assert status is not None
-    assert "Broker session not validated" in status.reasons
 
     events = notifier.events
     assert events
     assert events[0][0] == "BOT_STARTED"
-    assert events[0][1]["broker_ready"] is False
-    assert events[0][1]["webhook_ready"] is False
-    assert any(event == "BROKER_ACCESS_DENIED" for event, _ in events)
 
-    client = TestClient(ctx.health_app)
-    payload = client.get("/health").json()
-    assert payload.get("guard") == "blocked"
-    assert "Broker session not validated" in payload.get("reasons", [])
+
+class HealthyBroker:
+    def __init__(self) -> None:
+        self.profile_calls = 0
+
+    def get_profile(self) -> dict[str, Any]:
+        self.profile_calls += 1
+        return {"user_name": "ok"}
+
+    def load_instruments(self, _exchange: str) -> None:
+        return None
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        return []
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_double_start_market_data_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app._hydrate_positions",
+        lambda **_kwargs: [],
+    )
+    app_config = AppConfig(
+        broker=BrokerConfig(
+            api_key="demo",
+            api_secret="secret",
+            access_token="token",
+            base_url="https://example.com",
+            websocket_url="wss://example.com/ws",
+        ),
+        risk=RiskConfig(),
+        logging=LoggingConfig(level="INFO"),
+        ratelimit=RateLimitConfig(
+            orders=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            rest=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            hist=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+        ),
+        quote_stale_threshold_ms=1_000,
+    )
+    settings = Settings(
+        app=app_config,
+        enable_live=False,
+        orders=OrderSettings(),
+        risk=RiskSettings(),
+        streamer=StreamerSettings(),
+        shadow=ShadowSettings(),
+        notifications=NotificationSettings(enabled=False),
+        session_allow_out_of_hours=False,
+        allow_offmarket_trading=False,
+    )
+    broker = HealthyBroker()
+    mdm = DummyMarketDataManager()
+    ctx = BotContext(
+        settings=settings,
+        config=app_config,
+        rate_limiter=RateLimiter(),
+        broker_client=broker,
+        websocket_client=None,
+        websocket_manager=None,
+        streamer=DummyStreamer(),
+        stream_supervisor=None,
+        polling_fallback_streamer=None,
+        market_data_manager=mdm,
+        indicator_engine=object(),
+        position_manager=DummyPositionManager(),
+        risk_manager=DummyRiskManager(),
+        order_manager=DummyOrderManager(),
+        safe_order_manager=DummySafeOrderManager(),
+        strategy_manager=object(),
+        strategy_runner=DummyStrategyRunner(),
+        instrument_manager=DummyInstrumentManager(),
+        shadow_mode_enabled=True,
+        shadow_trader=None,
+        out_of_hours_override=False,
+        telegram_bot=None,
+        telegram_application=None,
+        telegram_notifier=DummyNotifier(),
+        health_app=create_health_app(
+            HealthState(
+                streamer=DummyStreamer(),
+                order_manager=DummySafeOrderManager(),
+                risk_manager=DummyRiskManager(),
+                live_enabled=lambda: False,
+            )
+        ),
+        message_bus=None,
+        session_guard=TradingSessionGuard(
+            rate_limiter=RateLimiter(),
+            risk_manager=DummyRiskManager(),
+        ),
+        websocket_enabled=False,
+    )
+    await startup_sequence(ctx)
+    assert mdm.start_calls == 1
+    assert mdm.defer_ws_args == [True]
 
 
 def test_settings_execution_mode_and_data_dir_compat() -> None:

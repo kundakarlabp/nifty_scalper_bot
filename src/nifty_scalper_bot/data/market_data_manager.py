@@ -135,6 +135,7 @@ class MarketDataManager:
         self._last_ws_tick_mono: float = 0.0
         self._event_loop_lag_seconds: float = 0.0
         self._hydration_status: dict[str, str] = {}
+        self._hydration_log_ts: dict[str, float] = {}
         self._last_hb_mono: float | None = None
         self._heartbeat_callbacks: list[Callable[[float], None]] = []
         self._fallback_enabled = False
@@ -2394,24 +2395,41 @@ class MarketDataManager:
                 self._hydration_status[normalized] = "READY"
             else:
                 self._hydration_status[normalized] = "HYDRATING"
+                now = time.monotonic()
+                last_log_ts = float(self._hydration_log_ts.get(normalized, 0.0))
+                should_log = (now - last_log_ts) >= 15.0
+                if should_log:
+                    self._hydration_log_ts[normalized] = now
+                    if self.hydration_complete or self.ready:
+                        self._logger.warning(
+                            "insufficient_bars_for_strategy",
+                            extra={
+                                "event": "insufficient_bars_for_strategy",
+                                "symbol": normalized,
+                                "bars": bar_count,
+                            },
+                        )
+                    else:
+                        self._logger.debug(
+                            "startup_hydration_in_progress",
+                            extra={
+                                "event": "startup_hydration_in_progress",
+                                "symbol": normalized,
+                                "bars": bar_count,
+                                "required": self._min_required_bars,
+                            },
+                        )
+            if self._hydration_status.get(normalized) == "READY":
                 self._logger.info(
-                    "insufficient_bars_for_strategy",
+                    "Condition met: mdm_hydration_progress",
                     extra={
-                        "event": "insufficient_bars_for_strategy",
+                        "event": "mdm_hydration_progress",
                         "symbol": normalized,
                         "bars": bar_count,
+                        "required": self._min_required_bars,
+                        "status": "READY",
                     },
                 )
-            self._logger.info(
-                "Condition met: mdm_hydration_progress",
-                extra={
-                    "event": "mdm_hydration_progress",
-                    "symbol": normalized,
-                    "bars": bar_count,
-                    "required": self._min_required_bars,
-                    "status": self._hydration_status.get(normalized, "HYDRATING"),
-                },
-            )
         except Exception as exc:
             self._logger.error(
                 "Failure in update_hydration_status: %s", exc, exc_info=exc
@@ -2931,6 +2949,50 @@ class MarketDataManager:
 
         with self._authoritative_tick_lock:
             return (time.time() - self.last_tick_time) > self._stale_threshold_seconds
+
+    def data_age_ms(self) -> int:
+        """Return authoritative feed age in milliseconds. Args: none. Returns: age ms. Raises: none."""
+
+        now = time.time()
+        with self._authoritative_tick_lock:
+            last_authoritative = float(self.last_tick_time or 0.0)
+        if last_authoritative > 0.0:
+            return int(max(0.0, (now - last_authoritative) * 1000.0))
+        with self._lock:
+            tick_wallclock_values = list(self._last_tick_wallclock.values())
+            tick_arrival_values = list(self._last_tick_time.values())
+        candidates = [float(ts) for ts in tick_wallclock_values if float(ts) > 0.0]
+        candidates.extend(float(ts) for ts in tick_arrival_values if float(ts) > 0.0)
+        if not candidates:
+            return 1_000_000_000
+        freshest = max(candidates)
+        return int(max(0.0, (now - freshest) * 1000.0))
+
+    def symbol_data_age_ms(self, symbol: str | int) -> int:
+        """Return age in milliseconds for one symbol/token. Args: symbol/token. Returns: age ms. Raises: none."""
+
+        resolved_symbol: str | None = None
+        try:
+            if isinstance(symbol, int):
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(symbol))
+            elif str(symbol).strip().isdigit():
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
+            else:
+                resolved_symbol = self._canonical_symbol(str(symbol))
+        except Exception:
+            resolved_symbol = None
+        if not resolved_symbol:
+            return 1_000_000_000
+        now = time.time()
+        with self._lock:
+            wallclock = float(self._last_tick_wallclock.get(resolved_symbol, 0.0) or 0.0)
+            arrival = float(self._last_tick_time.get(resolved_symbol, 0.0) or 0.0)
+        freshest = max(wallclock, arrival)
+        if freshest <= 0.0:
+            return 1_000_000_000
+        return int(max(0.0, (now - freshest) * 1000.0))
 
     # ------------------------------------------------------------------
     # Internal plumbing
@@ -3569,8 +3631,7 @@ class MarketDataManager:
             loop_start = time.time()
 
             ws_healthy = self._is_ws_healthy()
-            self._rest_poll_enabled = not ws_healthy
-            poll_active = not ws_healthy
+            poll_active = bool(self._rest_poll_enabled) and (not ws_healthy)
             if ws_healthy and last_ws_healthy is not True:
                 self._logger.info("WS HEALTHY")
             if poll_active and last_poll_active is not True:
@@ -4412,7 +4473,7 @@ class MarketDataManager:
                 return True
         return False
 
-    def quote_age_ms(self, symbol: str) -> int:
+    def quote_age_ms(self, symbol: str | int) -> int:
         """Return the age in milliseconds of the cached quote for *symbol*.
 
         Args:
@@ -4430,8 +4491,19 @@ class MarketDataManager:
             extra={"event": "mdm_quote_age_enter", "symbol": symbol},
         )
         try:
+            resolved_symbol: str | None
+            if isinstance(symbol, int):
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(symbol))
+            elif str(symbol).strip().isdigit():
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
+            else:
+                resolved_symbol = self._canonical_symbol(str(symbol))
+            if not resolved_symbol:
+                return 1_000_000_000
             with self._lock:
-                ts_ms = self._last_quote_ts_ms.get(symbol)
+                ts_ms = self._last_quote_ts_ms.get(resolved_symbol)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in quote_age_ms: %s",
