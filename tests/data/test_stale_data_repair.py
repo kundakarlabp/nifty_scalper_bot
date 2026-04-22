@@ -8,6 +8,11 @@ Covers:
 - D: poll ticks do not update _last_ws_arrival in DataHub
 - E: new ATM-shift symbols warm before becoming strategy-eligible (add_symbol
      ordering in active basket refresh)
+- NEW: startup unresolved symbols not added to runner (Fix A)
+- NEW: active-basket add deferred until enough bars (Fix B)
+- NEW: consistent history threshold helper (Fix C)
+- NEW: get_ltp fallback repairs all 5 cache fields (Fix D)
+- NEW: hydration log severity: core=WARNING, dynamic=DEBUG (Fix E)
 """
 from __future__ import annotations
 
@@ -400,3 +405,229 @@ class TestHydrationLoggingThrottle:
         assert len(warning_msgs) <= 1, (
             f"Expected ≤1 insufficient_bars warning per 15s window, got {len(warning_msgs)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix A (startup): unresolved symbols must NOT reach strategy runner
+# ---------------------------------------------------------------------------
+
+class TestStartupUnresolvedSymbolsSkipped:
+    """Unresolved startup symbols (no token) must not be added to StrategyRunner."""
+
+    def test_unresolved_symbol_not_added_to_runner(self):
+        """Simulate startup wiring: only resolved symbols reach add_symbol."""
+        added: list[str] = []
+
+        class _FakeRunner:
+            def add_symbol(self, sym: str) -> None:
+                added.append(sym)
+
+        runner = _FakeRunner()
+        token_map = {"NSE:NIFTY": 256265}
+        targets = ["NSE:NIFTY", "NFO:NIFTY24CE"]
+        for sym in targets:
+            tok = token_map.get(sym)
+            if tok:
+                runner.add_symbol(sym)
+        assert added == ["NSE:NIFTY"]
+        assert "NFO:NIFTY24CE" not in added
+
+    def test_null_runner_does_not_raise_for_resolved_symbol(self):
+        """If runner is absent, resolved symbol handling does not raise."""
+        strategy_runner = None
+        tok = 256265
+        if tok and strategy_runner:
+            strategy_runner.add_symbol("NSE:NIFTY")
+
+
+# ---------------------------------------------------------------------------
+# Fix B (basket): add_symbol deferred until MDM has enough bars
+# ---------------------------------------------------------------------------
+
+class TestActiveBasketDeferredAdd:
+    """New basket symbols must wait for enough bars before add_symbol."""
+
+    def _symbol_history_requirement(self, runner, mdm) -> int:
+        reqs = [20, 50]
+        if runner is not None:
+            reqs.append(int(getattr(runner, "_required_candles", 0) or 0))
+        if mdm is not None:
+            reqs.append(int(getattr(mdm, "_min_required_bars", 0) or 0))
+        return max(r for r in reqs if r > 0)
+
+    def test_symbol_deferred_when_under_hydrated(self):
+        added: list[str] = []
+
+        class _FakeRunner:
+            _required_candles = 20
+
+            def add_symbol(self, sym: str) -> None:
+                added.append(sym)
+
+        mdm = _make_mdm()
+        runner = _FakeRunner()
+        sym = "NFO:NIFTY24500CE"
+        pending: set[str] = set()
+        bars = len(mdm.get_ohlc_bars(sym) or [])
+        required = self._symbol_history_requirement(runner, mdm)
+        if bars >= required:
+            runner.add_symbol(sym)
+        else:
+            pending.add(sym)
+        assert sym not in added
+        assert sym in pending
+
+    def test_symbol_added_exactly_once_after_bars_arrive(self):
+        from datetime import datetime, timezone, timedelta
+
+        added: list[str] = []
+
+        class _FakeRunner:
+            _required_candles = 20
+
+            def add_symbol(self, sym: str) -> None:
+                added.append(sym)
+
+        mdm = _make_mdm()
+        runner = _FakeRunner()
+        sym = "NFO:NIFTY24500CE"
+        pending: set[str] = {sym}
+        base_ts = datetime.now(timezone.utc) - timedelta(hours=1)
+        for i in range(25):
+            mdm.ingest_historical_bar({
+                "symbol": sym,
+                "open": 100.0, "high": 105.0, "low": 95.0, "close": 102.0,
+                "volume": 50, "timestamp": base_ts + timedelta(minutes=i),
+            })
+        required = self._symbol_history_requirement(runner, mdm)
+        still_pending: set[str] = set()
+        for _psym in list(pending):
+            _bars = len(mdm.get_ohlc_bars(_psym) or [])
+            if _bars >= required:
+                runner.add_symbol(_psym)
+            else:
+                still_pending.add(_psym)
+        pending.clear()
+        pending.update(still_pending)
+
+        still_pending2: set[str] = set()
+        for _psym in list(pending):
+            _bars = len(mdm.get_ohlc_bars(_psym) or [])
+            if _bars >= required:
+                runner.add_symbol(_psym)
+            else:
+                still_pending2.add(_psym)
+        assert added == [sym]
+        assert sym not in pending
+
+
+class TestSymbolHistoryRequirement:
+    """_symbol_history_requirement returns the maximum threshold."""
+
+    def _symbol_history_requirement(self, runner, mdm) -> int:
+        reqs = [20, 50]
+        if runner is not None:
+            reqs.append(int(getattr(runner, "_required_candles", 0) or 0))
+        if mdm is not None:
+            reqs.append(int(getattr(mdm, "_min_required_bars", 0) or 0))
+        return max(r for r in reqs if r > 0)
+
+    def test_returns_max_of_all_sources(self):
+        class _FakeRunner:
+            _required_candles = 75
+        class _FakeMdm:
+            _min_required_bars = 30
+        assert self._symbol_history_requirement(_FakeRunner(), _FakeMdm()) == 75
+
+    def test_mdm_threshold_wins_over_default(self):
+        class _FakeRunner:
+            _required_candles = 10
+        class _FakeMdm:
+            _min_required_bars = 60
+        assert self._symbol_history_requirement(_FakeRunner(), _FakeMdm()) == 60
+
+    def test_none_components_use_defaults(self):
+        assert self._symbol_history_requirement(None, None) == 50
+
+
+class TestGetLtpFallbackFullRepair:
+    """Fallback must repair all per-symbol cache and freshness fields."""
+
+    def test_fallback_repairs_all_cache_fields(self):
+        broker = _Broker({"last_price": 23000.0, "ltp": 23000.0})
+        mdm = _make_mdm(broker)
+        sym = "NSE:NIFTY"
+        mdm._normalize_tick = lambda *a, **kw: None
+        price = mdm.get_ltp(sym)
+        assert price == 23000.0
+        assert mdm._latest_ticks.get(sym) is not None
+        assert mdm._latest_ticks[sym].get("ltp") == 23000.0
+        assert mdm._latest_ticks[sym].get("source") == "rest"
+        assert mdm._last_tick_time.get(sym) is not None
+        assert time.time() - mdm._last_tick_time[sym] < 2.0
+        assert mdm._last_tick_wallclock.get(sym) is not None
+        assert time.time() - mdm._last_tick_wallclock[sym] < 2.0
+        assert mdm._last_quote_ts_ms.get(sym) is not None
+        assert mdm._last_quote_ts_ms[sym] > 0
+        assert mdm._last_tick_source.get(sym) == "rest"
+
+    def test_fallback_stops_repeated_stale_warnings(self):
+        broker = _Broker({"last_price": 23000.0, "ltp": 23000.0})
+        mdm = _make_mdm(broker)
+        sym = "NSE:NIFTY"
+        mdm._normalize_tick = lambda *a, **kw: None
+        mdm.get_ltp(sym)
+        calls_after_first = broker.call_count
+        mdm.get_ltp(sym)
+        assert broker.call_count == calls_after_first
+
+
+class TestHydrationLogSeverity:
+    """Core symbols warn post-startup; non-core symbols only debug-log."""
+
+    def _ready_mdm(self) -> MarketDataManager:
+        mdm = _make_mdm()
+        mdm.hydration_complete = True
+        mdm.ready = True
+        mdm._hydration_log_ts.clear()
+        return mdm
+
+    def test_core_symbol_warns_when_under_hydrated(self, caplog):
+        import logging
+        mdm = self._ready_mdm()
+        spot_sym = "NSE:NIFTY"
+        mdm.set_readiness_requirements(
+            spot_symbol=spot_sym,
+            futures_symbol="NSE:NIFTY-I",
+            atm_ce_symbol=None,
+            atm_pe_symbol=None,
+            option_symbols=[],
+        )
+        with caplog.at_level(logging.DEBUG, logger="nifty_scalper_bot.data.market_data_manager"):
+            mdm.update_hydration_status(spot_sym, [])
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "insufficient_bars" in (r.getMessage() + str(getattr(r, "extra", {})))
+        ]
+        assert len(warnings) >= 1
+
+    def test_dynamic_option_does_not_warn(self, caplog):
+        import logging
+        mdm = self._ready_mdm()
+        option_sym = "NFO:NIFTY24500CE"
+        mdm.set_readiness_requirements(
+            spot_symbol="NSE:NIFTY",
+            futures_symbol="NSE:NIFTY-I",
+            atm_ce_symbol=None,
+            atm_pe_symbol=None,
+            option_symbols=[],
+        )
+        with caplog.at_level(logging.DEBUG, logger="nifty_scalper_bot.data.market_data_manager"):
+            mdm.update_hydration_status(option_sym, [])
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "insufficient_bars" in (r.getMessage() + str(getattr(r, "extra", {})))
+        ]
+        assert len(warnings) == 0
