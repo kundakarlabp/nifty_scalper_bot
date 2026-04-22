@@ -4453,23 +4453,25 @@ class MarketDataManager:
             # Normalize through the standard REST tick pipeline so all
             # freshness markers (_last_tick_time, _last_tick_wallclock,
             # _last_quote_ts_ms, _latest_ticks) are updated consistently.
-            prepared = self._prepare_rest_tick(dict(quote), source="rest")
+            canonical_symbol = self._canonical_symbol(symbol)
+            prepared = self._prepare_rest_tick(quote, source="rest")
             with self._lock:
-                prev = self._latest_ticks.get(symbol)
-            normalized_tick = self._normalize_tick(symbol, prepared, prev)
+                prev = self._latest_ticks.get(canonical_symbol)
+            normalized_tick = self._normalize_tick(canonical_symbol, prepared, prev)
             if normalized_tick is not None:
                 if mid is not None:
                     with self._lock:
-                        self._last_mid[symbol] = (mid, now_ms)
-                self._emit_tick(symbol, normalized_tick, source="rest")
-                return dict(normalized_tick)
+                        self._last_mid[canonical_symbol] = (mid, now_ms)
+                self._emit_tick(canonical_symbol, normalized_tick, source="rest")
+                return normalized_tick
             # Fallback: raw cache update when normalization yields no ltp
             with self._lock:
-                self._latest_ticks[symbol] = dict(quote)
-                self._last_quote_ts_ms[symbol] = now_ms
+                self._latest_ticks[canonical_symbol] = quote
+                self._last_quote_ts_ms[canonical_symbol] = now_ms
+                self._last_tick_time[canonical_symbol] = time.time()
                 if mid is not None:
-                    self._last_mid[symbol] = (mid, now_ms)
-            return dict(quote)
+                    self._last_mid[canonical_symbol] = (mid, now_ms)
+            return quote
         self._logger.error(
             "refresh_quote_failed_all_candidates",
             extra={
