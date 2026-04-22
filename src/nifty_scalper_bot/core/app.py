@@ -97,7 +97,9 @@ def _polling_fallback_degraded(
     lagging: bool,
     quote_age_degraded: bool,
 ) -> bool:
-    """Evaluate fallback degrade state. Args: health flags. Returns: bool. Raises: none."""
+    """Evaluate fallback degrade state. Treat stale spot quote age as sufficient degradation on its own.
+    Otherwise NSE:NIFTY can remain symbol-stale forever while other symbols
+    keep the global feed appearing healthy."""
 
     if not ws_ok:
         return True
@@ -105,9 +107,9 @@ def _polling_fallback_degraded(
         return True
     if lagging:
         return True
-    # Quote-age is secondary: only confirm degradation when another explicit
-    # data-path signal is already unhealthy.
-    return quote_age_degraded and (stale or lagging or (not ws_ok))
+    if quote_age_degraded:
+        return True
+    return False
 
 
 def _run_sync_locked(operation: Callable[[], Any]) -> Any:
@@ -5939,6 +5941,27 @@ async def startup_sequence(ctx: BotContext) -> None:
                     if t and t not in tokens_to_poll:
                         tokens_to_poll.append(t)
 
+                # Ensure NIFTY spot is also covered by polling fallback.
+                try:
+                    nifty_spot_token = _resolve_startup_token("NSE:NIFTY")
+                    if nifty_spot_token and nifty_spot_token not in tokens_to_poll:
+                        tokens_to_poll.append(nifty_spot_token)
+                        LOGGER.info(
+                            "polling_fallback_added_spot symbol=%s token=%s",
+                            "NSE:NIFTY",
+                            nifty_spot_token,
+                            extra={
+                                "event": "polling_fallback_added_spot",
+                                "symbol": "NSE:NIFTY",
+                                "token": int(nifty_spot_token),
+                            },
+                        )
+                except Exception:
+                    LOGGER.exception(
+                        "failed_to_add_nifty_spot_to_polling_fallback",
+                        exc_info=True,
+                    )
+
             # --- Objective 5: Fail-fast Validation ---
             min_tokens = 10
             if len(tokens_to_poll) < min_tokens:
@@ -6088,6 +6111,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 spot_age = ctx.market_data_manager.quote_age_ms(core_symbol)
                                 spot_state, sanitized_spot_age = _sanitize_quote_age(spot_age)
                                 quote_age_degraded = spot_state == "stale"
+
+                                if quote_age_degraded:
+                                    LOGGER.warning(
+                                        "spot_quote_stale_triggering_poll_fallback symbol=%s age_ms=%s threshold_ms=%s",
+                                        core_symbol,
+                                        sanitized_spot_age,
+                                        quote_stale_ms,
+                                        extra={
+                                            "event": "spot_quote_stale_triggering_poll_fallback",
+                                            "symbol": core_symbol,
+                                            "age_ms": sanitized_spot_age,
+                                            "threshold_ms": quote_stale_ms,
+                                        },
+                                    )
                                 core_tick_age_ms = ctx.market_data_manager.symbol_data_age_ms(
                                     core_symbol
                                 )
