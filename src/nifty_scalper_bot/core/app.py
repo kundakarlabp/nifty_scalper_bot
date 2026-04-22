@@ -1112,6 +1112,34 @@ def _resolve_session_reason(
     return reason if reason else "OK", soft_override
 
 
+def _telegram_webhook_env_requested() -> bool:
+    """Return whether webhook transport was explicitly enabled via environment variables."""
+
+    raw_value = os.getenv("TELEGRAM__WEBHOOK_ENABLED")
+    if raw_value is None:
+        raw_value = os.getenv("TELEGRAM_WEBHOOK_ENABLED")
+    return str(raw_value or "").strip().lower() == "true"
+
+
+def _telegram_transport_mode(settings: Settings) -> str:
+    """Return the configured transport mode for Telegram notifications."""
+
+    notifications = settings.notifications
+    if (
+        notifications.enabled
+        and notifications.webhook_enabled
+        and bool((notifications.public_base_url or "").strip())
+    ):
+        return "webhook"
+    return "polling"
+
+
+def _telegram_requires_http_controller(settings: Settings) -> bool:
+    """Return whether Telegram delivery for this process needs HTTP controller wiring."""
+
+    return _telegram_transport_mode(settings) == "webhook"
+
+
 def get_http_app() -> FastAPI:
     """Return the FastAPI application exposing inbound Telegram webhook."""
     global _HTTP_APP, _HTTP_NOTIFIER, _HTTP_CONTROLLER
@@ -1124,10 +1152,7 @@ def get_http_app() -> FastAPI:
 
     telemetry_logger = get_logger("telegram.bootstrap")
 
-    raw_webhook_env = os.getenv("TELEGRAM__WEBHOOK_ENABLED")
-    if raw_webhook_env is None:
-        raw_webhook_env = os.getenv("TELEGRAM_WEBHOOK_ENABLED")
-    webhook_env_requested = str(raw_webhook_env or "false").strip().lower() == "true"
+    webhook_env_requested = _telegram_webhook_env_requested()
 
     if not webhook_env_requested and settings.notifications.webhook_enabled:
         settings.notifications.webhook_enabled = False
@@ -1139,6 +1164,7 @@ def get_http_app() -> FastAPI:
     notifier = TelegramEnhancedNotifier.from_settings(settings.notifications)
     _HTTP_NOTIFIER = notifier
 
+    _HTTP_CONTROLLER = None
     controller: TelegramWebhookController | None = None
     if settings.notifications.enabled:
         if notifier is None:
@@ -1146,13 +1172,21 @@ def get_http_app() -> FastAPI:
                 "telegram_controller_skipped",
                 extra={"event": "controller_skipped", "reason": "no_notifier"},
             )
-        else:
+        elif _telegram_requires_http_controller(settings):
             controller = TelegramWebhookController(
                 bot=notifier.bot,
                 settings=settings.notifications,
             )
             app.include_router(controller.router)
             _HTTP_CONTROLLER = controller
+        else:
+            telemetry_logger.info(
+                "telegram_http_controller_not_required",
+                extra={
+                    "event": "telegram_http_controller_not_required",
+                    "mode": "polling",
+                },
+            )
     else:
         telemetry_logger.info(
             "telegram_disabled",
@@ -1280,11 +1314,13 @@ def get_http_app() -> FastAPI:
     async def _startup_webhook() -> None:
         telegram_logger = get_logger("telegram")
         notif_settings = settings.notifications
-        if (
-            controller
-            and notif_settings.webhook_enabled
-            and notif_settings.public_base_url
-        ):
+        if controller is None:
+            telegram_logger.info(
+                "telegram_webhook_startup_skipped",
+                extra={"event": "telegram_webhook_startup_skipped", "mode": "polling"},
+            )
+            return
+        if notif_settings.webhook_enabled and notif_settings.public_base_url:
             registered = await register_webhook(
                 controller.bot,
                 notif_settings.public_base_url,
@@ -1308,7 +1344,7 @@ def get_http_app() -> FastAPI:
                         },
                     )
         else:
-            if controller and notif_settings.allow_poll_fallback:
+            if notif_settings.allow_poll_fallback:
                 await controller.activate_polling_fallback("webhook url missing")
                 telegram_logger.info(
                     "telegram_polling_started_no_webhook",
@@ -1357,6 +1393,7 @@ def get_http_app() -> FastAPI:
     # ----------------------------------------------------------------
 
     app.include_router(selftest_router)
+    return app
 
 
 def get_telegram_notifier() -> TelegramEnhancedNotifier | None:
@@ -4962,28 +4999,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     telegram_cfg = getattr(config, "telegram", None)
     ctx.telegram_bot = None
-    # Ensure controller exists for telegram setup
-    controller = _HTTP_CONTROLLER
-    if (
-        controller is None
-        and settings.notifications.enabled
-        and settings.notifications.webhook_enabled
-    ):
-        # Create a minimal webhook controller only when webhook transport is active.
-        try:
-            from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
-                TelegramWebhookController,
-            )
-
-            notifier = ctx.telegram_notifier
-            if notifier and hasattr(notifier, "bot"):
-                controller = TelegramWebhookController(
-                    bot=notifier.bot,
-                    settings=settings.notifications,
-                )
-                LOGGER.info("✅ Created TelegramWebhookController (webhook mode)")
-        except Exception as e:
-            LOGGER.warning(f"Could not create fallback controller: {e}")
+    telegram_transport_mode = _telegram_transport_mode(settings)
+    controller = _HTTP_CONTROLLER if _telegram_requires_http_controller(settings) else None
     telegram_bot_instance: TelegramBot | None = None
     telegram_chat_id: int | None = None
 
@@ -5165,74 +5182,83 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             telegram_chat_id = int(telegram_cfg.chat_id)
             LOGGER.info("Telegram configured for chat_id=%s", telegram_chat_id)
 
-            if controller is not None and settings.notifications.enabled:
-                try:
-                    application = telegram_bot_instance.build_application(
-                        bot=controller.bot
-                    )
-                except Exception as exc:  # noqa: BLE001 - defensive wiring
-                    LOGGER.exception(
-                        "telegram_application_build_failed",
+            if settings.notifications.enabled and telegram_transport_mode == "webhook":
+                if controller is None:
+                    LOGGER.warning(
+                        "telegram_application_controller_missing",
                         extra={
-                            "event": "telegram_application_build_failed",
-                            "err": str(exc),
+                            "event": "telegram_application_controller_missing",
+                            "mode": "webhook",
                         },
                     )
                 else:
-                    ctx.telegram_application = application
-                    controller.attach_application(application)
-                    LOGGER.info(
-                        "telegram_application_attached",
-                        extra={"event": "telegram_application_attached"},
-                    )
-                    version_info = {
-                        "build": str(getattr(config, "version", "unknown")),
-                        "sha": str(getattr(settings, "git_sha", "unknown")),
-                    }
-                    services_bundle = TelegramCommandServices(
-                        order_manager=ctx.order_manager,
-                        risk_manager=ctx.risk_manager,
-                        market_data=ctx.market_data_manager,
-                        strategy_runner=ctx.strategy_runner,
-                        config=config,
-                        broker=ctx.broker_client,
-                        journal=None,
-                        metrics=None,
-                        market_regime=ctx.market_regime,
-                        state_tracker=ctx.state_tracker,
-                        preflight_validator=ctx.preflight_validator,
-                        version_info=version_info,
-                        allowed_chat_id=telegram_chat_id,
-                    )
                     try:
-                        register_telegram_commands(
-                            telegram_bot_instance, application, services_bundle
+                        application = telegram_bot_instance.build_application(
+                            bot=controller.bot
                         )
                     except Exception as exc:  # noqa: BLE001 - defensive wiring
-                        LOGGER.warning(
-                            "telegram_command_registration_failed",
+                        LOGGER.exception(
+                            "telegram_application_build_failed",
                             extra={
-                                "event": "telegram_command_registration_failed",
+                                "event": "telegram_application_build_failed",
                                 "err": str(exc),
                             },
                         )
-                    hook = getattr(
-                        telegram_bot_instance, "after_application_built", None
-                    )
-                    if callable(hook):
-                        result = hook()
-                        if inspect.isawaitable(result):
-                            awaitable = cast(Coroutine[Any, Any, object], result)
-                            try:
-                                loop = asyncio.get_running_loop()
-                            except RuntimeError:
-                                asyncio.run(awaitable)
-                            else:
-                                loop.create_task(awaitable)
-            elif settings.notifications.enabled and controller is None:
-                LOGGER.warning(
-                    "telegram_application_controller_missing",
-                    extra={"event": "telegram_application_controller_missing"},
+                    else:
+                        ctx.telegram_application = application
+                        controller.attach_application(application)
+                        LOGGER.info(
+                            "telegram_application_attached",
+                            extra={"event": "telegram_application_attached"},
+                        )
+                        version_info = {
+                            "build": str(getattr(config, "version", "unknown")),
+                            "sha": str(getattr(settings, "git_sha", "unknown")),
+                        }
+                        services_bundle = TelegramCommandServices(
+                            order_manager=ctx.order_manager,
+                            risk_manager=ctx.risk_manager,
+                            market_data=ctx.market_data_manager,
+                            strategy_runner=ctx.strategy_runner,
+                            config=config,
+                            broker=ctx.broker_client,
+                            journal=None,
+                            metrics=None,
+                            market_regime=ctx.market_regime,
+                            state_tracker=ctx.state_tracker,
+                            preflight_validator=ctx.preflight_validator,
+                            version_info=version_info,
+                            allowed_chat_id=telegram_chat_id,
+                        )
+                        try:
+                            register_telegram_commands(
+                                telegram_bot_instance, application, services_bundle
+                            )
+                        except Exception as exc:  # noqa: BLE001 - defensive wiring
+                            LOGGER.warning(
+                                "telegram_command_registration_failed",
+                                extra={
+                                    "event": "telegram_command_registration_failed",
+                                    "err": str(exc),
+                                },
+                            )
+                        hook = getattr(
+                            telegram_bot_instance, "after_application_built", None
+                        )
+                        if callable(hook):
+                            result = hook()
+                            if inspect.isawaitable(result):
+                                awaitable = cast(Coroutine[Any, Any, object], result)
+                                try:
+                                    loop = asyncio.get_running_loop()
+                                except RuntimeError:
+                                    asyncio.run(awaitable)
+                                else:
+                                    loop.create_task(awaitable)
+            elif settings.notifications.enabled and telegram_transport_mode == "polling":
+                LOGGER.info(
+                    "telegram_application_attach_skipped",
+                    extra={"event": "telegram_application_attach_skipped", "mode": "polling"},
                 )
         else:
             LOGGER.info("Telegram disabled (no token/chat_id provided).")

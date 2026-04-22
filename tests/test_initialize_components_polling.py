@@ -24,6 +24,15 @@ from nifty_scalper_bot.config.settings import (
 from nifty_scalper_bot.core.app import initialize_components
 
 
+class DummyTelegramBot:
+    def __init__(self, _deps) -> None:  # noqa: ANN001
+        self.application_build_calls = 0
+
+    def build_application(self, *, bot) -> object:  # noqa: ANN001
+        self.application_build_calls += 1
+        return object()
+
+
 class DummyBroker:
     def __init__(self, api_key: str, api_secret: str, access_token: str) -> None:
         self.api_key = api_key
@@ -387,3 +396,65 @@ def test_poll_tick_invalid_token_is_dropped(
     assert "instrument_token" not in tick
     warnings = [record.message for record in caplog.records]
     assert "invalid_token_value" in warnings
+
+
+def test_initialize_components_polling_telegram_does_not_require_controller(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("nifty_scalper_bot.core.app.ZerodhaKiteClient", DummyBroker)
+    monkeypatch.setattr("nifty_scalper_bot.core.app.InstrumentResolver", DummyResolver)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app.MarketDataManager", DummyMarketDataManager
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.core.app.PollingStreamer", DummyPollingStreamer
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.notifications.telegram_controller.TelegramBot",
+        DummyTelegramBot,
+    )
+    monkeypatch.setattr("nifty_scalper_bot.core.app._HTTP_CONTROLLER", None)
+
+    app_config = AppConfig(
+        broker=BrokerConfig(
+            api_key="demo",
+            api_secret="secret",
+            access_token="token",
+            base_url="https://example.com",
+            websocket_url="wss://example.com/ws",
+        ),
+        risk=RiskConfig(),
+        logging=LoggingConfig(level="INFO"),
+        ratelimit=RateLimitConfig(
+            orders=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            rest=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+            hist=RateLimitBucketConfig(capacity=10, refill_rate_per_sec=10.0),
+        ),
+        quote_stale_threshold_ms=1_000,
+    )
+    settings = Settings(
+        app=app_config,
+        enable_live=False,
+        orders=OrderSettings(),
+        risk=RiskSettings(),
+        streamer=StreamerSettings(),
+        shadow=ShadowSettings(drift_threshold_pct=0.0),
+        notifications=NotificationSettings(
+            enabled=True,
+            token="fake-token",
+            chat_id=12345,
+            webhook_enabled=False,
+            public_base_url=None,
+        ),
+        session_allow_out_of_hours=False,
+        allow_offmarket_trading=False,
+    )
+    settings.app.telegram.bot_token = "fake-token"
+    settings.app.telegram.chat_id = 12345
+
+    caplog.set_level("INFO")
+    ctx = initialize_components(settings)
+
+    assert ctx.telegram_bot is not None
+    warnings = [record.message for record in caplog.records]
+    assert "telegram_application_controller_missing" not in warnings
