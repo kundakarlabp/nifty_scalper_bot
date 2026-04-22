@@ -68,3 +68,28 @@ def test_request_subscription_without_ws_retains_desired_set() -> None:
 
     assert changed is True
     assert mdm._desired_tokens == {256265}  # noqa: SLF001
+
+
+def test_request_token_unsubscription_reconciles_transport() -> None:
+    ws = DummyWebSocket()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+    mdm.request_token_subscriptions([101, 202])
+
+    changed = mdm.request_token_unsubscription(101)
+
+    assert changed is True
+    assert ws.calls[-1] == [202]
+
+
+def test_ensure_subscription_uses_request_api() -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    calls: list[str] = []
+
+    def _request(symbol: str) -> bool:
+        calls.append(symbol)
+        return True
+
+    mdm.request_symbol_subscription = _request  # type: ignore[method-assign]
+    mdm._ensure_subscription('NSE:NIFTY')  # noqa: SLF001
+
+    assert calls == ['NSE:NIFTY']

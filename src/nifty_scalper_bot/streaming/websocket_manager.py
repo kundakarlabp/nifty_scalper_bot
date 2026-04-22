@@ -875,11 +875,11 @@ class WebSocketManager:
                 continue
             self._subscription_log_tokens.add(token)
             self._logger.info(
-                "WS SUBSCRIBED: %s (%s)",
+                "ws_transport_subscribed symbol=%s token=%s",
                 symbol,
                 token,
                 extra={
-                    "event": "ws_subscribed_symbol",
+                    "event": "ws_transport_subscribed",
                     "symbol": symbol,
                     "token": token,
                 },

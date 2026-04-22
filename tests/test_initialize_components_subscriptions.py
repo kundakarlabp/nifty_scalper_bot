@@ -11,6 +11,8 @@ def test_app_has_no_direct_websocket_subscription_calls() -> None:
     assert 'ctx.websocket_manager.subscribe_tokens(' not in source
     assert 'ctx.websocket_manager.unsubscribe_tokens(' not in source
     assert 'ws.subscribe_tokens(' not in source
+    assert 'ctx.streamer.subscribe([tok])' not in source
+    assert 'ctx.streamer.unsubscribe([tok])' not in source
 
 
 def test_app_routes_startup_and_universe_subscriptions_via_mdm() -> None:
@@ -18,3 +20,4 @@ def test_app_routes_startup_and_universe_subscriptions_via_mdm() -> None:
 
     assert 'mdm.request_token_subscriptions(tokens_to_poll)' in source
     assert 'ctx.market_data_manager.request_token_subscription(' in source
+    assert 'ctx.market_data_manager.request_token_unsubscription(' in source

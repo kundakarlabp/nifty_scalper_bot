@@ -259,3 +259,16 @@ def test_on_connect_replays_current_tokens_only(monkeypatch: pytest.MonkeyPatch)
 
     assert set(ticker.subscribed) == {11, 22}
     assert set(manager._tokens) == {11, 22}  # noqa: SLF001
+
+
+def test_subscribe_tokens_wrapper_unions_and_delegates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    manager = ws_module.WebSocketManager("k", "t", [10], trading_window_enabled=False)
+
+    changed = manager.add_tokens([20])
+    assert changed is True
+    manager.subscribe_tokens([20, 30])
+
+    assert manager._tokens == {10, 20, 30}  # noqa: SLF001

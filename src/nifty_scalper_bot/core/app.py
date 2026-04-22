@@ -6349,12 +6349,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     tok,
                                     symbol=sym,
                                 )
-                            elif (
-                                tok
-                                and ctx.streamer
-                                and hasattr(ctx.streamer, "subscribe")
-                            ):
-                                ctx.streamer.subscribe([tok])
                             # Fetch OHLC history into MDM BEFORE adding to
                             # strategy runner so the runner's internal
                             # _prehydrate_symbol_history finds bars already
@@ -6419,14 +6413,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     tok = _im.get_token(sym)
                                 except RuntimeError:
                                     tok = None
-                            if (
-                                tok
-                                and ctx.streamer
-                                and hasattr(ctx.streamer, "unsubscribe")
-                            ):
-                                res = ctx.streamer.unsubscribe([tok])
-                                if asyncio.iscoroutine(res):
-                                    await res
+                            if tok and ctx.market_data_manager is not None:
+                                ctx.market_data_manager.request_token_unsubscription(
+                                    tok,
+                                    symbol=sym,
+                                )
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.remove_symbol(sym)
 
