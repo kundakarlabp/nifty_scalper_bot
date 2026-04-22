@@ -149,6 +149,7 @@ class WebSocketManager:
         self._fallback_stop_callback: Callable[[], None] | None = None
         self._fallback_active = False
         self._first_tick_logged = False
+        self._subscription_log_tokens: set[int] = set()
 
     @property
     def on_tick(self) -> TickCallback | None:
@@ -655,6 +656,7 @@ class WebSocketManager:
                         )
                 ws.subscribe(token_list)
                 ws.set_mode(ws.MODE_FULL, token_list)
+                self._log_ws_subscriptions(token_list)
                 symbol_map = getattr(mdm, "_symbol_by_token", {})
                 active_symbols = {
                     symbol_map.get(token)
@@ -842,12 +844,37 @@ class WebSocketManager:
             batch = payload[idx : idx + 200]
             await asyncio.to_thread(ticker.subscribe, batch)
             await asyncio.to_thread(ticker.set_mode, ticker.MODE_FULL, batch)
+            self._log_ws_subscriptions(batch)
 
     def _merge_tokens(self, tokens: Sequence[int]) -> None:
         """Args: tokens; Returns: none; Raises: none."""
 
         for token in tokens:
             self._tokens.add(int(token))
+
+    def _log_ws_subscriptions(self, tokens: Sequence[int]) -> None:
+        """Emit symbol/token subscription logs once per token. Args: tokens. Returns: none. Raises: none."""
+
+        mdm = getattr(self, "_market_data_manager", None)
+        symbol_map = getattr(mdm, "_symbol_by_token", {}) if mdm is not None else {}
+        for raw_token in tokens:
+            token = int(raw_token)
+            if token in self._subscription_log_tokens:
+                continue
+            symbol = symbol_map.get(token)
+            if not symbol:
+                continue
+            self._subscription_log_tokens.add(token)
+            self._logger.info(
+                "WS SUBSCRIBED: %s (%s)",
+                symbol,
+                token,
+                extra={
+                    "event": "ws_subscribed_symbol",
+                    "symbol": symbol,
+                    "token": token,
+                },
+            )
 
     def _resolve_loop(self) -> asyncio.AbstractEventLoop:
         """Args: none; Returns: event loop; Raises: RuntimeError."""

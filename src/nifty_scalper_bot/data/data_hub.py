@@ -134,6 +134,7 @@ class DataHub:
         self._last_ts: Dict[str, float] = {}
         self._last_arrival: Dict[str, float] = {}
         self._last_ws_arrival: Dict[str, float] = {}
+        self._last_poll_arrival: Dict[str, float] = {}
         self._last_global_ws_arrival = 0.0
         self._last_arrival_mono: Dict[str, float] = {}
         self._stale_candidates: Dict[str, int] = defaultdict(int)
@@ -589,9 +590,11 @@ class DataHub:
             self._last_ts[symbol] = ts_ms
             self._last_arrival[symbol] = now_ms
             self._last_arrival_mono[symbol] = mono_now
-            if source == "ws":
+            if source in {"ws", "websocket", "stream"}:
                 self._last_ws_arrival[symbol] = now_ms
                 self._last_global_ws_arrival = now_ms
+            elif source in {"poll", "rest"}:
+                self._last_poll_arrival[symbol] = now_ms
             self._stale_candidates[symbol] = 0
             subscribers = list(self._tick_subscribers.get(symbol, ()))
 
