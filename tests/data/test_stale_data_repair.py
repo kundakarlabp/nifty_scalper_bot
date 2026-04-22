@@ -173,6 +173,40 @@ class TestGetLtpRepairsCache:
         )
 
 
+    def test_rest_repair_skipped_when_live_tick_arrives_in_flight(self):
+        """REST cache repair must not overwrite a live WS tick that arrived
+        while the broker.get_quote() call was in flight."""
+        rest_price = 22500.0
+        ws_price = 22600.0  # fresher than REST snapshot
+
+        mdm = _make_mdm()
+        sym = "NSE:NIFTY"
+
+        # Plant a stale tick
+        stale_ts = time.time() - 10.0
+        mdm._latest_ticks[sym] = {"ltp": 22400.0, "timestamp": stale_ts, "symbol": sym}
+        mdm._last_tick_time[sym] = stale_ts
+
+        # Simulate broker.get_quote delivering a live WS tick mid-flight
+        def _slow_get_quote(symbol):
+            # While this REST call is "in flight", a WS tick arrives
+            fresh_ts = time.time() + 0.001  # marginally after t_before_rest
+            mdm._latest_ticks[sym] = {"ltp": ws_price, "timestamp": fresh_ts, "symbol": sym}
+            mdm._last_tick_time[sym] = fresh_ts
+            return {"last_price": rest_price, "ltp": rest_price}
+
+        mdm._broker.get_quote = _slow_get_quote
+
+        price = mdm.get_ltp(sym)
+        assert price == rest_price  # still returns the REST price (correct)
+
+        # The WS tick must NOT have been overwritten by the REST repair
+        stored_ltp = mdm._latest_ticks.get(sym, {}).get("ltp")
+        assert stored_ltp == ws_price, (
+            "REST repair should not clobber a live WS tick that arrived in-flight"
+        )
+
+
 # ---------------------------------------------------------------------------
 # C: _on_poll_tick sets source="poll" not "stream"
 # ---------------------------------------------------------------------------

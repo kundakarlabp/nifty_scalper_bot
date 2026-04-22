@@ -1365,6 +1365,7 @@ class MarketDataManager:
         broker = getattr(self, "_broker", None)
         if broker:
             try:
+                t_before_rest = time.time()
                 quote = broker.get_quote(canonical_symbol)
                 if isinstance(quote, dict):
                     price = quote.get("last_price") or quote.get("ltp")
@@ -1378,19 +1379,27 @@ class MarketDataManager:
                             )
                             # Repair symbol-level cache so the next call to
                             # get_ltp does not hit the stale guard again.
+                            # Skip if a live tick arrived while the REST call
+                            # was in flight — that tick is already fresher.
                             try:
-                                prepared = self._prepare_rest_tick(quote, source="rest")
                                 with self._lock:
-                                    prev = self._latest_ticks.get(canonical_symbol)
-                                normalized_repair = self._normalize_tick(
-                                    canonical_symbol, prepared, prev
-                                )
-                                if normalized_repair is not None:
-                                    self._store_tick(canonical_symbol, normalized_repair)
-                                else:
+                                    live_tick_arrived = (
+                                        self._last_tick_time.get(canonical_symbol, 0)
+                                        > t_before_rest
+                                    )
+                                if not live_tick_arrived:
+                                    prepared = self._prepare_rest_tick(quote, source="rest")
                                     with self._lock:
-                                        self._last_tick_time[canonical_symbol] = time.time()
-                                        self._last_quote_ts_ms[canonical_symbol] = self._now_ms()
+                                        prev = self._latest_ticks.get(canonical_symbol)
+                                    normalized_repair = self._normalize_tick(
+                                        canonical_symbol, prepared, prev
+                                    )
+                                    if normalized_repair is not None:
+                                        self._store_tick(canonical_symbol, normalized_repair)
+                                    else:
+                                        with self._lock:
+                                            self._last_tick_time[canonical_symbol] = time.time()
+                                            self._last_quote_ts_ms[canonical_symbol] = self._now_ms()
                             except Exception:  # noqa: BLE001
                                 pass
                             return p
