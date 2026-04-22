@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 
+from nifty_scalper_bot.core import app as core_app
 from nifty_scalper_bot.streaming import websocket_manager as ws_module
 
 
@@ -196,3 +198,30 @@ async def test_circuit_breaker_opens_after_repeated_failures(
 
     snapshot = manager.health_snapshot()
     assert snapshot["circuit_open"] is True
+
+
+def test_app_uses_module_level_time_module_only() -> None:
+    source = inspect.getsource(core_app)
+    assert "import time as time_module" in source
+    assert "        import time as time_module" not in source
+
+
+def test_polling_degrade_ignores_quote_age_when_ws_is_healthy() -> None:
+    assert (
+        core_app._polling_fallback_degraded(  # noqa: SLF001 - behavior contract test
+            ws_ok=True,
+            stale=False,
+            lagging=False,
+            quote_age_degraded=True,
+        )
+        is False
+    )
+    assert (
+        core_app._polling_fallback_degraded(  # noqa: SLF001 - behavior contract test
+            ws_ok=False,
+            stale=False,
+            lagging=False,
+            quote_age_degraded=False,
+        )
+        is True
+    )
