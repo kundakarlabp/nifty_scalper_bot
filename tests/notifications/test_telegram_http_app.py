@@ -89,7 +89,7 @@ def test_http_app_registers_webhook(monkeypatch) -> None:
     core_app._HTTP_NOTIFIER = None
 
 
-def test_http_app_starts_polling_when_webhook_missing(monkeypatch) -> None:
+def test_http_app_skips_webhook_controller_when_webhook_missing(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_API_KEY", "demo")
     monkeypatch.setenv("BROKER_API_SECRET", "demo-secret")
     monkeypatch.setenv("BROKER_ACCESS_TOKEN", "demo-token")
@@ -103,44 +103,28 @@ def test_http_app_starts_polling_when_webhook_missing(monkeypatch) -> None:
     core_app = importlib.import_module("nifty_scalper_bot.core.app")
     importlib.reload(core_app)
 
-    events: list[tuple[str, dict[str, object] | None]] = []
-
-    async def fake_send_event(
-        self, event: str, payload: dict[str, object] | None = None
-    ) -> None:
-        events.append((event, payload))
-
-    monkeypatch.setattr(
-        core_app.TelegramEnhancedNotifier,
-        "send_event",
-        fake_send_event,
-        raising=False,
-    )
-
-    started: dict[str, object] = {}
-
-    async def record_activate(
+    async def fail_activate(
         self, reason: str, *, interval: float | None = None
     ) -> None:  # type: ignore[no-untyped-def]
-        started["controller"] = self
-        started["reason"] = reason
+        raise AssertionError(f"polling fallback should not start (reason={reason})")
 
+    def fail_register(*_args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+        raise AssertionError("webhook registration should not be attempted")
+
+    monkeypatch.setattr(core_app, "register_webhook", fail_register)
     monkeypatch.setattr(
         core_app.TelegramWebhookController,
         "activate_polling_fallback",
-        record_activate,
+        fail_activate,
     )
 
     app = core_app.get_http_app()
 
-    assert "/telegram/webhook" in _ensure_routes(app)
+    assert "/telegram/webhook" not in _ensure_routes(app)
+    assert core_app._HTTP_CONTROLLER is None
 
     with TestClient(app):
         pass
-
-    assert started
-    assert started["reason"] == "webhook url missing"
-    assert events == []
 
     settings_module.get_settings.cache_clear()
     core_app._HTTP_APP = None
@@ -148,7 +132,7 @@ def test_http_app_starts_polling_when_webhook_missing(monkeypatch) -> None:
     core_app._HTTP_NOTIFIER = None
 
 
-def test_http_app_polling_when_webhook_disabled(monkeypatch) -> None:
+def test_http_app_skips_webhook_controller_when_webhook_disabled(monkeypatch) -> None:
     monkeypatch.setenv("BROKER_API_KEY", "demo")
     monkeypatch.setenv("BROKER_API_SECRET", "demo-secret")
     monkeypatch.setenv("BROKER_ACCESS_TOKEN", "demo-token")
@@ -163,13 +147,10 @@ def test_http_app_polling_when_webhook_disabled(monkeypatch) -> None:
     core_app = importlib.import_module("nifty_scalper_bot.core.app")
     importlib.reload(core_app)
 
-    started: dict[str, object] = {}
-
-    async def record_activate(
+    async def fail_activate(
         self, reason: str, *, interval: float | None = None
     ) -> None:  # type: ignore[no-untyped-def]
-        started["controller"] = self
-        started["reason"] = reason
+        raise AssertionError(f"polling fallback should not start (reason={reason})")
 
     def fail_register(*_args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
         raise AssertionError("webhook registration should be skipped when disabled")
@@ -177,19 +158,17 @@ def test_http_app_polling_when_webhook_disabled(monkeypatch) -> None:
     monkeypatch.setattr(
         core_app.TelegramWebhookController,
         "activate_polling_fallback",
-        record_activate,
+        fail_activate,
     )
     monkeypatch.setattr(core_app, "register_webhook", fail_register)
 
     app = core_app.get_http_app()
 
-    assert "/telegram/webhook" in _ensure_routes(app)
+    assert "/telegram/webhook" not in _ensure_routes(app)
+    assert core_app._HTTP_CONTROLLER is None
 
     with TestClient(app):
         pass
-
-    assert started
-    assert started["reason"] == "webhook url missing"
 
     settings_module.get_settings.cache_clear()
     core_app._HTTP_APP = None
