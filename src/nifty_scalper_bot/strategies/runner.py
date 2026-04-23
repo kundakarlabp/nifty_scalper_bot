@@ -246,6 +246,7 @@ class OrderRouter(Protocol):
         price: float | None = None,
         stop_loss: float | None = None,
         take_profit: float | None = None,
+        trace_id: str | None = None,
     ) -> str: ...
 
     def place_reduce_only_exit(self, intent: ExitIntent) -> str | None: ...
@@ -499,6 +500,15 @@ class StrategyRunner:
         ).strip().lower() in {"1", "true", "yes", "on"}
         # Time block logging throttle
         self._time_block_logged: Dict[str, float] = {}
+        self._allow_eval_without_new_bar = (
+            os.getenv("RUNNER_ALLOW_EVAL_WITHOUT_NEW_BAR", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._same_bar_eval_interval_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_EVAL_WITHOUT_NEW_BAR_SECONDS", "15")),
+        )
+        self._last_same_bar_eval_ts: dict[str, float] = {}
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
@@ -774,7 +784,7 @@ class StrategyRunner:
             if signal:
                 from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
-                self._handle_signal(signal, price, now)
+                self._handle_signal(signal, price, now, trace_id=trace_id)
 
             print(f"STRATEGY TRIGGERED: {token}")
         except Exception as e:
@@ -3339,6 +3349,7 @@ class StrategyRunner:
             normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
             if normalized_symbol.count(":") != 1:
                 raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
+            trace_id = f"{normalized_symbol}-{time_module.monotonic_ns()}"
             self._last_tick_time_by_symbol[normalized_symbol] = time.time()
             engine = self._candle_engines.setdefault(normalized_symbol, CandleEngine())
             with self._symbol_locks[normalized_symbol]:
@@ -3401,6 +3412,18 @@ class StrategyRunner:
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
             )
+            self._logger.info(
+                "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%s",
+                normalized_symbol,
+                trace_id,
+                tick.get("last_price") or tick.get("ltp"),
+                extra={
+                    "event": "RUNNER_TICK_ACCEPTED",
+                    "symbol": normalized_symbol,
+                    "trace_id": trace_id,
+                    "tick_price": tick.get("last_price") or tick.get("ltp"),
+                },
+            )
             
             # 🚨 FIX: Legacy ensure_valid_data() block completely removed.
             # We no longer pause live tick processing to attempt blocking historical 
@@ -3429,7 +3452,7 @@ class StrategyRunner:
                 )
                 self._last_eval_queue_log_ts = now_queue_log
             try:
-                self._on_tick(normalized_symbol, tick)
+                self._on_tick(normalized_symbol, {**dict(tick), "trace_id": trace_id})
             finally:
                 with self._eval_queue_lock:
                     self._eval_queue_depth = max(0, self._eval_queue_depth - 1)
@@ -4196,6 +4219,7 @@ class StrategyRunner:
             # =================================================================
 
             now = datetime.now(timezone.utc)
+            trace_id = str(tick.get("trace_id") or f"{symbol}-{time_module.monotonic_ns()}")
 
             # Helper: Extract timestamp for freshness check
             def _extract_timestamp(t, fallback):
@@ -4419,11 +4443,16 @@ class StrategyRunner:
                 log_throttled(
                     self._logger,
                     "market_closed_global",
-                    "Condition met: market_closed",
+                    "Condition met: market_closed_diagnostic_only",
                     interval_sec=300.0,
                     level=logging.INFO,
+                    extra={
+                        "event": "RUNNER_MARKET_HOURS_DIAGNOSTIC",
+                        "symbol": symbol,
+                        "trace_id": trace_id,
+                        "reason": "market_closed_no_runner_block",
+                    },
                 )
-                skip_strategy = True
 
             # 🚨 RELAXED LATENCY GUARD: Polling APIs have natural latency.
             # We allow ticks up to 5 seconds old to ensure strategies evaluate.
@@ -4470,12 +4499,21 @@ class StrategyRunner:
             # =================================================================
 
             # Log successful tick acceptance (throttled)
-            log_throttled(
-                self._logger,
-                f"tick_accepted_{symbol}",
-                f"✅ TICK ACCEPTED: {symbol} | LTP={price:.2f} | Age={tick_age:.1f}s | Vol={volume}",
-                interval_sec=60.0,
-                level=logging.DEBUG,
+            self._logger.info(
+                "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%.2f tick_age_s=%.3f volume=%s",
+                symbol,
+                trace_id,
+                price,
+                tick_age,
+                volume,
+                extra={
+                    "event": "RUNNER_TICK_ACCEPTED",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "tick_price": price,
+                    "tick_age_s": tick_age,
+                    "volume": volume,
+                },
             )
 
             # Grace period warmup logging
@@ -4505,6 +4543,23 @@ class StrategyRunner:
                 completed_bar = builder.update(float(price), volume, timestamp)
                 if completed_bar is not None:
                     self._ingest_bar(symbol, completed_bar)
+                candle_count = len(self._indicator_engine.get_history(symbol) or [])
+                self._logger.info(
+                    "RUNNER_BAR_STATE symbol=%s trace_id=%s candle_count=%d required_candles=%d completed_bar=%s",
+                    symbol,
+                    trace_id,
+                    candle_count,
+                    self._required_candles,
+                    completed_bar is not None,
+                    extra={
+                        "event": "RUNNER_BAR_STATE",
+                        "symbol": symbol,
+                        "trace_id": trace_id,
+                        "candle_count": candle_count,
+                        "required_candles": self._required_candles,
+                        "completed_bar": completed_bar is not None,
+                    },
+                )
                 # NOTE: Do NOT return here when completed_bar is None.
                 # The position manager (PHASE 5) must receive every tick to
                 # track unrealised P&L and update stop-loss levels in real time.
@@ -4820,9 +4875,64 @@ class StrategyRunner:
             signal = generated_signal
             current_version = int(self._candle_versions.get(symbol, 0))
             last_version = int(self._last_strategy_versions.get(symbol, 0))
-            
+            candle_count = len(self._indicator_engine.get_history(symbol) or [])
             if current_version <= last_version:
-                return
+                now_eval_ts = time_module.time()
+                last_same_bar_eval = float(self._last_same_bar_eval_ts.get(symbol, 0.0))
+                if (
+                    self._allow_eval_without_new_bar
+                    and now_eval_ts - last_same_bar_eval
+                    >= self._same_bar_eval_interval_seconds
+                ):
+                    self._last_same_bar_eval_ts[symbol] = now_eval_ts
+                    self._logger.info(
+                        "RUNNER_PHASE9_DECISION",
+                        extra={
+                            "event": "RUNNER_PHASE9_DECISION",
+                            "symbol": symbol,
+                            "trace_id": trace_id,
+                            "allowed": True,
+                            "reason": "same_bar_periodic_eval",
+                            "current_version": current_version,
+                            "last_version": last_version,
+                            "candle_count": candle_count,
+                            "required_candles": self._required_candles,
+                            "tick_price": price,
+                        },
+                    )
+                else:
+                    self._logger.info(
+                        "RUNNER_PHASE9_DECISION",
+                        extra={
+                            "event": "RUNNER_PHASE9_DECISION",
+                            "symbol": symbol,
+                            "trace_id": trace_id,
+                            "allowed": False,
+                            "reason": "same_bar_version",
+                            "current_version": current_version,
+                            "last_version": last_version,
+                            "candle_count": candle_count,
+                            "required_candles": self._required_candles,
+                            "tick_price": price,
+                        },
+                    )
+                    return
+            else:
+                self._logger.info(
+                    "RUNNER_PHASE9_DECISION",
+                    extra={
+                        "event": "RUNNER_PHASE9_DECISION",
+                        "symbol": symbol,
+                        "trace_id": trace_id,
+                        "allowed": True,
+                        "reason": "new_bar_version",
+                        "current_version": current_version,
+                        "last_version": last_version,
+                        "candle_count": candle_count,
+                        "required_candles": self._required_candles,
+                        "tick_price": price,
+                    },
+                )
             upper_symbol = symbol.upper()
             is_index_symbol = (
                 upper_symbol.startswith("NSE:")
@@ -5042,7 +5152,9 @@ class StrategyRunner:
                                 return
 
                             signal = self._strategy_manager.generate_signal(
-                                symbol, price
+                                symbol,
+                                price,
+                                trace_id=trace_id,
                             )
                             self._logger.info(
                                 "STRATEGY_EVALUATED",
@@ -5362,7 +5474,14 @@ class StrategyRunner:
                 exc_info=exc,
             )
 
-    def _handle_signal(self, signal: Signal, price: float, timestamp: datetime) -> None:
+    def _handle_signal(
+        self,
+        signal: Signal,
+        price: float,
+        timestamp: datetime,
+        *,
+        trace_id: str | None = None,
+    ) -> None:
         """
         Handle signal execution with comprehensive error handling.
 
@@ -5373,24 +5492,30 @@ class StrategyRunner:
         # ═══════════════════════════════════════════════════════════
 
         exchange_open = is_market_hours_cached()
-        allow_signal_generation = True
-        allow_execution = bool(exchange_open)
-        if allow_signal_generation and not allow_execution:
-            cache_key = f"time_block_{signal.symbol}"
-            if not hasattr(self, "_time_block_logged"):
-                self._time_block_logged = {}
-            now = timestamp.timestamp()
-            last_logged = self._time_block_logged.get(cache_key, 0)
-            if now - last_logged > 60:
-                self._logger.info(
-                    "Condition met: after_market_signal_allowed_execution_blocked",
-                    extra={
-                        "event": "after_market_signal_allowed_execution_blocked",
-                        "symbol": signal.symbol,
-                    },
-                )
-                self._time_block_logged[cache_key] = now
-            return
+        if not bool(exchange_open):
+            self._logger.info(
+                "RUNNER_SIGNAL_DECISION",
+                extra={
+                    "event": "RUNNER_SIGNAL_DECISION",
+                    "symbol": signal.symbol,
+                    "action": signal.action,
+                    "proceed_to_order": True,
+                    "reason": "outside_market_hours_runner_forwarding",
+                    "trace_id": trace_id,
+                },
+            )
+        else:
+            self._logger.info(
+                "RUNNER_SIGNAL_DECISION",
+                extra={
+                    "event": "RUNNER_SIGNAL_DECISION",
+                    "symbol": signal.symbol,
+                    "action": signal.action,
+                    "proceed_to_order": True,
+                    "reason": "market_hours_open",
+                    "trace_id": trace_id,
+                },
+            )
         # ═══════════════════════════════════════════════════════════
 
         self._logger.info(
@@ -5409,7 +5534,12 @@ class StrategyRunner:
 
             if action in {"BUY", "SELL"}:
                 self._handle_entry_signal(
-                    signal, base_symbol, trade_symbol, trade_price, timestamp
+                    signal,
+                    base_symbol,
+                    trade_symbol,
+                    trade_price,
+                    timestamp,
+                    trace_id=trace_id,
                 )
 
             elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
@@ -5628,6 +5758,16 @@ class StrategyRunner:
         """
         # 1. GUARD: Check if Strike Selector component exists
         if self._strike_selector is None:
+            self._logger.info(
+                "RUNNER_SIGNAL_DECISION",
+                extra={
+                    "event": "RUNNER_SIGNAL_DECISION",
+                    "symbol": base_symbol,
+                    "action": action,
+                    "proceed_to_order": False,
+                    "reason": "strike_selector_none",
+                },
+            )
             log_throttled(
                 self._logger,
                 "strike_selector_none",
@@ -5643,6 +5783,16 @@ class StrategyRunner:
             if hasattr(
                 self._data_hub, "has_chain_data"
             ) and not self._data_hub.has_chain_data(base_symbol):
+                self._logger.info(
+                    "RUNNER_SIGNAL_DECISION",
+                    extra={
+                        "event": "RUNNER_SIGNAL_DECISION",
+                        "symbol": base_symbol,
+                        "action": action,
+                        "proceed_to_order": False,
+                        "reason": "missing_chain_data",
+                    },
+                )
                 log_throttled(
                     self._logger,
                     f"missing_chain_{base_symbol}",
@@ -5670,6 +5820,16 @@ class StrategyRunner:
             )
 
             if not selection:
+                self._logger.info(
+                    "RUNNER_SIGNAL_DECISION",
+                    extra={
+                        "event": "RUNNER_SIGNAL_DECISION",
+                        "symbol": base_symbol,
+                        "action": action,
+                        "proceed_to_order": False,
+                        "reason": "strike_selection_none",
+                    },
+                )
                 self._logger.warning(
                     f"⚠️ Strike Selector returned None for {base_symbol} {action} @ {price}"
                 )
@@ -5678,6 +5838,16 @@ class StrategyRunner:
             return selection
 
         except Exception as e:
+            self._logger.info(
+                "RUNNER_SIGNAL_DECISION",
+                extra={
+                    "event": "RUNNER_SIGNAL_DECISION",
+                    "symbol": base_symbol,
+                    "action": action,
+                    "proceed_to_order": False,
+                    "reason": "strike_selection_exception",
+                },
+            )
             self._logger.error(
                 f"💥 EXCEPTION in strike selection for {base_symbol}: {e}",
                 exc_info=True,
@@ -5714,6 +5884,8 @@ class StrategyRunner:
         trade_symbol: str,
         trade_price: float,
         timestamp: datetime,
+        *,
+        trace_id: str | None = None,
     ) -> None:
         """
         Handle entry signal execution with comprehensive safeguards.
@@ -5741,7 +5913,12 @@ class StrategyRunner:
 
         try:
             self._handle_entry_signal_inner(
-                signal, base_symbol, trade_symbol, trade_price, timestamp
+                signal,
+                base_symbol,
+                trade_symbol,
+                trade_price,
+                timestamp,
+                trace_id=trace_id,
             )
         finally:
             self._entry_lock.release()
@@ -5753,6 +5930,8 @@ class StrategyRunner:
         trade_symbol: str,
         trade_price: float,
         timestamp: datetime,
+        *,
+        trace_id: str | None = None,
     ) -> None:
         """Direct order_manager entry path — no ExecutionEngine middleman.
 
@@ -5833,6 +6012,7 @@ class StrategyRunner:
                 signal_id=signal.deterministic_id,
                 strategy_name=strategy_name,
                 tag=f"runner_{signal.action.lower()}",
+                trace_id=trace_id,
             )
 
             if order_id:

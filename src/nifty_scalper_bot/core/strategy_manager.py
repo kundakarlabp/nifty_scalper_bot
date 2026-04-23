@@ -1698,7 +1698,13 @@ class StrategyManager(_BaseStrategyManager):
                 extra={"event": "strategy_no_signal_summary_error", "symbol": symbol},
             )
 
-    def generate_signal(self, symbol: str, current_price: float) -> Signal | None:
+    def generate_signal(
+        self,
+        symbol: str,
+        current_price: float,
+        *,
+        trace_id: str | None = None,
+    ) -> Signal | None:
         """Generate signal with confidence adjusted by strategy scores.
 
         Args:
@@ -1721,9 +1727,40 @@ class StrategyManager(_BaseStrategyManager):
             "strategy_evaluation_start",
             extra={"event": "strategy_evaluation_start", "symbol": symbol},
         )
-        if self._data_hub is not None and not bool(
-            getattr(self._data_hub, "indicators_ready", False)
-        ):
+        no_signal_reasons: list[str] = []
+        error_strategies: list[str] = []
+        disabled_strategies_snapshot: list[str] = []
+        signal_action: str | None = None
+        signal_score: float | None = None
+        signal_confidence: float | None = None
+        exit_result = "no_signal"
+        indicators_ready = True
+        if self._data_hub is not None:
+            indicators_ready = bool(getattr(self._data_hub, "indicators_ready", False))
+        indicators_raw = self._indicator_engine.get_indicators(
+            symbol, self._required_indicators
+        )
+        indicators: dict[str, t.Any] = dict(indicators_raw)
+        vwap = indicators.get("vwap")
+        avg_volume = indicators.get("avg_volume")
+        required_missing = sorted(
+            name for name in self._required_indicators if indicators.get(name) is None
+        )
+        log.info(
+            "STRATEGY_MANAGER_ENTER",
+            extra={
+                "event": "STRATEGY_MANAGER_ENTER",
+                "symbol": symbol,
+                "trace_id": trace_id,
+                "indicators_ready": indicators_ready,
+                "vwap": vwap,
+                "avg_volume": avg_volume,
+                "required_indicators_missing": required_missing,
+                "active_strategies_count": len(self._strategies),
+            },
+        )
+        if not indicators_ready:
+            no_signal_reasons.append("global_indicators_not_ready_diagnostic_only")
             log_throttled(
                 log,
                 key=f"signal_blocked_indicators_not_ready:{symbol}",
@@ -1732,9 +1769,27 @@ class StrategyManager(_BaseStrategyManager):
                 extra={
                     "event": "signal_blocked_indicators_not_ready",
                     "symbol": symbol,
+                    "trace_id": trace_id,
                 },
             )
-            return None
+
+        def _emit_strategy_exit() -> None:
+            """Emit terminal strategy manager summary. Args: none. Returns: none. Raises: none."""
+            log.info(
+                "STRATEGY_MANAGER_EXIT",
+                extra={
+                    "event": "STRATEGY_MANAGER_EXIT",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "result": exit_result,
+                    "signal_action": signal_action,
+                    "signal_score": signal_score,
+                    "signal_confidence": signal_confidence,
+                    "no_signal_reasons": no_signal_reasons,
+                    "disabled_strategies": disabled_strategies_snapshot,
+                    "error_strategies": error_strategies,
+                },
+            )
 
         def _log_reject(
             reason_code: str, context: dict[str, t.Any] | None = None
@@ -1834,6 +1889,8 @@ class StrategyManager(_BaseStrategyManager):
                         {"gate_reasons": reasons, "gate": "regime_manager"},
                     )
                     _emit_no_signal("regime_gate_block", {"gate_reasons": reasons})
+                    no_signal_reasons.append("regime_gate_block")
+                    _emit_strategy_exit()
                     return None
             except Exception as exc:  # noqa: BLE001
                 log.error(
@@ -1883,10 +1940,7 @@ class StrategyManager(_BaseStrategyManager):
             },
         )
         score_map = self._recompute_scores()
-        indicators_raw = self._indicator_engine.get_indicators(
-            symbol, self._required_indicators
-        )
-        indicators: dict[str, t.Any] = dict(indicators_raw)
+        indicators = dict(indicators)
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
         # ✅ FIX S3: Inject exchange VWAP for options
@@ -1998,6 +2052,8 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
                 _emit_no_signal("data_invalid", {"reason_code": invalid_reason})
+                no_signal_reasons.append("data_invalid")
+                _emit_strategy_exit()
                 return None
             log_throttled(
                 log,
@@ -2034,6 +2090,8 @@ class StrategyManager(_BaseStrategyManager):
                     "reason_code": self._symbol_temporarily_ineligible.get(symbol),
                 },
             )
+            no_signal_reasons.append("data_invalid")
+            _emit_strategy_exit()
             return None
         position = self._position_manager.get_position(symbol)
 
@@ -2041,6 +2099,7 @@ class StrategyManager(_BaseStrategyManager):
         disabled: list[str] = []
         empty: list[str] = []
         errors: list[str] = []
+        disabled_strategies_snapshot = disabled
         evaluation_start = time.monotonic()
         for strategy in self._strategies:
             if strategy.name in self._disabled_strategies:
@@ -2060,6 +2119,7 @@ class StrategyManager(_BaseStrategyManager):
                 )
             except Exception as exc:  # noqa: BLE001
                 errors.append(strategy.name)
+                error_strategies.append(strategy.name)
                 log.error(
                     "Failure in strategy generate for %s: %s",
                     strategy.name,
@@ -2137,10 +2197,17 @@ class StrategyManager(_BaseStrategyManager):
                     "no_signal_strategies": empty[:8],
                 },
             )
+            no_signal_reasons.append("no_strategy_signal")
+            _emit_strategy_exit()
             return None
 
         combined = self._combine_signals(signals)
         if combined and bool(getattr(combined, "metadata", {}).get("is_approved")):
+            exit_result = "signal"
+            signal_action = combined.action
+            signal_score = float(combined.quantity)
+            signal_confidence = float(combined.confidence)
+            _emit_strategy_exit()
             return combined
         if combined and self._filter_signal(combined):
             orchestrator = self._orchestrator
@@ -2188,6 +2255,11 @@ class StrategyManager(_BaseStrategyManager):
                     float(dict(combined.metadata).get("kelly_fraction", 0.0))
                 )
                 self._emit_metrics_snapshot()
+                exit_result = "signal"
+                signal_action = combined.action
+                signal_score = float(combined.quantity)
+                signal_confidence = float(combined.confidence)
+                _emit_strategy_exit()
                 return combined
         elif combined is None:
             log_throttled(
@@ -2211,6 +2283,7 @@ class StrategyManager(_BaseStrategyManager):
                 },
             )
             _emit_no_signal("data_invalid", {"stage": "combine"})
+            no_signal_reasons.append("combine_none")
         else:
             log_throttled(
                 log,
@@ -2244,6 +2317,8 @@ class StrategyManager(_BaseStrategyManager):
                     "confidence": combined.confidence,
                 },
             )
+            no_signal_reasons.append("filtered_signal")
+        _emit_strategy_exit()
         return None
 
     def _emit_metrics_snapshot(self) -> None:

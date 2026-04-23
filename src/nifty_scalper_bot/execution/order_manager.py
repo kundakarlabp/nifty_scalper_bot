@@ -1680,6 +1680,7 @@ class OrderManager:
         take_profit: float | None = None,
         signal_id: str | None = None,
         strategy_name: str = "manual",
+        trace_id: str | None = None,
     ) -> str | None:
         """
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
@@ -1689,6 +1690,33 @@ class OrderManager:
             "TRADE_ATTEMPT symbol=%s side=%s qty=%s price=%s sl=%s tp=%s strategy=%s signal_id=%s",
             symbol, side, quantity, price, stop_loss, take_profit, strategy_name, signal_id,
         )
+        if trace_id:
+            self._last_trace_id = trace_id
+
+        def _log_order_decision(
+            *,
+            allowed: bool,
+            block_reason: str | None = None,
+            order_id: str | None = None,
+        ) -> None:
+            """Emit unified decision logs for order placement. Args: fields. Returns: None. Raises: None."""
+            self._logger.info(
+                "ORDER_MANAGER_DECISION",
+                extra={
+                    "event": "ORDER_MANAGER_DECISION",
+                    "symbol": symbol,
+                    "side": side,
+                    "allowed": allowed,
+                    "block_reason": block_reason,
+                    "signal_id": signal_id,
+                    "strategy_name": strategy_name,
+                    "price": price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "order_id": order_id,
+                    "trace_id": trace_id,
+                },
+            )
         # ✅ FIX: Round Price/Trigger to 0.05 tick size BEFORE processing
         # ═══════════════════════════════════════════════════════════════════════
         if price is not None and price > 0:
@@ -1711,6 +1739,7 @@ class OrderManager:
         ):
             if not self._validate_live_execution_safety():
                 self._logger.critical("ORDER_BLOCKED: live_execution_safety_check_failed symbol=%s", symbol)
+                _log_order_decision(allowed=False, block_reason="live_execution_safety_check_failed")
                 return None
 
         # 🛡️ CIRCUIT BREAKER CHECK — skipped for system exits
@@ -1726,6 +1755,7 @@ class OrderManager:
                     "Trading Halted to prevent API ban / account blowup."
                 )
                 self._logger.critical("ORDER_BLOCKED: kill_switch_engaged consecutive_failures=%s symbol=%s", self._consecutive_failures, symbol)
+                _log_order_decision(allowed=False, block_reason="kill_switch_engaged")
                 return None
         # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
         is_entry = (side == "BUY") and not is_system_exit
@@ -1744,12 +1774,14 @@ class OrderManager:
             )
             if has_open_local and has_pending_entry:
                 self._logger.critical("ORDER_BLOCKED: duplicate_entry_prevented symbol=%s side=%s", symbol, side)
+                _log_order_decision(allowed=False, block_reason="duplicate_entry_prevented")
                 return None
             if not self._signal_arbitrator.allow(symbol, side):
                 self._logger.critical(
                     "ORDER_BLOCKED: signal_arbitrator_blocked symbol=%s side=%s",
                     symbol, side,
                 )
+                _log_order_decision(allowed=False, block_reason="signal_arbitrator_blocked")
                 return None
 
         # 3. THE INVARIANT CHECK
@@ -1762,6 +1794,7 @@ class OrderManager:
                     f"\nData: Qty={quantity}, SL={stop_loss}, Tag={tag}"
                 )
                 self._logger.critical("ORDER_BLOCKED: naked_entry_no_stop_loss symbol=%s qty=%s", symbol, quantity)
+                _log_order_decision(allowed=False, block_reason="naked_entry_no_stop_loss")
                 return None  # ❌ STOP HERE. DO NOT CALL BROKER.
 
         # =========================================================
@@ -1822,6 +1855,7 @@ class OrderManager:
                     extra={"event": "duplicate_block", "symbol": normalized_symbol},
                 )
                 self._logger.critical("ORDER_BLOCKED: fresh_pending_order_exists symbol=%s", normalized_symbol)
+                _log_order_decision(allowed=False, block_reason="fresh_pending_order_exists")
                 return None
             elif pending_orders and is_system_exit:
                 self._logger.warning(
@@ -1848,6 +1882,7 @@ class OrderManager:
                 meta={"signal_id": signal_id},
             )
             self._logger.critical("ORDER_BLOCKED: duplicate_signal signal_id=%s symbol=%s", signal_id, normalized_symbol)
+            _log_order_decision(allowed=False, block_reason="duplicate_signal")
             return None
 
         # --- SEMANTIC VALIDATION GATEKEEPER ---
@@ -1859,12 +1894,14 @@ class OrderManager:
                         f"🛑 REJECTED: BUY TP ({take_profit}) is below entry ({price})"
                     )
                     self._logger.critical("ORDER_BLOCKED: buy_tp_below_entry symbol=%s tp=%s entry=%s", normalized_symbol, take_profit, price)
+                    _log_order_decision(allowed=False, block_reason="buy_tp_below_entry")
                     return None
                 if stop_loss and stop_loss >= price:
                     self._logger.error(
                         f"🛑 REJECTED: BUY SL ({stop_loss}) is above entry ({price})"
                     )
                     self._logger.critical("ORDER_BLOCKED: buy_sl_above_entry symbol=%s sl=%s entry=%s", normalized_symbol, stop_loss, price)
+                    _log_order_decision(allowed=False, block_reason="buy_sl_above_entry")
                     return None
             elif side == "SELL":
                 # For a Short/Exit, TP must be below Entry, SL must be above Entry
@@ -1873,12 +1910,14 @@ class OrderManager:
                         f"🛑 REJECTED: SELL TP ({take_profit}) is above entry ({price})"
                     )
                     self._logger.critical("ORDER_BLOCKED: sell_tp_above_entry symbol=%s tp=%s entry=%s", normalized_symbol, take_profit, price)
+                    _log_order_decision(allowed=False, block_reason="sell_tp_above_entry")
                     return None
                 if stop_loss and stop_loss <= price:
                     self._logger.error(
                         f"🛑 REJECTED: SELL SL ({stop_loss}) is below entry ({price})"
                     )
                     self._logger.critical("ORDER_BLOCKED: sell_sl_below_entry symbol=%s sl=%s entry=%s", normalized_symbol, stop_loss, price)
+                    _log_order_decision(allowed=False, block_reason="sell_sl_below_entry")
                     return None
 
         # ---------------------------------------------------------------------
@@ -1908,6 +1947,7 @@ class OrderManager:
                         },
                     )
                     self._logger.critical("ORDER_BLOCKED: time_guard reason=%s symbol=%s time=%s", reason, normalized_symbol, now.strftime("%H:%M:%S"))
+                    _log_order_decision(allowed=False, block_reason="time_guard_block")
                     return None
             except Exception as e:
                 self._logger.error(
@@ -1933,6 +1973,7 @@ class OrderManager:
                     extra={"symbol": normalized_symbol},
                 )
                 self._logger.critical("ORDER_BLOCKED: trading_switch_off symbol=%s", normalized_symbol)
+                _log_order_decision(allowed=False, block_reason="trading_switch_off")
                 return None
 
         # ---------------------------------------------------------------------
@@ -1962,6 +2003,7 @@ class OrderManager:
                     extra={"symbol": normalized_symbol, "event": "risk_block"},
                 )
                 self._logger.critical("ORDER_BLOCKED: risk_manager_blocked reason=%s symbol=%s", reason, normalized_symbol)
+                _log_order_decision(allowed=False, block_reason="risk_manager_blocked")
                 return None
 
         # ---------------------------------------------------------------------
@@ -2323,6 +2365,10 @@ class OrderManager:
 
                     if not is_system_exit:
                         self._signal_arbitrator.register(normalized_symbol, side)
+                    _log_order_decision(
+                        allowed=True,
+                        order_id=order_id,
+                    )
                     return order_id
 
             except Exception as e:
@@ -2353,12 +2399,14 @@ class OrderManager:
                         price=float(price or 0.0),
                         meta={"trade_id": trade_id, "error": str(e)},
                     )
+                    _log_order_decision(allowed=False, block_reason="fatal_order_error")
                     return None
 
                 self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
                 time.sleep(0.5 * attempt)
 
         self._logger.error("❌ Order placement failed after retries.")
+        _log_order_decision(allowed=False, block_reason="order_placement_failed_after_retries")
         return None
 
     def place_managed_order(

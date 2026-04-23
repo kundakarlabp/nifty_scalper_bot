@@ -141,6 +141,9 @@ def _gate_runner_symbol_add(
     ctx: Any,
     symbol: str,
     pending_runner_symbols: set[str],
+    *,
+    token: int | None = None,
+    source: str = "startup",
 ) -> bool:
     """Gate StrategyRunner add by bar readiness. Args: ctx/symbol/pending. Returns: added flag. Raises: none."""
 
@@ -148,24 +151,35 @@ def _gate_runner_symbol_add(
         return False
     bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
     required = _symbol_history_requirement(ctx)
-    if bars >= required:
-        ctx.strategy_runner.add_symbol(symbol)
+    history_ready = bars >= required
+    ctx.strategy_runner.add_symbol(symbol)
+    if history_ready:
         pending_runner_symbols.discard(symbol)
-        return True
-    pending_runner_symbols.add(symbol)
+    else:
+        pending_runner_symbols.add(symbol)
     LOGGER.info(
-        "symbol_add_deferred_waiting_for_history symbol=%s bars=%d required=%d",
+        "RUNNER_SYMBOL_STATUS symbol=%s token=%s added_to_runner=%s bars=%d required_bars=%d history_ready=%s source=%s reason=%s",
         symbol,
+        token,
+        True,
         bars,
         required,
+        history_ready,
+        source,
+        "history_ready" if history_ready else "history_pending_runner_added",
         extra={
-            "event": "symbol_add_deferred_waiting_for_history",
+            "event": "RUNNER_SYMBOL_STATUS",
             "symbol": symbol,
+            "token": token,
+            "added_to_runner": True,
             "bars": bars,
-            "required": required,
+            "required_bars": required,
+            "history_ready": history_ready,
+            "source": source,
+            "reason": "history_ready" if history_ready else "history_pending_runner_added",
         },
     )
-    return False
+    return True
 
 
 from urllib.parse import urlsplit
@@ -6033,7 +6047,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                     active_symbol_tokens[sym] = int(tok)
                     resolved_count += 1
                     LOGGER.info(f"✅ Resolved: {sym} -> token {tok}")
-                    _gate_runner_symbol_add(ctx, sym, pending_runner_symbols)
+                    _gate_runner_symbol_add(
+                        ctx,
+                        sym,
+                        pending_runner_symbols,
+                        token=int(tok),
+                        source="startup",
+                    )
                 else:
                     unresolved_symbols.append(sym)
                     LOGGER.warning(
@@ -6250,15 +6270,26 @@ async def startup_sequence(ctx: BotContext) -> None:
                             for _psym in list(pending_runner_symbols):
                                 _bars = len(ctx.market_data_manager.get_ohlc_bars(_psym) or [])
                                 if _bars >= _symbol_history_requirement(ctx):
-                                    ctx.strategy_runner.add_symbol(_psym)
                                     LOGGER.info(
-                                        "symbol_add_deferred_ready symbol=%s bars=%d",
+                                        "RUNNER_SYMBOL_STATUS symbol=%s token=%s added_to_runner=%s bars=%d required_bars=%d history_ready=%s source=%s reason=%s",
                                         _psym,
+                                        active_symbol_tokens.get(_psym),
+                                        True,
                                         _bars,
+                                        _symbol_history_requirement(ctx),
+                                        True,
+                                        "dynamic_universe",
+                                        "history_now_ready",
                                         extra={
-                                            "event": "symbol_add_deferred_ready",
+                                            "event": "RUNNER_SYMBOL_STATUS",
                                             "symbol": _psym,
                                             "bars": _bars,
+                                            "token": active_symbol_tokens.get(_psym),
+                                            "added_to_runner": True,
+                                            "required_bars": _symbol_history_requirement(ctx),
+                                            "history_ready": True,
+                                            "source": "dynamic_universe",
+                                            "reason": "history_now_ready",
                                         },
                                     )
                                 else:
@@ -6333,6 +6364,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 continue
                             if tok and ctx.market_data_manager:
                                 ctx.market_data_manager.register_symbol(sym, tok)
+                            if tok:
+                                active_symbol_tokens[sym] = int(tok)
                             if tok and ctx.market_data_manager is not None:
                                 ctx.market_data_manager.request_token_subscription(
                                     tok,
@@ -6393,7 +6426,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     )
                             # Add to runner only after MDM holds enough bars.
                             # Defer if still under-hydrated; the loop retries.
-                            _gate_runner_symbol_add(ctx, sym, pending_runner_symbols)
+                            _gate_runner_symbol_add(
+                                ctx,
+                                sym,
+                                pending_runner_symbols,
+                                token=int(tok),
+                                source="dynamic_universe",
+                            )
 
                         for sym in drop_symbols:
                             tok = None
