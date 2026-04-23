@@ -3558,6 +3558,27 @@ class MarketDataManager:
             self._last_tick_source[symbol] = source
             callbacks = list(self._subscribers.get(symbol, ()))
             self._tick_counter += 1
+        subscriber_count = len(callbacks)
+        _price_val = tick.get("ltp") or tick.get("last_price") or tick.get("price")
+        _token_val = tick.get("instrument_token") or tick.get("token")
+        try:
+            self._logger.debug(
+                "MDM_TICK_RECEIVED symbol=%s source=%s subscribers=%d",
+                symbol,
+                source,
+                subscriber_count,
+                extra={
+                    "event": "MDM_TICK_RECEIVED",
+                    "symbol": symbol,
+                    "token": _token_val,
+                    "price": _price_val,
+                    "source": source,
+                    "has_subscribers": subscriber_count > 0,
+                    "subscriber_count": subscriber_count,
+                },
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
         self.bump_heartbeat()
         now_mono = time.monotonic()
         tick_stats_interval = float(os.getenv("TICK_STATS_INTERVAL", "5.0"))
@@ -3640,6 +3661,52 @@ class MarketDataManager:
                 self._logger.error(
                     "Tick callback failed", extra={"symbol": symbol, "error": str(exc)}
                 )
+        try:
+            delivered = subscriber_count > 0
+            self._logger.debug(
+                "MDM_TICK_EMITTED symbol=%s delivered=%s subscribers=%d source=%s",
+                symbol,
+                delivered,
+                subscriber_count,
+                source,
+                extra={
+                    "event": "MDM_TICK_EMITTED",
+                    "symbol": symbol,
+                    "token": _token_val,
+                    "delivered_to_subscribers": delivered,
+                    "subscriber_count": subscriber_count,
+                    "source": source,
+                },
+            )
+            # Emit a single INFO-level event the FIRST time a subscriber
+            # receives (or fails to receive) a tick for a symbol — this is
+            # the critical breakpoint that reveals whether the MDM→DataHub
+            # bridge is live for that symbol, without flooding per-tick.
+            first_emit_log_tracker = getattr(self, "_first_emit_logged", None)
+            if first_emit_log_tracker is None:
+                first_emit_log_tracker = set()
+                self._first_emit_logged = first_emit_log_tracker
+            emit_key = (symbol, delivered)
+            if emit_key not in first_emit_log_tracker:
+                first_emit_log_tracker.add(emit_key)
+                self._logger.info(
+                    "MDM_TICK_EMITTED_FIRST symbol=%s delivered=%s subscribers=%d source=%s",
+                    symbol,
+                    delivered,
+                    subscriber_count,
+                    source,
+                    extra={
+                        "event": "MDM_TICK_EMITTED",
+                        "symbol": symbol,
+                        "token": _token_val,
+                        "delivered_to_subscribers": delivered,
+                        "subscriber_count": subscriber_count,
+                        "source": source,
+                        "first_emit": True,
+                    },
+                )
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     async def warmup_history(
         self,

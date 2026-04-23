@@ -1465,6 +1465,7 @@ class StrategyRunner:
     def _subscribe_symbol(self, symbol: str) -> None:
         """Subscribe to tick updates for a symbol."""
         callback = self._callbacks.get(symbol)
+        callback_already_registered = callback is not None
         if callback is None:
 
             def _callback(tick: Mapping[str, Any], sym: str = symbol) -> None:
@@ -1477,8 +1478,55 @@ class StrategyRunner:
                     payload = dict(tick)
                     payload["symbol"] = sym
 
+                    # Lightweight per-tick trace id so we can follow a tick
+                    # from callback → event bus → runner → evaluation → order.
+                    try:
+                        _trace_id = f"{sym}-{time_module.monotonic_ns()}"
+                    except Exception:  # noqa: BLE001
+                        _trace_id = f"{sym}-{int(time.time()*1e9)}"
+                    payload.setdefault("trace_id", _trace_id)
+
+                    # Observability: runner received tick from DataHub/MDM
+                    try:
+                        _price = (
+                            tick.get("ltp")
+                            or tick.get("last_price")
+                            or tick.get("price")
+                        )
+                        self._logger.debug(
+                            "RUNNER_CALLBACK_TICK symbol=%s trace_id=%s price=%s",
+                            sym,
+                            _trace_id,
+                            _price,
+                            extra={
+                                "event": "RUNNER_CALLBACK_TICK",
+                                "symbol": sym,
+                                "trace_id": _trace_id,
+                                "price": _price,
+                                "payload_keys": sorted(list(payload.keys())),
+                                "published_to_event_bus": False,
+                            },
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
                     # 3. Publish to the event bus
                     self._event_bus.publish(payload)
+
+                    try:
+                        self._logger.debug(
+                            "RUNNER_CALLBACK_TICK_PUBLISHED symbol=%s trace_id=%s",
+                            sym,
+                            _trace_id,
+                            extra={
+                                "event": "RUNNER_CALLBACK_TICK",
+                                "symbol": sym,
+                                "trace_id": _trace_id,
+                                "published_to_event_bus": True,
+                            },
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        pass
                 except Exception:
                     # Capture full stack trace AND the raw tick data for senior-level debugging
                     self._logger.exception(
@@ -1490,22 +1538,76 @@ class StrategyRunner:
             callback = _callback
             self._callbacks[symbol] = callback
 
-        self._safe_subscribe(symbol, callback)
+        self._safe_subscribe(
+            symbol, callback, callback_already_registered=callback_already_registered
+        )
 
     def _safe_subscribe(
-        self, symbol: str, callback: Callable[[Mapping[str, Any]], None]
+        self,
+        symbol: str,
+        callback: Callable[[Mapping[str, Any]], None],
+        *,
+        callback_already_registered: bool = False,
     ) -> None:
         """Subscribe symbol safely. Args: symbol/callback. Returns: None. Raises: None."""
         try:
+            _trace_id = f"{symbol}-{time_module.monotonic_ns()}"
+        except Exception:  # noqa: BLE001
+            _trace_id = f"{symbol}-{int(time.time()*1e9)}"
+        using_data_hub = self._data_hub is not None
+        try:
             if self._data_hub is not None:
                 self._data_hub.subscribe_ticks(symbol, callback)
+                self._logger.info(
+                    "RUNNER_SUBSCRIBE_REQUEST symbol=%s via=data_hub success=true",
+                    symbol,
+                    extra={
+                        "event": "RUNNER_SUBSCRIBE_REQUEST",
+                        "symbol": symbol,
+                        "trace_id": _trace_id,
+                        "using_data_hub": True,
+                        "callback_registered": True,
+                        "callback_already_registered": callback_already_registered,
+                        "success": True,
+                        "error": None,
+                    },
+                )
                 return
             if self._legacy_tick_subscription_mode:
                 self._market_data.subscribe(symbol, callback)
+                self._logger.info(
+                    "RUNNER_SUBSCRIBE_REQUEST symbol=%s via=market_data success=true",
+                    symbol,
+                    extra={
+                        "event": "RUNNER_SUBSCRIBE_REQUEST",
+                        "symbol": symbol,
+                        "trace_id": _trace_id,
+                        "using_data_hub": False,
+                        "callback_registered": True,
+                        "callback_already_registered": callback_already_registered,
+                        "success": True,
+                        "error": None,
+                    },
+                )
                 return
             raise RuntimeError("DataHub unavailable and legacy subscription disabled")
         except Exception as exc:
             self._logger.error("SUBSCRIBE_FAIL %s: %s", symbol, exc)
+            self._logger.error(
+                "RUNNER_SUBSCRIBE_REQUEST symbol=%s success=false error=%s",
+                symbol,
+                exc,
+                extra={
+                    "event": "RUNNER_SUBSCRIBE_REQUEST",
+                    "symbol": symbol,
+                    "trace_id": _trace_id,
+                    "using_data_hub": using_data_hub,
+                    "callback_registered": False,
+                    "callback_already_registered": callback_already_registered,
+                    "success": False,
+                    "error": str(exc),
+                },
+            )
 
     def _ingest_historical_bar_unlocked(self, data: dict[str, Any]) -> None:
         """Ingest one historical candle into runner state. Args: data. Returns: None. Raises: None."""
@@ -3306,17 +3408,73 @@ class StrategyRunner:
         """Args: tick; Returns: none; Raises: none."""
         try:
             symbol_value = tick.get("symbol")
+            trace_id = tick.get("trace_id")
             if not symbol_value:
+                self._logger.debug(
+                    "RUNNER_TICK_CONSUMED no_symbol",
+                    extra={
+                        "event": "RUNNER_TICK_CONSUMED",
+                        "symbol": None,
+                        "trace_id": trace_id,
+                        "active_symbol": False,
+                        "state_active": False,
+                        "phase": None,
+                        "reason_if_skipped": "missing_symbol",
+                    },
+                )
                 return
             symbol = enforce_canonical(normalize_symbol(str(symbol_value)))
+            active = symbol in self._active_symbols
             if symbol not in self._tracked_symbols:
-                if symbol in self._active_symbols:
+                if active:
                     self._tracked_symbols.add(symbol)
                 else:
+                    self._logger.debug(
+                        "RUNNER_TICK_CONSUMED symbol=%s skipped=untracked",
+                        symbol,
+                        extra={
+                            "event": "RUNNER_TICK_CONSUMED",
+                            "symbol": symbol,
+                            "trace_id": trace_id,
+                            "active_symbol": False,
+                            "state_active": False,
+                            "phase": self._data_phase.get(symbol),
+                            "reason_if_skipped": "symbol_not_in_active_universe",
+                        },
+                    )
                     return
             price = tick.get("last_price") or tick.get("ltp")
             if not isinstance(price, (int, float)):
+                self._logger.debug(
+                    "RUNNER_TICK_CONSUMED symbol=%s skipped=no_price",
+                    symbol,
+                    extra={
+                        "event": "RUNNER_TICK_CONSUMED",
+                        "symbol": symbol,
+                        "trace_id": trace_id,
+                        "active_symbol": active,
+                        "state_active": symbol in self._symbol_state,
+                        "phase": self._data_phase.get(symbol),
+                        "reason_if_skipped": "missing_or_invalid_price",
+                    },
+                )
                 return
+            self._logger.debug(
+                "RUNNER_TICK_CONSUMED symbol=%s trace_id=%s price=%s",
+                symbol,
+                trace_id,
+                price,
+                extra={
+                    "event": "RUNNER_TICK_CONSUMED",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "price": float(price),
+                    "active_symbol": active,
+                    "state_active": symbol in self._symbol_state,
+                    "phase": self._data_phase.get(symbol),
+                    "reason_if_skipped": None,
+                },
+            )
             self._on_tick_safe(
                 {**dict(tick), "symbol": symbol, "last_price": float(price)}
             )
@@ -3349,7 +3507,41 @@ class StrategyRunner:
             normalized_symbol = enforce_canonical(normalize_symbol(str(symbol)))
             if normalized_symbol.count(":") != 1:
                 raise RuntimeError(f"Malformed canonical symbol: {normalized_symbol}")
-            trace_id = f"{normalized_symbol}-{time_module.monotonic_ns()}"
+            # Reuse an upstream trace_id if the tick payload already carries one
+            # (set by RunnerCallback or by an outer caller); otherwise mint here.
+            trace_id = tick.get("trace_id") or f"{normalized_symbol}-{time_module.monotonic_ns()}"
+            # RUNNER_TICK_CONSUMED: the tick has been pulled off the event bus
+            # and accepted by the runner's evaluation entry point.  This is the
+            # canonical observability breakpoint between publication and
+            # evaluation, independent of which caller invoked _on_tick_safe.
+            try:
+                _price_consumed = (
+                    tick.get("last_price") or tick.get("ltp") or tick.get("price")
+                )
+                _phase = self._data_phase.get(normalized_symbol)
+                _state_active = False
+                _state_obj = self._symbol_state.get(normalized_symbol)
+                if _state_obj is not None:
+                    _state_active = bool(getattr(_state_obj, "active", False))
+                self._logger.debug(
+                    "RUNNER_TICK_CONSUMED symbol=%s trace_id=%s price=%s phase=%s",
+                    normalized_symbol,
+                    trace_id,
+                    _price_consumed,
+                    _phase,
+                    extra={
+                        "event": "RUNNER_TICK_CONSUMED",
+                        "symbol": normalized_symbol,
+                        "trace_id": trace_id,
+                        "price": _price_consumed,
+                        "active_symbol": normalized_symbol in self._active_symbols,
+                        "state_active": _state_active,
+                        "phase": _phase,
+                        "reason_if_skipped": None,
+                    },
+                )
+            except Exception:  # pragma: no cover - defensive
+                pass
             self._last_tick_time_by_symbol[normalized_symbol] = time.time()
             engine = self._candle_engines.setdefault(normalized_symbol, CandleEngine())
             with self._symbol_locks[normalized_symbol]:
@@ -3921,6 +4113,84 @@ class StrategyRunner:
                 extra={"event": "symbol_gate_warn_error", "symbol": symbol},
                 exc_info=exc,
             )
+
+    def _emit_runner_eval_decision(
+        self,
+        *,
+        symbol: str,
+        stage: str,
+        reason: str,
+        allowed: bool,
+        trace_id: str | None = None,
+        **context: Any,
+    ) -> None:
+        """Emit a single structured RUNNER_EVAL_DECISION log.
+
+        Captures the full per-symbol evaluation-path decision so every early
+        return is traceable. ``stage`` is one of ``phase7``, ``phase9``,
+        ``signal_forward``; ``reason`` names the specific gate.
+        """
+        try:
+            state_obj = self._symbol_state.get(symbol)
+            state_active = bool(getattr(state_obj, "active", False)) if state_obj else False
+            sym_state = self._symbol_states.get(symbol)
+            sym_state_val = getattr(sym_state, "value", str(sym_state)) if sym_state else None
+            try:
+                candle_count = len(self._indicator_engine.get_history(symbol) or [])
+            except Exception:  # pragma: no cover - defensive
+                candle_count = None
+            current_version = int(self._candle_versions.get(symbol, 0))
+            last_version = int(self._last_strategy_versions.get(symbol, 0))
+            last_bar_ts = self._last_bar_ts.get(symbol)
+            last_bar_ts_iso = last_bar_ts.isoformat() if last_bar_ts else None
+            last_eval_bar_ts = None
+            if state_obj is not None:
+                _leb = getattr(state_obj, "_last_eval_bar_ts", None)
+                if _leb is not None:
+                    try:
+                        last_eval_bar_ts = _leb.isoformat()
+                    except Exception:
+                        last_eval_bar_ts = str(_leb)
+            mdm_last_tick_age = None
+            try:
+                mdm_last_map = getattr(self._market_data, "_last_tick_time", {}) or {}
+                last_tick_wall = mdm_last_map.get(symbol)
+                if isinstance(last_tick_wall, (int, float)) and last_tick_wall > 0:
+                    mdm_last_tick_age = round(time.time() - float(last_tick_wall), 3)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            has_live_bars = symbol in getattr(self, "_live_bar_seen", set())
+            payload = {
+                "event": "RUNNER_EVAL_DECISION",
+                "symbol": symbol,
+                "trace_id": trace_id,
+                "allowed": allowed,
+                "stage": stage,
+                "reason": reason,
+                "active_symbol": symbol in self._active_symbols,
+                "symbol_state": sym_state_val,
+                "state_active": state_active,
+                "candle_count": candle_count,
+                "current_version": current_version,
+                "last_version": last_version,
+                "last_bar_ts": last_bar_ts_iso,
+                "last_eval_bar_ts": last_eval_bar_ts,
+                "mdm_last_tick_age_s": mdm_last_tick_age,
+                "has_live_bars": has_live_bars,
+                "data_phase": self._data_phase.get(symbol),
+            }
+            if context:
+                payload.update(context)
+            self._logger.info("RUNNER_EVAL_DECISION", extra=payload)
+        except Exception as exc:  # noqa: BLE001
+            # Observability must never raise; log and continue.
+            try:
+                self._logger.error(
+                    "runner_eval_decision_emit_failed: %s", exc,
+                    extra={"event": "runner_eval_decision_emit_error", "symbol": symbol},
+                )
+            except Exception:  # pragma: no cover - defensive
+                pass
 
     def _mark_symbol_unready(
         self,
@@ -4955,6 +5225,14 @@ class StrategyRunner:
                     remaining_s=max(0.0, symbol_rate_until - now_ts),
                 )
                 self._mark_symbol_unready(symbol, "rate_limit_breach")
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage="phase9",
+                    reason="symbol_rate_limit_backoff_active",
+                    allowed=False,
+                    trace_id=trace_id,
+                    remaining_s=max(0.0, symbol_rate_until - now_ts),
+                )
                 return
 
             backoff_until = float(getattr(self, "_data_freshness_backoff_until", 0.0))
@@ -4972,11 +5250,20 @@ class StrategyRunner:
                     interval_sec=30.0,
                     level=logging.WARNING,
                 )
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage="phase9",
+                    reason="data_freshness_backoff_active",
+                    allowed=False,
+                    trace_id=trace_id,
+                    remaining_s=remaining,
+                    backoff_until=backoff_until,
+                )
                 return
 
             # 🚨 ALL PHASE 9 STATE GATES REMOVED
             current_state = SymbolState.READY
-            
+
             if signal is None and self._required_candles:
                 should_evaluate = False
                 phase = self._data_phase.get(symbol, "HYDRATION")
@@ -4986,8 +5273,22 @@ class StrategyRunner:
                         or getattr(self, "_allow_polling_fallback", True)
                     )
                     if not fallback_enabled:
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage="phase9",
+                            reason="non_live_phase_and_fallback_disabled",
+                            allowed=False,
+                            trace_id=trace_id,
+                        )
                         return
                     if not self._symbol_history.get(symbol):
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage="phase9",
+                            reason="non_live_phase_and_empty_symbol_history",
+                            allowed=False,
+                            trace_id=trace_id,
+                        )
                         return
                 with self._lock:
                     state = self._symbol_state.get(symbol)
@@ -5006,6 +5307,13 @@ class StrategyRunner:
                                 level=logging.INFO,
                             )
                             self._last_bar_ts[symbol] = now
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="bar_ts_initialized_retry_next_tick",
+                                allowed=False,
+                                trace_id=trace_id,
+                            )
                             return
                         # ✅ FIX K: Same-bar-skip for options with no live bars.
                         # When _symbol_history is empty (no live bars ever completed),
@@ -5047,6 +5355,14 @@ class StrategyRunner:
                                         "Condition met: strategy_eval_skipped_same_bar",
                                         extra=extra_payload,
                                     )
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="strategy_eval_skipped_same_bar",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                    effective_bar_ts=_effective_last_bar_ts.isoformat(),
+                                )
                                 return
                         if last_bar_ts:
                             bar_age = (now - last_bar_ts).total_seconds()
@@ -5076,6 +5392,15 @@ class StrategyRunner:
                                         "bar_age_s": bar_age,
                                         "bar_ts": last_bar_ts.isoformat(),
                                     },
+                                )
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="strategy_eval_stale_bar",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                    bar_age_s=bar_age,
+                                    stale_bar_threshold_s=_stale_bar_max,
                                 )
                                 return
                         # Frequency limit moved to ExecutionEngine
@@ -5111,6 +5436,13 @@ class StrategyRunner:
                             and hasattr(self._market_data, "is_data_stale")
                             and self._market_data.is_data_stale()
                         ):
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="market_data_is_stale",
+                                allowed=False,
+                                trace_id=trace_id,
+                            )
                             return
 
                         mdm_last_tick = getattr(
@@ -5127,13 +5459,23 @@ class StrategyRunner:
                             isinstance(mdm_last_tick, (int, float))
                             and time.time() - float(mdm_last_tick) > _stale_thresh
                         ):
+                            _mdm_age = time.time() - float(mdm_last_tick)
                             log_throttled(
                                 self._logger,
                                 f"stale_mdm_tick_{symbol}",
                                 f"⏰ Stale MDM tick — skipping: {symbol} "
-                                f"age={time.time()-float(mdm_last_tick):.1f}s",
+                                f"age={_mdm_age:.1f}s",
                                 interval_sec=300.0,
                                 level=logging.WARNING,
+                            )
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="stale_mdm_tick",
+                                allowed=False,
+                                trace_id=trace_id,
+                                mdm_tick_age_s=_mdm_age,
+                                stale_tick_threshold_s=_stale_thresh,
                             )
                             return
                         self._last_global_eval_ts = time.monotonic()
@@ -5146,9 +5488,24 @@ class StrategyRunner:
                                 "state": current_state.value,
                             },
                         )
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage="phase9",
+                            reason="evaluation_entered",
+                            allowed=True,
+                            trace_id=trace_id,
+                            price=price,
+                        )
                         try:
                             # --- Objective 2: Block signals if market depth insufficient ---
                             if not self.validate_market_depth():
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="market_depth_invalid",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
                                 return
 
                             signal = self._strategy_manager.generate_signal(
@@ -5156,6 +5513,25 @@ class StrategyRunner:
                                 price,
                                 trace_id=trace_id,
                             )
+                            if signal is None:
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="evaluation_no_signal",
+                                    allowed=True,
+                                    trace_id=trace_id,
+                                    price=price,
+                                )
+                            else:
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="signal_forward",
+                                    reason="signal_forwarded",
+                                    allowed=True,
+                                    trace_id=trace_id,
+                                    signal_action=signal.action,
+                                    signal_confidence=getattr(signal, "confidence", None),
+                                )
                             self._logger.info(
                                 "STRATEGY_EVALUATED",
                                 extra={

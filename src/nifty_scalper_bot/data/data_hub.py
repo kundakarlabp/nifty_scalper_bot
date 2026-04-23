@@ -645,10 +645,42 @@ class DataHub:
 
     subscribe_ticks = subscribe
 
+    def _make_trace_id(self, symbol: str) -> str:
+        """Produce a lightweight per-symbol trace id for lifecycle logs."""
+        try:
+            return f"{symbol}-{time.monotonic_ns()}"
+        except Exception:  # noqa: BLE001
+            return f"{symbol}-{int(time.time()*1e9)}"
+
     def _subscribe_symbol(self, symbol: str) -> None:
+        trace_id = self._make_trace_id(symbol)
         if symbol.isdigit():
+            LOGGER.info(
+                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=false reason=symbol_is_token",
+                symbol,
+                extra={
+                    "event": "DATAHUB_LIVE_SUBSCRIBE",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "subscribed": False,
+                    "reason": "symbol_is_token",
+                    "mdm_delegate_called": False,
+                },
+            )
             return
         if symbol in self._mdm_subscribed_symbols:
+            LOGGER.info(
+                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=true reason=already_subscribed",
+                symbol,
+                extra={
+                    "event": "DATAHUB_LIVE_SUBSCRIBE",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "subscribed": True,
+                    "reason": "already_subscribed",
+                    "mdm_delegate_called": False,
+                },
+            )
             return
         mdm_sub = getattr(self._mdm, "subscribe", None)
         if callable(mdm_sub):
@@ -658,6 +690,46 @@ class DataHub:
                 "datahub_live_symbol_subscribed symbol=%s",
                 symbol,
                 extra={"event": "datahub_live_symbol_subscribed", "symbol": symbol},
+            )
+            LOGGER.info(
+                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=true reason=mdm_subscribed",
+                symbol,
+                extra={
+                    "event": "DATAHUB_LIVE_SUBSCRIBE",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "subscribed": True,
+                    "reason": "mdm_subscribed",
+                    "mdm_delegate_called": True,
+                },
+            )
+            LOGGER.info(
+                "DATAHUB_SYMBOL_STATUS symbol=%s state=active",
+                symbol,
+                extra={
+                    "event": "DATAHUB_SYMBOL_STATUS",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "registration_state": "active",
+                    "deferred_mode": self._defer_live_symbol_subscriptions,
+                    "callback_attached": bool(self._tick_subscribers.get(symbol)),
+                    "mdm_subscribed": True,
+                    "pending_count": len(self._pending_live_symbols),
+                    "reason": "mdm_subscribed",
+                },
+            )
+        else:
+            LOGGER.warning(
+                "DATAHUB_LIVE_SUBSCRIBE symbol=%s subscribed=false reason=mdm_no_subscribe",
+                symbol,
+                extra={
+                    "event": "DATAHUB_LIVE_SUBSCRIBE",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "subscribed": False,
+                    "reason": "mdm_no_subscribe_callable",
+                    "mdm_delegate_called": False,
+                },
             )
 
     def flush_pending_live_subscriptions(self) -> int:
@@ -669,6 +741,19 @@ class DataHub:
                 "datahub_live_symbol_flush count=0",
                 extra={"event": "datahub_live_symbol_flush", "count": 0},
             )
+            LOGGER.info(
+                "DATAHUB_SYMBOL_STATUS flush_count=0",
+                extra={
+                    "event": "DATAHUB_SYMBOL_STATUS",
+                    "trace_id": self._make_trace_id("__flush__"),
+                    "registration_state": "flush_empty",
+                    "deferred_mode": False,
+                    "callback_attached": False,
+                    "mdm_subscribed": False,
+                    "pending_count": 0,
+                    "reason": "flush_no_pending",
+                },
+            )
             return 0
 
         LOGGER.info(
@@ -677,6 +762,22 @@ class DataHub:
             extra={"event": "datahub_live_symbol_flush", "count": len(pending_symbols)},
         )
         for symbol in pending_symbols:
+            trace_id = self._make_trace_id(symbol)
+            LOGGER.info(
+                "DATAHUB_SYMBOL_STATUS symbol=%s state=active reason=flush",
+                symbol,
+                extra={
+                    "event": "DATAHUB_SYMBOL_STATUS",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "registration_state": "active",
+                    "deferred_mode": False,
+                    "callback_attached": bool(self._tick_subscribers.get(symbol)),
+                    "mdm_subscribed": symbol in self._mdm_subscribed_symbols,
+                    "pending_count": len(self._pending_live_symbols),
+                    "reason": "flush_activating",
+                },
+            )
             self._subscribe_symbol(symbol)
         self._pending_live_symbols.clear()
         return len(pending_symbols)
@@ -684,7 +785,23 @@ class DataHub:
     def subscribe_ticks(self, symbol: str, callback: Optional[TickListener] = None):
         normalized = self._canonical_quote_symbol(symbol)
         if not normalized or normalized.isdigit():
+            LOGGER.info(
+                "DATAHUB_SYMBOL_STATUS symbol=%s state=rejected_invalid",
+                symbol,
+                extra={
+                    "event": "DATAHUB_SYMBOL_STATUS",
+                    "symbol": symbol,
+                    "trace_id": self._make_trace_id(str(symbol)),
+                    "registration_state": "rejected",
+                    "deferred_mode": self._defer_live_symbol_subscriptions,
+                    "callback_attached": callback is not None,
+                    "mdm_subscribed": False,
+                    "pending_count": len(self._pending_live_symbols),
+                    "reason": "invalid_or_token_symbol",
+                },
+            )
             return
+        trace_id = self._make_trace_id(normalized)
         if callback is not None:
             self._tick_subscribers[normalized].add(callback)
         if self._defer_live_symbol_subscriptions:
@@ -697,7 +814,37 @@ class DataHub:
                     "symbol": normalized,
                 },
             )
+            LOGGER.info(
+                "DATAHUB_SYMBOL_STATUS symbol=%s state=deferred",
+                normalized,
+                extra={
+                    "event": "DATAHUB_SYMBOL_STATUS",
+                    "symbol": normalized,
+                    "trace_id": trace_id,
+                    "registration_state": "deferred",
+                    "deferred_mode": True,
+                    "callback_attached": bool(self._tick_subscribers.get(normalized)),
+                    "mdm_subscribed": normalized in self._mdm_subscribed_symbols,
+                    "pending_count": len(self._pending_live_symbols),
+                    "reason": "deferred_mode_active",
+                },
+            )
         else:
+            LOGGER.info(
+                "DATAHUB_SYMBOL_STATUS symbol=%s state=registered",
+                normalized,
+                extra={
+                    "event": "DATAHUB_SYMBOL_STATUS",
+                    "symbol": normalized,
+                    "trace_id": trace_id,
+                    "registration_state": "registered",
+                    "deferred_mode": False,
+                    "callback_attached": bool(self._tick_subscribers.get(normalized)),
+                    "mdm_subscribed": normalized in self._mdm_subscribed_symbols,
+                    "pending_count": len(self._pending_live_symbols),
+                    "reason": "subscribe_immediate",
+                },
+            )
             self._subscribe_symbol(normalized)
         if callback is not None:
             quote = self.get_quote(normalized, allow_pull=True)
