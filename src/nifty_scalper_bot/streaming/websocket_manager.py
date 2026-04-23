@@ -39,7 +39,7 @@ class _CircuitState:
 
 
 class WebSocketManager:
-    """Manage one resilient KiteTicker session with guarded reconnect logic."""
+    """Transport-only KiteTicker session manager; business subscription intent lives upstream."""
 
     def __init__(
         self,
@@ -324,21 +324,12 @@ class WebSocketManager:
         self.add_tokens(tokens)
 
     def resubscribe(self, tokens: list[int]) -> None:
-        """Args: tokens; Returns: none; Raises: none."""
+        """Compatibility replay helper that delegates token-set reconciliation."""
 
         try:
             if not tokens:
                 return
-            unique_tokens = sorted({int(token) for token in tokens})
-            if not unique_tokens:
-                return
-            self._merge_tokens(unique_tokens)
-            ticker = self._ticker
-            if ticker is None or not self._connected.is_set():
-                return
-            ticker.subscribe(unique_tokens)
-            ticker.set_mode(ticker.MODE_FULL, unique_tokens)
-            self._logger.info("WebSocket resubscribed to %d tokens", len(unique_tokens))
+            self.set_tokens(tokens)
         except Exception as e:
             self._logger.error("WebSocket resubscribe failed: %s", e, exc_info=True)
 
@@ -348,7 +339,7 @@ class WebSocketManager:
         self.unsubscribe_tokens(tokens)
 
     def unsubscribe_tokens(self, tokens: Sequence[int]) -> None:
-        """Args: tokens; Returns: none; Raises: none."""
+        """Compatibility wrapper for transport token removals. Args: tokens; Returns: none; Raises: none."""
 
         try:
             self.remove_tokens(tokens)
@@ -854,12 +845,6 @@ class WebSocketManager:
             await asyncio.to_thread(ticker.subscribe, batch)
             await asyncio.to_thread(ticker.set_mode, ticker.MODE_FULL, batch)
             self._log_ws_subscriptions(batch)
-
-    def _merge_tokens(self, tokens: Sequence[int]) -> None:
-        """Args: tokens; Returns: none; Raises: none."""
-
-        for token in tokens:
-            self._tokens.add(int(token))
 
     def _log_ws_subscriptions(self, tokens: Sequence[int]) -> None:
         """Emit symbol/token subscription logs once per token. Args: tokens. Returns: none. Raises: none."""

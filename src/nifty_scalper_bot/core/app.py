@@ -3501,6 +3501,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         stream_supervisor = StreamSupervisor(
             streamer=streamer,
             resolver=instrument_manager,
+            market_data_manager=market_data_manager,
             default_symbols=list(poll_symbols or ["NSE:NIFTY"]),
             autostart=True,
             monitor_interval_s=1.0,

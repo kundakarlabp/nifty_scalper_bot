@@ -53,13 +53,14 @@ class StreamHealth:
 
 
 class StreamSupervisor:
-    """Single source of truth for polling lifecycle, health, and tokens."""
+    """Lifecycle supervisor for polling; subscription intent is owned by MarketDataManager."""
 
     def __init__(
         self,
         *,
         streamer: Any,
         resolver: Any,
+        market_data_manager: Any | None = None,
         default_symbols: Sequence[str] | None = None,
         autostart: bool = True,
         monitor_interval_s: float = 300.0,
@@ -67,12 +68,12 @@ class StreamSupervisor:
     ) -> None:
         self.streamer = streamer
         self.resolver = resolver
+        self.market_data_manager = market_data_manager
         self._default_symbols = unique_normalized_symbols(default_symbols or [])
         self._autostart = bool(autostart)
         self._monitor_interval = max(float(monitor_interval_s), 0.2)
         self._risk_halt_getter = risk_halt_getter
 
-        self._tokens: set[int] = set()
         self._lock = threading.RLock()
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
@@ -104,9 +105,8 @@ class StreamSupervisor:
     def ensure_started(self) -> bool:
         """Start the poller when tokens are present."""
 
-        with self._lock:
-            if not self._tokens:
-                return False
+        if self.token_count() <= 0:
+            return False
         return self.start()
 
     def start(self) -> bool:
@@ -280,30 +280,13 @@ class StreamSupervisor:
         additions = {int(token) for token in tokens or []}
         if not additions:
             return self.token_count()
-        with self._lock:
-            new_tokens = additions - self._tokens
-            if new_tokens:
-                self._tokens.update(new_tokens)
-        if new_tokens:
-            payload = sorted(new_tokens)
-            try:
-                subscribe = getattr(self.streamer, "subscribe_tokens", None)
-                if callable(subscribe):
-                    subscribe(payload)
-                else:
-                    self.streamer.subscribe(payload)
-            except Exception as exc:  # noqa: BLE001 - defensive guard
-                LOG.warning(
-                    "stream_supervisor_subscribe_failed",
-                    extra={
-                        "event": "stream_supervisor_subscribe_failed",
-                        "tokens": payload,
-                        "error": str(exc),
-                    },
-                )
+        mdm = self.market_data_manager
+        if mdm is None:
+            raise RuntimeError("MarketDataManager unavailable for subscription routing")
+        mdm.request_token_subscriptions(sorted(additions))
         if self._autostart:
             self.ensure_started()
-        return len(self._tokens)
+        return self.token_count()
 
     def unsubscribe_tokens(self, tokens: Iterable[int]) -> int:
         """Unsubscribe the provided tokens and return the remaining size."""
@@ -311,46 +294,38 @@ class StreamSupervisor:
         removals = {int(token) for token in tokens or []}
         if not removals:
             return self.token_count()
-        with self._lock:
-            has_overlap = bool(self._tokens & removals)
-            if has_overlap:
-                self._tokens -= removals
-        payload = sorted(removals)
-        try:
-            unsubscribe = getattr(self.streamer, "unsubscribe_tokens", None)
-            if callable(unsubscribe):
-                unsubscribe(payload)
-            else:
-                self.streamer.unsubscribe(payload)
-        except Exception as exc:  # noqa: BLE001 - defensive guard
-            LOG.warning(
-                "stream_supervisor_unsubscribe_failed",
-                extra={
-                    "event": "stream_supervisor_unsubscribe_failed",
-                    "tokens": payload,
-                    "error": str(exc),
-                },
-            )
-        if not self._tokens:
+        mdm = self.market_data_manager
+        if mdm is None:
+            raise RuntimeError("MarketDataManager unavailable for subscription routing")
+        mdm.request_token_unsubscriptions(sorted(removals))
+        if self.token_count() == 0:
             with suppress(Exception):
                 self.streamer.stop()
             with self._lock:
                 self._started_at_mono = None
-        return len(self._tokens)
+        return self.token_count()
 
     # ------------------------------------------------------------------
     # Telemetry helpers
     def token_count(self) -> int:
         """Return the number of tracked tokens."""
 
-        with self._lock:
-            return len(self._tokens)
+        mdm = self.market_data_manager
+        if mdm is not None:
+            desired_count = getattr(mdm, "desired_token_count", None)
+            if callable(desired_count):
+                return int(desired_count())
+        return 0
 
     def tracked_tokens(self) -> list[int]:
         """Return the tracked tokens in sorted order."""
 
-        with self._lock:
-            return sorted(self._tokens)
+        mdm = self.market_data_manager
+        if mdm is not None:
+            desired_snapshot = getattr(mdm, "desired_tokens_snapshot", None)
+            if callable(desired_snapshot):
+                return list(desired_snapshot())
+        return []
 
     def on_tick(self, _tick: dict[str, Any]) -> None:
         """Record the last tick timestamps for health accounting."""
@@ -367,8 +342,8 @@ class StreamSupervisor:
         """Return the current supervisor health snapshot."""
 
         running = self.is_running()
+        tokens = self.token_count()
         with self._lock:
-            tokens = len(self._tokens)
             started_at = self._started_at_mono
             last_tick_wall = self._last_tick_wall
             last_tick_mono = self._last_tick_mono
@@ -470,7 +445,7 @@ class StreamSupervisor:
             if not self._is_trading_window():
                 continue
             with self._lock:
-                active_tokens = bool(self._tokens)
+                active_tokens = self.token_count() > 0
             if not active_tokens:
                 continue
             running = self.is_running()

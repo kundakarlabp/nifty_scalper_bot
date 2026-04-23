@@ -74,6 +74,7 @@ class DummyMarketDataManager:
         self._enqueue_calls: list[dict[str, object]] = []
         self._symbol_by_token: dict[int, str] = {}
         self._heartbeat_callbacks: list[callable] = []  # type: ignore[var-annotated]
+        self._desired_tokens: set[int] = set()
 
     def _handle_tick(self, tick):  # noqa: ANN001
         self._handle_tick_calls.append(dict(tick))
@@ -100,6 +101,22 @@ class DummyMarketDataManager:
 
     def get_latest_price(self, _symbol: str) -> None:
         return None
+
+    def request_token_subscriptions(self, tokens):  # noqa: ANN001
+        before = len(self._desired_tokens)
+        self._desired_tokens.update(int(token) for token in tokens)
+        return len(self._desired_tokens) - before
+
+    def request_token_unsubscriptions(self, tokens):  # noqa: ANN001
+        before = len(self._desired_tokens)
+        self._desired_tokens.difference_update(int(token) for token in tokens)
+        return before - len(self._desired_tokens)
+
+    def desired_token_count(self) -> int:
+        return len(self._desired_tokens)
+
+    def desired_tokens_snapshot(self) -> list[int]:
+        return sorted(self._desired_tokens)
 
 
 class DummyPollingStreamer:

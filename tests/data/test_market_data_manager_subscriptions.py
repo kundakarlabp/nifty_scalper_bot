@@ -61,6 +61,18 @@ def test_request_token_subscriptions_batch_reconciles_once() -> None:
     assert ws.calls == [[101, 202]]
 
 
+def test_request_token_subscriptions_idempotent() -> None:
+    ws = DummyWebSocket()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+
+    first = mdm.request_token_subscriptions([101, 202])
+    second = mdm.request_token_subscriptions([202, 101])
+
+    assert first == 2
+    assert second == 0
+    assert ws.calls == [[101, 202]]
+
+
 def test_request_subscription_without_ws_retains_desired_set() -> None:
     mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
 
@@ -79,6 +91,37 @@ def test_request_token_unsubscription_reconciles_transport() -> None:
 
     assert changed is True
     assert ws.calls[-1] == [202]
+
+
+def test_request_token_unsubscriptions_batch_reconciles_once() -> None:
+    ws = DummyWebSocket()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+    mdm.request_token_subscriptions([101, 202, 303])
+
+    removed = mdm.request_token_unsubscriptions([202, 303, 303])
+
+    assert removed == 2
+    assert ws.calls[-1] == [101]
+
+
+def test_request_token_unsubscriptions_missing_token_is_harmless() -> None:
+    ws = DummyWebSocket()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+    mdm.request_token_subscriptions([101])
+    before_calls = list(ws.calls)
+
+    removed = mdm.request_token_unsubscriptions([999])
+
+    assert removed == 0
+    assert ws.calls == before_calls
+
+
+def test_desired_token_snapshot_and_count_are_stable() -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    mdm.request_token_subscriptions([303, 101, 202, 202])
+
+    assert mdm.desired_token_count() == 3
+    assert mdm.desired_tokens_snapshot() == [101, 202, 303]
 
 
 def test_ensure_subscription_uses_request_api() -> None:
