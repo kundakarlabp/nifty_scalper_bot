@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 
@@ -72,3 +74,11 @@ def test_timeout_without_hard_requirements_reports_incomplete() -> None:
     assert readiness['hard_ready'] is False
     assert 'futures' in readiness['missing_hard']
     assert 'atm_pe' in readiness['missing_hard']
+
+
+def test_app_startup_uses_hard_ready_for_trading_indicators_gate() -> None:
+    source = Path('src/nifty_scalper_bot/core/app.py').read_text(encoding='utf-8')
+
+    assert 'indicators_ready_for_trading = hard_ready' in source
+    assert 'ctx.market_regime_manager.indicators_ready = (' in source
+    assert 'ctx.data_hub.indicators_ready = (' in source

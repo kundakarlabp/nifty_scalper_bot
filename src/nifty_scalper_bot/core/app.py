@@ -6014,7 +6014,11 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             for sym in targets:
                 if mdm:
-                    mdm.ensure_tracking(sym, seed=not ctx.websocket_enabled)
+                    mdm.ensure_tracking(
+                        sym,
+                        seed=not ctx.websocket_enabled,
+                        subscribe=False,
+                    )
 
                 tok = None
                 # BUG-α FIX: Never raise here — a missing token for one symbol
@@ -6472,10 +6476,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                             hard_ready = bool(readiness_state.get("hard_ready"))
                             spot_ready = bool(readiness_state.get("spot_ready"))
                             missing_hard = list(readiness_state.get("missing_hard") or [])
+                            indicators_ready_for_trading = hard_ready
                             if ctx.market_regime_manager is not None:
-                                ctx.market_regime_manager.indicators_ready = readiness_ready
+                                ctx.market_regime_manager.indicators_ready = (
+                                    indicators_ready_for_trading
+                                )
                             if ctx.data_hub is not None:
-                                ctx.data_hub.indicators_ready = readiness_ready
+                                ctx.data_hub.indicators_ready = (
+                                    indicators_ready_for_trading
+                                )
                             ws_connected = bool(
                                 ctx.websocket_manager.is_connected()
                                 if ctx.websocket_manager is not None
