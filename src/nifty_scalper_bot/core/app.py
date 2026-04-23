@@ -179,7 +179,171 @@ def _gate_runner_symbol_add(
             "reason": "history_ready" if history_ready else "history_pending_runner_added",
         },
     )
+    try:
+        _emit_option_symbol_pipeline_status(
+            ctx,
+            symbol=symbol,
+            token=token,
+            selected=True,
+            hydrated_bars=bars,
+            runner_added=True,
+            source=source,
+            reason="gate_add",
+        )
+    except Exception:  # pragma: no cover - observability must never raise
+        pass
     return True
+
+
+def _emit_option_symbol_pipeline_status(
+    ctx: Any,
+    *,
+    symbol: str,
+    token: int | None,
+    selected: bool,
+    hydrated_bars: int | None,
+    runner_added: bool,
+    source: str,
+    reason: str,
+) -> None:
+    """Emit OPTION_SYMBOL_PIPELINE_STATUS for one symbol across the full pipeline."""
+    try:
+        import time as _time_module
+
+        trace_id = f"{symbol}-{_time_module.monotonic_ns()}"
+    except Exception:  # noqa: BLE001
+        trace_id = f"{symbol}-pipeline"
+    # DataHub subscription state
+    datahub_subscribed = False
+    try:
+        dh = getattr(ctx, "data_hub", None)
+        if dh is not None:
+            datahub_subscribed = symbol in getattr(dh, "_mdm_subscribed_symbols", set())
+    except Exception:  # pragma: no cover - defensive
+        pass
+    # MDM tracking state + last-tick age
+    mdm_tracking = False
+    live_tick_seen = False
+    try:
+        mdm = getattr(ctx, "market_data_manager", None)
+        if mdm is not None:
+            mdm_tracking = symbol in getattr(mdm, "_subscribers", {})
+            last_tick_map = getattr(mdm, "_last_tick_time", {}) or {}
+            last_tick = last_tick_map.get(symbol)
+            if isinstance(last_tick, (int, float)) and last_tick > 0:
+                live_tick_seen = True
+    except Exception:  # pragma: no cover - defensive
+        pass
+    # Runner state
+    runner_active = False
+    indicators_ready_local = False
+    evaluation_seen = False
+    try:
+        runner = getattr(ctx, "strategy_runner", None)
+        if runner is not None:
+            runner_active = symbol in getattr(runner, "_active_symbols", set())
+            indicators_ready_local = symbol in getattr(runner, "_live_bar_seen", set())
+            evaluation_seen = symbol in getattr(
+                runner, "_warmup_complete_logged", set()
+            )
+    except Exception:  # pragma: no cover - defensive
+        pass
+    LOGGER.info(
+        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s bars=%s runner_added=%s datahub_subscribed=%s mdm_tracking=%s live_tick_seen=%s",
+        symbol,
+        token,
+        selected,
+        hydrated_bars,
+        runner_added,
+        datahub_subscribed,
+        mdm_tracking,
+        live_tick_seen,
+        extra={
+            "event": "OPTION_SYMBOL_PIPELINE_STATUS",
+            "symbol": symbol,
+            "token": token,
+            "trace_id": trace_id,
+            "selected": selected,
+            "hydrated_bars": hydrated_bars,
+            "runner_added": runner_added,
+            "datahub_subscribed": datahub_subscribed,
+            "mdm_tracking": mdm_tracking,
+            "live_tick_seen": live_tick_seen,
+            "indicators_ready_local": indicators_ready_local,
+            "evaluation_seen": evaluation_seen,
+            "source": source,
+            "reason": reason,
+        },
+    )
+
+
+def _emit_trading_universe_summary(
+    ctx: Any,
+    *,
+    startup_symbols: Iterable[str] = (),
+    phase: str = "startup",
+) -> None:
+    """Emit TRADING_UNIVERSE_SUMMARY snapshot across runner, DataHub, and MDM."""
+    runner = getattr(ctx, "strategy_runner", None)
+    mdm = getattr(ctx, "market_data_manager", None)
+    dh = getattr(ctx, "data_hub", None)
+    startup_list = list(startup_symbols) if startup_symbols else []
+    option_symbols = [s for s in startup_list if any(x in s for x in ("CE", "PE"))]
+    runner_active_count = 0
+    evaluation_seen_count = 0
+    try:
+        if runner is not None:
+            runner_active_count = len(getattr(runner, "_active_symbols", set()))
+            evaluation_seen_count = len(
+                getattr(runner, "_warmup_complete_logged", set())
+            )
+    except Exception:  # pragma: no cover - defensive
+        pass
+    datahub_pending = 0
+    datahub_subscribed = 0
+    try:
+        if dh is not None:
+            datahub_pending = len(getattr(dh, "_pending_live_symbols", set()))
+            datahub_subscribed = len(
+                getattr(dh, "_mdm_subscribed_symbols", set())
+            )
+    except Exception:  # pragma: no cover - defensive
+        pass
+    mdm_registered = 0
+    live_tick_seen = 0
+    try:
+        if mdm is not None:
+            mdm_registered = len(getattr(mdm, "_token_by_symbol", {}))
+            last_tick_map = getattr(mdm, "_last_tick_time", {}) or {}
+            live_tick_seen = sum(
+                1 for v in last_tick_map.values() if isinstance(v, (int, float)) and v > 0
+            )
+    except Exception:  # pragma: no cover - defensive
+        pass
+    LOGGER.info(
+        "TRADING_UNIVERSE_SUMMARY phase=%s startup_symbols=%d option_symbols=%d runner_active=%d datahub_pending=%d datahub_subscribed=%d mdm_registered=%d live_tick_seen=%d evaluation_seen=%d",
+        phase,
+        len(startup_list),
+        len(option_symbols),
+        runner_active_count,
+        datahub_pending,
+        datahub_subscribed,
+        mdm_registered,
+        live_tick_seen,
+        evaluation_seen_count,
+        extra={
+            "event": "TRADING_UNIVERSE_SUMMARY",
+            "phase": phase,
+            "startup_symbols_count": len(startup_list),
+            "option_symbols_count": len(option_symbols),
+            "runner_active_symbols_count": runner_active_count,
+            "datahub_pending_symbols_count": datahub_pending,
+            "datahub_subscribed_symbols_count": datahub_subscribed,
+            "mdm_registered_symbols_count": mdm_registered,
+            "live_tick_seen_count": live_tick_seen,
+            "evaluation_seen_count": evaluation_seen_count,
+        },
+    )
 
 
 from urllib.parse import urlsplit
@@ -6109,6 +6273,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                     },
                 )
 
+            # Post pre-hydration universe snapshot so logs capture the
+            # end-of-startup pipeline state for every tradable symbol.
+            try:
+                _emit_trading_universe_summary(
+                    ctx,
+                    startup_symbols=active_symbols,
+                    phase="startup_post_flush",
+                )
+            except Exception:  # pragma: no cover - observability must not raise
+                pass
+
             if tokens_to_poll:
                 if mdm is not None:
                     seeded = mdm.request_token_subscriptions(tokens_to_poll)
@@ -6450,6 +6625,40 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.strategy_runner.remove_symbol(sym)
 
                         dynamic_option_symbols = latest_symbols
+
+                        # Universe summary + per-symbol pipeline status after
+                        # a dynamic-universe mutation so operators can see
+                        # where each option sits in the live lifecycle.
+                        if add_symbols or drop_symbols:
+                            try:
+                                for _sym in add_symbols:
+                                    _tok = active_symbol_tokens.get(_sym)
+                                    _emit_option_symbol_pipeline_status(
+                                        ctx,
+                                        symbol=_sym,
+                                        token=_tok,
+                                        selected=True,
+                                        hydrated_bars=(
+                                            len(
+                                                ctx.market_data_manager.get_ohlc_bars(
+                                                    _sym
+                                                )
+                                                or []
+                                            )
+                                            if ctx.market_data_manager
+                                            else None
+                                        ),
+                                        runner_added=bool(ctx.strategy_runner),
+                                        source="dynamic_universe",
+                                        reason="post_universe_sync",
+                                    )
+                                _emit_trading_universe_summary(
+                                    ctx,
+                                    startup_symbols=sorted(latest_symbols),
+                                    phase="dynamic_universe_update",
+                                )
+                            except Exception:  # pragma: no cover - obs must not raise
+                                pass
                     except Exception as exc:
                         LOGGER.error(
                             "Failure in option universe sync loop: %s",

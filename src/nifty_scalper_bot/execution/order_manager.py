@@ -1698,8 +1698,16 @@ class OrderManager:
             allowed: bool,
             block_reason: str | None = None,
             order_id: str | None = None,
+            broker_mode: str | None = None,
         ) -> None:
             """Emit unified decision logs for order placement. Args: fields. Returns: None. Raises: None."""
+            if broker_mode is None:
+                try:
+                    broker_mode = str(
+                        os.getenv("EXECUTION_MODE", "SHADOW")
+                    ).strip().upper()
+                except Exception:  # noqa: BLE001
+                    broker_mode = None
             self._logger.info(
                 "ORDER_MANAGER_DECISION",
                 extra={
@@ -1715,6 +1723,7 @@ class OrderManager:
                     "take_profit": take_profit,
                     "order_id": order_id,
                     "trace_id": trace_id,
+                    "broker_mode": broker_mode,
                 },
             )
         # ✅ FIX: Round Price/Trigger to 0.05 tick size BEFORE processing
