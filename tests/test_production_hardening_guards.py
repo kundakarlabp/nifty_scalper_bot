@@ -32,6 +32,7 @@ def test_data_hub_subscribe_deduplicates() -> None:
     hub.subscribe_ticks("NSE:NIFTY", lambda _: None)
     hub.subscribe_ticks("NSE:NIFTY", lambda _: None)
     hub.subscribe_ticks("256265", lambda _: None)
+    hub.flush_pending_live_subscriptions()
 
     assert mdm.calls == ["NSE:NIFTY"]
 

@@ -6073,6 +6073,22 @@ async def startup_sequence(ctx: BotContext) -> None:
             if not subscribed_symbols:
                 LOGGER.critical("⛔ STRATEGY SUBSCRIPTION LIST IS EMPTY")
 
+            deferred_flush_count = 0
+            if ctx.data_hub is not None and hasattr(
+                ctx.data_hub, "flush_pending_live_subscriptions"
+            ):
+                deferred_flush_count = int(
+                    ctx.data_hub.flush_pending_live_subscriptions()
+                )
+                LOGGER.info(
+                    "startup_deferred_listener_subscriptions_flushed count=%d",
+                    deferred_flush_count,
+                    extra={
+                        "event": "startup_deferred_listener_subscriptions_flushed",
+                        "count": deferred_flush_count,
+                    },
+                )
+
             if tokens_to_poll:
                 if mdm is not None:
                     seeded = mdm.request_token_subscriptions(tokens_to_poll)
