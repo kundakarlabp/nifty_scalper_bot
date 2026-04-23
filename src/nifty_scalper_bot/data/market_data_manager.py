@@ -154,6 +154,12 @@ class MarketDataManager:
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
         self._readiness_requirements: dict[str, Any] = {}
+        self._last_readiness_state: dict[str, Any] = {
+            "hard_ready": False,
+            "spot_ready": False,
+            "missing_hard": [],
+        }
+        self._spot_refresh_last_attempt_mono: float = 0.0
         # Bounded queue: drops oldest when full so a stall in the async
         # consumer never grows memory without bound. Size 10 000 is ~8 s
         # of headroom at 1 000 tps.
@@ -2692,8 +2698,10 @@ class MarketDataManager:
                     for symbol in subscribed_symbols
                 }
             requirements = dict(self._readiness_requirements)
+            readiness_state = self._readiness_state(bars, min_bars, requirements)
+            self._last_readiness_state = dict(readiness_state)
             valid_symbols = [s for s, count in bars.items() if count >= min_bars]
-            if self._readiness_passes(bars, min_bars, requirements):
+            if readiness_state["hard_ready"]:
                 self.ready = True
                 self.degraded = False
                 self.hydration_complete = True
@@ -2703,6 +2711,7 @@ class MarketDataManager:
                         "event": "mdm_ready",
                         "symbols": valid_symbols,
                         "requirements": requirements,
+                        "spot_ready": readiness_state["spot_ready"],
                     },
                 )
                 return
@@ -2731,13 +2740,21 @@ class MarketDataManager:
             self.ready = False
             self.degraded = True
         else:
+            timed_out_state = self._readiness_state(
+                bars, min_bars, self._readiness_requirements
+            )
+            self._last_readiness_state = dict(timed_out_state)
             self._logger.warning(
                 "Readiness timeout before hydration completed "
-                "(timeout=%.1fs, min_bars=%d, bars=%s, requirements=%s)",
+                "(timeout=%.1fs, min_bars=%d, bars=%s, requirements=%s, "
+                "hard_ready=%s, spot_ready=%s, missing_hard=%s)",
                 timeout,
                 min_bars,
                 bars,
                 self._readiness_requirements,
+                timed_out_state["hard_ready"],
+                timed_out_state["spot_ready"],
+                timed_out_state["missing_hard"],
             )
             self.ready = False
             self.degraded = False
@@ -2750,28 +2767,151 @@ class MarketDataManager:
         requirements: Mapping[str, Any],
     ) -> bool:
         """Evaluate strict readiness rules for startup/live gating."""
+        return bool(self._readiness_state(bars, min_bars, requirements)["hard_ready"])
+
+    def _readiness_state(
+        self,
+        bars: Mapping[str, int],
+        min_bars: int,
+        requirements: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Classify readiness into hard-trading and soft-spot states."""
         if not requirements:
-            return any(count >= min_bars for count in bars.values())
+            any_ready = any(count >= min_bars for count in bars.values())
+            return {
+                "hard_ready": any_ready,
+                "spot_ready": True,
+                "missing_hard": [],
+            }
         spot = str(requirements.get("spot") or "")
         futures = str(requirements.get("futures") or "")
-        atm_ce = requirements.get("atm_ce")
-        atm_pe = requirements.get("atm_pe")
+        atm_ce = str(requirements.get("atm_ce") or "")
+        atm_pe = str(requirements.get("atm_pe") or "")
         options = [str(s) for s in requirements.get("options") or []]
-        if bars.get(spot, 0) < min_bars or bars.get(futures, 0) < min_bars:
+
+        missing_hard: list[str] = []
+        if futures and bars.get(futures, 0) < min_bars:
+            missing_hard.append("futures")
+        if atm_ce and bars.get(atm_ce, 0) < min_bars:
+            missing_hard.append("atm_ce")
+        if atm_pe and bars.get(atm_pe, 0) < min_bars:
+            missing_hard.append("atm_pe")
+
+        if not atm_ce or not atm_pe:
+            ce_ready = any(
+                sym.endswith("CE") and bars.get(sym, 0) >= min_bars for sym in options
+            )
+            pe_ready = any(
+                sym.endswith("PE") and bars.get(sym, 0) >= min_bars for sym in options
+            )
+            if not ce_ready:
+                missing_hard.append("options_ce")
+            if not pe_ready:
+                missing_hard.append("options_pe")
+
+        spot_ready = True if not spot else bars.get(spot, 0) >= min_bars
+        return {
+            "hard_ready": len(missing_hard) == 0,
+            "spot_ready": spot_ready,
+            "missing_hard": missing_hard,
+        }
+
+    def readiness_state_snapshot(self) -> dict[str, Any]:
+        """Return latest readiness classification snapshot."""
+        return dict(self._last_readiness_state)
+
+    def _is_symbol_fresh(self, symbol: str, max_age_ms: int) -> bool:
+        """Return whether a symbol has a fresh enough tick age."""
+        return self.symbol_data_age_ms(symbol) <= int(max(max_age_ms, 1))
+
+    def _active_option_symbols(self) -> list[str]:
+        """Return currently active option symbols used for hard feed checks."""
+        requirements = dict(self._readiness_requirements)
+        symbols = [str(s) for s in requirements.get("options") or [] if s]
+        if not symbols:
+            with self._lock:
+                symbols = [
+                    symbol
+                    for symbol in self._active_subscribed_symbols
+                    if symbol.endswith("CE") or symbol.endswith("PE")
+                ]
+        return sorted(set(symbols))
+
+    def _is_spot_fresh(self, max_age_ms: int | None = None) -> bool:
+        """Return whether spot is fresh enough for advisory reference."""
+        threshold = int(max_age_ms or self._tick_stale_threshold_ms)
+        spot_symbol = str(self._readiness_requirements.get("spot") or "NSE:NIFTY")
+        return self._is_symbol_fresh(spot_symbol, threshold)
+
+    def _is_futures_fresh(self, max_age_ms: int | None = None) -> bool:
+        """Return whether futures feed is fresh enough for trading safety."""
+        threshold = int(max_age_ms or self._tick_stale_threshold_ms)
+        futures_symbol = str(self._readiness_requirements.get("futures") or "")
+        if not futures_symbol:
             return False
-        if atm_ce and bars.get(str(atm_ce), 0) < min_bars:
+        return self._is_symbol_fresh(futures_symbol, threshold)
+
+    def _are_active_options_fresh(self, max_age_ms: int | None = None) -> bool:
+        """Return whether active options feed is fresh enough for trading safety."""
+        threshold = int(max_age_ms or self._tick_stale_threshold_ms)
+        option_symbols = self._active_option_symbols()
+        if not option_symbols:
             return False
-        if atm_pe and bars.get(str(atm_pe), 0) < min_bars:
-            return False
-        if atm_ce and atm_pe:
+        return all(self._is_symbol_fresh(symbol, threshold) for symbol in option_symbols)
+
+    def trading_feed_health(self, max_age_ms: int | None = None) -> dict[str, Any]:
+        """Return trading-critical feed health where spot is advisory only."""
+        threshold = int(max_age_ms or self._tick_stale_threshold_ms)
+        requirements = dict(self._readiness_requirements)
+        spot_symbol = str(requirements.get("spot") or "NSE:NIFTY")
+        futures_symbol = str(requirements.get("futures") or "")
+        option_symbols = self._active_option_symbols()
+        futures_fresh = self._is_futures_fresh(threshold)
+        options_fresh = self._are_active_options_fresh(threshold)
+        spot_fresh = self._is_spot_fresh(threshold)
+        return {
+            "trading_feed_healthy": futures_fresh and options_fresh,
+            "futures_fresh": futures_fresh,
+            "options_fresh": options_fresh,
+            "spot_fresh": spot_fresh,
+            "spot_symbol": spot_symbol,
+            "spot_age_ms": self.symbol_data_age_ms(spot_symbol),
+            "futures_symbol": futures_symbol,
+            "futures_age_ms": self.symbol_data_age_ms(futures_symbol)
+            if futures_symbol
+            else 1_000_000_000,
+            "option_symbols": option_symbols,
+            "threshold_ms": threshold,
+        }
+
+    def ensure_spot_reference_fresh(
+        self,
+        *,
+        symbol: str = "NSE:NIFTY",
+        stale_after_ms: int | None = None,
+        min_refresh_interval_s: float = 3.0,
+    ) -> bool:
+        """Soft-check spot and trigger REST refresh without global fallback."""
+        canonical_symbol = self._canonical_symbol(symbol)
+        threshold = int(stale_after_ms or self._tick_stale_threshold_ms)
+        age_ms = self.symbol_data_age_ms(canonical_symbol)
+        if age_ms <= threshold:
             return True
-        ce_ready = any(
-            sym.endswith("CE") and bars.get(sym, 0) >= min_bars for sym in options
+        self._logger.warning(
+            "spot_quote_stale_soft_warning symbol=%s age_ms=%s threshold_ms=%s",
+            canonical_symbol,
+            age_ms,
+            threshold,
         )
-        pe_ready = any(
-            sym.endswith("PE") and bars.get(sym, 0) >= min_bars for sym in options
-        )
-        return ce_ready and pe_ready
+        now_mono = time.monotonic()
+        if now_mono - self._spot_refresh_last_attempt_mono < max(
+            min_refresh_interval_s, 0.0
+        ):
+            return False
+        self._spot_refresh_last_attempt_mono = now_mono
+        self._logger.info("spot_rest_refresh_attempt symbol=%s", canonical_symbol)
+        self.request_refresh(canonical_symbol)
+        return False
 
     def get_hydration_status(self, symbol: str) -> str:
         """Return hydration status. Args: symbol. Returns: status string. Raises: None."""
