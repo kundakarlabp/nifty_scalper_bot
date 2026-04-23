@@ -6402,6 +6402,35 @@ class TelegramBot:
             poll_line += f" {heart}"
             if not ws_ok and not ws_disabled and poll_tokens == 0:
                 hints.append("Enable polling or subscribe tokens.")
+            mdm_health_line = ""
+            market_data_manager = self.deps.market_data_manager
+            if market_data_manager is not None and hasattr(
+                market_data_manager, "trading_feed_health"
+            ):
+                try:
+                    feed_health = market_data_manager.trading_feed_health()
+                except Exception as exc:  # noqa: BLE001
+                    log.error(
+                        "Failure in cmd_status.trading_feed_health: %s",
+                        exc,
+                        extra={"event": "telegram_cmd_status_feed_health_error"},
+                    )
+                else:
+                    futures_fresh = bool(feed_health.get("futures_fresh"))
+                    options_fresh = bool(feed_health.get("options_fresh"))
+                    spot_fresh = bool(feed_health.get("spot_fresh"))
+                    mdm_health_line = (
+                        f"{EMOJI['data']} Feed: "
+                        f"futures=<b>{'OK' if futures_fresh else 'STALE'}</b> "
+                        f"options=<b>{'OK' if options_fresh else 'STALE'}</b> "
+                        f"spot=<b>{'OK' if spot_fresh else 'STALE (soft)'}</b>"
+                    )
+                    if not futures_fresh or not options_fresh:
+                        hints.append(
+                            "Trading feed degraded (futures/options stale)."
+                        )
+                    elif not spot_fresh:
+                        hints.append("Spot stale (soft); futures/options healthy.")
 
             risk_line = f"{EMOJI['risk']} Risk: <b>n/a</b>"
             risk_snapshot = self._coerce_risk_snapshot()
@@ -6531,6 +6560,8 @@ class TelegramBot:
                     positions_line,
                 ]
             )
+            if mdm_health_line:
+                section_main.insert(4, mdm_health_line)
             reconcile_line, reconcile_hint = self._reconcile_status_line()
             if reconcile_line:
                 section_main.append(reconcile_line)

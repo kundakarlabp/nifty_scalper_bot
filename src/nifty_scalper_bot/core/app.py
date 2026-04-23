@@ -93,21 +93,19 @@ def _build_startup_fingerprint() -> dict[str, str]:
 def _polling_fallback_degraded(
     *,
     ws_ok: bool,
-    stale: bool,
     lagging: bool,
-    quote_age_degraded: bool,
+    futures_fresh: bool,
+    options_fresh: bool,
 ) -> bool:
-    """Evaluate fallback degrade state. Treat stale spot quote age as sufficient degradation on its own.
-    Otherwise NSE:NIFTY can remain symbol-stale forever while other symbols
-    keep the global feed appearing healthy."""
+    """Evaluate fallback degrade state using trading-critical feed health."""
 
     if not ws_ok:
         return True
-    if stale:
-        return True
     if lagging:
         return True
-    if quote_age_degraded:
+    if not futures_fresh:
+        return True
+    if not options_fresh:
         return True
     return False
 
@@ -6090,60 +6088,29 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.websocket_manager is not None and ctx.market_data_manager is not None:
                     async def _polling_failover_supervisor() -> None:
                         """Supervise WS health and toggle polling fallback with hysteresis."""
-                        def _sanitize_quote_age(raw_age: Any) -> tuple[str, int | None]:
-                            """Classify quote freshness age. Args: raw age. Returns: state/age. Raises: none."""
-                            try:
-                                if raw_age is None:
-                                    return ("unknown", None)
-                                age = int(raw_age)
-                            except (TypeError, ValueError):
-                                return ("invalid_sentinel", None)
-                            if age < 0 or age > 60_000_000:
-                                return ("invalid_sentinel", None)
-                            if age <= quote_stale_ms:
-                                return ("fresh", age)
-                            return ("stale", age)
-
                         degraded_since: float | None = None
                         recovered_since: float | None = None
                         activate_after = 3.0
                         recover_cooldown = 10.0
                         quote_stale_ms = 5000
-                        core_symbol = "NSE:NIFTY"
                         while True:
                             try:
                                 ws_ok = bool(ctx.websocket_manager.is_connected())
-                                stale = bool(ctx.market_data_manager.is_data_stale())
-                                spot_age = ctx.market_data_manager.quote_age_ms(core_symbol)
-                                spot_state, sanitized_spot_age = _sanitize_quote_age(spot_age)
-                                quote_age_degraded = spot_state == "stale"
-
-                                if quote_age_degraded:
-                                    LOGGER.warning(
-                                        "spot_quote_stale_triggering_poll_fallback symbol=%s age_ms=%s threshold_ms=%s",
-                                        core_symbol,
-                                        sanitized_spot_age,
-                                        quote_stale_ms,
-                                        extra={
-                                            "event": "spot_quote_stale_triggering_poll_fallback",
-                                            "symbol": core_symbol,
-                                            "age_ms": sanitized_spot_age,
-                                            "threshold_ms": quote_stale_ms,
-                                        },
-                                    )
-                                core_tick_age_ms = ctx.market_data_manager.symbol_data_age_ms(
-                                    core_symbol
+                                feed_health = ctx.market_data_manager.trading_feed_health(
+                                    max_age_ms=quote_stale_ms
                                 )
+                                futures_fresh = bool(feed_health.get("futures_fresh"))
+                                options_fresh = bool(feed_health.get("options_fresh"))
+                                spot_fresh = bool(feed_health.get("spot_fresh"))
+                                spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
+                                spot_age_ms = feed_health.get("spot_age_ms")
                                 auth_tick_age_ms = ctx.market_data_manager.data_age_ms()
-                                lagging = (
-                                    core_tick_age_ms > quote_stale_ms
-                                    and auth_tick_age_ms > quote_stale_ms
-                                )
+                                lagging = auth_tick_age_ms > quote_stale_ms
                                 degraded = _polling_fallback_degraded(
                                     ws_ok=ws_ok,
-                                    stale=stale,
                                     lagging=lagging,
-                                    quote_age_degraded=quote_age_degraded,
+                                    futures_fresh=futures_fresh,
+                                    options_fresh=options_fresh,
                                 )
                                 now_mono = time_module.monotonic()
                                 if degraded:
@@ -6156,38 +6123,39 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         LOGGER.warning(
                                             "Polling fallback activate (supervisor) ws_ok=%s stale=%s lagging=%s spot_quote_age_ms=%s",
                                             ws_ok,
-                                            stale,
+                                            not bool(feed_health.get("trading_feed_healthy")),
                                             lagging,
-                                            sanitized_spot_age,
+                                            spot_age_ms,
                                             extra={
-                                                "event": "polling_fallback_activated",
+                                                "event": "poll_fallback_activate",
                                                 "reason": (
                                                     "ws_disconnected"
                                                     if not ws_ok
-                                                    else "stale_full_basket"
-                                                    if stale
                                                     else "tick_lag"
                                                     if lagging
-                                                    else "stale_spot_quote"
+                                                    else "futures_stale"
+                                                    if not futures_fresh
+                                                    else "options_stale"
                                                 ),
-                                                "spot_state": spot_state,
                                                 "lagging": lagging,
-                                                "core_tick_age_ms": core_tick_age_ms,
+                                                "futures_fresh": futures_fresh,
+                                                "options_fresh": options_fresh,
                                                 "authoritative_age_ms": auth_tick_age_ms,
                                             },
                                         )
                                         polling_fallback.set_websocket_mode(False)
                                         polling_fallback.start()
-                                elif spot_state in {"unknown", "invalid_sentinel"}:
-                                    LOGGER.info(
-                                        "Polling fallback not activated due to non-actionable spot quote age state=%s",
-                                        spot_state,
-                                        extra={
-                                            "event": "polling_fallback_age_ignored",
-                                            "spot_state": spot_state,
-                                        },
-                                    )
                                 else:
+                                    if not spot_fresh:
+                                        ctx.market_data_manager.ensure_spot_reference_fresh(
+                                            symbol=spot_symbol,
+                                            stale_after_ms=quote_stale_ms,
+                                        )
+                                        LOGGER.info(
+                                            "poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s",
+                                            spot_symbol,
+                                            spot_age_ms,
+                                        )
                                     degraded_since = None
                                     recovered_since = recovered_since or now_mono
                                     if (
@@ -6498,22 +6466,55 @@ async def startup_sequence(ctx: BotContext) -> None:
                         try:
                             await ctx.market_data_manager.wait_until_ready(timeout=30.0)
                             readiness_ready = bool(ctx.market_data_manager.ready)
+                            readiness_state = (
+                                ctx.market_data_manager.readiness_state_snapshot()
+                            )
+                            hard_ready = bool(readiness_state.get("hard_ready"))
+                            spot_ready = bool(readiness_state.get("spot_ready"))
+                            missing_hard = list(readiness_state.get("missing_hard") or [])
                             if ctx.market_regime_manager is not None:
                                 ctx.market_regime_manager.indicators_ready = readiness_ready
                             if ctx.data_hub is not None:
                                 ctx.data_hub.indicators_ready = readiness_ready
-                            LOGGER.info(
-                                "Condition met: startup_pipeline_ready",
-                                extra={
-                                    "event": "startup_pipeline_ready",
-                                    "readiness_ready": readiness_ready,
-                                    "ws_connected": bool(
-                                        ctx.websocket_manager.is_connected()
-                                        if ctx.websocket_manager is not None
-                                        else False
-                                    ),
-                                },
+                            ws_connected = bool(
+                                ctx.websocket_manager.is_connected()
+                                if ctx.websocket_manager is not None
+                                else False
                             )
+                            if readiness_ready and spot_ready:
+                                LOGGER.info(
+                                    "Condition met: startup_pipeline_ready",
+                                    extra={
+                                        "event": "startup_pipeline_ready",
+                                        "readiness_ready": readiness_ready,
+                                        "ws_connected": ws_connected,
+                                    },
+                                )
+                            elif hard_ready:
+                                LOGGER.warning(
+                                    "startup_pipeline_ready_degraded spot_ready=%s",
+                                    spot_ready,
+                                    extra={
+                                        "event": "startup_pipeline_ready_degraded",
+                                        "hard_ready": hard_ready,
+                                        "spot_ready": spot_ready,
+                                        "timed_out": not readiness_ready,
+                                        "ws_connected": ws_connected,
+                                    },
+                                )
+                            else:
+                                LOGGER.error(
+                                    "startup_pipeline_incomplete missing=%s",
+                                    ",".join(missing_hard) if missing_hard else "unknown",
+                                    extra={
+                                        "event": "startup_pipeline_incomplete",
+                                        "hard_ready": hard_ready,
+                                        "spot_ready": spot_ready,
+                                        "timed_out": not readiness_ready,
+                                        "missing": missing_hard,
+                                        "ws_connected": ws_connected,
+                                    },
+                                )
                         except Exception as ready_exc:
                             LOGGER.critical(
                                 "Startup readiness gate failed: %s",
