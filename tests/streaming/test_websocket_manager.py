@@ -272,3 +272,31 @@ def test_subscribe_tokens_wrapper_unions_and_delegates(
     manager.subscribe_tokens([20, 30])
 
     assert manager._tokens == {10, 20, 30}  # noqa: SLF001
+
+
+def test_unsubscribe_tokens_wrapper_subtracts_and_delegates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    manager = ws_module.WebSocketManager(
+        "k", "t", [10, 20, 30], trading_window_enabled=False
+    )
+
+    manager.unsubscribe_tokens([20, 99])
+
+    assert manager._tokens == {10, 30}  # noqa: SLF001
+
+
+def test_resubscribe_delegates_to_set_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    manager = ws_module.WebSocketManager("k", "t", [1], trading_window_enabled=False)
+    called: list[list[int]] = []
+
+    def _set_tokens(tokens: list[int]) -> bool:
+        called.append(list(tokens))
+        return True
+
+    manager.set_tokens = _set_tokens  # type: ignore[method-assign]
+    manager.resubscribe([1, 2, 2])
+
+    assert called == [[1, 2, 2]]

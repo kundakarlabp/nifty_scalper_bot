@@ -4474,6 +4474,11 @@ class TelegramBot:
             return self._supervisor
         return getattr(self.deps, "stream_supervisor", None)
 
+    def _market_data_manager(self) -> t.Any | None:
+        """Return MarketDataManager dependency if available."""
+
+        return getattr(self.deps, "market_data_manager", None)
+
     def _fmt_age(self, seconds: float | None) -> str:
         """Return a compact age string for transport diagnostics.
 
@@ -4979,24 +4984,33 @@ class TelegramBot:
                 return 0
         return 0
 
-    def _streamer_subscribe(self, streamer: t.Any, tokens: t.Sequence[int]) -> None:
-        handler = getattr(streamer, "subscribe_tokens", None)
-        if callable(handler):
-            handler(tokens)
-            return
-        handler = getattr(streamer, "subscribe", None)
-        if callable(handler):
-            handler(tokens)
-            return
-        raise RuntimeError("Polling streamer does not support subscribe")
+    def _mdm_subscribe_tokens(self, tokens: t.Sequence[int]) -> tuple[int, int]:
+        """Route token additions through MarketDataManager."""
 
-    def _streamer_unsubscribe(self, streamer: t.Any, tokens: t.Sequence[int]) -> None:
-        for name in ("unsubscribe_tokens", "unsubscribe"):
-            handler = getattr(streamer, name, None)
-            if callable(handler):
-                handler(tokens)
-                return
-        raise RuntimeError("Polling streamer does not support unsubscribe")
+        normalized = sorted({int(token) for token in tokens if int(token) > 0})
+        if not normalized:
+            mdm = self._market_data_manager()
+            total = int(mdm.desired_token_count()) if mdm is not None else 0
+            return (0, total)
+        mdm = self._market_data_manager()
+        if mdm is None:
+            return (-1, 0)
+        changed = int(mdm.request_token_subscriptions(normalized))
+        return (changed, int(mdm.desired_token_count()))
+
+    def _mdm_unsubscribe_tokens(self, tokens: t.Sequence[int]) -> tuple[int, int]:
+        """Route token removals through MarketDataManager."""
+
+        normalized = sorted({int(token) for token in tokens if int(token) > 0})
+        if not normalized:
+            mdm = self._market_data_manager()
+            total = int(mdm.desired_token_count()) if mdm is not None else 0
+            return (0, total)
+        mdm = self._market_data_manager()
+        if mdm is None:
+            return (-1, 0)
+        changed = int(mdm.request_token_unsubscriptions(normalized))
+        return (changed, int(mdm.desired_token_count()))
 
     # ------------------------------------------------------------------
     # Consistent composer: render sections without multiplying <br> tags.
@@ -7811,88 +7825,41 @@ class TelegramBot:
         if not tokens and not symbols:
             await self._reply(chat, ctx, "Usage: /subscribe SYMBOL|TOKEN [MORE]")
             return
-        ws = self.deps.websocket_manager
-        if ws is None:
-            supervisor = self._stream_supervisor()
-            streamer = self._polling_streamer()
-            if supervisor is None and streamer is None:
-                await self._reply(chat, ctx, "Polling streamer not available")
-                return
-            try:
-                lines: list[str] = []
-                unresolved: list[str] = []
-                resolved_pairs: list[str] = []
-                added = 0
-                combined_tokens = list(tokens)
-                if supervisor is not None and symbols:
-                    resolver = getattr(supervisor, "resolve_symbols", None)
-                    if callable(resolver):
-                        resolved_tokens, unresolved, mapping = resolver(symbols)
-                        combined_tokens.extend(resolved_tokens)
-                        resolved_pairs = [
-                            f"{symbol}->{mapping[symbol]}" for symbol in mapping
-                        ]
-                    else:
-                        unresolved = list(symbols)
-                elif symbols:
-                    unresolved = list(symbols)
+        supervisor = self._stream_supervisor()
+        lines: list[str] = []
+        unresolved: list[str] = []
+        resolved_pairs: list[str] = []
+        combined_tokens = list(tokens)
+        if supervisor is not None and symbols:
+            resolver = getattr(supervisor, "resolve_symbols", None)
+            if callable(resolver):
+                resolved_tokens, unresolved, mapping = resolver(symbols)
+                combined_tokens.extend(resolved_tokens)
+                resolved_pairs = [f"{symbol}->{mapping[symbol]}" for symbol in mapping]
+            else:
+                unresolved = list(symbols)
+        elif symbols:
+            unresolved = list(symbols)
 
-                if supervisor is not None:
-                    token_count = getattr(supervisor, "token_count", None)
-                    if callable(token_count):
-                        before = int(token_count())
-                    else:
-                        before = len(
-                            getattr(supervisor, "tracked_tokens", lambda: [])()
-                        )
-                    unique_tokens = sorted({int(token) for token in combined_tokens})
-                    after = supervisor.subscribe_tokens(unique_tokens)
-                    added = max(0, int(after) - before)
-                    with suppress(Exception):
-                        supervisor.ensure_started()
-                    status_line = ""
-                    with suppress(Exception):
-                        status_line = str(supervisor.status_line())
-                    if added > 0:
-                        lines.append(f"Added {added} token(s).")
-                    elif unique_tokens:
-                        lines.append("No new tokens added (already tracking).")
-                    if resolved_pairs:
-                        lines.append(f"Resolved: {', '.join(resolved_pairs)}")
-                    if unresolved:
-                        lines.append(f"Unresolved: {', '.join(unresolved)}")
-                    if invalid:
-                        lines.append(f"Ignored: {', '.join(invalid)}")
-                    if not status_line:
-                        status_line = str(
-                            self._polling_snapshot().get("status") or "n/a"
-                        )
-                    lines.append(f"Poll: {status_line}")
-                    await self._reply(chat, ctx, "\n".join(lines))
-                    return
-                self._streamer_subscribe(streamer, tokens)
-                count = self._streamer_token_count(streamer)
-            except Exception as exc:  # noqa: BLE001
-                await self._reply(chat, ctx, f"Subscribe failed: {exc}")
-                return
-            message = f"Subscribed {len(tokens)} token(s). Now tracking {count}."
-            if invalid:
-                message += f" (ignored: {', '.join(invalid)})"
-            if symbols:
-                message += f" (symbols ignored: {', '.join(symbols)})"
-            await self._reply(chat, ctx, message)
+        changed, desired_total = self._mdm_subscribe_tokens(combined_tokens)
+        if changed < 0:
+            await self._reply(chat, ctx, "MarketDataManager unavailable for subscription.")
             return
-        try:
-            await asyncio.to_thread(ws.subscribe, tokens)
-        except Exception as exc:
-            await self._reply(chat, ctx, f"Subscribe failed: {exc}")
-            return
-        message = f"Queued subscribe for tokens: {', '.join(map(str, tokens))}"
+        if supervisor is not None:
+            with suppress(Exception):
+                supervisor.ensure_started()
+        if changed > 0:
+            lines.append(f"Tracked via MarketDataManager: added {changed} token(s).")
+        elif combined_tokens:
+            lines.append("Already tracked in MarketDataManager.")
+        if resolved_pairs:
+            lines.append(f"Resolved: {', '.join(resolved_pairs)}")
+        if unresolved:
+            lines.append(f"Unresolved: {', '.join(unresolved)}")
         if invalid:
-            message += f" (ignored: {', '.join(invalid)})"
-        if symbols:
-            message += f" (symbols ignored: {', '.join(symbols)})"
-        await self._reply(chat, ctx, message)
+            lines.append(f"Ignored: {', '.join(invalid)}")
+        lines.append(f"Current desired token count: {desired_total}")
+        await self._reply(chat, ctx, "\n".join(lines))
 
     async def cmd_unsubscribe(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
@@ -7904,51 +7871,23 @@ class TelegramBot:
         if not tokens:
             await self._reply(chat, ctx, "Usage: /unsubscribe TOKEN[,TOKEN]")
             return
-        ws = self.deps.websocket_manager
-        if ws is None:
-            supervisor = self._stream_supervisor()
-            streamer = self._polling_streamer()
-            if supervisor is None and streamer is None:
-                await self._reply(chat, ctx, "Polling streamer not available")
-                return
-            try:
-                if supervisor is not None:
-                    count = supervisor.unsubscribe_tokens(tokens)
-                    status_line = ""
-                    with suppress(Exception):
-                        status_line = str(supervisor.status_line())
-                    message_lines = [
-                        f"Unsubscribed {len(tokens)} token(s). Now tracking {count}.",
-                    ]
-                    if invalid:
-                        message_lines.append(f"Ignored: {', '.join(invalid)}")
-                    if not status_line:
-                        status_line = str(
-                            self._polling_snapshot().get("status") or "n/a"
-                        )
-                    message_lines.append(f"Poll: {status_line}")
-                    await self._reply(chat, ctx, "\n".join(message_lines))
-                    return
-                else:
-                    self._streamer_unsubscribe(streamer, tokens)
-                    count = self._streamer_token_count(streamer)
-            except Exception as exc:  # noqa: BLE001
-                await self._reply(chat, ctx, f"Unsubscribe failed: {exc}")
-                return
-            message = f"Unsubscribed {len(tokens)} token(s). Now tracking {count}."
-            if invalid:
-                message += f" (ignored: {', '.join(invalid)})"
-            await self._reply(chat, ctx, message)
+        changed, desired_total = self._mdm_unsubscribe_tokens(tokens)
+        if changed < 0:
+            await self._reply(
+                chat, ctx, "MarketDataManager unavailable for unsubscription."
+            )
             return
-        try:
-            await asyncio.to_thread(ws.unsubscribe, tokens)
-        except Exception as exc:
-            await self._reply(chat, ctx, f"Unsubscribe failed: {exc}")
-            return
-        message = f"Queued unsubscribe for tokens: {', '.join(map(str, tokens))}"
+        lines: list[str] = []
+        if changed > 0:
+            lines.append(
+                f"Removed from desired subscription set: {changed} token(s)."
+            )
+        else:
+            lines.append("No matching desired subscriptions found.")
         if invalid:
-            message += f" (ignored: {', '.join(invalid)})"
-        await self._reply(chat, ctx, message)
+            lines.append(f"Ignored: {', '.join(invalid)}")
+        lines.append(f"Current desired token count: {desired_total}")
+        await self._reply(chat, ctx, "\n".join(lines))
 
     @command_meta("/sub N[,N]", "Subscribe tokens (alias of /subscribe).")
     async def cmd_sub(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:  # type: ignore[override]

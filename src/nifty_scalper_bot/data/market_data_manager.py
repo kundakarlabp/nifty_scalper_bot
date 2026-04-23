@@ -1212,6 +1212,26 @@ class MarketDataManager:
             self._reconcile_ws_subscriptions()
         return added_count
 
+    def request_token_unsubscriptions(self, tokens: Iterable[int]) -> int:
+        """Record token removal intents. Args: tokens. Returns: number of removed tokens. Raises: none."""
+
+        normalized = {int(token) for token in tokens if int(token) > 0}
+        if not normalized:
+            return 0
+        with self._lock:
+            before = len(self._desired_tokens)
+            self._desired_tokens.difference_update(normalized)
+            removed_count = before - len(self._desired_tokens)
+            for token in normalized:
+                mapped_symbol = self._token_to_symbol.pop(token, None)
+                if mapped_symbol is not None:
+                    current = self._symbol_to_token.get(mapped_symbol)
+                    if current == token:
+                        self._symbol_to_token.pop(mapped_symbol, None)
+        if removed_count > 0:
+            self._reconcile_ws_subscriptions()
+        return removed_count
+
     def request_token_unsubscription(
         self,
         token: int,
@@ -1231,13 +1251,32 @@ class MarketDataManager:
             if token_int in self._desired_tokens:
                 self._desired_tokens.discard(token_int)
                 changed = True
-            if normalized_symbol and self._symbol_to_token.pop(normalized_symbol, None) is not None:
-                changed = True
-            if self._token_to_symbol.pop(token_int, None) is not None:
+            if normalized_symbol:
+                current = self._symbol_to_token.get(normalized_symbol)
+                if current == token_int:
+                    self._symbol_to_token.pop(normalized_symbol, None)
+                    changed = True
+            mapped_symbol = self._token_to_symbol.pop(token_int, None)
+            if mapped_symbol is not None:
+                current = self._symbol_to_token.get(mapped_symbol)
+                if current == token_int:
+                    self._symbol_to_token.pop(mapped_symbol, None)
                 changed = True
         if changed:
             self._reconcile_ws_subscriptions()
         return changed
+
+    def desired_token_count(self) -> int:
+        """Return desired token count. Args: none. Returns: token count. Raises: none."""
+
+        with self._lock:
+            return len(self._desired_tokens)
+
+    def desired_tokens_snapshot(self) -> list[int]:
+        """Return sorted desired tokens. Args: none. Returns: tokens list. Raises: none."""
+
+        with self._lock:
+            return sorted(self._desired_tokens)
 
     def request_symbol_unsubscription(self, symbol: str) -> bool:
         """Record symbol removal intent. Args: symbol. Returns: changed flag. Raises: none."""
