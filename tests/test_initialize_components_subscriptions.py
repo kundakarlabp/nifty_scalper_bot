@@ -31,6 +31,18 @@ def test_startup_tracking_is_deferred_without_immediate_subscription() -> None:
     assert 'mdm.ensure_tracking(' in source
 
 
+def test_startup_listener_subscriptions_flush_after_universe_prep() -> None:
+    source = inspect.getsource(core_app)
+
+    assert 'data_hub.subscribe_ticks(regime_symbol, callback)' in source
+    assert 'data_hub.subscribe_ticks(risk_symbol, _risk_state_tick_listener)' in source
+    assert 'ctx.data_hub.flush_pending_live_subscriptions()' in source
+
+    flush_idx = source.index('ctx.data_hub.flush_pending_live_subscriptions()')
+    token_idx = source.index('mdm.request_token_subscriptions(tokens_to_poll)')
+    assert flush_idx < token_idx
+
+
 def test_market_data_manager_supports_optional_subscription_during_tracking() -> None:
     source = Path(
         'src/nifty_scalper_bot/data/market_data_manager.py'

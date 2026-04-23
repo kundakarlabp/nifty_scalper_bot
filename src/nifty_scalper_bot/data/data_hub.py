@@ -130,6 +130,10 @@ class DataHub:
         self._tick_subscribers: Dict[str, set[TickListener]] = defaultdict(set)
         self._order_subscribers: list[OrderListener] = []
         self._mdm_subscribed_symbols: set[str] = set()
+        self._defer_live_symbol_subscriptions = bool(
+            kwargs.get("defer_live_symbol_subscriptions", True)
+        )
+        self._pending_live_symbols: set[str] = set()
 
         self._last_ts: Dict[str, float] = {}
         self._last_arrival: Dict[str, float] = {}
@@ -650,6 +654,32 @@ class DataHub:
         if callable(mdm_sub):
             mdm_sub(symbol, self.ingest_tick_sync)
             self._mdm_subscribed_symbols.add(symbol)
+            LOGGER.info(
+                "datahub_live_symbol_subscribed symbol=%s",
+                symbol,
+                extra={"event": "datahub_live_symbol_subscribed", "symbol": symbol},
+            )
+
+    def flush_pending_live_subscriptions(self) -> int:
+        """Activate deferred live subscriptions. Args: none. Returns: flush count. Raises: none."""
+        pending_symbols = sorted(self._pending_live_symbols)
+        self._defer_live_symbol_subscriptions = False
+        if not pending_symbols:
+            LOGGER.info(
+                "datahub_live_symbol_flush count=0",
+                extra={"event": "datahub_live_symbol_flush", "count": 0},
+            )
+            return 0
+
+        LOGGER.info(
+            "datahub_live_symbol_flush count=%d",
+            len(pending_symbols),
+            extra={"event": "datahub_live_symbol_flush", "count": len(pending_symbols)},
+        )
+        for symbol in pending_symbols:
+            self._subscribe_symbol(symbol)
+        self._pending_live_symbols.clear()
+        return len(pending_symbols)
 
     def subscribe_ticks(self, symbol: str, callback: Optional[TickListener] = None):
         normalized = self._canonical_quote_symbol(symbol)
@@ -657,7 +687,18 @@ class DataHub:
             return
         if callback is not None:
             self._tick_subscribers[normalized].add(callback)
-        self._subscribe_symbol(normalized)
+        if self._defer_live_symbol_subscriptions:
+            self._pending_live_symbols.add(normalized)
+            LOGGER.info(
+                "datahub_symbol_registered_deferred symbol=%s",
+                normalized,
+                extra={
+                    "event": "datahub_symbol_registered_deferred",
+                    "symbol": normalized,
+                },
+            )
+        else:
+            self._subscribe_symbol(normalized)
         if callback is not None:
             quote = self.get_quote(normalized, allow_pull=True)
             if quote is not None:
@@ -676,6 +717,7 @@ class DataHub:
         if callback is not None and callback in self._tick_subscribers.get(normalized, set()):
             self._tick_subscribers[normalized].remove(callback)
         if not self._tick_subscribers.get(normalized):
+            self._pending_live_symbols.discard(normalized)
             self._mdm_subscribed_symbols.discard(normalized)
             mdm_unsub = getattr(self._mdm, "unsubscribe", None)
             if callable(mdm_unsub):
