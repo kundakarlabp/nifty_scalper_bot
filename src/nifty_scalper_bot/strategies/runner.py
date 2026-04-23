@@ -5036,20 +5036,6 @@ class StrategyRunner:
                                 "state": current_state.value,
                             },
                         )
-                        if last_bar_ts is not None:
-                            candle_age_seconds = (
-                                datetime.now(timezone.utc) - last_bar_ts
-                            ).total_seconds()
-                            if candle_age_seconds > 2:
-                                self._logger.warning(
-                                    "Stale data detected. Skipping signal.",
-                                    extra={
-                                        "event": "stale_data_detected",
-                                        "symbol": symbol,
-                                        "candle_age_seconds": candle_age_seconds,
-                                    },
-                                )
-                                return
                         try:
                             # --- Objective 2: Block signals if market depth insufficient ---
                             if not self.validate_market_depth():

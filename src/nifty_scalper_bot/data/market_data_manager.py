@@ -4147,12 +4147,15 @@ class MarketDataManager:
                 exc_info=exc,
             )
             return []
-    def ensure_tracking(self, symbol: str, *, seed: bool = True) -> bool:
+    def ensure_tracking(
+        self, symbol: str, *, seed: bool = True, subscribe: bool = True
+    ) -> bool:
         """Ensure *symbol* is tracked for REST polling and optional seeding.
 
         Args:
             symbol: Trading symbol identifier to watch.
             seed: Flag indicating whether to seed the cache from broker REST.
+            subscribe: Whether to request WS subscription intent for symbol.
 
         Returns:
             ``True`` when the symbol was accepted for tracking, else ``False``.
@@ -4181,6 +4184,8 @@ class MarketDataManager:
                 "Condition met: mdm_tracking_added",
                 extra={"event": "mdm_tracking_added", "symbol": sym},
             )
+            if subscribe and self._is_ws_healthy():
+                self.request_symbol_subscription(sym)
             if seed and not self._seed_completed and not self._is_ws_healthy():
                 if sym not in self._seeded_symbols:
                     seeded = self._seed_quote_from_broker(sym)
