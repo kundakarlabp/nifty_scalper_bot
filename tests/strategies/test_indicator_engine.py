@@ -310,6 +310,34 @@ def test_non_option_avg_volume_keeps_standard_average(engine: IndicatorEngine) -
     assert indicators['avg_volume'] == pytest.approx(sum(volumes) / len(volumes))
 
 
+def test_old_provisional_bar_outside_tail_does_not_block_readiness(
+    engine: IndicatorEngine,
+) -> None:
+    symbol = 'NSE:NIFTY'
+    for idx in range(6):
+        engine.update_price(
+            symbol,
+            {'open': 200 + idx, 'high': 201 + idx, 'low': 199 + idx, 'close': 200 + idx},
+            volume=10,
+            timestamp=datetime(2024, 1, 1, 2, idx, tzinfo=timezone.utc),
+            is_provisional=idx == 0,
+        )
+    assert engine.has_min_bars(symbol, 5) is True
+
+
+def test_provisional_bar_inside_tail_blocks_readiness(engine: IndicatorEngine) -> None:
+    symbol = 'NSE:NIFTY'
+    for idx in range(6):
+        engine.update_price(
+            symbol,
+            {'open': 300 + idx, 'high': 301 + idx, 'low': 299 + idx, 'close': 300 + idx},
+            volume=10,
+            timestamp=datetime(2024, 1, 1, 3, idx, tzinfo=timezone.utc),
+            is_provisional=idx == 5,
+        )
+    assert engine.has_min_bars(symbol, 5) is False
+
+
 def _atr_reference(
     highs: list[float], lows: list[float], closes: list[float], period: int
 ) -> float:
