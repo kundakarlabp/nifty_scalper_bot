@@ -222,51 +222,86 @@ def _emit_option_symbol_pipeline_status(
         trace_id = f"{symbol}-{_time_module.monotonic_ns()}"
     except Exception:  # noqa: BLE001
         trace_id = f"{symbol}-pipeline"
-    # DataHub subscription state
-    datahub_subscribed = False
-    try:
-        dh = getattr(ctx, "data_hub", None)
-        if dh is not None:
-            datahub_subscribed = symbol in getattr(dh, "_mdm_subscribed_symbols", set())
-    except Exception:  # pragma: no cover - defensive
-        pass
-    # MDM tracking state + last-tick age
-    mdm_tracking = False
+    dh = getattr(ctx, "data_hub", None)
+    mdm = getattr(ctx, "market_data_manager", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    computed_runner_added = bool(runner_added)
+    runner_history_count = 0
+    datahub_callback_registered = False
+    datahub_mdm_delegate_subscribed = False
+    mdm_tracked = False
+    mdm_has_subscriber = False
+    mdm_active_subscribed = False
+    broker_ws_token_requested = False
+    broker_ws_token_active = False
     live_tick_seen = False
-    try:
-        mdm = getattr(ctx, "market_data_manager", None)
-        if mdm is not None:
-            mdm_tracking = symbol in getattr(mdm, "_subscribers", {})
+    last_tick_age_s: float | None = None
+    if runner is not None:
+        try:
+            computed_runner_added = computed_runner_added or (
+                symbol in getattr(runner, "_active_symbols", set())
+            )
+            runner_engine = getattr(runner, "_indicator_engine", None)
+            if runner_engine is not None:
+                runner_history_count = len(runner_engine.get_history(symbol) or [])
+        except Exception:
+            pass
+    if dh is not None:
+        try:
+            datahub_callback_registered = bool(
+                getattr(dh, "_tick_subscribers", {}).get(symbol)
+            )
+            datahub_mdm_delegate_subscribed = symbol in getattr(
+                dh, "_mdm_subscribed_symbols", set()
+            )
+        except Exception:
+            pass
+    if mdm is not None:
+        try:
+            mdm_tracked = symbol in getattr(mdm, "_tracked_symbols", set())
+            mdm_has_subscriber = symbol in getattr(mdm, "_subscribers", {})
+            mdm_active_subscribed = symbol in getattr(
+                mdm, "_active_subscribed_symbols", set()
+            )
             last_tick_map = getattr(mdm, "_last_tick_time", {}) or {}
             last_tick = last_tick_map.get(symbol)
             if isinstance(last_tick, (int, float)) and last_tick > 0:
                 live_tick_seen = True
-    except Exception:  # pragma: no cover - defensive
-        pass
-    # Runner state
-    runner_active = False
-    indicators_ready_local = False
-    evaluation_seen = False
-    try:
-        runner = getattr(ctx, "strategy_runner", None)
-        if runner is not None:
-            runner_active = symbol in getattr(runner, "_active_symbols", set())
-            indicators_ready_local = symbol in getattr(runner, "_live_bar_seen", set())
-            evaluation_seen = symbol in getattr(
-                runner, "_warmup_complete_logged", set()
+                last_tick_age_s = max(0.0, _time_module.time() - float(last_tick))
+            token_candidates = (
+                getattr(mdm, "_subscribed_tokens", set()),
+                getattr(mdm, "_requested_tokens", set()),
+                getattr(mdm, "_active_tokens", set()),
+                getattr(mdm, "_desired_tokens", set()),
             )
-    except Exception:  # pragma: no cover - defensive
-        pass
+            if token is not None:
+                broker_ws_token_requested = any(token in s for s in token_candidates)
+                broker_ws_token_active = any(
+                    token in s
+                    for s in (
+                        getattr(mdm, "_subscribed_tokens", set()),
+                        getattr(mdm, "_active_tokens", set()),
+                    )
+                )
+        except Exception:
+            pass
     LOGGER.info(
-        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s bars=%s runner_added=%s datahub_subscribed=%s mdm_tracking=%s live_tick_seen=%s",
+        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s hydrated_bars=%s runner_added=%s runner_history_count=%s datahub_callback_registered=%s datahub_mdm_delegate_subscribed=%s mdm_tracked=%s mdm_has_subscriber=%s mdm_active_subscribed=%s broker_ws_token_requested=%s broker_ws_token_active=%s live_tick_seen=%s last_tick_age_s=%s",
         symbol,
         token,
         selected,
         hydrated_bars,
-        runner_added,
-        datahub_subscribed,
-        mdm_tracking,
+        computed_runner_added,
+        runner_history_count,
+        datahub_callback_registered,
+        datahub_mdm_delegate_subscribed,
+        mdm_tracked,
+        mdm_has_subscriber,
+        mdm_active_subscribed,
+        broker_ws_token_requested,
+        broker_ws_token_active,
         live_tick_seen,
+        last_tick_age_s,
         extra={
             "event": "OPTION_SYMBOL_PIPELINE_STATUS",
             "symbol": symbol,
@@ -274,12 +309,17 @@ def _emit_option_symbol_pipeline_status(
             "trace_id": trace_id,
             "selected": selected,
             "hydrated_bars": hydrated_bars,
-            "runner_added": runner_added,
-            "datahub_subscribed": datahub_subscribed,
-            "mdm_tracking": mdm_tracking,
+            "runner_added": computed_runner_added,
+            "runner_history_count": runner_history_count,
+            "datahub_callback_registered": datahub_callback_registered,
+            "datahub_mdm_delegate_subscribed": datahub_mdm_delegate_subscribed,
+            "mdm_tracked": mdm_tracked,
+            "mdm_has_subscriber": mdm_has_subscriber,
+            "mdm_active_subscribed": mdm_active_subscribed,
+            "broker_ws_token_requested": broker_ws_token_requested,
+            "broker_ws_token_active": broker_ws_token_active,
             "live_tick_seen": live_tick_seen,
-            "indicators_ready_local": indicators_ready_local,
-            "evaluation_seen": evaluation_seen,
+            "last_tick_age_s": last_tick_age_s,
             "source": source,
             "reason": reason,
         },
@@ -6162,16 +6202,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if hasattr(runner, "mark_ready"):
                     runner.mark_ready(ready_symbols)
                     LOGGER.info(
-                        "RUNNER_READY_MARKED symbols_count=%d symbols=%s min_required_bars=%d skipped_symbols=%s skipped_reasons=%s",
-                        len(ready_symbols),
+                        "RUNNER_READY_MARKED symbol_count=%d ready_symbols=%s skipped_symbols=%s skipped_reasons=%s min_required_bars=%d",
+                        len(readiness_symbols),
                         ready_symbols,
-                        min_required_bars,
                         skipped_symbols,
                         skipped_reasons,
+                        min_required_bars,
                         extra={
                             "event": "RUNNER_READY_MARKED",
-                            "symbols_count": len(ready_symbols),
-                            "symbols": ready_symbols,
+                            "symbol_count": len(readiness_symbols),
+                            "ready_symbols": ready_symbols,
                             "min_required_bars": min_required_bars,
                             "skipped_symbols": skipped_symbols,
                             "skipped_reasons": skipped_reasons,
@@ -6330,6 +6370,36 @@ async def startup_sequence(ctx: BotContext) -> None:
                         token=int(tok),
                         source="startup",
                     )
+                    LOGGER.info(
+                        "LIVE_SYMBOL_WIRED symbol=%s token=%s mdm_tracked=%s broker_ws_token_requested=%s runner_callback_registered=%s success=%s reason=%s",
+                        sym,
+                        int(tok),
+                        sym in getattr(mdm, "_tracked_symbols", set()) if mdm else False,
+                        int(tok) in getattr(mdm, "_requested_tokens", set()) if mdm else False,
+                        bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(sym))
+                        if ctx.data_hub is not None
+                        else False,
+                        True,
+                        "startup",
+                        extra={
+                            "event": "LIVE_SYMBOL_WIRED",
+                            "symbol": sym,
+                            "token": int(tok),
+                            "mdm_tracked": (
+                                sym in getattr(mdm, "_tracked_symbols", set()) if mdm else False
+                            ),
+                            "broker_ws_token_requested": (
+                                int(tok) in getattr(mdm, "_requested_tokens", set()) if mdm else False
+                            ),
+                            "runner_callback_registered": (
+                                bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(sym))
+                                if ctx.data_hub is not None
+                                else False
+                            ),
+                            "success": True,
+                            "reason": "startup",
+                        },
+                    )
                 else:
                     unresolved_symbols.append(sym)
                     LOGGER.warning(
@@ -6382,6 +6452,58 @@ async def startup_sequence(ctx: BotContext) -> None:
                     extra={
                         "event": "startup_deferred_listener_subscriptions_flushed",
                         "count": deferred_flush_count,
+                    },
+                )
+            if ctx.market_data_manager is not None:
+                last_tick_map = getattr(ctx.market_data_manager, "_last_tick_time", {}) or {}
+                live_tick_seen_count = sum(
+                    1
+                    for _sym in targets
+                    if isinstance(last_tick_map.get(_sym), (int, float))
+                    and float(last_tick_map.get(_sym, 0.0)) > 0
+                )
+                LOGGER.info(
+                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d broker_ws_token_count=%d live_tick_seen_count=%d",
+                    len(targets),
+                    len(active_symbol_tokens),
+                    len(getattr(ctx.market_data_manager, "_tracked_symbols", set())),
+                    len(getattr(ctx.market_data_manager, "_subscribers", {})),
+                    sum(
+                        1
+                        for _sym in targets
+                        if bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(_sym))
+                    )
+                    if ctx.data_hub is not None
+                    else 0,
+                    len(
+                        getattr(ctx.market_data_manager, "_requested_tokens", set())
+                        or getattr(ctx.market_data_manager, "_subscribed_tokens", set())
+                    ),
+                    live_tick_seen_count,
+                    extra={
+                        "event": "LIVE_WIRING_FINAL_STATUS",
+                        "symbols_count": len(targets),
+                        "tokens_count": len(active_symbol_tokens),
+                        "mdm_tracked_count": len(
+                            getattr(ctx.market_data_manager, "_tracked_symbols", set())
+                        ),
+                        "mdm_subscriber_count": len(
+                            getattr(ctx.market_data_manager, "_subscribers", {})
+                        ),
+                        "datahub_callback_symbols_count": (
+                            sum(
+                                1
+                                for _sym in targets
+                                if bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(_sym))
+                            )
+                            if ctx.data_hub is not None
+                            else 0
+                        ),
+                        "broker_ws_token_count": len(
+                            getattr(ctx.market_data_manager, "_requested_tokens", set())
+                            or getattr(ctx.market_data_manager, "_subscribed_tokens", set())
+                        ),
+                        "live_tick_seen_count": live_tick_seen_count,
                     },
                 )
 
@@ -6555,14 +6677,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                         if pending_runner_symbols and ctx.strategy_runner and ctx.market_data_manager:
                             still_pending: set[str] = set()
                             for _psym in list(pending_runner_symbols):
-                                _bars = len(ctx.market_data_manager.get_ohlc_bars(_psym) or [])
-                                if _bars >= _symbol_history_requirement(ctx):
+                                _mdm_bars = len(ctx.market_data_manager.get_ohlc_bars(_psym) or [])
+                                _runner_bars = 0
+                                try:
+                                    _runner_engine = getattr(ctx.strategy_runner, "_indicator_engine", None)
+                                    if _runner_engine is not None:
+                                        _runner_bars = len(_runner_engine.get_history(_psym) or [])
+                                except Exception:
+                                    _runner_bars = 0
+                                if _runner_bars >= _symbol_history_requirement(ctx):
                                     LOGGER.info(
-                                        "RUNNER_SYMBOL_STATUS symbol=%s token=%s added_to_runner=%s bars=%d required_bars=%d history_ready=%s source=%s reason=%s",
+                                        "RUNNER_SYMBOL_STATUS symbol=%s token=%s added_to_runner=%s runner_bars=%d mdm_bars=%d required_bars=%d history_ready=%s source=%s reason=%s",
                                         _psym,
                                         active_symbol_tokens.get(_psym),
                                         True,
-                                        _bars,
+                                        _runner_bars,
+                                        _mdm_bars,
                                         _symbol_history_requirement(ctx),
                                         True,
                                         "dynamic_universe",
@@ -6570,7 +6700,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         extra={
                                             "event": "RUNNER_SYMBOL_STATUS",
                                             "symbol": _psym,
-                                            "bars": _bars,
+                                            "runner_bars": _runner_bars,
+                                            "mdm_bars": _mdm_bars,
                                             "token": active_symbol_tokens.get(_psym),
                                             "added_to_runner": True,
                                             "required_bars": _symbol_history_requirement(ctx),
@@ -6636,8 +6767,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
 
                         for sym in add_symbols:
+                            runner_callback_registered = False
+                            mdm_tracked = False
+                            broker_ws_token_requested = False
                             if ctx.market_data_manager:
                                 ctx.market_data_manager.ensure_tracking(sym)
+                                mdm_tracked = sym in getattr(
+                                    ctx.market_data_manager, "_tracked_symbols", set()
+                                )
                             tok = None
                             if _im and _im.is_loaded():
                                 try:
@@ -6658,6 +6795,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     tok,
                                     symbol=sym,
                                 )
+                                broker_ws_token_requested = True
                             # Fetch OHLC history into MDM BEFORE adding to
                             # strategy runner so the runner's internal
                             # _prehydrate_symbol_history finds bars already
@@ -6676,6 +6814,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                                         end_dt.strftime("%Y-%m-%d %H:%M:%S"),
                                     )
+                                    runner_ingested = 0
                                     for row in list(records or []):
                                         ts = row.get("date") or row.get("timestamp")
                                         if isinstance(ts, str):
@@ -6686,20 +6825,52 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             ts = ts.replace(tzinfo=timezone.utc)
                                         if not isinstance(ts, datetime):
                                             continue
-                                        ctx.market_data_manager.ingest_historical_bar(
-                                            {
-                                                "symbol": sym,
-                                                "open": float(row.get("open") or 0.0),
-                                                "high": float(row.get("high") or 0.0),
-                                                "low": float(row.get("low") or 0.0),
-                                                "close": float(row.get("close") or 0.0),
-                                                "volume": int(row.get("volume") or 0),
-                                                "timestamp": ts,
-                                            }
-                                        )
+                                        bar_data = {
+                                            "symbol": sym,
+                                            "open": float(row.get("open") or 0.0),
+                                            "high": float(row.get("high") or 0.0),
+                                            "low": float(row.get("low") or 0.0),
+                                            "close": float(row.get("close") or 0.0),
+                                            "volume": int(row.get("volume") or 0),
+                                            "timestamp": ts,
+                                        }
+                                        ctx.market_data_manager.ingest_historical_bar(bar_data)
+                                        if (
+                                            getattr(ctx, "strategy_runner", None) is not None
+                                            and hasattr(ctx.strategy_runner, "ingest_historical_bar")
+                                        ):
+                                            ctx.strategy_runner.ingest_historical_bar(bar_data)
+                                            runner_ingested += 1
                                     ctx.market_data_manager.update_hydration_status(
                                         sym,
                                         ctx.market_data_manager.get_ohlc_bars(sym),
+                                    )
+                                    if getattr(ctx, "strategy_runner", None) is not None:
+                                        runner_history_count = len(
+                                            ctx.strategy_runner._indicator_engine.get_history(sym) or []
+                                        )
+                                    else:
+                                        runner_history_count = 0
+                                    mdm_history_count = len(
+                                        ctx.market_data_manager.get_ohlc_bars(sym) or []
+                                    )
+                                    LOGGER.info(
+                                        "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d source=%s runner_history_count=%d mdm_history_count=%d",
+                                        sym,
+                                        int(tok),
+                                        runner_ingested,
+                                        "dynamic_hydration",
+                                        runner_history_count,
+                                        mdm_history_count,
+                                        extra={
+                                            "event": "RUNNER_HISTORY_INGESTED",
+                                            "symbol": sym,
+                                            "token": int(tok),
+                                            "bars_ingested": runner_ingested,
+                                            "source": "dynamic_hydration",
+                                            "runner_history_count": runner_history_count,
+                                            "mdm_history_count": mdm_history_count,
+                                        },
                                     )
                                 except Exception as hydration_exc:  # noqa: BLE001
                                     LOGGER.warning(
@@ -6720,8 +6891,34 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 token=int(tok),
                                 source="dynamic_universe",
                             )
+                            if ctx.data_hub is not None:
+                                tick_subscribers = getattr(ctx.data_hub, "_tick_subscribers", {})
+                                runner_callback_registered = bool(tick_subscribers.get(sym))
+                            LOGGER.info(
+                                "LIVE_SYMBOL_WIRED symbol=%s token=%s mdm_tracked=%s broker_ws_token_requested=%s runner_callback_registered=%s success=%s reason=%s",
+                                sym,
+                                int(tok),
+                                mdm_tracked,
+                                broker_ws_token_requested,
+                                runner_callback_registered,
+                                True,
+                                "dynamic_add",
+                                extra={
+                                    "event": "LIVE_SYMBOL_WIRED",
+                                    "symbol": sym,
+                                    "token": int(tok),
+                                    "mdm_tracked": mdm_tracked,
+                                    "broker_ws_token_requested": broker_ws_token_requested,
+                                    "runner_callback_registered": runner_callback_registered,
+                                    "success": True,
+                                    "reason": "dynamic_add",
+                                },
+                            )
 
                         for sym in drop_symbols:
+                            removed_from_mdm = False
+                            removed_from_datahub = False
+                            removed_from_runner = False
                             tok = None
                             if _im and _im.is_loaded():
                                 try:
@@ -6733,8 +6930,37 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     tok,
                                     symbol=sym,
                                 )
+                            if ctx.market_data_manager is not None:
+                                removed_from_mdm = bool(ctx.market_data_manager.untrack(sym))
+                            if ctx.data_hub is not None:
+                                try:
+                                    ctx.data_hub.unsubscribe_ticks(sym)
+                                    removed_from_datahub = True
+                                except Exception:
+                                    removed_from_datahub = False
                             if ctx.strategy_runner:
                                 ctx.strategy_runner.remove_symbol(sym)
+                                removed_from_runner = True
+                            pending_runner_symbols.discard(sym)
+                            active_symbol_tokens.pop(sym, None)
+                            LOGGER.info(
+                                "SYMBOL_REMOVAL_CLEANUP symbol=%s removed_from_mdm=%s removed_from_datahub=%s removed_from_runner=%s removed_from_watchdog=%s pending_backfill_cancelled=%s",
+                                sym,
+                                removed_from_mdm,
+                                removed_from_datahub,
+                                removed_from_runner,
+                                True,
+                                True,
+                                extra={
+                                    "event": "SYMBOL_REMOVAL_CLEANUP",
+                                    "symbol": sym,
+                                    "removed_from_mdm": removed_from_mdm,
+                                    "removed_from_datahub": removed_from_datahub,
+                                    "removed_from_runner": removed_from_runner,
+                                    "removed_from_watchdog": True,
+                                    "pending_backfill_cancelled": True,
+                                },
+                            )
 
                         dynamic_option_symbols = latest_symbols
 
@@ -6768,6 +6994,55 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     ctx,
                                     startup_symbols=sorted(latest_symbols),
                                     phase="dynamic_universe_update",
+                                )
+                                mdm_tracked_count = 0
+                                mdm_subscriber_count = 0
+                                datahub_callback_symbols_count = 0
+                                broker_ws_token_count = 0
+                                live_tick_seen_count = 0
+                                if ctx.market_data_manager is not None:
+                                    mdm_tracked_count = len(
+                                        getattr(ctx.market_data_manager, "_tracked_symbols", set())
+                                    )
+                                    mdm_subscriber_count = len(
+                                        getattr(ctx.market_data_manager, "_subscribers", {})
+                                    )
+                                    broker_ws_token_count = len(
+                                        getattr(ctx.market_data_manager, "_requested_tokens", set())
+                                        or getattr(ctx.market_data_manager, "_subscribed_tokens", set())
+                                    )
+                                    last_tick_map = getattr(ctx.market_data_manager, "_last_tick_time", {}) or {}
+                                    live_tick_seen_count = sum(
+                                        1
+                                        for _s in latest_symbols
+                                        if isinstance(last_tick_map.get(_s), (int, float))
+                                        and float(last_tick_map.get(_s, 0.0)) > 0
+                                    )
+                                if ctx.data_hub is not None:
+                                    datahub_callback_symbols_count = sum(
+                                        1
+                                        for _s in latest_symbols
+                                        if bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(_s))
+                                    )
+                                LOGGER.info(
+                                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d broker_ws_token_count=%d live_tick_seen_count=%d",
+                                    len(latest_symbols),
+                                    len(active_symbol_tokens),
+                                    mdm_tracked_count,
+                                    mdm_subscriber_count,
+                                    datahub_callback_symbols_count,
+                                    broker_ws_token_count,
+                                    live_tick_seen_count,
+                                    extra={
+                                        "event": "LIVE_WIRING_FINAL_STATUS",
+                                        "symbols_count": len(latest_symbols),
+                                        "tokens_count": len(active_symbol_tokens),
+                                        "mdm_tracked_count": mdm_tracked_count,
+                                        "mdm_subscriber_count": mdm_subscriber_count,
+                                        "datahub_callback_symbols_count": datahub_callback_symbols_count,
+                                        "broker_ws_token_count": broker_ws_token_count,
+                                        "live_tick_seen_count": live_tick_seen_count,
+                                    },
                                 )
                             except Exception:  # pragma: no cover - obs must not raise
                                 pass
