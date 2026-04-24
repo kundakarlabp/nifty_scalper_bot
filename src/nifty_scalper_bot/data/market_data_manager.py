@@ -3266,17 +3266,27 @@ class MarketDataManager:
             loop = self._main_loop
             if loop is not None and loop.is_running():
                 try:
-                    now = time.time()
+                    now_dt = datetime.now(timezone.utc)
                     for t in ticks:
                         token = t.get("instrument_token")
+                        token_int = int(token) if isinstance(token, (int, float, str)) and str(token).isdigit() else None
                         price = float(t.get("last_price", t.get("ltp", 0.0)))
+                        symbol = None
+                        if token_int is not None:
+                            with self._lock:
+                                symbol = self._symbol_by_token.get(token_int)
+                        trace_id = f"{symbol or token_int or 'tick'}-{time.monotonic_ns()}"
                         msg = Message(
                             type=MessageType.TICK,
-                            timestamp=now,
+                            timestamp=now_dt,
                             data={
-                                "token": token,
+                                "token": token_int if token_int is not None else token,
+                                "instrument_token": token_int if token_int is not None else token,
+                                "symbol": symbol,
                                 "ltp": price,
-                                "ts": t.get("exchange_timestamp", now),
+                                "timestamp": t.get("exchange_timestamp", now_dt),
+                                "source": "ws",
+                                "trace_id": trace_id,
                             },
                             source="market_data_manager",
                         )
@@ -3575,6 +3585,8 @@ class MarketDataManager:
                     "source": source,
                     "has_subscribers": subscriber_count > 0,
                     "subscriber_count": subscriber_count,
+                    "emitted": subscriber_count > 0,
+                    "reason": "tick_received",
                 },
             )
         except Exception:  # pragma: no cover - defensive
@@ -3676,6 +3688,8 @@ class MarketDataManager:
                     "delivered_to_subscribers": delivered,
                     "subscriber_count": subscriber_count,
                     "source": source,
+                    "emitted": delivered,
+                    "reason": "subscribers_present" if delivered else "no_subscribers",
                 },
             )
             # Emit a single INFO-level event the FIRST time a subscriber
