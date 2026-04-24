@@ -118,7 +118,7 @@ class CandleEngine:
             raise DataIntegrityError('candle timestamps must be monotonic')
         self.df = frame
         self.last_candle_close = pd.to_datetime(candle['timestamp'], utc=True).to_pydatetime()
-        LOGGER.info('candle_finalized', extra={'event': 'candle_finalized', 'timestamp': pd.Timestamp(candle['timestamp']).isoformat()})
+        LOGGER.debug('candle_finalized', extra={'event': 'candle_finalized', 'timestamp': pd.Timestamp(candle['timestamp']).isoformat()})
         return candle
 
     def flush(self) -> dict[str, Any] | None:

@@ -1693,6 +1693,23 @@ class OrderManager:
             extra={"event": "ORDER_KILL_SWITCH_RESET", "reason": reason},
         )
 
+    def get_kill_switch_status(self) -> dict[str, Any]:
+        """Return kill switch diagnostics. Args: none. Returns: status map. Raises: none."""
+        engaged_at = self._kill_switch_engaged_at
+        remaining = 0.0
+        if engaged_at is not None and self._kill_switch_allow_auto_reset:
+            elapsed = (datetime.now(timezone.utc) - engaged_at).total_seconds()
+            remaining = max(float(self._kill_switch_auto_reset_seconds) - elapsed, 0.0)
+        return {
+            "active": self.is_kill_switch_active(),
+            "kill_reason": self._kill_switch_reason,
+            "consecutive_failures": self._consecutive_failures,
+            "engaged_at": engaged_at.isoformat() if engaged_at else None,
+            "auto_reset_allowed": bool(self._kill_switch_allow_auto_reset),
+            "auto_reset_seconds": int(self._kill_switch_auto_reset_seconds),
+            "remaining_auto_reset_seconds": int(remaining),
+        }
+
     def resolve_lot_size(self, symbol: str) -> int:
         """Resolve lot size for symbol. Args: symbol. Returns: lot size. Raises: OrderPlacementError."""
         return self._lot_size_for_symbol(symbol)
@@ -1742,6 +1759,7 @@ class OrderManager:
             block_reason: str | None = None,
             order_id: str | None = None,
             broker_mode: str | None = None,
+            details: dict[str, Any] | None = None,
         ) -> None:
             """Emit unified decision logs for order placement. Args: fields. Returns: None. Raises: None."""
             if broker_mode is None:
@@ -1767,6 +1785,7 @@ class OrderManager:
                     "order_id": order_id,
                     "trace_id": trace_id,
                     "broker_mode": broker_mode,
+                    "details": details or {},
                 },
             )
         # ✅ FIX: Round Price/Trigger to 0.05 tick size BEFORE processing
@@ -1787,6 +1806,7 @@ class OrderManager:
         )
 
         if not is_system_exit and self.is_kill_switch_active():
+            kill_state = self.get_kill_switch_status()
             now_ts = time.time()
             if now_ts - self._last_kill_switch_log_ts >= 300.0:
                 self._last_kill_switch_log_ts = now_ts
@@ -1795,9 +1815,21 @@ class OrderManager:
                     symbol,
                     self._consecutive_failures,
                     self._kill_switch_reason,
-                    extra={"event": "ORDER_KILL_SWITCH_BLOCK", "symbol": symbol, "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason},
+                        extra={"event": "ORDER_KILL_SWITCH_BLOCK", "symbol": symbol, "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason},
                 )
-            _log_order_decision(allowed=False, block_reason="kill_switch_engaged")
+            self._logger.warning(
+                "ORDER_BLOCKED reason=kill_switch_active kill_reason=%s failures=%s engaged_at=%s trace_id=%s",
+                kill_state.get("kill_reason"),
+                kill_state.get("consecutive_failures"),
+                kill_state.get("engaged_at"),
+                trace_id,
+                extra={"event": "ORDER_BLOCKED", "block_reason": "kill_switch_active", "trace_id": trace_id},
+            )
+            _log_order_decision(
+                allowed=False,
+                block_reason="kill_switch_active",
+                details=kill_state,
+            )
             return None
 
         if not is_system_exit and (
@@ -2442,19 +2474,40 @@ class OrderManager:
                         allowed=True,
                         order_id=order_id,
                     )
+                    self._consecutive_failures = 0
                     return order_id
 
             except Exception as e:
                 msg = str(e).lower()
-                failure_class = "broker_submit_exception"
+                failure_class = "unexpected_exception"
                 if "rate" in msg and "limit" in msg:
-                    failure_class = "broker_rate_limit"
+                    failure_class = "transient_api_error"
                 elif "auth" in msg or "token" in msg or "unauthor" in msg:
-                    failure_class = "broker_auth_error"
+                    failure_class = "broker_rejected"
+                elif "timeout" in msg:
+                    failure_class = "timeout"
+                elif "margin" in msg or "fund" in msg:
+                    failure_class = "insufficient_margin"
+                elif "market closed" in msg:
+                    failure_class = "market_closed"
+                elif "invalid" in msg and "symbol" in msg:
+                    failure_class = "invalid_symbol"
+                elif "invalid" in msg and "quant" in msg:
+                    failure_class = "invalid_quantity"
                 elif any(x in msg for x in ["invalid", "bad request", "payload", "400"]):
-                    failure_class = "broker_reject_invalid_payload"
+                    failure_class = "broker_rejected"
 
-                self._consecutive_failures += 1
+                countable_failures = {
+                    "transient_api_error",
+                    "invalid_symbol",
+                    "invalid_quantity",
+                    "insufficient_margin",
+                    "broker_rejected",
+                    "timeout",
+                    "unexpected_exception",
+                }
+                if failure_class in countable_failures:
+                    self._consecutive_failures += 1
                 if self._consecutive_failures >= self._max_failures and self._kill_switch_engaged_at is None:
                     self._kill_switch_engaged_at = datetime.now(timezone.utc)
                     self._kill_switch_reason = failure_class

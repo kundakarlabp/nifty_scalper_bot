@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, time, timedelta, timezone
 import logging
+import os
 import threading
 from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -761,7 +762,7 @@ class IndicatorEngine:
         min_bars: int,
     ) -> bool:
         """Validate indicator inputs before strategy evaluation."""
-        timestamps = history.get_timestamps()
+        timestamps = history.get_timestamps(min_bars)
         if len(timestamps) < min_bars:
             LOGGER.error(
                 "Condition met: indicator_integrity_short_history",
@@ -782,10 +783,10 @@ class IndicatorEngine:
                 },
             )
             return False
-        completeness = history.get_completeness()
-        provisional_flags = history.get_provisional_flags()
+        completeness = history.get_completeness(min_bars)
+        provisional_flags = history.get_provisional_flags(min_bars)
         if not all(completeness):
-            LOGGER.error(
+            LOGGER.debug(
                 "Condition met: indicator_integrity_incomplete_candle",
                 extra={
                     "event": "indicator_integrity_incomplete_candle",
@@ -794,10 +795,14 @@ class IndicatorEngine:
             )
             return False
         if any(provisional_flags):
-            LOGGER.error(
-                "Condition met: indicator_integrity_provisional_candle",
+            log_throttled(
+                LOGGER,
+                f"indicator_integrity_provisional_tail:{symbol}",
+                "indicator_integrity_provisional_tail",
+                interval_sec=float(os.getenv("INDICATOR_INTEGRITY_LOG_THROTTLE_SECONDS", "120")),
+                level=logging.DEBUG,
                 extra={
-                    "event": "indicator_integrity_provisional_candle",
+                    "event": "indicator_integrity_provisional_tail",
                     "symbol": symbol,
                 },
             )
