@@ -511,15 +511,19 @@ class StrategyRunner:
         self._last_same_bar_eval_ts_by_symbol: dict[str, float] = {}
         self._tick_log_throttle_seconds = max(
             1.0,
-            float(os.getenv("RUNNER_TICK_LOG_THROTTLE_SECONDS", "300")),
+            float(os.getenv("RUNNER_TICK_LOG_THROTTLE_SECONDS", "120")),
         )
         self._bar_log_throttle_seconds = max(
             1.0,
-            float(os.getenv("RUNNER_BAR_LOG_THROTTLE_SECONDS", "300")),
+            float(os.getenv("RUNNER_BAR_LOG_THROTTLE_SECONDS", "120")),
         )
         self._eval_log_throttle_seconds = max(
             1.0,
-            float(os.getenv("RUNNER_EVAL_LOG_THROTTLE_SECONDS", "300")),
+            float(os.getenv("RUNNER_EVAL_LOG_THROTTLE_SECONDS", "60")),
+        )
+        self._cooldown_log_throttle_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_COOLDOWN_LOG_THROTTLE_SECONDS", "60")),
         )
         self._no_signal_log_throttle_seconds = max(
             1.0,
@@ -535,6 +539,7 @@ class StrategyRunner:
         self._symbol_last_signal_ts: dict[str, float] = {}
         self._underlying_last_signal_ts: dict[str, float] = {}
         self._reason_last_signal_ts: dict[str, float] = {}
+        self._premium_squeeze_last_signal_ts: dict[str, float] = {}
         self._order_attempt_window: Deque[float] = deque()
         self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "60") or 60))
         self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "120") or 120))
@@ -4618,38 +4623,46 @@ class StrategyRunner:
         """
         Validates that the WebSocket is actively streaming data for our requested universe.
         """
-        # 1. Get current active tokens from the Market Data Manager
-        # Using getattr safely in case the MDM structure changes
-        mdm = getattr(self, "market_data_manager", None)
+        mdm = self._market_data
         if not mdm:
+            log_throttled(
+                self._logger,
+                "market_depth_mdm_missing",
+                "market_depth_mdm_missing",
+                interval_sec=self._cooldown_log_throttle_seconds,
+                level=logging.WARNING,
+                extra={"event": "market_depth_mdm_missing"},
+            )
             return False
-            
+
         token_map = getattr(mdm, "_symbol_by_token", {})
         current_token_count = len(token_map)
-
-        # 2. Get the expected number of tokens based on what the Runner is tracking
-        # (Replace '_active_symbols' with whatever list/dict holds your current universe)
         tracked_symbols = getattr(self, "_active_symbols", {})
         expected_count = len(tracked_symbols)
-
-        # 3. Dynamic Threshold Calculation
-        # If we expect 0 symbols, we shouldn't be trading
         if expected_count == 0:
-            return False
-
-        # Require 80% of our expected universe to be streaming, but never require less than 2
-        # (e.g., We always need at least NIFTY Spot + 1 tradable contract)
-        minimum_required = max(2, int(expected_count * 0.8))
-
-        # 4. The Circuit Breaker
-        if current_token_count < minimum_required:
-            # Throttle this log so it doesn't spam, but ensures you are alerted
             log_throttled(
-                self._logger, 
-                "market_depth_failure", 
-                f"🛑 Market depth validation failed: Active Tokens ({current_token_count}) < Required ({minimum_required}) for an expected universe of {expected_count}.",
-                interval_sec=60.0, 
-                level=logging.WARNING
+                self._logger,
+                "market_depth_no_active_symbols",
+                "market_depth_no_active_symbols",
+                interval_sec=self._cooldown_log_throttle_seconds,
+                level=logging.WARNING,
+                extra={"event": "market_depth_no_active_symbols"},
+            )
+            return False
+        minimum_required = max(2, int(expected_count * 0.8))
+        if current_token_count < minimum_required:
+            log_throttled(
+                self._logger,
+                "market_depth_insufficient",
+                "market_depth_insufficient",
+                interval_sec=self._cooldown_log_throttle_seconds,
+                level=logging.WARNING,
+                extra={
+                    "event": "market_depth_insufficient",
+                    "active_tokens": current_token_count,
+                    "required_tokens": minimum_required,
+                    "expected_symbols": expected_count,
+                },
             )
             return False
 
@@ -5739,7 +5752,14 @@ class StrategyRunner:
                         should_evaluate = True
 
                 if should_evaluate:
-                    self._logger.info("Strategy evaluation triggered: %s", symbol)
+                    log_throttled(
+                        self._logger,
+                        f"strategy_evaluation_triggered:{symbol}",
+                        "Strategy evaluation triggered",
+                        interval_sec=self._eval_log_throttle_seconds,
+                        level=logging.DEBUG,
+                        extra={"event": "strategy_evaluation_triggered", "symbol": symbol},
+                    )
                     # ✅ DIAGNOSTIC LOG: Confirm evaluation is happening
                     log_throttled(
                         self._logger,
@@ -5806,7 +5826,7 @@ class StrategyRunner:
                             )
                             return
                         self._last_global_eval_ts = time.monotonic()
-                        self._logger.info(
+                        self._logger.debug(
                             "strategy_evaluation_start",
                             extra={
                                 "event": "strategy_evaluation_start",
@@ -6022,7 +6042,7 @@ class StrategyRunner:
                             elapsed_s = max(symbol_now - last_signal_ts, 0.0)
                             if self._should_log_throttled(
                                 f"runner_signal_cooldown:{symbol}",
-                                self._eval_log_throttle_seconds,
+                                self._cooldown_log_throttle_seconds,
                             ):
                                 self._logger.info(
                                     "RUNNER_SIGNAL_COOLDOWN",
@@ -6048,12 +6068,12 @@ class StrategyRunner:
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
-                self._handle_signal(signal, price, now)
+                self._handle_signal(signal, price, now, trace_id=trace_id)
                 self._symbol_last_signal_ts[symbol] = time.time()
                 self._logger.info(
-                    "SIGNAL_HANDLED symbol=%s action=%s — check execution logs for ORDER_PLACED",
+                    "SIGNAL_HANDLER_RETURNED symbol=%s action=%s — inspect ORDER_SUBMITTED / ORDER_REJECTED / ORDER_BLOCKED logs",
                     symbol, signal.action,
-                    extra={"event": "signal_handled", "symbol": symbol},
+                    extra={"event": "SIGNAL_HANDLER_RETURNED", "symbol": symbol, "action": signal.action},
                 )
         except Exception as e:
             self._logger.error(
@@ -6285,8 +6305,6 @@ class StrategyRunner:
         except Exception as exc:
             self._logger.error(f"🔴 HANDLER CRASHED: {exc}", exc_info=True)
             if base_symbol:
-                self._underlying_last_signal_ts[underlying] = now_epoch
-                self._reason_last_signal_ts[reason_key] = now_epoch
                 try:
                     self._record_trade(
                         base_symbol,
@@ -6298,7 +6316,7 @@ class StrategyRunner:
                     LOGGER.exception(
                         "[CRITICAL] unhandled exception", exc_info=True
                     )
-                    raise
+                    self._logger.error("Failure in _handle_signal: %s", e, exc_info=True)
 
     def _adopt_orphan_positions(self) -> None:
         """
@@ -6683,10 +6701,11 @@ class StrategyRunner:
 
             # ── PHASE 2: SIGNAL_RECEIVED log ────────────────────────────────
             self._logger.info(
-                "SIGNAL_RECEIVED symbol=%s action=%s qty=%s sl=%s tp=%s confidence=%.2f reason=%s",
+                "SIGNAL_RECEIVED symbol=%s action=%s qty_lots=%s price=%s sl=%s tp=%s confidence=%.2f reason=%s",
                 signal.symbol,
                 signal.action,
                 signal.quantity,
+                trade_price,
                 signal.stop_loss,
                 signal.take_profit,
                 signal.confidence,
@@ -6722,11 +6741,34 @@ class StrategyRunner:
             now_epoch = time.time()
             underlying = self._extract_underlying(base_symbol) or base_symbol
             reason_key = str(signal.reason or "unknown")
+            if reason_key == "premium_momentum_squeeze":
+                upper_symbol = (trade_symbol or base_symbol).upper()
+                if ("CE" not in upper_symbol and "PE" not in upper_symbol) or "FUT" in upper_symbol:
+                    log_throttled(
+                        self._logger,
+                        f"premium_squeeze_skipped_{upper_symbol}",
+                        "PREMIUM_SQUEEZE_SKIPPED",
+                        interval_sec=self._cooldown_log_throttle_seconds,
+                        level=logging.INFO,
+                        extra={"event": "PREMIUM_SQUEEZE_SKIPPED", "symbol": trade_symbol or base_symbol, "reason": "non_option_instrument"},
+                    )
+                    return
+                last_premium_ts = float(self._premium_squeeze_last_signal_ts.get(underlying, 0.0))
+                if now_epoch - last_premium_ts < self._underlying_signal_cooldown_seconds:
+                    log_throttled(
+                        self._logger,
+                        f"premium_squeeze_suppressed_{underlying}",
+                        "PREMIUM_SQUEEZE_SUPPRESSED",
+                        interval_sec=self._cooldown_log_throttle_seconds,
+                        level=logging.INFO,
+                        extra={"event": "PREMIUM_SQUEEZE_SUPPRESSED", "underlying": underlying, "reason": "cooldown"},
+                    )
+                    return
             if now_epoch - float(self._underlying_last_signal_ts.get(underlying, 0.0)) < self._underlying_signal_cooldown_seconds:
-                log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=300.0, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
+                log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
                 return
             if now_epoch - float(self._reason_last_signal_ts.get(reason_key, 0.0)) < self._reason_signal_cooldown_seconds:
-                log_throttled(self._logger, f"runner_reason_cd_{reason_key}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=300.0, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "reason_cooldown"})
+                log_throttled(self._logger, f"runner_reason_cd_{reason_key}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "reason_cooldown"})
                 return
             while self._order_attempt_window and (now_epoch - self._order_attempt_window[0]) > 60.0:
                 self._order_attempt_window.popleft()
@@ -6743,13 +6785,12 @@ class StrategyRunner:
                 qty_lots = max(int(signal.quantity or 1), 1)
                 final_qty = qty_lots * lot_size
                 self._logger.info(
-                    "ORDER_QTY_NORMALIZED symbol=%s input_qty=%s lot_size=%s final_qty=%s reason=%s",
+                    "ORDER_QTY_NORMALIZED symbol=%s input_qty_lots=%s lot_size=%s final_qty=%s",
                     trade_symbol or base_symbol,
                     input_qty,
                     lot_size,
                     final_qty,
-                    "signal_quantity_as_lots",
-                    extra={"event": "ORDER_QTY_NORMALIZED", "symbol": trade_symbol or base_symbol, "input_qty": input_qty, "lot_size": lot_size, "final_qty": final_qty, "reason": "signal_quantity_as_lots"},
+                    extra={"event": "ORDER_QTY_NORMALIZED", "symbol": trade_symbol or base_symbol, "input_qty_lots": input_qty, "lot_size": lot_size, "final_qty": final_qty},
                 )
             except Exception as lot_exc:
                 self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s error=%s", trade_symbol or base_symbol, lot_exc)
@@ -6812,6 +6853,8 @@ class StrategyRunner:
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
                 self._reason_last_signal_ts[reason_key] = now_epoch
+                if reason_key == "premium_momentum_squeeze":
+                    self._premium_squeeze_last_signal_ts[underlying] = now_epoch
                 self._order_attempt_window.append(now_epoch)
                 try:
                     self._record_trade(

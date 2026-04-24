@@ -42,7 +42,7 @@ _LIQUIDITY_MIN_BARS = max(
     1, int(os.getenv("OPTION_LIQUIDITY_MIN_BARS", "3") or 3)
 )
 _LIQUIDITY_ENABLED = os.getenv(
-    "OPTION_LIQUIDITY_HISTORY_CHECK", "1"
+    "OPTION_LIQUIDITY_HISTORY_CHECK", "0"
 ).strip().lower() not in {"0", "false", "no", "off"}
 
 
