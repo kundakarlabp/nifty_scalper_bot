@@ -1510,29 +1510,54 @@ class StrategyRunner:
                     except Exception:  # pragma: no cover - defensive
                         pass
 
-                    # 3. Publish to the event bus
-                    self._event_bus.publish(payload)
-
+                    # Dispatch directly to evaluation path; event-bus fanout is
+                    # kept best-effort for observability compatibility.
+                    self._on_tick_safe(payload)
+                    publish_scheduled = False
                     try:
+                        self._event_bus.publish(payload)
+                        publish_scheduled = True
+                    except Exception as exc:  # noqa: BLE001
                         self._logger.debug(
-                            "RUNNER_CALLBACK_TICK_PUBLISHED symbol=%s trace_id=%s",
+                            "Runner local event bus publish failed for %s: %s",
                             sym,
-                            _trace_id,
-                            extra={
-                                "event": "RUNNER_CALLBACK_TICK",
-                                "symbol": sym,
-                                "trace_id": _trace_id,
-                                "published_to_event_bus": True,
-                            },
+                            exc,
                         )
-                    except Exception:  # pragma: no cover - defensive
-                        pass
+                    self._logger.info(
+                        "RUNNER_CALLBACK_DISPATCH symbol=%s mode=%s success=%s",
+                        sym,
+                        "direct",
+                        True,
+                        extra={
+                            "event": "RUNNER_CALLBACK_DISPATCH",
+                            "symbol": sym,
+                            "trace_id": _trace_id,
+                            "dispatch_mode": "direct",
+                            "publish_scheduled": publish_scheduled,
+                            "success": True,
+                            "reason": "direct_tick_consume",
+                        },
+                    )
                 except Exception:
                     # Capture full stack trace AND the raw tick data for senior-level debugging
                     self._logger.exception(
                         "CRITICAL: Failure in StrategyRunner._subscribe_symbol callback for %s. Raw tick: %s",
                         sym,
                         tick,
+                    )
+                    self._logger.info(
+                        "RUNNER_CALLBACK_DISPATCH symbol=%s mode=%s success=%s",
+                        sym,
+                        "direct",
+                        False,
+                        extra={
+                            "event": "RUNNER_CALLBACK_DISPATCH",
+                            "symbol": sym,
+                            "dispatch_mode": "direct",
+                            "publish_scheduled": False,
+                            "success": False,
+                            "reason": "callback_exception",
+                        },
                     )
 
             callback = _callback
@@ -3482,16 +3507,43 @@ class StrategyRunner:
             self._logger.error("Failure in StrategyRunner._on_tick_from_bus: %s", e)
 
     async def on_data(self, message: "Message") -> None:
-        self.on_tick_event(message.data)
+        payload = dict(message.data or {})
+        payload.setdefault("trace_id", f"bus-{time_module.monotonic_ns()}")
+        if not payload.get("symbol"):
+            token = payload.get("token") or payload.get("instrument_token")
+            if token is not None and self._market_data is not None:
+                symbol_map = getattr(self._market_data, "_symbol_by_token", {}) or {}
+                resolved = symbol_map.get(int(token)) if str(token).isdigit() else None
+                if resolved:
+                    payload["symbol"] = resolved
+        self.on_tick_event(payload)
 
     def on_tick_event(self, tick: dict[str, Any]) -> None:
         """Args: tick; Returns: none; Raises: none."""
         try:
             symbol = str(tick.get("symbol") or "")
             if not symbol:
+                self._logger.info(
+                    "RUNNER_EVAL_DECISION",
+                    extra={
+                        "event": "RUNNER_EVAL_DECISION",
+                        "symbol": "UNKNOWN",
+                        "trace_id": tick.get("trace_id"),
+                        "stage": "message_ingress",
+                        "allowed": False,
+                        "reason": "missing_symbol",
+                    },
+                )
                 return
             price = tick.get("last_price") or tick.get("ltp")
             if not isinstance(price, (int, float)):
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage="message_ingress",
+                    reason="missing_price",
+                    allowed=False,
+                    trace_id=str(tick.get("trace_id") or ""),
+                )
                 return
             self._on_tick_safe({**tick, "symbol": symbol, "last_price": float(price)})
         except Exception as e:
@@ -4152,11 +4204,13 @@ class StrategyRunner:
                     except Exception:
                         last_eval_bar_ts = str(_leb)
             mdm_last_tick_age = None
+            tick_age_ms = None
             try:
                 mdm_last_map = getattr(self._market_data, "_last_tick_time", {}) or {}
                 last_tick_wall = mdm_last_map.get(symbol)
                 if isinstance(last_tick_wall, (int, float)) and last_tick_wall > 0:
                     mdm_last_tick_age = round(time.time() - float(last_tick_wall), 3)
+                    tick_age_ms = int(max(0.0, mdm_last_tick_age * 1000.0))
             except Exception:  # pragma: no cover - defensive
                 pass
             has_live_bars = symbol in getattr(self, "_live_bar_seen", set())
@@ -4176,6 +4230,7 @@ class StrategyRunner:
                 "last_bar_ts": last_bar_ts_iso,
                 "last_eval_bar_ts": last_eval_bar_ts,
                 "mdm_last_tick_age_s": mdm_last_tick_age,
+                "tick_age_ms": tick_age_ms,
                 "has_live_bars": has_live_bars,
                 "data_phase": self._data_phase.get(symbol),
             }

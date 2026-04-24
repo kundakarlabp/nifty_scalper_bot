@@ -6688,10 +6688,37 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # 🚨 CRITICAL: Start MessageBus AFTER subscribers are registered 🚨
                 if ctx.message_bus and ctx.data_hub and ctx.strategy_runner:
                     ctx.data_hub.bus = ctx.message_bus
-                    if getattr(ctx, 'market_data_manager', None):
+                    if getattr(ctx, "market_data_manager", None):
                         ctx.market_data_manager.bus = ctx.message_bus
-                    ctx.message_bus.subscribe(MessageType.TICK, ctx.data_hub.ingest_tick_from_bus)
-                    ctx.message_bus.subscribe(MessageType.DATA_READY, ctx.strategy_runner.on_data)
+                    ctx.message_bus.subscribe(
+                        MessageType.TICK, ctx.data_hub.ingest_tick_from_bus
+                    )
+                    LOGGER.info(
+                        "MESSAGE_BUS_SUBSCRIPTION component=%s message_type=%s callback_name=%s",
+                        "data_hub",
+                        MessageType.TICK.value,
+                        "ingest_tick_from_bus",
+                        extra={
+                            "event": "MESSAGE_BUS_SUBSCRIPTION",
+                            "component": "data_hub",
+                            "message_type": MessageType.TICK.value,
+                            "callback_name": "ingest_tick_from_bus",
+                        },
+                    )
+                    # Runner must consume live tick events, not DATA_READY.
+                    ctx.message_bus.subscribe(MessageType.TICK, ctx.strategy_runner.on_data)
+                    LOGGER.info(
+                        "MESSAGE_BUS_SUBSCRIPTION component=%s message_type=%s callback_name=%s",
+                        "strategy_runner",
+                        MessageType.TICK.value,
+                        "on_data",
+                        extra={
+                            "event": "MESSAGE_BUS_SUBSCRIPTION",
+                            "component": "strategy_runner",
+                            "message_type": MessageType.TICK.value,
+                            "callback_name": "on_data",
+                        },
+                    )
 
                 if ctx.message_bus:
                     LOGGER.info("🚀 Starting MessageBus Dispatchers...")

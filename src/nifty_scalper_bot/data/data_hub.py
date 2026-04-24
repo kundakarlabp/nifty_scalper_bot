@@ -601,6 +601,21 @@ class DataHub:
                 self._last_poll_arrival[symbol] = now_ms
             self._stale_candidates[symbol] = 0
             subscribers = list(self._tick_subscribers.get(symbol, ()))
+        trace_id = str(tick.get("trace_id") or self._make_trace_id(symbol))
+        canonical_tick["trace_id"] = trace_id
+        LOGGER.debug(
+            "DATAHUB_SYMBOL_DISPATCH symbol=%s source=%s subscribers=%d",
+            symbol,
+            source,
+            len(subscribers),
+            extra={
+                "event": "DATAHUB_SYMBOL_DISPATCH",
+                "symbol": symbol,
+                "trace_id": trace_id,
+                "source": source,
+                "subscriber_count": len(subscribers),
+            },
+        )
 
         self._capture_option_metrics(symbol, canonical_tick)
 
@@ -710,10 +725,11 @@ class DataHub:
                     "event": "DATAHUB_SYMBOL_STATUS",
                     "symbol": symbol,
                     "trace_id": trace_id,
-                    "registration_state": "active",
+                    "state": "active",
                     "deferred_mode": self._defer_live_symbol_subscriptions,
                     "callback_attached": bool(self._tick_subscribers.get(symbol)),
-                    "mdm_subscribed": True,
+                    "mdm_subscribe_requested": True,
+                    "success": True,
                     "pending_count": len(self._pending_live_symbols),
                     "reason": "mdm_subscribed",
                 },
@@ -729,6 +745,20 @@ class DataHub:
                     "subscribed": False,
                     "reason": "mdm_no_subscribe_callable",
                     "mdm_delegate_called": False,
+                },
+            )
+            LOGGER.info(
+                "DATAHUB_SYMBOL_STATUS symbol=%s state=active",
+                symbol,
+                extra={
+                    "event": "DATAHUB_SYMBOL_STATUS",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "state": "active",
+                    "callback_attached": bool(self._tick_subscribers.get(symbol)),
+                    "mdm_subscribe_requested": False,
+                    "success": False,
+                    "reason": "mdm_no_subscribe_callable",
                 },
             )
 
@@ -821,10 +851,11 @@ class DataHub:
                     "event": "DATAHUB_SYMBOL_STATUS",
                     "symbol": normalized,
                     "trace_id": trace_id,
-                    "registration_state": "deferred",
+                    "state": "deferred",
                     "deferred_mode": True,
                     "callback_attached": bool(self._tick_subscribers.get(normalized)),
-                    "mdm_subscribed": normalized in self._mdm_subscribed_symbols,
+                    "mdm_subscribe_requested": False,
+                    "success": True,
                     "pending_count": len(self._pending_live_symbols),
                     "reason": "deferred_mode_active",
                 },
@@ -837,10 +868,11 @@ class DataHub:
                     "event": "DATAHUB_SYMBOL_STATUS",
                     "symbol": normalized,
                     "trace_id": trace_id,
-                    "registration_state": "registered",
+                    "state": "active",
                     "deferred_mode": False,
                     "callback_attached": bool(self._tick_subscribers.get(normalized)),
-                    "mdm_subscribed": normalized in self._mdm_subscribed_symbols,
+                    "mdm_subscribe_requested": True,
+                    "success": True,
                     "pending_count": len(self._pending_live_symbols),
                     "reason": "subscribe_immediate",
                 },
