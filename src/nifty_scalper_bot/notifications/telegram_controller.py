@@ -563,6 +563,12 @@ class TelegramBot:
             bucket_capacity=20,
             bucket_refill_seconds=10.0,
         )
+        self._telegram_alert_min_interval_seconds = max(1.0, float(os.getenv("TELEGRAM_ALERT_MIN_INTERVAL_SECONDS", "5") or 5))
+        self._telegram_flood_hold_buffer_seconds = max(0.0, float(os.getenv("TELEGRAM_FLOOD_HOLD_BUFFER_SECONDS", "5") or 5))
+        self._telegram_critical_alert_cooldown_seconds = max(1.0, float(os.getenv("TELEGRAM_CRITICAL_ALERT_COOLDOWN_SECONDS", "300") or 300))
+        self._telegram_hold_until: datetime | None = None
+        self._telegram_last_dispatch_at: datetime | None = None
+        self._telegram_last_flood_log_at: datetime | None = None
         self._log_handler: logging.Handler | None = None
         self._allocation_history: deque[tuple[datetime, dict[str, float]]] = deque(
             maxlen=12
@@ -1796,6 +1802,17 @@ class TelegramBot:
                 extra={"event": "telegram_alert_dispatch_skipped"},
             )
             return
+        now = datetime.now(timezone.utc)
+        if self._telegram_hold_until is not None and now < self._telegram_hold_until:
+            return
+        if self._telegram_last_dispatch_at is not None:
+            elapsed = (now - self._telegram_last_dispatch_at).total_seconds()
+            min_interval = self._telegram_alert_min_interval_seconds
+            if severity == "critical":
+                min_interval = max(min_interval, self._telegram_critical_alert_cooldown_seconds)
+            if elapsed < min_interval:
+                return
+
         prefix_map = {"critical": "🚨", "warning": "⚠️", "info": "ℹ️"}
         prefix = prefix_map.get(severity, "ℹ️")
         try:
@@ -1813,11 +1830,37 @@ class TelegramBot:
                 f"{prefix} {message}",
                 disable_web_page_preview=True,
             )
+            self._telegram_last_dispatch_at = datetime.now(timezone.utc)
         except Exception as exc:  # noqa: BLE001 - defensive send guard
-            flood_markers = ("too many requests", "retry after", "flood")
             lowered = str(exc).lower()
-            if any(marker in lowered for marker in flood_markers):
-                self._alert_deduplicator.mark_flood_limited(f"dispatch:{severity}")
+            retry_after_seconds = 0.0
+            if isinstance(exc, RetryAfter):
+                retry_after_seconds = float(getattr(exc, "retry_after", 0.0) or 0.0)
+            if retry_after_seconds <= 0.0:
+                match = re.search(r"retry\s+in\s+(\d+)", lowered)
+                if match:
+                    retry_after_seconds = float(match.group(1))
+            flood_markers = ("too many requests", "retry after", "flood")
+            if retry_after_seconds > 0.0 or any(marker in lowered for marker in flood_markers):
+                hold_seconds = max(retry_after_seconds, self._telegram_alert_min_interval_seconds) + self._telegram_flood_hold_buffer_seconds
+                self._telegram_hold_until = datetime.now(timezone.utc) + timedelta(seconds=hold_seconds)
+                self._alert_deduplicator.mark_flood_limited(
+                    key=f"dispatch:{severity}",
+                    hold_for=timedelta(seconds=hold_seconds),
+                )
+                should_log = (
+                    self._telegram_last_flood_log_at is None
+                    or (datetime.now(timezone.utc) - self._telegram_last_flood_log_at).total_seconds() >= hold_seconds
+                )
+                if should_log:
+                    self._telegram_last_flood_log_at = datetime.now(timezone.utc)
+                    log.warning(
+                        "TELEGRAM_FLOOD_HOLD retry_after=%s hold_until=%s",
+                        retry_after_seconds,
+                        self._telegram_hold_until.isoformat() if self._telegram_hold_until else None,
+                        extra={"event": "TELEGRAM_FLOOD_HOLD", "retry_after": retry_after_seconds, "hold_until": self._telegram_hold_until.isoformat() if self._telegram_hold_until else None},
+                    )
+                return
             log.error(
                 "Failure in _dispatch_alert send: %s",
                 exc,
@@ -4362,6 +4405,7 @@ class TelegramBot:
                     ("guard", self.cmd_guard, ()),
                     ("selftest", self.cmd_selftest, ()),
                     ("assess", self.cmd_assess, ()),
+                    ("reset_kill", self.cmd_reset_kill, ("riskreset",)),
                     ("cooldown", self.cmd_cooldown, ()),
                     ("pause", self.cmd_pause, ()),
                     ("resume", self.cmd_resume, ()),
@@ -10469,6 +10513,26 @@ class TelegramBot:
                     "margin_used": margin_used,
                 },
             )
+
+
+    @command_meta("/reset_kill", "Reset order-manager kill switch (admin only).")
+    async def cmd_reset_kill(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reset kill switch through operator command. Args: update, ctx. Returns: None. Raises: None."""
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        if not await self._guard_admin(update):
+            return
+        om = getattr(self.deps, "safe_order_manager", None) or getattr(self.deps, "order_manager", None)
+        if om is None or not hasattr(om, "reset_kill_switch"):
+            await self._reply(chat, ctx, "Order manager kill switch control unavailable.")
+            return
+        try:
+            om.reset_kill_switch(reason="telegram_command")
+            await self._reply(chat, ctx, "✅ Kill switch reset complete.")
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in cmd_reset_kill: %s", exc, extra={"event": "telegram_cmd_reset_kill_error"})
+            await self._reply(chat, ctx, f"Reset failed: {exc}")
 
     @command_meta("/report", "Latest nightly replay automation summary.")
     async def cmd_report(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
