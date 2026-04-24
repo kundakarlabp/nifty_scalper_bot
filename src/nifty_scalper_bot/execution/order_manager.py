@@ -737,7 +737,12 @@ class OrderManager:
         # 🛡️ CIRCUIT BREAKER STATE (Kill Switch)
         # ---------------------------------------------------------
         self._consecutive_failures: int = 0
-        self._max_failures: int = 5  # Stop trading after 5 back-to-back errors
+        self._max_failures: int = max(1, int(os.getenv("ORDER_KILL_SWITCH_MAX_FAILURES", "5") or 5))
+        self._kill_switch_auto_reset_seconds: int = max(60, int(os.getenv("ORDER_KILL_SWITCH_AUTO_RESET_SECONDS", "900") or 900))
+        self._kill_switch_allow_auto_reset: bool = os.getenv("ORDER_KILL_SWITCH_ALLOW_AUTO_RESET", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self._kill_switch_engaged_at: datetime | None = None
+        self._kill_switch_reason: str | None = None
+        self._last_kill_switch_log_ts: float = 0.0
         self._missing_counts: dict[str, int] = {}
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
@@ -1664,6 +1669,44 @@ class OrderManager:
             self._logger.error("Failure in _validate_live_execution_safety: %s", e)
             return False
 
+    def is_kill_switch_active(self) -> bool:
+        """Return whether kill switch is currently blocking new entries. Args: none. Returns: bool. Raises: none."""
+        if self._kill_switch_engaged_at is None:
+            return False
+        if not self._kill_switch_allow_auto_reset:
+            return True
+        elapsed = (datetime.now(timezone.utc) - self._kill_switch_engaged_at).total_seconds()
+        if elapsed < float(self._kill_switch_auto_reset_seconds):
+            return True
+        self.reset_kill_switch(reason="auto_timeout")
+        return False
+
+    def reset_kill_switch(self, reason: str = "manual") -> None:
+        """Reset kill switch state. Args: reason. Returns: None. Raises: none."""
+        self._consecutive_failures = 0
+        self._kill_switch_engaged_at = None
+        self._kill_switch_reason = None
+        self._last_kill_switch_log_ts = 0.0
+        self._logger.info(
+            "ORDER_KILL_SWITCH_RESET reason=%s",
+            reason,
+            extra={"event": "ORDER_KILL_SWITCH_RESET", "reason": reason},
+        )
+
+    def resolve_lot_size(self, symbol: str) -> int:
+        """Resolve lot size for symbol. Args: symbol. Returns: lot size. Raises: OrderPlacementError."""
+        return self._lot_size_for_symbol(symbol)
+
+    def normalize_quantity_to_lot(self, symbol: str, quantity: int) -> tuple[int, int]:
+        """Normalize quantity to lot multiples. Args: symbol, quantity. Returns: (lot_size, normalized_qty). Raises: OrderPlacementError."""
+        lot_size = self._lot_size_for_symbol(symbol)
+        if quantity <= 0:
+            return lot_size, 0
+        if quantity % lot_size == 0:
+            return lot_size, quantity
+        normalized = (int(quantity) // lot_size) * lot_size
+        return lot_size, normalized
+
     def place_order(
         self,
         symbol: str,
@@ -1686,7 +1729,7 @@ class OrderManager:
         Execute order with Idempotency, Safe Trading Window, Risk Gating, and Auto-Recovery.
         """
         # ── PHASE 3: TRADE_ATTEMPT — first thing, always ─────────────────────
-        self._logger.critical(
+        self._logger.info(
             "TRADE_ATTEMPT symbol=%s side=%s qty=%s price=%s sl=%s tp=%s strategy=%s signal_id=%s",
             symbol, side, quantity, price, stop_loss, take_profit, strategy_name, signal_id,
         )
@@ -1743,29 +1786,28 @@ class OrderManager:
             x in normalized_tag for x in ["exit", "stop", "target", "square", "guard"]
         )
 
+        if not is_system_exit and self.is_kill_switch_active():
+            now_ts = time.time()
+            if now_ts - self._last_kill_switch_log_ts >= 300.0:
+                self._last_kill_switch_log_ts = now_ts
+                self._logger.info(
+                    "ORDER_KILL_SWITCH_BLOCK symbol=%s consecutive_failures=%s reason=%s",
+                    symbol,
+                    self._consecutive_failures,
+                    self._kill_switch_reason,
+                    extra={"event": "ORDER_KILL_SWITCH_BLOCK", "symbol": symbol, "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason},
+                )
+            _log_order_decision(allowed=False, block_reason="kill_switch_engaged")
+            return None
+
         if not is_system_exit and (
             os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
         ):
             if not self._validate_live_execution_safety():
-                self._logger.critical("ORDER_BLOCKED: live_execution_safety_check_failed symbol=%s", symbol)
+                self._logger.warning("ORDER_BLOCKED: live_execution_safety_check_failed symbol=%s", symbol)
                 _log_order_decision(allowed=False, block_reason="live_execution_safety_check_failed")
                 return None
 
-        # 🛡️ CIRCUIT BREAKER CHECK — skipped for system exits
-        if self._consecutive_failures >= self._max_failures:
-            if is_system_exit:
-                self._logger.warning(
-                    f"⚠️ Circuit breaker active but ALLOWING system exit for {symbol}",
-                    extra={"event": "circuit_breaker_exit_bypass", "symbol": symbol},
-                )
-            else:
-                self._logger.critical(
-                    f"💀 KILL SWITCH ENGAGED: {self._consecutive_failures} consecutive broker errors. "
-                    "Trading Halted to prevent API ban / account blowup."
-                )
-                self._logger.critical("ORDER_BLOCKED: kill_switch_engaged consecutive_failures=%s symbol=%s", self._consecutive_failures, symbol)
-                _log_order_decision(allowed=False, block_reason="kill_switch_engaged")
-                return None
         # 🛡️ SAFETY GUARD: ENFORCE VIRTUAL BRACKETS
         is_entry = (side == "BUY") and not is_system_exit
 
@@ -1782,7 +1824,7 @@ class OrderManager:
                 for o in self._orders.values()
             )
             if has_open_local and has_pending_entry:
-                self._logger.critical("ORDER_BLOCKED: duplicate_entry_prevented symbol=%s side=%s", symbol, side)
+                self._logger.warning("ORDER_BLOCKED: duplicate_entry_prevented symbol=%s side=%s", symbol, side)
                 _log_order_decision(allowed=False, block_reason="duplicate_entry_prevented")
                 return None
             if not self._signal_arbitrator.allow(symbol, side):
@@ -1802,7 +1844,7 @@ class OrderManager:
                     f"\nReason: Intraday Buy Orders MUST have a Stop Loss to attach a Virtual Bracket."
                     f"\nData: Qty={quantity}, SL={stop_loss}, Tag={tag}"
                 )
-                self._logger.critical("ORDER_BLOCKED: naked_entry_no_stop_loss symbol=%s qty=%s", symbol, quantity)
+                self._logger.warning("ORDER_BLOCKED: naked_entry_no_stop_loss symbol=%s qty=%s", symbol, quantity)
                 _log_order_decision(allowed=False, block_reason="naked_entry_no_stop_loss")
                 return None  # ❌ STOP HERE. DO NOT CALL BROKER.
 
@@ -1818,6 +1860,28 @@ class OrderManager:
         normalized_symbol = normalize_symbol(symbol)
         if not is_strategy_instrument(normalized_symbol):
             raise RuntimeError("Blocked non-NIFTY instrument")
+        try:
+            lot_size = self._lot_size_for_symbol(normalized_symbol)
+        except OrderPlacementError as exc:
+            self._logger.warning(
+                "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s reason=%s",
+                normalized_symbol,
+                quantity,
+                exc,
+                extra={"event": "ORDER_BLOCKED", "block_reason": "invalid_lot_quantity", "symbol": normalized_symbol, "qty": quantity},
+            )
+            _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
+            return None
+        if quantity <= 0 or quantity % lot_size != 0:
+            self._logger.warning(
+                "ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s",
+                normalized_symbol,
+                quantity,
+                lot_size,
+                extra={"event": "ORDER_BLOCKED", "block_reason": "invalid_lot_quantity", "symbol": normalized_symbol, "qty": quantity, "lot_size": lot_size},
+            )
+            _log_order_decision(allowed=False, block_reason="invalid_lot_quantity")
+            return None
         # ---------------------------------------------------------------------
         # 🛑 FIX 1: Smart Idempotency with Timeout
         # ---------------------------------------------------------------------
@@ -1863,7 +1927,7 @@ class OrderManager:
                     f"🚫 BLOCKED: Fresh pending order exists for {normalized_symbol}. Ignored to prevent duplicate.",
                     extra={"event": "duplicate_block", "symbol": normalized_symbol},
                 )
-                self._logger.critical("ORDER_BLOCKED: fresh_pending_order_exists symbol=%s", normalized_symbol)
+                self._logger.warning("ORDER_BLOCKED: fresh_pending_order_exists symbol=%s", normalized_symbol)
                 _log_order_decision(allowed=False, block_reason="fresh_pending_order_exists")
                 return None
             elif pending_orders and is_system_exit:
@@ -1890,7 +1954,7 @@ class OrderManager:
                 price=float(price or 0.0),
                 meta={"signal_id": signal_id},
             )
-            self._logger.critical("ORDER_BLOCKED: duplicate_signal signal_id=%s symbol=%s", signal_id, normalized_symbol)
+            self._logger.warning("ORDER_BLOCKED: duplicate_signal signal_id=%s symbol=%s", signal_id, normalized_symbol)
             _log_order_decision(allowed=False, block_reason="duplicate_signal")
             return None
 
@@ -1955,7 +2019,7 @@ class OrderManager:
                             "event": "time_guard_block",
                         },
                     )
-                    self._logger.critical("ORDER_BLOCKED: time_guard reason=%s symbol=%s time=%s", reason, normalized_symbol, now.strftime("%H:%M:%S"))
+                    self._logger.info("ORDER_BLOCKED: time_guard reason=%s symbol=%s time=%s", reason, normalized_symbol, now.strftime("%H:%M:%S"))
                     _log_order_decision(allowed=False, block_reason="time_guard_block")
                     return None
             except Exception as e:
@@ -1981,7 +2045,7 @@ class OrderManager:
                     "Order blocked: Trading Switch is OFF",
                     extra={"symbol": normalized_symbol},
                 )
-                self._logger.critical("ORDER_BLOCKED: trading_switch_off symbol=%s", normalized_symbol)
+                self._logger.info("ORDER_BLOCKED: trading_switch_off symbol=%s", normalized_symbol)
                 _log_order_decision(allowed=False, block_reason="trading_switch_off")
                 return None
 
@@ -2011,7 +2075,7 @@ class OrderManager:
                     f"Risk Block: {reason}",
                     extra={"symbol": normalized_symbol, "event": "risk_block"},
                 )
-                self._logger.critical("ORDER_BLOCKED: risk_manager_blocked reason=%s symbol=%s", reason, normalized_symbol)
+                self._logger.info("ORDER_BLOCKED: risk_manager_blocked reason=%s symbol=%s", reason, normalized_symbol)
                 _log_order_decision(allowed=False, block_reason="risk_manager_blocked")
                 return None
 
@@ -2381,10 +2445,28 @@ class OrderManager:
                     return order_id
 
             except Exception as e:
-                # ✅ ADD THIS: Count the failure
-                self._consecutive_failures += 1
-
                 msg = str(e).lower()
+                failure_class = "broker_submit_exception"
+                if "rate" in msg and "limit" in msg:
+                    failure_class = "broker_rate_limit"
+                elif "auth" in msg or "token" in msg or "unauthor" in msg:
+                    failure_class = "broker_auth_error"
+                elif any(x in msg for x in ["invalid", "bad request", "payload", "400"]):
+                    failure_class = "broker_reject_invalid_payload"
+
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= self._max_failures and self._kill_switch_engaged_at is None:
+                    self._kill_switch_engaged_at = datetime.now(timezone.utc)
+                    self._kill_switch_reason = failure_class
+                    self._last_kill_switch_log_ts = time.time()
+                    self._logger.critical(
+                        "ORDER_KILL_SWITCH_ENGAGED consecutive_failures=%s reason=%s symbol=%s",
+                        self._consecutive_failures,
+                        self._kill_switch_reason,
+                        normalized_symbol,
+                        extra={"event": "ORDER_KILL_SWITCH_ENGAGED", "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason, "symbol": normalized_symbol},
+                    )
+
                 # Fail Fast logic
                 if any(
                     x in msg

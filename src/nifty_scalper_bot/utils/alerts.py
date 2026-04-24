@@ -196,13 +196,18 @@ class AlertDeduplicator:
             return hint_immediate
 
     def mark_flood_limited(
-        self, key: str, *, now: datetime | None = None
+        self, key: str, *, now: datetime | None = None, hold_for: timedelta | None = None
     ) -> None:
         """Record send flood-control and suppress immediate retries for family."""
 
         moment = now or datetime.now(timezone.utc)
         family_key = self._family_key(str(key))
-        self._flood_hold_until[family_key] = moment + self._quiet_window
+        effective_hold = hold_for if hold_for is not None and hold_for > self._quiet_window else self._quiet_window
+        hold_until = moment + effective_hold
+        self._flood_hold_until[family_key] = hold_until
+        # Apply hold to all severities under the family to stop critical bypass spam.
+        for severity in ("critical", "warning", "info"):
+            self._flood_hold_until[f"{family_key}:{severity}"] = hold_until
 
     def prune(self, *, now: datetime | None = None) -> None:
         """Drop dedupe entries older than the quiet window.
