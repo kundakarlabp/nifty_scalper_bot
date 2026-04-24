@@ -4405,7 +4405,7 @@ class TelegramBot:
                     ("guard", self.cmd_guard, ()),
                     ("selftest", self.cmd_selftest, ()),
                     ("assess", self.cmd_assess, ()),
-                    ("reset_kill", self.cmd_reset_kill, ("riskreset",)),
+                    ("reset_kill", self.cmd_reset_kill, ("riskreset", "reset_kill_switch")),
                     ("cooldown", self.cmd_cooldown, ()),
                     ("pause", self.cmd_pause, ()),
                     ("resume", self.cmd_resume, ()),
@@ -6502,6 +6502,7 @@ class TelegramBot:
 
             orders_line = f"{EMOJI['orders']} Orders: <b>n/a</b>"
             om = self.deps.order_manager
+            kill_switch_line = ""
             if om is not None:
                 try:
                     recent_orders: list[t.Any] = om.recent_orders(limit=10)
@@ -6524,6 +6525,15 @@ class TelegramBot:
                         f"{EMOJI['orders']} Orders: recent=<b>{len(recent_orders)}</b> "
                         f"pending=<b>{pending}</b>"
                     )
+                with suppress(Exception):
+                    if hasattr(om, "get_kill_switch_status"):
+                        ks = om.get_kill_switch_status()
+                        kill_switch_line = (
+                            f"{EMOJI['warn']} KillSwitch: "
+                            f"<b>{'ON' if ks.get('active') else 'OFF'}</b> "
+                            f"fails={rb.esc(str(ks.get('consecutive_failures')))} "
+                            f"reason={rb.esc(str(ks.get('kill_reason') or 'none'))}"
+                        )
 
             positions_line = f"{EMOJI['pos']} Positions: <b>n/a</b>"
             pm = self.deps.position_manager
@@ -6604,6 +6614,8 @@ class TelegramBot:
                     positions_line,
                 ]
             )
+            if kill_switch_line:
+                section_main.append(kill_switch_line)
             if mdm_health_line:
                 section_main.insert(4, mdm_health_line)
             reconcile_line, reconcile_hint = self._reconcile_status_line()
