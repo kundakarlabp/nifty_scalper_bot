@@ -230,6 +230,16 @@ class InstrumentManager:
             # Return lot size - NIFTY options should return 65 (current lot size)
             return self._lot_size_map.get(token)
 
+    def lot_size_for_symbol(self, symbol: str) -> Optional[int]:
+        """Compatibility alias for lot-size resolver consumers.
+
+        Args: symbol – exchange-qualified or bare trading symbol.
+        Returns: Lot size or ``None`` when not available.
+        Raises: None.
+        """
+
+        return self.get_lot_size(symbol)
+
     def lookup(self, token_or_symbol: int | str) -> Optional[dict]:
         """Lookup full instrument data by token or symbol.
         

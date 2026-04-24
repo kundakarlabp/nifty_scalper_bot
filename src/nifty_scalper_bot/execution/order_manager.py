@@ -10387,25 +10387,48 @@ class OrderManager:
 
     def _lot_lookup(self) -> Callable[[str], int] | None:
         resolver = self._resolver
-        if not resolver:
-            return None
         if resolver is None:
             market_data = self._market_data
             resolver = getattr(market_data, "resolver", None) if market_data else None
             if resolver is None and market_data is not None:
                 resolver = getattr(market_data, "_resolver", None)
-        lookup = getattr(resolver, "lot_size_for_symbol", None)
-        return lookup if callable(lookup) else None
+        if resolver is None:
+            return None
+
+        primary = getattr(resolver, "lot_size_for_symbol", None)
+        if callable(primary):
+            return cast(Callable[[str], int], primary)
+
+        secondary = getattr(resolver, "get_lot_size", None)
+        if callable(secondary):
+            return cast(Callable[[str], int], secondary)
+        return None
 
     def _lot_size_for_symbol(self, symbol: str) -> int:
         lookup = self._lot_lookup()
         if lookup is None:
             raise OrderPlacementError("Instrument resolver with lot sizes required")
+        normalized_symbol = normalize_symbol(symbol) or str(symbol).strip().upper()
+        candidates = [normalized_symbol]
+        if ":" in normalized_symbol:
+            candidates.append(normalized_symbol.split(":", 1)[-1])
         try:
-            resolved = lookup(symbol)
+            resolved = None
+            for candidate in candidates:
+                resolved = lookup(candidate)
+                if resolved is not None:
+                    break
         except Exception as exc:  # noqa: BLE001 - surface resolver error
             self._logger.debug("lot_size_lookup_failed", exc_info=True)
             raise OrderPlacementError("Failed to resolve lot size") from exc
+        if resolved is None and "NIFTY" in normalized_symbol and ("CE" in normalized_symbol or "PE" in normalized_symbol):
+            try:
+                fallback_settings = app_settings.get_settings()
+                fallback_lot = int(getattr(fallback_settings, "contract_lot_size", 0) or 0)
+                if fallback_lot > 0:
+                    resolved = fallback_lot
+            except Exception:  # pragma: no cover - defensive
+                resolved = None
         if resolved is None:
             raise OrderPlacementError("No lot size available for symbol")
         try:
@@ -10414,6 +10437,12 @@ class OrderManager:
             raise OrderPlacementError("Invalid lot size returned by resolver") from exc
         if lot_size <= 0:
             raise OrderPlacementError("Lot size must be positive")
+        self._logger.info(
+            "LOT_SIZE_RESOLVED symbol=%s lot_size=%s",
+            normalized_symbol,
+            lot_size,
+            extra={"event": "LOT_SIZE_RESOLVED", "symbol": normalized_symbol, "lot_size": lot_size},
+        )
         return lot_size
 
     def _normalize_leg(self, leg: AtomicLeg | Mapping[str, Any]) -> AtomicLeg:

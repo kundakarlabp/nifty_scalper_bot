@@ -200,6 +200,10 @@ class MarketDataManager:
         self._stale_threshold_seconds = self._parse_float_env(
             "MDM_STALE_THRESHOLD_SECONDS", default=10.0, minimum=1.0
         )
+        self._ltp_stale_seconds = self._parse_float_env(
+            "MDM_LTP_STALE_SECONDS", default=5.0, minimum=1.0
+        )
+        self._ltp_stale_warn_last: dict[str, float] = {}
         self._tick_warn_last: dict[str, float] = (
             {}
         )  # ✅ FIX: rate-limit cache-miss warnings
@@ -1501,7 +1505,7 @@ class MarketDataManager:
             float | None: Latest price or None if unavailable from all sources.
         """
         canonical_symbol = self._canonical_symbol(symbol)
-        _STALE_SECONDS = 2.0
+        _STALE_SECONDS = float(self._ltp_stale_seconds)
         now = time.time()
 
         # 1. Try tick cache with freshness check
@@ -1517,11 +1521,15 @@ class MarketDataManager:
                     if tick_age is None or tick_age <= _STALE_SECONDS:
                         return ltp
                     # Tick exists but is stale — log and fall through to broker
-                    self._logger.warning(
-                        "STALE_DATA symbol=%s age=%.2fs — falling back to broker REST",
-                        canonical_symbol,
-                        tick_age,
-                    )
+                    last_warn = self._ltp_stale_warn_last.get(canonical_symbol, 0.0)
+                    if now - last_warn >= 60.0:
+                        self._ltp_stale_warn_last[canonical_symbol] = now
+                        self._logger.warning(
+                            "STALE_DATA symbol=%s age=%.2fs — falling back to broker REST",
+                            canonical_symbol,
+                            tick_age,
+                            extra={"event": "STALE_DATA", "symbol": canonical_symbol, "age_s": round(float(tick_age), 3)},
+                        )
             except (KeyError, TypeError, ValueError):
                 pass
 
@@ -1537,9 +1545,10 @@ class MarketDataManager:
                         p = float(price)
                         if p > 0:
                             self._logger.debug(
-                                "REST_FALLBACK_HIT symbol=%s price=%.2f",
+                                "MDM_REST_FALLBACK_USED symbol=%s reason=stale_ws_tick price=%.2f",
                                 canonical_symbol,
                                 p,
+                                extra={"event": "MDM_REST_FALLBACK_USED", "symbol": canonical_symbol, "reason": "stale_ws_tick", "price": p},
                             )
                             # Repair symbol-level cache so the next call to
                             # get_ltp does not hit the stale guard again.
@@ -3509,6 +3518,13 @@ class MarketDataManager:
             datahub = getattr(self, "_datahub", None)
             if datahub is not None and hasattr(datahub, "register_symbol"):
                 datahub.register_symbol(normalized_symbol, token_int)
+            if normalized_symbol == "NSE:NIFTY":
+                self._logger.info(
+                    "SPOT_SUBSCRIPTION_READY symbol=%s token=%s",
+                    normalized_symbol,
+                    token_int,
+                    extra={"event": "SPOT_SUBSCRIPTION_READY", "symbol": normalized_symbol, "token": token_int},
+                )
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Resolver/DataHub sync skipped: %s", exc, exc_info=exc)
 
@@ -3589,6 +3605,20 @@ class MarketDataManager:
                     "reason": "tick_received",
                 },
             )
+            if source == "ws" and symbol == "NSE:NIFTY":
+                tick_age = 0.0
+                try:
+                    tick_age = max(time.time() - float(self._last_tick_time.get(symbol, 0.0) or 0.0), 0.0)
+                except Exception:
+                    tick_age = 0.0
+                log_throttled(
+                    self._logger,
+                    "mdm_ws_tick_received_nse_nifty",
+                    "MDM_WS_TICK_RECEIVED symbol=NSE:NIFTY",
+                    interval_sec=60.0,
+                    level=logging.DEBUG,
+                    extra={"event": "MDM_WS_TICK_RECEIVED", "symbol": "NSE:NIFTY", "age": round(tick_age, 3)},
+                )
         except Exception:  # pragma: no cover - defensive
             pass
         self.bump_heartbeat()

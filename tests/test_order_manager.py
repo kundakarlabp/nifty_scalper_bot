@@ -238,6 +238,29 @@ def test_place_order_truncates_quantity_to_lot(
     assert payload["quantity"] % 75 == 0
 
 
+def test_resolve_lot_size_supports_get_lot_size_interface(
+    order_manager: OrderManager,
+) -> None:
+    class _GetLotResolver:
+        def get_lot_size(self, symbol: str) -> int:
+            assert symbol in {"NFO:NIFTY26APR23800PE", "NIFTY26APR23800PE"}
+            return 65
+
+    order_manager.set_instrument_resolver(_GetLotResolver())
+    assert order_manager.resolve_lot_size("NFO:NIFTY26APR23800PE") == 65
+
+
+def test_resolve_lot_size_supports_bare_symbol_normalization(
+    order_manager: OrderManager,
+) -> None:
+    class _LotResolver:
+        def lot_size_for_symbol(self, symbol: str) -> int | None:
+            return 65 if symbol == "NIFTY26APR23800PE" else None
+
+    order_manager.set_instrument_resolver(_LotResolver())
+    assert order_manager.resolve_lot_size("NFO:NIFTY26APR23800PE") == 65
+
+
 def test_place_order_rounding_to_zero_skips(
     order_manager: OrderManager, fake_broker: FakeBrokerClient
 ) -> None:

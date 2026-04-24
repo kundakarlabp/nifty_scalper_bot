@@ -327,9 +327,10 @@ class IndicatorEngine:
             if names is None:
                 log_throttled(
                     LOGGER,
-                    f"indicator_names_defaulted_{symbol}",
-                    "Condition met: indicator_names_defaulted",
-                    interval_sec=60.0,
+                    "indicator_names_defaulted_global",
+                    "indicator_names_defaulted: using default indicator set",
+                    interval_sec=300.0,
+                    level=logging.DEBUG,
                     extra={
                         "event": "indicator_engine_names_defaulted",
                         "symbol": symbol,
