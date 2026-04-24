@@ -280,6 +280,36 @@ def test_ensure_min_bars_uses_hydrator(engine: IndicatorEngine) -> None:
     assert engine.has_min_bars('TEST', 2) is True
 
 
+def test_option_avg_volume_ignores_zero_volume_bars(engine: IndicatorEngine) -> None:
+    symbol = 'NFO:NIFTY26APR23850PE'
+    volumes = [0, 0, 10, 0, 20]
+    for idx, volume in enumerate(volumes):
+        engine.update_price(
+            symbol,
+            {'open': 100 + idx, 'high': 101 + idx, 'low': 99 + idx, 'close': 100 + idx},
+            volume=volume,
+            timestamp=datetime(2024, 1, 1, 0, idx, tzinfo=timezone.utc),
+        )
+    indicators = engine.get_indicators(symbol, {'avg_volume', 'average_volume'})
+    assert indicators['avg_volume'] is not None
+    assert float(indicators['avg_volume']) > 0.0
+    assert indicators['average_volume'] == indicators['avg_volume']
+
+
+def test_non_option_avg_volume_keeps_standard_average(engine: IndicatorEngine) -> None:
+    symbol = 'NSE:NIFTY'
+    volumes = [0, 0, 10, 0, 20]
+    for idx, volume in enumerate(volumes):
+        engine.update_price(
+            symbol,
+            {'open': 200 + idx, 'high': 201 + idx, 'low': 199 + idx, 'close': 200 + idx},
+            volume=volume,
+            timestamp=datetime(2024, 1, 1, 1, idx, tzinfo=timezone.utc),
+        )
+    indicators = engine.get_indicators(symbol, {'avg_volume'})
+    assert indicators['avg_volume'] == pytest.approx(sum(volumes) / len(volumes))
+
+
 def _atr_reference(
     highs: list[float], lows: list[float], closes: list[float], period: int
 ) -> float:

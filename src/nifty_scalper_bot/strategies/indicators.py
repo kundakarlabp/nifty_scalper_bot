@@ -522,6 +522,18 @@ class IndicatorEngine:
                 return cached  # type: ignore[return-value]
             prices = history.get_closes(effective_period)
             volumes = history.get_volumes(effective_period)
+            provisional_flags = history.get_provisional_flags(effective_period)
+            if provisional_flags and len(provisional_flags) == len(volumes):
+                filtered_pairs = [
+                    (float(price), int(volume))
+                    for price, volume, provisional in zip(
+                        prices, volumes, provisional_flags, strict=False
+                    )
+                    if not bool(provisional)
+                ]
+                if filtered_pairs:
+                    prices = [pair[0] for pair in filtered_pairs]
+                    volumes = [pair[1] for pair in filtered_pairs]
 
             # Pre-check: skip calculation if all volumes are zero
             if not volumes or all(v == 0 for v in volumes):
@@ -966,16 +978,38 @@ class IndicatorEngine:
             return
 
         volumes = history.get_volumes()
+        provisional_flags = history.get_provisional_flags()
         if volumes:
-            last_volume = float(volumes[-1])
+            last_volume = (
+                float(volumes[-1]) if not provisional_flags or not provisional_flags[-1] else 0.0
+            )
             indicators["volume"] = last_volume
-            tail = volumes[-20:]
+            upper_symbol = str(symbol).upper()
+            is_option = upper_symbol.endswith("CE") or upper_symbol.endswith("PE")
+            zipped = list(zip(volumes, provisional_flags, strict=False)) if provisional_flags else [
+                (volume, False) for volume in volumes
+            ]
+            recent = zipped[-20:]
+            if is_option:
+                tail = [float(volume) for volume, provisional in recent if not provisional and float(volume) > 0.0]
+                if not tail:
+                    tail = [
+                        float(volume)
+                        for volume, provisional in zipped
+                        if not provisional and float(volume) > 0.0
+                    ][-20:]
+            else:
+                tail = [float(volume) for volume, provisional in recent if not provisional]
             if tail:
                 avg_volume = sum(float(v) for v in tail) / len(tail)
                 indicators["avg_volume"] = avg_volume
-                indicators["average_volume"] = avg_volume  # ✅ ADD ALIAS
+                indicators["average_volume"] = avg_volume
                 if avg_volume > 0:
                     indicators["volume_spike_ratio"] = last_volume / avg_volume
+                else:
+                    indicators["volume_spike_ratio"] = 0.0
+            else:
+                indicators["volume_spike_ratio"] = 0.0
 
         timestamps = history.get_timestamps()
         highs = history.get_highs()

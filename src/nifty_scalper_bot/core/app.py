@@ -2524,6 +2524,40 @@ def _data_ready(mdm: MarketDataManager | None) -> bool:
     return True
 
 
+def _compute_indicator_readiness(ctx: BotContext) -> bool:
+    """Compute indicator readiness from runner/indicator histories."""
+    runner = getattr(ctx, "strategy_runner", None)
+    indicator_engine = getattr(ctx, "indicator_engine", None)
+    if runner is None or indicator_engine is None:
+        return False
+    required = int(getattr(runner, "_required_candles", 20) or 20)
+    active_symbols = list(getattr(runner, "_active_symbols", set()) or [])
+    tradeable_symbols = [
+        symbol
+        for symbol in active_symbols
+        if str(symbol).upper().startswith("NFO:")
+        and str(symbol).upper().endswith(("CE", "PE"))
+    ]
+    if not tradeable_symbols:
+        return False
+    for symbol in tradeable_symbols:
+        try:
+            if hasattr(indicator_engine, "has_min_bars") and indicator_engine.has_min_bars(
+                symbol, required
+            ):
+                return True
+            history = (
+                indicator_engine.get_history(symbol)
+                if hasattr(indicator_engine, "get_history")
+                else []
+            )
+            if history is not None and len(history) >= required:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _build_canonical_active_basket(
     *,
     instrument_manager: InstrumentManager | None,
@@ -7154,7 +7188,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             hard_ready = bool(readiness_state.get("hard_ready"))
                             spot_ready = bool(readiness_state.get("spot_ready"))
                             missing_hard = list(readiness_state.get("missing_hard") or [])
-                            indicators_ready_for_trading = hard_ready
+                            indicators_ready_for_trading = _compute_indicator_readiness(ctx)
                             if ctx.market_regime_manager is not None:
                                 ctx.market_regime_manager.indicators_ready = (
                                     indicators_ready_for_trading
@@ -7163,6 +7197,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.data_hub.indicators_ready = (
                                     indicators_ready_for_trading
                                 )
+                            LOGGER.info(
+                                "INDICATOR_READINESS_SYNC ready=%s",
+                                indicators_ready_for_trading,
+                                extra={
+                                    "event": "INDICATOR_READINESS_SYNC",
+                                    "ready": indicators_ready_for_trading,
+                                },
+                            )
                             ws_connected = bool(
                                 ctx.websocket_manager.is_connected()
                                 if ctx.websocket_manager is not None
@@ -7223,6 +7265,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                     atr_prov = ctx.indicator_engine.atr_provider
                     if hasattr(atr_prov, "mark_warmed_up"):
                         atr_prov.mark_warmed_up()
+                indicator_ready = _compute_indicator_readiness(ctx)
+                if ctx.data_hub is not None:
+                    ctx.data_hub.indicators_ready = indicator_ready
+                if ctx.market_regime_manager is not None:
+                    ctx.market_regime_manager.indicators_ready = indicator_ready
+                LOGGER.info(
+                    "INDICATOR_READINESS_SYNC ready=%s",
+                    indicator_ready,
+                    extra={"event": "INDICATOR_READINESS_SYNC", "ready": indicator_ready},
+                )
 
                 ctx.subsystems_started = True
                 LOGGER.info("✅ All subsystems started.")

@@ -31,7 +31,7 @@ class VWAPProStrategy(EliteStrategy):
     MIN_BARS_REQUIRED = 10
     COOLDOWN_SECONDS = 20  # ✅ Scalping fix: shorter directional cooldown for rapid continuation legs
     VWAP_ACCEPTANCE_BARS = 1  # ✅ FIX #5: Reduced from 2 → 1; index bias gate is already a strong 2-condition filter
-    TELEMETRY_LOG_EVERY = 5
+    TELEMETRY_LOG_EVERY = 50
     VOLUME_GRACE_SECONDS = 900.0  # ✅ FIX C: Extended from 120s → 900s (15 min). NFO options tick ≈once/13min between batches; 120s grace expired before next tick arrived → volume_below_threshold on every call.
 
     __slots__ = (
@@ -49,6 +49,10 @@ class VWAPProStrategy(EliteStrategy):
         "_index_bias_missing_logged",  # ✅ FIX #5b: Was missing from __slots__ but set in __init__ and read in _evaluate_signal
         "_last_valid_index_vwap",
         "_bias_failover_logged_bar",
+        "_cfg_allow_vwap_pullback",
+        "_cfg_vwap_slack_atr_mult",
+        "_cfg_max_vwap_distance_pct",
+        "_cfg_telemetry_log_every",
     )
 
     def __init__(
@@ -108,6 +112,18 @@ class VWAPProStrategy(EliteStrategy):
             )
         except ValueError:
             self._cfg_expiry_weekday = WEEKLY_EXPIRY_WEEKDAY
+        self._cfg_allow_vwap_pullback = str(
+            os.getenv("VWAP_ALLOW_PULLBACK_ENTRY", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._cfg_vwap_slack_atr_mult = float(
+            os.getenv("VWAP_SLACK_ATR_MULT", "1.5")
+        )
+        self._cfg_max_vwap_distance_pct = float(
+            os.getenv("VWAP_MAX_OPTION_DISTANCE_PCT", "0.18")
+        )
+        self._cfg_telemetry_log_every = max(
+            1, int(os.getenv("VWAP_TELEMETRY_LOG_EVERY", "50") or 50)
+        )
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -318,14 +334,14 @@ class VWAPProStrategy(EliteStrategy):
             # ✅ FIX B6: Periodic telemetry dump
             self._telemetry["evaluations"] += 1
             _evals = self._telemetry["evaluations"]
-            if _evals == 1 or _evals % self.TELEMETRY_LOG_EVERY == 0:
+            if _evals == 1 or _evals % self._cfg_telemetry_log_every == 0:
                 dominant_reject_reason = None
                 if self._reject_reason_counts:
                     dominant_reject_reason = max(
                         self._reject_reason_counts.items(),
                         key=lambda item: item[1],
                     )[0]
-                LOGGER.info(
+                LOGGER.debug(
                     f"📊 VWAPPro TELEMETRY [{symbol}]: evals={_evals} "
                     f"signals={self._telemetry['signals']} "
                     f"cool={self._telemetry['skipped_cooldown']} "
@@ -539,7 +555,7 @@ class VWAPProStrategy(EliteStrategy):
                 self._telemetry["skipped_bias"] += 1
                 if (
                     self._telemetry["skipped_bias"] <= 3
-                    or self._telemetry["skipped_bias"] % self.TELEMETRY_LOG_EVERY == 0
+                    or self._telemetry["skipped_bias"] % self._cfg_telemetry_log_every == 0
                 ):
                     LOGGER.info(
                         f"🧭 BIAS GATE: {symbol} {direction} blocked | "
@@ -594,7 +610,7 @@ class VWAPProStrategy(EliteStrategy):
                     self._telemetry["skipped_data"] += 1
                     if (
                         self._telemetry["skipped_data"] <= 5
-                        or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY
+                        or self._telemetry["skipped_data"] % self._cfg_telemetry_log_every
                         == 0
                     ):
                         LOGGER.info(
@@ -636,7 +652,7 @@ class VWAPProStrategy(EliteStrategy):
                 self._telemetry["skipped_spread"] += 1
                 if (
                     self._telemetry["skipped_spread"] <= 3
-                    or self._telemetry["skipped_spread"] % self.TELEMETRY_LOG_EVERY == 0
+                    or self._telemetry["skipped_spread"] % self._cfg_telemetry_log_every == 0
                 ):
                     LOGGER.info(
                         f"💹 SPREAD REJECT: {symbol} | spread={_spread_pct:.1f}% > max={_max_spread:.0f}%",
@@ -666,12 +682,13 @@ class VWAPProStrategy(EliteStrategy):
             _option_vwap = float(
                 indicators.get("vwap") or indicators.get("exchange_vwap") or 0.0
             )
-            _vwap_slack = atr * 1.0
-            if _option_vwap > 0 and current_price < (_option_vwap - _vwap_slack):
+            _vwap_slack = atr * self._cfg_vwap_slack_atr_mult
+            price_below_vwap = _option_vwap > 0 and current_price < (_option_vwap - _vwap_slack)
+            if price_below_vwap and not self._cfg_allow_vwap_pullback:
                 self._telemetry["skipped_vwap"] += 1
                 if (
                     self._telemetry["skipped_vwap"] <= 3
-                    or self._telemetry["skipped_vwap"] % self.TELEMETRY_LOG_EVERY == 0
+                    or self._telemetry["skipped_vwap"] % self._cfg_telemetry_log_every == 0
                 ):
                     LOGGER.info(
                         f"📏 OPT VWAP: {symbol} {direction} | "
@@ -693,13 +710,16 @@ class VWAPProStrategy(EliteStrategy):
             distance = 0.0
             if _option_vwap > 0:
                 distance = abs(current_price - _option_vwap) / _option_vwap
-                if distance > 0.12:
+                if distance > self._cfg_max_vwap_distance_pct:
                     self._log_no_signal_reason(
                         "vwap_distance_extension",
                         symbol=symbol,
                         ltp=current_price,
                         vwap=_option_vwap,
-                        context={"distance": distance, "max_distance": 0.12},
+                        context={
+                            "distance": distance,
+                            "max_distance": self._cfg_max_vwap_distance_pct,
+                        },
                     )
                     self._reset_acceptance(
                         acc_key,
@@ -723,7 +743,9 @@ class VWAPProStrategy(EliteStrategy):
                 or indicators.get("orb_breakout")
             )
             soft_flag = False
-            if not pullback_ok or not momentum_confirmation:
+            if not pullback_ok or not momentum_confirmation or (
+                price_below_vwap and self._cfg_allow_vwap_pullback
+            ):
                 soft_flag = True
                 self._log_no_signal_reason(
                     "vwap_pullback_soft_flag",
@@ -736,7 +758,7 @@ class VWAPProStrategy(EliteStrategy):
                         "breakout_detected": breakout_detected,
                     },
                 )
-                if not breakout_detected:
+                if not breakout_detected and (not self._cfg_allow_vwap_pullback or not price_below_vwap):
                     _emit_no_signal("vwap_pullback_not_confirmed")
                     return None
 
@@ -821,7 +843,7 @@ class VWAPProStrategy(EliteStrategy):
                     self._telemetry["skipped_data"] += 1
                     if (
                         self._telemetry["skipped_data"] <= 5
-                        or self._telemetry["skipped_data"] % self.TELEMETRY_LOG_EVERY
+                        or self._telemetry["skipped_data"] % self._cfg_telemetry_log_every
                         == 0
                     ):
                         LOGGER.warning(
@@ -858,7 +880,7 @@ class VWAPProStrategy(EliteStrategy):
                 self._telemetry["skipped_volume"] += 1
                 if (
                     self._telemetry["skipped_volume"] <= 5
-                    or self._telemetry["skipped_volume"] % self.TELEMETRY_LOG_EVERY == 0
+                    or self._telemetry["skipped_volume"] % self._cfg_telemetry_log_every == 0
                 ):
                     LOGGER.info(
                         f"🔊 VOL GATE: {symbol} | vol={vol:.0f} < avg={avg_vol:.0f}×{vol_thresh}={avg_vol*vol_thresh:.0f}",
