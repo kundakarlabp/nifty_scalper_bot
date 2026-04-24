@@ -525,6 +525,22 @@ class StrategyRunner:
             1.0,
             float(os.getenv("RUNNER_COOLDOWN_LOG_THROTTLE_SECONDS", "60")),
         )
+        self._index_stale_tick_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_INDEX_STALE_TICK_SECONDS", "30")),
+        )
+        self._future_stale_tick_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_FUTURE_STALE_TICK_SECONDS", "120")),
+        )
+        self._option_stale_tick_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_OPTION_STALE_TICK_SECONDS", "900")),
+        )
+        self._generic_stale_tick_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_GENERIC_STALE_TICK_SECONDS", "60")),
+        )
         self._no_signal_log_throttle_seconds = max(
             1.0,
             float(os.getenv("RUNNER_NO_SIGNAL_LOG_THROTTLE_SECONDS", "300")),
@@ -2092,6 +2108,7 @@ class StrategyRunner:
             ts_utc = row_ts.astimezone(timezone.utc).replace(second=0, microsecond=0)
             cache_by_minute[ts_utc] = row
 
+        is_option_symbol = upper_symbol.endswith("CE") or upper_symbol.endswith("PE")
         prev_close = float(previous_bar.close)
         while expected < incoming_bar.timestamp:
             row = cache_by_minute.get(expected)
@@ -2107,7 +2124,7 @@ class StrategyRunner:
                     end=expected + timedelta(seconds=59),
                     synthetic=False,
                 )
-            else:
+            elif not is_option_symbol:
                 repaired_bar = OneMinuteBar(
                     open=prev_close,
                     high=prev_close,
@@ -2118,19 +2135,23 @@ class StrategyRunner:
                     end=expected + timedelta(seconds=59),
                     synthetic=True,
                 )
+            else:
+                expected += timedelta(minutes=1)
+                continue
             repaired.append(repaired_bar)
             prev_close = repaired_bar.close
             expected += timedelta(minutes=1)
 
         if repaired:
-            self._logger.warning(
-                "candle_gap_repaired",
-                extra={
-                    "event": "candle_gap_repaired",
-                    "symbol": symbol,
-                    "count": len(repaired),
-                },
-            )
+            if self._should_log_throttled(f"candle_gap_repaired:{symbol}", 300.0):
+                self._logger.info(
+                    "candle_gap_repaired",
+                    extra={
+                        "event": "candle_gap_repaired",
+                        "symbol": symbol,
+                        "count": len(repaired),
+                    },
+                )
             if (
                 self._main_loop
                 and self._main_loop.is_running()
@@ -2507,7 +2528,7 @@ class StrategyRunner:
                     volume=indicator_volume,
                     timestamp=bar.timestamp,
                     is_complete=True,
-                    is_provisional=False,
+                    is_provisional=bool(getattr(bar, "synthetic", False)),
                 )
 
             self._update_symbol_readiness(symbol)
@@ -2631,8 +2652,11 @@ class StrategyRunner:
             if self._data_phase.get(symbol) != "LIVE":
                 self._data_phase[symbol] = "LIVE"
                 self._live_bar_seen.add(symbol)
-                LOGGER.info("LIVE MODE ENABLED: %s", symbol)
-                self._logger.info("LIVE MODE ENABLED: %s", symbol)
+                self._logger.info(
+                    "LIVE_MODE_ENABLED symbol=%s",
+                    symbol,
+                    extra={"event": "LIVE_MODE_ENABLED", "symbol": symbol},
+                )
         except Exception as e:
             self._logger.error("Failure in StrategyRunner._mark_live: %s", e)
 
@@ -5074,7 +5098,7 @@ class StrategyRunner:
                 log_throttled(
                     self._logger,
                     "warmup_period",
-                    f"⏳ WARMUP: {15 - time_since_startup:.0f}s remaining before trading enabled",
+                    f"RUNNER_BOOT_GRACE: {15 - time_since_startup:.0f}s remaining before live evaluation allowed",
                     interval_sec=5.0,
                     level=logging.INFO,
                 )
@@ -5171,12 +5195,17 @@ class StrategyRunner:
                     )
 
             # =================================================================
-            # PHASE 6: RISK CHECK (Moved to ExecutionEngine)
+            # PHASE 6: Global readiness gate
             # =================================================================
-            # 🚨 ALL GATES REMOVED: Runner is permanently EXECUTION_ENABLED
-            self._runner_state = RunnerState.EXECUTION_ENABLED
-            self.ready = True
-            self._hydration_complete = True
+            if self._runner_state != RunnerState.EXECUTION_ENABLED:
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage="phase6",
+                    reason="runner_not_execution_enabled",
+                    allowed=False,
+                    trace_id=trace_id,
+                )
+                return
 
             # =================================================================
             # PHASE 7: STRATEGY PREPARATION
@@ -5795,36 +5824,60 @@ class StrategyRunner:
                         mdm_last_tick = getattr(
                             self._market_data, "_last_tick_time", {}
                         ).get(symbol)
-                        # ✅ FIX H: MDM stale-tick threshold for NFO options/futures
-                        # is raised to 900s.  Options legitimately have 13-min gaps
-                        # between ticks; the previous 30s threshold caused the MDM
-                        # check to fire on every single option evaluation, returning
-                        # before _last_global_eval_ts was updated → stall watchdog spam.
-                        _is_option = any(x in symbol for x in ("CE", "PE", "FUT"))
-                        _stale_thresh = 900.0 if _is_option else 10.0
+                        _stale_thresh = self._stale_tick_threshold_for_symbol(symbol)
                         if (
                             isinstance(mdm_last_tick, (int, float))
                             and time.time() - float(mdm_last_tick) > _stale_thresh
                         ):
                             _mdm_age = time.time() - float(mdm_last_tick)
-                            log_throttled(
-                                self._logger,
-                                f"stale_mdm_tick_{symbol}",
-                                f"⏰ Stale MDM tick — skipping: {symbol} "
-                                f"age={_mdm_age:.1f}s",
-                                interval_sec=300.0,
-                                level=logging.WARNING,
-                            )
-                            self._emit_runner_eval_decision(
-                                symbol=symbol,
-                                stage="phase9",
-                                reason="stale_mdm_tick",
-                                allowed=False,
-                                trace_id=trace_id,
-                                mdm_tick_age_s=_mdm_age,
-                                stale_tick_threshold_s=_stale_thresh,
-                            )
-                            return
+                            upper_symbol = symbol.upper()
+                            if upper_symbol in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY 50", "NIFTY 50"}:
+                                fallback_ltp = None
+                                if self._market_data is not None and hasattr(self._market_data, "get_ltp"):
+                                    try:
+                                        fallback_ltp = self._market_data.get_ltp(symbol)
+                                    except Exception:
+                                        fallback_ltp = None
+                                log_throttled(
+                                    self._logger,
+                                    f"stale_mdm_tick_{symbol}",
+                                    f"Stale MDM tick for {symbol} age={_mdm_age:.1f}s; using fallback and continuing",
+                                    interval_sec=60.0,
+                                    level=logging.WARNING,
+                                )
+                                if fallback_ltp and fallback_ltp > 0:
+                                    self._logger.info(
+                                        "MDM_REST_FALLBACK_USED symbol=%s reason=stale_ws_tick",
+                                        symbol,
+                                        extra={"event": "MDM_REST_FALLBACK_USED", "symbol": symbol, "reason": "stale_ws_tick"},
+                                    )
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="stale_mdm_tick_index_fallback",
+                                    allowed=True,
+                                    trace_id=trace_id,
+                                    mdm_tick_age_s=_mdm_age,
+                                    stale_tick_threshold_s=_stale_thresh,
+                                )
+                            else:
+                                log_throttled(
+                                    self._logger,
+                                    f"stale_mdm_tick_{symbol}",
+                                    f"Stale MDM tick — skipping: {symbol} age={_mdm_age:.1f}s",
+                                    interval_sec=60.0,
+                                    level=logging.WARNING,
+                                )
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="stale_mdm_tick",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                    mdm_tick_age_s=_mdm_age,
+                                    stale_tick_threshold_s=_stale_thresh,
+                                )
+                                return
                         self._last_global_eval_ts = time.monotonic()
                         self._logger.debug(
                             "strategy_evaluation_start",
@@ -6741,6 +6794,7 @@ class StrategyRunner:
             now_epoch = time.time()
             underlying = self._extract_underlying(base_symbol) or base_symbol
             reason_key = str(signal.reason or "unknown")
+            underlying_reason_key = f"{underlying}:{reason_key}"
             if reason_key == "premium_momentum_squeeze":
                 upper_symbol = (trade_symbol or base_symbol).upper()
                 if ("CE" not in upper_symbol and "PE" not in upper_symbol) or "FUT" in upper_symbol:
@@ -6749,7 +6803,7 @@ class StrategyRunner:
                         f"premium_squeeze_skipped_{upper_symbol}",
                         "PREMIUM_SQUEEZE_SKIPPED",
                         interval_sec=self._cooldown_log_throttle_seconds,
-                        level=logging.INFO,
+                        level=logging.DEBUG,
                         extra={"event": "PREMIUM_SQUEEZE_SKIPPED", "symbol": trade_symbol or base_symbol, "reason": "non_option_instrument"},
                     )
                     return
@@ -6767,7 +6821,7 @@ class StrategyRunner:
             if now_epoch - float(self._underlying_last_signal_ts.get(underlying, 0.0)) < self._underlying_signal_cooldown_seconds:
                 log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
                 return
-            if now_epoch - float(self._reason_last_signal_ts.get(reason_key, 0.0)) < self._reason_signal_cooldown_seconds:
+            if now_epoch - float(self._reason_last_signal_ts.get(underlying_reason_key, 0.0)) < self._reason_signal_cooldown_seconds:
                 log_throttled(self._logger, f"runner_reason_cd_{reason_key}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "reason_cooldown"})
                 return
             while self._order_attempt_window and (now_epoch - self._order_attempt_window[0]) > 60.0:
@@ -6776,21 +6830,20 @@ class StrategyRunner:
                 log_throttled(self._logger, "runner_order_attempt_rate", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=300.0, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "max_order_attempts_per_minute"})
                 return
 
-            input_qty = qty
             lot_size = 1
             final_qty = qty
             try:
+                qty_lots = max(int(signal.quantity or 1), 1)
                 if hasattr(self._order_manager, "resolve_lot_size"):
                     lot_size = int(self._order_manager.resolve_lot_size(trade_symbol or base_symbol))
-                qty_lots = max(int(signal.quantity or 1), 1)
                 final_qty = qty_lots * lot_size
                 self._logger.info(
                     "ORDER_QTY_NORMALIZED symbol=%s input_qty_lots=%s lot_size=%s final_qty=%s",
                     trade_symbol or base_symbol,
-                    input_qty,
+                    qty_lots,
                     lot_size,
                     final_qty,
-                    extra={"event": "ORDER_QTY_NORMALIZED", "symbol": trade_symbol or base_symbol, "input_qty_lots": input_qty, "lot_size": lot_size, "final_qty": final_qty},
+                    extra={"event": "ORDER_QTY_NORMALIZED", "symbol": trade_symbol or base_symbol, "input_qty_lots": qty_lots, "lot_size": lot_size, "final_qty": final_qty},
                 )
             except Exception as lot_exc:
                 self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s error=%s", trade_symbol or base_symbol, lot_exc)
@@ -6852,7 +6905,7 @@ class StrategyRunner:
                     order_id, base_symbol, signal.action, qty,
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
-                self._reason_last_signal_ts[reason_key] = now_epoch
+                self._reason_last_signal_ts[underlying_reason_key] = now_epoch
                 if reason_key == "premium_momentum_squeeze":
                     self._premium_squeeze_last_signal_ts[underlying] = now_epoch
                 self._order_attempt_window.append(now_epoch)
@@ -7008,6 +7061,20 @@ class StrategyRunner:
 
         return symbol
 
+    def _stale_tick_threshold_for_symbol(self, symbol: str) -> float:
+        """Return configured stale threshold for symbol type."""
+        upper_symbol = (symbol or "").upper()
+        is_option = upper_symbol.endswith("CE") or upper_symbol.endswith("PE")
+        is_future = upper_symbol.endswith("FUT")
+        is_index = upper_symbol in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY 50", "NIFTY 50"}
+        if is_option:
+            return self._option_stale_tick_seconds
+        if is_future:
+            return self._future_stale_tick_seconds
+        if is_index:
+            return self._index_stale_tick_seconds
+        return self._generic_stale_tick_seconds
+
     def _handle_exit_signal(
         self,
         signal: Signal,
@@ -7037,6 +7104,9 @@ class StrategyRunner:
                     base_symbol,
                 )
                 return
+            now_epoch = time.time()
+            underlying = self._extract_underlying(base_symbol) or base_symbol
+            reason_key = str(signal.reason or "unknown")
 
             # Determine exit side from action
             if signal.action == "CLOSE_LONG":
@@ -7086,7 +7156,7 @@ class StrategyRunner:
                     order_id, base_symbol, exit_side, qty,
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
-                self._reason_last_signal_ts[reason_key] = now_epoch
+                self._reason_last_signal_ts[f"{underlying}:{reason_key}"] = now_epoch
                 self._order_attempt_window.append(now_epoch)
                 try:
                     self._record_trade(

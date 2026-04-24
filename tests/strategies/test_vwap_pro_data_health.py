@@ -72,3 +72,13 @@ def test_vwap_pro_uses_volume_grace_fallback(monkeypatch: pytest.MonkeyPatch) ->
     assert signal is None
     assert strategy._telemetry['skipped_data'] == 0
     assert strategy._telemetry['skipped_volume'] == 2
+
+
+def test_vwap_pro_reads_configurable_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('VWAP_MAX_OPTION_DISTANCE_PCT', '0.18')
+    monkeypatch.setenv('VWAP_SLACK_ATR_MULT', '1.5')
+    monkeypatch.setenv('VWAP_ALLOW_PULLBACK_ENTRY', '1')
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyIndicatorEngine())
+    assert strategy._cfg_max_vwap_distance_pct == pytest.approx(0.18)
+    assert strategy._cfg_vwap_slack_atr_mult == pytest.approx(1.5)
+    assert strategy._cfg_allow_vwap_pullback is True

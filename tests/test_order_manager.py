@@ -261,6 +261,20 @@ def test_resolve_lot_size_supports_bare_symbol_normalization(
     assert order_manager.resolve_lot_size("NFO:NIFTY26APR23800PE") == 65
 
 
+def test_resolve_lot_size_supports_lot_size_for_symbol_interface(
+    order_manager: OrderManager,
+) -> None:
+    class _LotResolver:
+        def lot_size_for_symbol(self, symbol: str) -> int | None:
+            if symbol in {"NFO:NIFTY26APR23800PE", "NIFTY26APR23800PE"}:
+                return 65
+            return None
+
+    order_manager.set_instrument_resolver(_LotResolver())
+    assert order_manager.resolve_lot_size("NFO:NIFTY26APR23800PE") == 65
+    assert order_manager.resolve_lot_size("NIFTY26APR23800PE") == 65
+
+
 def test_place_order_rounding_to_zero_skips(
     order_manager: OrderManager, fake_broker: FakeBrokerClient
 ) -> None:

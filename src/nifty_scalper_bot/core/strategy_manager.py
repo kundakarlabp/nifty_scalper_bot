@@ -1734,9 +1734,12 @@ class StrategyManager(_BaseStrategyManager):
         signal_score: float | None = None
         signal_confidence: float | None = None
         exit_result = "no_signal"
-        indicators_ready = True
+        required_bars = int(getattr(self, "_required_candles", 20) or 20)
+        bars_available = len(self._indicator_engine.get_history(symbol) or [])
+        indicators_ready = bars_available >= required_bars
+        hub_ready = None
         if self._data_hub is not None:
-            indicators_ready = bool(getattr(self._data_hub, "indicators_ready", False))
+            hub_ready = bool(getattr(self._data_hub, "indicators_ready", False))
         indicators_raw = self._indicator_engine.get_indicators(
             symbol, self._required_indicators
         )
@@ -1753,6 +1756,9 @@ class StrategyManager(_BaseStrategyManager):
                 "symbol": symbol,
                 "trace_id": trace_id,
                 "indicators_ready": indicators_ready,
+                "bars_available": bars_available,
+                "required_bars": required_bars,
+                "hub_indicators_ready": hub_ready,
                 "vwap": vwap,
                 "avg_volume": avg_volume,
                 "required_indicators_missing": required_missing,
@@ -1763,13 +1769,16 @@ class StrategyManager(_BaseStrategyManager):
             no_signal_reasons.append("global_indicators_not_ready_diagnostic_only")
             log_throttled(
                 log,
-                key=f"signal_blocked_indicators_not_ready:{symbol}",
-                msg="signal_blocked_indicators_not_ready",
-                interval_sec=30.0,
+                key=f"indicators_not_ready_diagnostic:{symbol}",
+                msg="indicators_not_ready_diagnostic",
+                interval_sec=120.0,
+                level=10,
                 extra={
-                    "event": "signal_blocked_indicators_not_ready",
+                    "event": "indicators_not_ready_diagnostic",
                     "symbol": symbol,
                     "trace_id": trace_id,
+                    "bars": bars_available,
+                    "required": required_bars,
                 },
             )
 
