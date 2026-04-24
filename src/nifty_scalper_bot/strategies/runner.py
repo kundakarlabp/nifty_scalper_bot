@@ -511,13 +511,28 @@ class StrategyRunner:
         self._last_same_bar_eval_ts_by_symbol: dict[str, float] = {}
         self._tick_log_throttle_seconds = max(
             1.0,
-            float(os.getenv("RUNNER_TICK_LOG_THROTTLE_SECONDS", "30")),
+            float(os.getenv("RUNNER_TICK_LOG_THROTTLE_SECONDS", "300")),
         )
         self._bar_log_throttle_seconds = max(
             1.0,
-            float(os.getenv("RUNNER_BAR_LOG_THROTTLE_SECONDS", "30")),
+            float(os.getenv("RUNNER_BAR_LOG_THROTTLE_SECONDS", "300")),
+        )
+        self._eval_log_throttle_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_EVAL_LOG_THROTTLE_SECONDS", "300")),
+        )
+        self._no_signal_log_throttle_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_NO_SIGNAL_LOG_THROTTLE_SECONDS", "300")),
+        )
+        self._block_low_volatility = (
+            os.getenv("RUNNER_BLOCK_LOW_VOLATILITY", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
         )
         self._log_throttle_state: dict[str, float] = {}
+        self._first_tick_logged_symbols: set[str] = set()
+        self._first_live_bar_logged_symbols: set[str] = set()
+        self._symbol_last_signal_ts: dict[str, float] = {}
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
@@ -1049,6 +1064,30 @@ class StrategyRunner:
                 "ready": ready,
             },
         )
+        mdm_history_count = 0
+        try:
+            if self._market_data is not None and hasattr(self._market_data, "get_ohlc_bars"):
+                mdm_history_count = len(self._market_data.get_ohlc_bars(symbol) or [])
+        except Exception:
+            mdm_history_count = 0
+        self._logger.info(
+            "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d runner_history_count=%d mdm_history_count=%d source=%s",
+            symbol,
+            None,
+            rows_ingested,
+            runner_history_count,
+            mdm_history_count,
+            "dynamic_hydration",
+            extra={
+                "event": "RUNNER_HISTORY_INGESTED",
+                "symbol": symbol,
+                "token": None,
+                "bars_ingested": rows_ingested,
+                "runner_history_count": runner_history_count,
+                "mdm_history_count": mdm_history_count,
+                "source": "dynamic_hydration",
+            },
+        )
         if len(rows) > 0 and rows_ingested == 0:
             self._logger.warning(
                 "RUNNER_PREHYDRATE_INGEST_FAILED symbol=%s rows_fetched=%d reason=%s",
@@ -1226,6 +1265,8 @@ class StrategyRunner:
     def remove_symbol(self, symbol: str) -> None:
         """Stop tracking a symbol."""
         normalized = self._normalize_symbol(symbol)
+        removed_from_watchdog = False
+        pending_backfill_cancelled = False
         with self._lock:
             state = self._symbol_state.get(normalized)
             if state is None:
@@ -1240,6 +1281,18 @@ class StrategyRunner:
             self._symbol_bar_count.pop(normalized, None)
             self._hydration_ready_streak.pop(normalized, None)
             self._vwap_state.pop(normalized, None)
+            self._last_tick_time_by_symbol.pop(normalized, None)
+            self._last_ws_stale_log_ts_by_symbol.pop(normalized, None)
+            self._last_same_bar_eval_ts_by_symbol.pop(normalized, None)
+            self._last_strategy_versions.pop(normalized, None)
+            self._candle_versions.pop(normalized, None)
+            self._live_bar_seen.discard(normalized)
+            self._warmup_complete_logged.discard(normalized)
+            self._symbol_last_signal_ts.pop(normalized, None)
+            self._first_tick_logged_symbols.discard(normalized)
+            self._first_live_bar_logged_symbols.discard(normalized)
+            removed_from_watchdog = True
+            pending_backfill_cancelled = True
             # Dynamic diffing avoids legacy frozen-universe drift conflicts.
             self._universe_controller.update(self._active_symbols)
             callback = self._callbacks.pop(normalized, None)
@@ -1260,8 +1313,26 @@ class StrategyRunner:
             completed = builder.flush()
             if completed is not None:
                 self._ingest_bar(normalized, completed)
+        stale_throttle_keys = [
+            key for key in list(self._log_throttle_state) if normalized in key
+        ]
+        for key in stale_throttle_keys:
+            self._log_throttle_state.pop(key, None)
 
-        self._logger.info("Stopped tracking symbol %s", normalized)
+        self._logger.info(
+            "SYMBOL_REMOVAL_CLEANUP symbol=%s removed_from_runner=%s removed_from_watchdog=%s pending_backfill_cancelled=%s",
+            normalized,
+            True,
+            removed_from_watchdog,
+            pending_backfill_cancelled,
+            extra={
+                "event": "SYMBOL_REMOVAL_CLEANUP",
+                "symbol": normalized,
+                "removed_from_runner": True,
+                "removed_from_watchdog": removed_from_watchdog,
+                "pending_backfill_cancelled": pending_backfill_cancelled,
+            },
+        )
 
     @property
     def tracked_symbols(self) -> list[str]:
@@ -1607,7 +1678,7 @@ class StrategyRunner:
                             sym,
                             exc,
                         )
-                    self._logger.info(
+                    self._logger.debug(
                         "RUNNER_CALLBACK_DISPATCH symbol=%s mode=%s success=%s",
                         sym,
                         "direct",
@@ -1629,7 +1700,7 @@ class StrategyRunner:
                         sym,
                         tick,
                     )
-                    self._logger.info(
+                    self._logger.debug(
                         "RUNNER_CALLBACK_DISPATCH symbol=%s mode=%s success=%s",
                         sym,
                         "direct",
@@ -3697,7 +3768,7 @@ class StrategyRunner:
                 )
                 if _pl_candle is not None:
                     _pl_count = len(self._pipeline.store.get(normalized_symbol))
-                    self._logger.info(
+                    self._logger.debug(
                         "CANDLE_FORMED symbol=%s ts=%s close=%.2f candles=%d ready=%s",
                         normalized_symbol,
                         _pl_candle.timestamp,
@@ -3740,21 +3811,32 @@ class StrategyRunner:
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
             )
-            if self._should_log_throttled(
-                f"runner_tick_accepted:{normalized_symbol}",
-                self._tick_log_throttle_seconds,
-            ):
+            if normalized_symbol not in self._first_tick_logged_symbols:
+                self._first_tick_logged_symbols.add(normalized_symbol)
                 self._logger.info(
-                    "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%s",
+                    "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%s first_tick=%s",
                     normalized_symbol,
                     trace_id,
                     tick.get("last_price") or tick.get("ltp"),
+                    True,
                     extra={
                         "event": "RUNNER_TICK_ACCEPTED",
                         "symbol": normalized_symbol,
                         "trace_id": trace_id,
                         "tick_price": tick.get("last_price") or tick.get("ltp"),
+                        "first_tick": True,
                     },
+                )
+            elif self._should_log_throttled(
+                f"runner_tick_accepted_debug:{normalized_symbol}",
+                self._tick_log_throttle_seconds,
+            ):
+                self._logger.debug(
+                    "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%s first_tick=%s",
+                    normalized_symbol,
+                    trace_id,
+                    tick.get("last_price") or tick.get("ltp"),
+                    False,
                 )
             
             # 🚨 FIX: Legacy ensure_valid_data() block completely removed.
@@ -3843,6 +3925,19 @@ class StrategyRunner:
         stale_count = 0
 
         for symbol, engine in self._candle_engines.items():
+            if symbol not in self._active_symbols:
+                if self._should_log_throttled(
+                    f"backfill_skipped_removed:{symbol}",
+                    180.0,
+                ):
+                    self._logger.info(
+                        "BACKFILL_SKIPPED_REMOVED_SYMBOL",
+                        extra={
+                            "event": "BACKFILL_SKIPPED_REMOVED_SYMBOL",
+                            "symbol": symbol,
+                        },
+                    )
+                continue
             # 1. Use .get() to prevent KeyError on newly subscribed symbols
             stale_for = now_wall - self._last_tick_time_by_symbol.get(symbol, now_wall)
 
@@ -4559,6 +4654,7 @@ class StrategyRunner:
             "Entered StrategyRunner._on_tick",
             extra={"event": "tick_enter", "symbol": symbol},
         )
+        phase = "entry"
         try:
             # =================================================================
             # PHASE -1: BRACKET MANAGER TICK FORWARDING (MUST be before ANY return)
@@ -4911,11 +5007,10 @@ class StrategyRunner:
             # PHASE 3: DIAGNOSTIC LOGGING
             # =================================================================
 
-            # Log successful tick acceptance (throttled)
-            if self._should_log_throttled(
-                f"runner_tick_accepted:{symbol}",
-                self._tick_log_throttle_seconds,
-            ):
+            phase = "phase3_diagnostics"
+            # Log first tick at INFO, routine ticks at DEBUG.
+            if symbol not in self._first_tick_logged_symbols:
+                self._first_tick_logged_symbols.add(symbol)
                 self._logger.info(
                     "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%.2f tick_age_s=%.3f volume=%s",
                     symbol,
@@ -4930,7 +5025,20 @@ class StrategyRunner:
                         "tick_price": price,
                         "tick_age_s": tick_age,
                         "volume": volume,
+                        "first_tick": True,
                     },
+                )
+            elif self._should_log_throttled(
+                f"runner_tick_accepted:{symbol}",
+                self._tick_log_throttle_seconds,
+            ):
+                self._logger.debug(
+                    "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%.2f tick_age_s=%.3f volume=%s",
+                    symbol,
+                    trace_id,
+                    price,
+                    tick_age,
+                    volume,
                 )
 
             # Grace period warmup logging
@@ -4951,6 +5059,7 @@ class StrategyRunner:
                     level=logging.INFO,
                 )
 
+            phase = "phase4_bar_build"
             # =================================================================
             # PHASE 4: BAR BUILDING (Always process, even during warmup)
             # =================================================================
@@ -4963,37 +5072,45 @@ class StrategyRunner:
                     runner_history_count = len(
                         self._indicator_engine.get_history(symbol) or []
                     )
-                    self._logger.info(
-                        "RUNNER_LIVE_BAR_INGESTED symbol=%s timestamp=%s open=%.4f high=%.4f low=%.4f close=%.4f volume=%s runner_history_count=%d candle_version=%d",
-                        symbol,
-                        completed_bar.timestamp.isoformat(),
-                        completed_bar.open,
-                        completed_bar.high,
-                        completed_bar.low,
-                        completed_bar.close,
-                        completed_bar.volume,
-                        runner_history_count,
-                        int(self._candle_versions.get(symbol, 0)),
-                        extra={
-                            "event": "RUNNER_LIVE_BAR_INGESTED",
-                            "symbol": symbol,
-                            "timestamp": completed_bar.timestamp.isoformat(),
-                            "open": completed_bar.open,
-                            "high": completed_bar.high,
-                            "low": completed_bar.low,
-                            "close": completed_bar.close,
-                            "volume": completed_bar.volume,
-                            "runner_history_count": runner_history_count,
-                            "candle_version": int(self._candle_versions.get(symbol, 0)),
-                        },
+                    should_info_live_bar = symbol not in self._first_live_bar_logged_symbols
+                    if should_info_live_bar:
+                        self._first_live_bar_logged_symbols.add(symbol)
+                    should_info_live_bar = should_info_live_bar or self._should_log_throttled(
+                        f"runner_live_bar_ingested:{symbol}",
+                        self._bar_log_throttle_seconds,
                     )
+                    if should_info_live_bar:
+                        self._logger.info(
+                            "RUNNER_LIVE_BAR_INGESTED symbol=%s timestamp=%s open=%.4f high=%.4f low=%.4f close=%.4f volume=%s runner_history_count=%d candle_version=%d",
+                            symbol,
+                            completed_bar.timestamp.isoformat(),
+                            completed_bar.open,
+                            completed_bar.high,
+                            completed_bar.low,
+                            completed_bar.close,
+                            completed_bar.volume,
+                            runner_history_count,
+                            int(self._candle_versions.get(symbol, 0)),
+                            extra={
+                                "event": "RUNNER_LIVE_BAR_INGESTED",
+                                "symbol": symbol,
+                                "timestamp": completed_bar.timestamp.isoformat(),
+                                "open": completed_bar.open,
+                                "high": completed_bar.high,
+                                "low": completed_bar.low,
+                                "close": completed_bar.close,
+                                "volume": completed_bar.volume,
+                                "runner_history_count": runner_history_count,
+                                "candle_version": int(self._candle_versions.get(symbol, 0)),
+                            },
+                        )
                 candle_count = len(self._indicator_engine.get_history(symbol) or [])
                 should_log_bar_state = completed_bar is not None or self._should_log_throttled(
                     f"runner_bar_state:{symbol}:c0:{candle_count == 0}",
                     self._bar_log_throttle_seconds,
                 )
                 if should_log_bar_state:
-                    self._logger.info(
+                    self._logger.debug(
                         "RUNNER_BAR_STATE symbol=%s trace_id=%s candle_count=%d required_candles=%d completed_bar=%s",
                         symbol,
                         trace_id,
@@ -5105,21 +5222,38 @@ class StrategyRunner:
                 # "Indicators fully hydrated" (from app.py) but never confirm that
                 # per-symbol evaluation has actually been unblocked.
                 if symbol not in self._warmup_complete_logged:
-                    self._warmup_complete_logged.add(symbol)
                     try:
                         _wc_bars = len(self._indicator_engine.get_history(symbol) or [])
                     except Exception:
-                        _wc_bars = min_bars_needed
-                    self._logger.info(
-                        f"✅ WARMUP COMPLETE: {symbol} | {_wc_bars} indicator bars "
-                        f"loaded | strategies now ACTIVE",
-                        extra={
-                            "event": "warmup_complete",
-                            "symbol": symbol,
-                            "bar_count": _wc_bars,
-                            "required": min_bars_needed,
-                        },
-                    )
+                        _wc_bars = 0
+                    if _wc_bars >= min_bars_needed:
+                        self._warmup_complete_logged.add(symbol)
+                        self._logger.info(
+                            "WARMUP_COMPLETE symbol=%s runner_bars=%d required_candles=%d",
+                            symbol,
+                            _wc_bars,
+                            min_bars_needed,
+                            extra={
+                                "event": "WARMUP_COMPLETE",
+                                "symbol": symbol,
+                                "runner_bars": _wc_bars,
+                                "required_candles": min_bars_needed,
+                            },
+                        )
+                    elif self._should_log_throttled(
+                        f"runner_warmup_pending:{symbol}",
+                        self._bar_log_throttle_seconds,
+                    ):
+                        self._logger.info(
+                            "RUNNER_WARMUP_PENDING",
+                            extra={
+                                "event": "RUNNER_WARMUP_PENDING",
+                                "symbol": symbol,
+                                "runner_bars": _wc_bars,
+                                "required_candles": min_bars_needed,
+                                "source": "live_tick_path",
+                            },
+                        )
 
                 # Strategy evaluation is now purely event-driven. 
                 # ExecutionEngine handles any timing constraints.
@@ -5355,7 +5489,7 @@ class StrategyRunner:
                 else:
                     if self._should_log_throttled(
                         f"runner_eval_same_bar_skip:{symbol}",
-                        self._bar_log_throttle_seconds,
+                        self._eval_log_throttle_seconds,
                     ):
                         self._logger.info(
                             "RUNNER_EVAL_DECISION",
@@ -5842,15 +5976,21 @@ class StrategyRunner:
                     return
                 coarse_regime = self.detect_market_regime(symbol)
                 if coarse_regime == "low_volatility":
-                    log_throttled(
-                        self._logger,
-                        f"regime_low_vol_{symbol}",
-                        "Condition met: low_volatility_regime_skip",
-                        interval_sec=60.0,
-                        level=logging.INFO,
-                        extra={"event": "low_volatility_regime_skip", "symbol": symbol},
-                    )
-                    return
+                    if self._should_log_throttled(
+                        f"runner_regime_low_vol:{symbol}",
+                        self._eval_log_throttle_seconds,
+                    ):
+                        self._logger.info(
+                            "RUNNER_REGIME_DECISION",
+                            extra={
+                                "event": "RUNNER_REGIME_DECISION",
+                                "symbol": symbol,
+                                "regime": "low_volatility",
+                                "hard_block": self._block_low_volatility,
+                            },
+                        )
+                    if self._block_low_volatility:
+                        return
                 if (
                     signal.action in {"BUY", "SELL"}
                     and not self._strategy_slots_available()
@@ -5872,6 +6012,21 @@ class StrategyRunner:
                             symbol_now - last_signal_ts
                             < self._config.signal_cooldown_seconds
                         ):
+                            elapsed_s = max(symbol_now - last_signal_ts, 0.0)
+                            if self._should_log_throttled(
+                                f"runner_signal_cooldown:{symbol}",
+                                self._eval_log_throttle_seconds,
+                            ):
+                                self._logger.info(
+                                    "RUNNER_SIGNAL_COOLDOWN",
+                                    extra={
+                                        "event": "RUNNER_SIGNAL_COOLDOWN",
+                                        "symbol": symbol,
+                                        "elapsed_s": round(elapsed_s, 3),
+                                        "required_s": float(self._config.signal_cooldown_seconds),
+                                        "allowed": False,
+                                    },
+                                )
                             return
 
                         state.strategy_data["last_signal"] = {
@@ -5887,13 +6042,24 @@ class StrategyRunner:
                            "action": signal.action},
                 )
                 self._handle_signal(signal, price, now)
+                self._symbol_last_signal_ts[symbol] = time.time()
                 self._logger.info(
                     "SIGNAL_HANDLED symbol=%s action=%s — check execution logs for ORDER_PLACED",
                     symbol, signal.action,
                     extra={"event": "signal_handled", "symbol": symbol},
                 )
         except Exception as e:
-            self._logger.error("Failure in _on_tick: %s", e, exc_info=True)
+            self._logger.error(
+                "RUNNER_ON_TICK_ERROR",
+                extra={
+                    "event": "RUNNER_ON_TICK_ERROR",
+                    "symbol": symbol,
+                    "phase": phase,
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                },
+                exc_info=True,
+            )
             return
 
     def _should_enforce_freshness_backoff(self) -> bool:
