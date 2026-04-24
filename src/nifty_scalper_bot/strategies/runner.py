@@ -501,14 +501,23 @@ class StrategyRunner:
         # Time block logging throttle
         self._time_block_logged: Dict[str, float] = {}
         self._allow_eval_without_new_bar = (
-            os.getenv("RUNNER_ALLOW_EVAL_WITHOUT_NEW_BAR", "false").strip().lower()
+            os.getenv("RUNNER_ALLOW_EVAL_WITHOUT_NEW_BAR", "true").strip().lower()
             in {"1", "true", "yes", "on"}
         )
-        self._same_bar_eval_interval_seconds = max(
+        self._eval_without_new_bar_seconds = max(
             1.0,
             float(os.getenv("RUNNER_EVAL_WITHOUT_NEW_BAR_SECONDS", "15")),
         )
-        self._last_same_bar_eval_ts: dict[str, float] = {}
+        self._last_same_bar_eval_ts_by_symbol: dict[str, float] = {}
+        self._tick_log_throttle_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_TICK_LOG_THROTTLE_SECONDS", "30")),
+        )
+        self._bar_log_throttle_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_BAR_LOG_THROTTLE_SECONDS", "30")),
+        )
+        self._log_throttle_state: dict[str, float] = {}
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
@@ -987,10 +996,85 @@ class StrategyRunner:
         if not rows:
             self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
             return
-        if len(rows) >= target and not self._has_session_candle_gaps(symbol):
+        rows_ingested = 0
+        for row in rows:
+            payload: dict[str, Any] = {"symbol": symbol}
+            if isinstance(row, dict):
+                payload.update(row)
+            elif isinstance(row, (list, tuple)) and len(row) >= 6:
+                payload.update(
+                    {
+                        "timestamp": row[0],
+                        "open": row[1],
+                        "high": row[2],
+                        "low": row[3],
+                        "close": row[4],
+                        "volume": row[5],
+                    }
+                )
+            else:
+                continue
+            payload["symbol"] = symbol
+            timestamp = payload.get("timestamp") or payload.get("date")
+            if timestamp is None:
+                continue
+            payload["timestamp"] = timestamp
+            try:
+                payload["open"] = float(payload["open"])
+                payload["high"] = float(payload["high"])
+                payload["low"] = float(payload["low"])
+                payload["close"] = float(payload["close"])
+                payload["volume"] = int(payload.get("volume", 0) or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.ingest_historical_bar(payload)
+            rows_ingested += 1
+        runner_history_count = len(self._indicator_engine.get_history(symbol) or [])
+        ready = runner_history_count >= target and not self._has_session_candle_gaps(symbol)
+        self._logger.info(
+            "RUNNER_PREHYDRATE_INGESTED symbol=%s rows_fetched=%d rows_ingested=%d runner_history_count=%d target=%d ready=%s",
+            symbol,
+            len(rows),
+            rows_ingested,
+            runner_history_count,
+            target,
+            ready,
+            extra={
+                "event": "RUNNER_PREHYDRATE_INGESTED",
+                "symbol": symbol,
+                "rows_fetched": len(rows),
+                "rows_ingested": rows_ingested,
+                "runner_history_count": runner_history_count,
+                "target": target,
+                "ready": ready,
+            },
+        )
+        if len(rows) > 0 and rows_ingested == 0:
+            self._logger.warning(
+                "RUNNER_PREHYDRATE_INGEST_FAILED symbol=%s rows_fetched=%d reason=%s",
+                symbol,
+                len(rows),
+                "no_valid_rows",
+                extra={
+                    "event": "RUNNER_PREHYDRATE_INGEST_FAILED",
+                    "symbol": symbol,
+                    "rows_fetched": len(rows),
+                    "reason": "no_valid_rows",
+                },
+            )
+        if ready:
             self._set_symbol_hydration_state(symbol, SymbolState.READY)
             return
         self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+
+    def _should_log_throttled(self, key: str, interval_s: float = 30.0) -> bool:
+        """Decide whether a throttled log should emit. Args: key/interval_s. Returns: bool. Raises: None."""
+        now = time.monotonic()
+        last = float(self._log_throttle_state.get(key, 0.0))
+        if now - last >= max(0.0, float(interval_s)):
+            self._log_throttle_state[key] = now
+            return True
+        return False
 
     def _symbol_has_valid_data(self, symbol: str) -> bool:
         """Validate symbol candle data integrity from the indicator engine."""
@@ -3656,18 +3740,22 @@ class StrategyRunner:
                 "STRATEGY_RECEIVED_TICK",
                 extra={"event": "strategy_received_tick", "symbol": normalized_symbol},
             )
-            self._logger.info(
-                "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%s",
-                normalized_symbol,
-                trace_id,
-                tick.get("last_price") or tick.get("ltp"),
-                extra={
-                    "event": "RUNNER_TICK_ACCEPTED",
-                    "symbol": normalized_symbol,
-                    "trace_id": trace_id,
-                    "tick_price": tick.get("last_price") or tick.get("ltp"),
-                },
-            )
+            if self._should_log_throttled(
+                f"runner_tick_accepted:{normalized_symbol}",
+                self._tick_log_throttle_seconds,
+            ):
+                self._logger.info(
+                    "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%s",
+                    normalized_symbol,
+                    trace_id,
+                    tick.get("last_price") or tick.get("ltp"),
+                    extra={
+                        "event": "RUNNER_TICK_ACCEPTED",
+                        "symbol": normalized_symbol,
+                        "trace_id": trace_id,
+                        "tick_price": tick.get("last_price") or tick.get("ltp"),
+                    },
+                )
             
             # 🚨 FIX: Legacy ensure_valid_data() block completely removed.
             # We no longer pause live tick processing to attempt blocking historical 
@@ -4824,22 +4912,26 @@ class StrategyRunner:
             # =================================================================
 
             # Log successful tick acceptance (throttled)
-            self._logger.info(
-                "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%.2f tick_age_s=%.3f volume=%s",
-                symbol,
-                trace_id,
-                price,
-                tick_age,
-                volume,
-                extra={
-                    "event": "RUNNER_TICK_ACCEPTED",
-                    "symbol": symbol,
-                    "trace_id": trace_id,
-                    "tick_price": price,
-                    "tick_age_s": tick_age,
-                    "volume": volume,
-                },
-            )
+            if self._should_log_throttled(
+                f"runner_tick_accepted:{symbol}",
+                self._tick_log_throttle_seconds,
+            ):
+                self._logger.info(
+                    "RUNNER_TICK_ACCEPTED symbol=%s trace_id=%s tick_price=%.2f tick_age_s=%.3f volume=%s",
+                    symbol,
+                    trace_id,
+                    price,
+                    tick_age,
+                    volume,
+                    extra={
+                        "event": "RUNNER_TICK_ACCEPTED",
+                        "symbol": symbol,
+                        "trace_id": trace_id,
+                        "tick_price": price,
+                        "tick_age_s": tick_age,
+                        "volume": volume,
+                    },
+                )
 
             # Grace period warmup logging
             startup_time = getattr(self, "_startup_timestamp", None)
@@ -4868,23 +4960,55 @@ class StrategyRunner:
                 completed_bar = builder.update(float(price), volume, timestamp)
                 if completed_bar is not None:
                     self._ingest_bar(symbol, completed_bar)
+                    runner_history_count = len(
+                        self._indicator_engine.get_history(symbol) or []
+                    )
+                    self._logger.info(
+                        "RUNNER_LIVE_BAR_INGESTED symbol=%s timestamp=%s open=%.4f high=%.4f low=%.4f close=%.4f volume=%s runner_history_count=%d candle_version=%d",
+                        symbol,
+                        completed_bar.timestamp.isoformat(),
+                        completed_bar.open,
+                        completed_bar.high,
+                        completed_bar.low,
+                        completed_bar.close,
+                        completed_bar.volume,
+                        runner_history_count,
+                        int(self._candle_versions.get(symbol, 0)),
+                        extra={
+                            "event": "RUNNER_LIVE_BAR_INGESTED",
+                            "symbol": symbol,
+                            "timestamp": completed_bar.timestamp.isoformat(),
+                            "open": completed_bar.open,
+                            "high": completed_bar.high,
+                            "low": completed_bar.low,
+                            "close": completed_bar.close,
+                            "volume": completed_bar.volume,
+                            "runner_history_count": runner_history_count,
+                            "candle_version": int(self._candle_versions.get(symbol, 0)),
+                        },
+                    )
                 candle_count = len(self._indicator_engine.get_history(symbol) or [])
-                self._logger.info(
-                    "RUNNER_BAR_STATE symbol=%s trace_id=%s candle_count=%d required_candles=%d completed_bar=%s",
-                    symbol,
-                    trace_id,
-                    candle_count,
-                    self._required_candles,
-                    completed_bar is not None,
-                    extra={
-                        "event": "RUNNER_BAR_STATE",
-                        "symbol": symbol,
-                        "trace_id": trace_id,
-                        "candle_count": candle_count,
-                        "required_candles": self._required_candles,
-                        "completed_bar": completed_bar is not None,
-                    },
+                should_log_bar_state = completed_bar is not None or self._should_log_throttled(
+                    f"runner_bar_state:{symbol}:c0:{candle_count == 0}",
+                    self._bar_log_throttle_seconds,
                 )
+                if should_log_bar_state:
+                    self._logger.info(
+                        "RUNNER_BAR_STATE symbol=%s trace_id=%s candle_count=%d required_candles=%d completed_bar=%s",
+                        symbol,
+                        trace_id,
+                        candle_count,
+                        self._required_candles,
+                        completed_bar is not None,
+                        extra={
+                            "event": "RUNNER_BAR_STATE",
+                            "symbol": symbol,
+                            "trace_id": trace_id,
+                            "candle_count": candle_count,
+                            "required_candles": self._required_candles,
+                            "completed_bar": completed_bar is not None,
+                        },
+                    )
                 # NOTE: Do NOT return here when completed_bar is None.
                 # The position manager (PHASE 5) must receive every tick to
                 # track unrealised P&L and update stop-loss levels in real time.
@@ -5203,57 +5327,64 @@ class StrategyRunner:
             candle_count = len(self._indicator_engine.get_history(symbol) or [])
             if current_version <= last_version:
                 now_eval_ts = time_module.time()
-                last_same_bar_eval = float(self._last_same_bar_eval_ts.get(symbol, 0.0))
+                last_same_bar_eval = float(
+                    self._last_same_bar_eval_ts_by_symbol.get(symbol, 0.0)
+                )
                 if (
                     self._allow_eval_without_new_bar
+                    and candle_count >= self._required_candles
                     and now_eval_ts - last_same_bar_eval
-                    >= self._same_bar_eval_interval_seconds
+                    >= self._eval_without_new_bar_seconds
                 ):
-                    self._last_same_bar_eval_ts[symbol] = now_eval_ts
+                    self._last_same_bar_eval_ts_by_symbol[symbol] = now_eval_ts
                     self._logger.info(
-                        "RUNNER_PHASE9_DECISION",
+                        "RUNNER_EVAL_DECISION",
                         extra={
-                            "event": "RUNNER_PHASE9_DECISION",
+                            "event": "RUNNER_EVAL_DECISION",
                             "symbol": symbol,
                             "trace_id": trace_id,
                             "allowed": True,
                             "reason": "same_bar_periodic_eval",
                             "current_version": current_version,
                             "last_version": last_version,
-                            "candle_count": candle_count,
+                            "runner_history_count": candle_count,
                             "required_candles": self._required_candles,
                             "tick_price": price,
                         },
                     )
                 else:
-                    self._logger.info(
-                        "RUNNER_PHASE9_DECISION",
-                        extra={
-                            "event": "RUNNER_PHASE9_DECISION",
-                            "symbol": symbol,
-                            "trace_id": trace_id,
-                            "allowed": False,
-                            "reason": "same_bar_version",
-                            "current_version": current_version,
-                            "last_version": last_version,
-                            "candle_count": candle_count,
-                            "required_candles": self._required_candles,
-                            "tick_price": price,
-                        },
-                    )
+                    if self._should_log_throttled(
+                        f"runner_eval_same_bar_skip:{symbol}",
+                        self._bar_log_throttle_seconds,
+                    ):
+                        self._logger.info(
+                            "RUNNER_EVAL_DECISION",
+                            extra={
+                                "event": "RUNNER_EVAL_DECISION",
+                                "symbol": symbol,
+                                "trace_id": trace_id,
+                                "allowed": False,
+                                "reason": "same_bar_version",
+                                "current_version": current_version,
+                                "last_version": last_version,
+                                "runner_history_count": candle_count,
+                                "required_candles": self._required_candles,
+                                "tick_price": price,
+                            },
+                        )
                     return
             else:
                 self._logger.info(
-                    "RUNNER_PHASE9_DECISION",
+                    "RUNNER_EVAL_DECISION",
                     extra={
-                        "event": "RUNNER_PHASE9_DECISION",
+                        "event": "RUNNER_EVAL_DECISION",
                         "symbol": symbol,
                         "trace_id": trace_id,
                         "allowed": True,
                         "reason": "new_bar_version",
                         "current_version": current_version,
                         "last_version": last_version,
-                        "candle_count": candle_count,
+                        "runner_history_count": candle_count,
                         "required_candles": self._required_candles,
                         "tick_price": price,
                     },

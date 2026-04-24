@@ -149,20 +149,28 @@ def _gate_runner_symbol_add(
 
     if not ctx.strategy_runner or not ctx.market_data_manager:
         return False
-    bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
+    runner_bars = 0
+    try:
+        runner_engine = getattr(ctx.strategy_runner, "_indicator_engine", None)
+        if runner_engine is not None:
+            runner_bars = len(runner_engine.get_history(symbol) or [])
+    except Exception:
+        runner_bars = 0
+    mdm_bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
     required = _symbol_history_requirement(ctx)
-    history_ready = bars >= required
+    history_ready = runner_bars >= required
     ctx.strategy_runner.add_symbol(symbol)
     if history_ready:
         pending_runner_symbols.discard(symbol)
     else:
         pending_runner_symbols.add(symbol)
     LOGGER.info(
-        "RUNNER_SYMBOL_STATUS symbol=%s token=%s added_to_runner=%s bars=%d required_bars=%d history_ready=%s source=%s reason=%s",
+        "RUNNER_SYMBOL_STATUS symbol=%s token=%s added_to_runner=%s runner_bars=%d mdm_bars=%d required_bars=%d history_ready=%s source=%s reason=%s",
         symbol,
         token,
         True,
-        bars,
+        runner_bars,
+        mdm_bars,
         required,
         history_ready,
         source,
@@ -172,7 +180,8 @@ def _gate_runner_symbol_add(
             "symbol": symbol,
             "token": token,
             "added_to_runner": True,
-            "bars": bars,
+            "runner_bars": runner_bars,
+            "mdm_bars": mdm_bars,
             "required_bars": required,
             "history_ready": history_ready,
             "source": source,
@@ -185,7 +194,7 @@ def _gate_runner_symbol_add(
             symbol=symbol,
             token=token,
             selected=True,
-            hydrated_bars=bars,
+            hydrated_bars=runner_bars,
             runner_added=True,
             source=source,
             reason="gate_add",
@@ -5957,7 +5966,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                     LOGGER.warning(f"❌ Failed to fetch hydration symbol: {result}")
                     continue
                 sym, records = result
+                sym_token = None
+                try:
+                    sym_token = active_symbol_tokens.get(sym)
+                except Exception:
+                    sym_token = None
                 count = 0
+                runner_ingested = 0
                 for row in records:
                     try:
                         if isinstance(row, dict):
@@ -6000,12 +6015,60 @@ async def startup_sequence(ctx: BotContext) -> None:
                         }
                         if ctx.market_data_manager is not None:
                             ctx.market_data_manager.ingest_historical_bar(bar_data)
+                        if (
+                            getattr(ctx, "strategy_runner", None) is not None
+                            and hasattr(ctx.strategy_runner, "ingest_historical_bar")
+                        ):
+                            try:
+                                ctx.strategy_runner.ingest_historical_bar(bar_data)
+                                runner_ingested += 1
+                            except Exception as runner_ingest_exc:
+                                LOGGER.warning(
+                                    "startup_runner_hydration_ingest_failed symbol=%s err=%s",
+                                    sym,
+                                    runner_ingest_exc,
+                                    extra={
+                                        "event": "startup_runner_hydration_ingest_failed",
+                                        "symbol": sym,
+                                        "token": sym_token,
+                                    },
+                                )
                         count += 1
                     except Exception as candle_err:
                         LOGGER.debug(f"Skipping bad candle for {sym}: {candle_err}")
 
                 hydrated_counts[sym] = count
                 LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
+                if getattr(ctx, "strategy_runner", None) is not None:
+                    try:
+                        runner_history_count = len(
+                            ctx.strategy_runner._indicator_engine.get_history(sym) or []
+                        )
+                    except Exception:
+                        runner_history_count = 0
+                    mdm_history_count = 0
+                    if ctx.market_data_manager is not None:
+                        mdm_history_count = len(
+                            ctx.market_data_manager.get_ohlc_bars(sym) or []
+                        )
+                    LOGGER.info(
+                        "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d source=%s runner_history_count=%d mdm_history_count=%d",
+                        sym,
+                        sym_token,
+                        runner_ingested,
+                        "startup_hydration",
+                        runner_history_count,
+                        mdm_history_count,
+                        extra={
+                            "event": "RUNNER_HISTORY_INGESTED",
+                            "symbol": sym,
+                            "token": sym_token,
+                            "bars_ingested": runner_ingested,
+                            "source": "startup_hydration",
+                            "runner_history_count": runner_history_count,
+                            "mdm_history_count": mdm_history_count,
+                        },
+                    )
                 if ctx.market_data_manager:
                     bars_snapshot = ctx.market_data_manager.get_ohlc_bars(sym)
                     ctx.market_data_manager.update_hydration_status(
@@ -6043,35 +6106,84 @@ async def startup_sequence(ctx: BotContext) -> None:
                     [
                         basket.get("spot_symbol"),
                         basket.get("futures_symbol"),
-                        basket.get("ce_symbols", [None])[
-                            len(basket.get("ce_symbols", [])) // 2
-                        ]
-                        if basket.get("ce_symbols")
-                        else None,
-                        basket.get("pe_symbols", [None])[
-                            len(basket.get("pe_symbols", [])) // 2
-                        ]
-                        if basket.get("pe_symbols")
-                        else None,
+                        *(basket.get("option_symbols", []) or []),
                     ]
                 )
             )
             readiness_symbols = [str(sym) for sym in readiness_symbols if sym]
+            LOGGER.info(
+                "READINESS_SYMBOLS_SELECTED count=%d spot=%s futures=%s option_count=%d symbols=%s",
+                len(readiness_symbols),
+                basket.get("spot_symbol"),
+                basket.get("futures_symbol"),
+                len(basket.get("option_symbols", []) or []),
+                readiness_symbols,
+                extra={
+                    "event": "READINESS_SYMBOLS_SELECTED",
+                    "count": len(readiness_symbols),
+                    "spot": basket.get("spot_symbol"),
+                    "futures": basket.get("futures_symbol"),
+                    "option_count": len(basket.get("option_symbols", []) or []),
+                    "symbols": readiness_symbols,
+                },
+            )
             ready_symbols: list[str] = []
             min_required_bars = int(
                 getattr(runner, "_required_candles", 20) if runner else 20
             )
+            skipped_symbols: list[str] = []
+            skipped_reasons: dict[str, str] = {}
             for sym in readiness_symbols:
-                if hydrated_counts.get(sym, 0) >= min_required_bars:
+                runner_history_count = 0
+                if runner is not None:
+                    try:
+                        runner_history_count = len(
+                            runner._indicator_engine.get_history(sym) or []
+                        )
+                    except Exception:
+                        runner_history_count = 0
+                if runner_history_count >= min_required_bars:
                     ready_symbols.append(sym)
                 else:
+                    skipped_symbols.append(sym)
+                    skipped_reasons[sym] = (
+                        f"runner_history_below_required:{runner_history_count}/{min_required_bars}"
+                    )
                     LOGGER.info(
                         "Condition met: startup_hydration_incomplete",
                         extra={
                             "event": "startup_hydration_incomplete",
                             "symbol": sym,
-                            "bars": hydrated_counts.get(sym, 0),
+                            "bars": runner_history_count,
                             "required": min_required_bars,
+                        },
+                    )
+            if runner is not None:
+                if hasattr(runner, "mark_ready"):
+                    runner.mark_ready(ready_symbols)
+                    LOGGER.info(
+                        "RUNNER_READY_MARKED symbols_count=%d symbols=%s min_required_bars=%d skipped_symbols=%s skipped_reasons=%s",
+                        len(ready_symbols),
+                        ready_symbols,
+                        min_required_bars,
+                        skipped_symbols,
+                        skipped_reasons,
+                        extra={
+                            "event": "RUNNER_READY_MARKED",
+                            "symbols_count": len(ready_symbols),
+                            "symbols": ready_symbols,
+                            "min_required_bars": min_required_bars,
+                            "skipped_symbols": skipped_symbols,
+                            "skipped_reasons": skipped_reasons,
+                        },
+                    )
+                else:
+                    LOGGER.warning(
+                        "RUNNER_READY_MARK_SKIPPED reason=%s",
+                        "method_missing",
+                        extra={
+                            "event": "RUNNER_READY_MARK_SKIPPED",
+                            "reason": "method_missing",
                         },
                     )
             if (
