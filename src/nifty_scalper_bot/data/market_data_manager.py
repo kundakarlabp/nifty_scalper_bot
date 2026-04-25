@@ -5211,6 +5211,18 @@ class MarketDataManager:
         symbol = "NSE:NIFTY"
         age_ms = self.symbol_data_age_ms(symbol)
         threshold_ms = self._ltp_stale_threshold_for_symbol(symbol) * 1000.0
+        self._logger.debug(
+            "SPOT_WS_HEALTH_CHECK symbol=%s age=%.2fs threshold=%.2fs",
+            symbol,
+            age_ms / 1000.0,
+            threshold_ms / 1000.0,
+            extra={
+                "event": "SPOT_WS_HEALTH_CHECK",
+                "symbol": symbol,
+                "age_s": round(age_ms / 1000.0, 3),
+                "threshold_s": round(threshold_ms / 1000.0, 3),
+            },
+        )
         if age_ms <= threshold_ms:
             return
         now = time.time()
@@ -5318,11 +5330,11 @@ class MarketDataManager:
                     )
                     if not hasattr(self._ws, "is_connected") or self._is_ws_connected():
                         self._logger.info(
-                            "WS_SUBSCRIBE_CONFIRMED symbol=%s token=%s",
+                            "WS_SUBSCRIBE_DISPATCHED symbol=%s token=%s",
                             symbol,
                             token,
                             extra={
-                                "event": "WS_SUBSCRIBE_CONFIRMED",
+                                "event": "WS_SUBSCRIBE_DISPATCHED",
                                 "symbol": symbol,
                                 "token": token,
                             },

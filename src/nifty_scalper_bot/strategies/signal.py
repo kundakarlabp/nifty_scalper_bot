@@ -71,7 +71,16 @@ def _load_enabled_strategy_modules() -> list[str]:
             extra={"event": "strategy_config_empty"},
         )
         return ['smc_liquidity']
-    return ['smc_liquidity']
+    LOGGER.info(
+        "STRATEGY_REGISTRY_LOADED strategies=%s source=config",
+        normalized,
+        extra={
+            "event": "STRATEGY_REGISTRY_LOADED",
+            "strategies": normalized,
+            "source": "config",
+        },
+    )
+    return normalized
 
 
 def basic_signal(

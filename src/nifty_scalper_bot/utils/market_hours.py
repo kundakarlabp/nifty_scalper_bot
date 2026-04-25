@@ -44,6 +44,11 @@ class MarketState(Enum):
 
 def _override_enabled() -> bool:
     """Args: none; Returns: bool; Raises: none."""
+    return allow_offhours_testing_safe()
+
+
+def allow_offhours_testing_safe() -> bool:
+    """Args: none; Returns: safe off-hours override state; Raises: none."""
     execution_mode = os.getenv("EXECUTION_MODE", "SHADOW").strip().upper()
     enable_live = os.getenv("ENABLE_LIVE", "false").strip().lower() in {
         "1",
@@ -53,7 +58,9 @@ def _override_enabled() -> bool:
     }
     if execution_mode == "LIVE" or enable_live:
         return False
-    return os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").strip().lower() in {
+    return os.getenv(
+        "ALLOW_OFFHOURS_TESTING", os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "")
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -185,4 +192,5 @@ __all__ = [
     "SAFE_START", 
     "SAFE_END",
     "MARKET_CLOSE",
+    "allow_offhours_testing_safe",
 ]

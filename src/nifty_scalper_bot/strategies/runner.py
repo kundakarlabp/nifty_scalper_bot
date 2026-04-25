@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 from collections import defaultdict, deque
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time, timedelta, timezone
 from enum import Enum
@@ -81,11 +82,13 @@ from nifty_scalper_bot.strategies.market_regime_engine import (
     MarketRegimeEngine,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
+from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.logging import LogThrottle, get_logger
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
+    allow_offhours_testing_safe,
     get_market_state,
     is_market_hours_cached,
 )
@@ -775,9 +778,7 @@ class StrategyRunner:
         self._warmup_complete_logged: set[str] = set()
         self._max_trades_per_symbol_per_candle = 1
         self._min_trade_interval_seconds = 60.0
-        self._session_allow_out_of_hours = (
-            os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
-        )
+        self._session_allow_out_of_hours = allow_offhours_testing_safe()
         self._force_signal_enabled = os.getenv("FORCE_SIGNAL", "").lower() == "true"
         self._disable_early_forced_signals = (
             os.getenv("FEATURE_DISABLE_EARLY_FORCED_SIGNALS", "").lower() == "true"
@@ -5343,10 +5344,13 @@ class StrategyRunner:
                 )
                 if spot_ts is not None and spot_ts > 1_000_000_000_000:
                     spot_ts = spot_ts / 1000.0
-                # 🚨 RELAXED SPOT GUARD: Allow up to 90 seconds of staleness
-                # Options can still trade even if the index tick is slightly delayed.
                 spot_age = time.time() - float(spot_ts) if spot_ts is not None else None
-                spot_max_age = float(os.environ.get("SPOT_STALENESS_SEC", "90.0")) 
+                spot_max_age = float(
+                    os.environ.get(
+                        "RUNNER_INDEX_STALE_TICK_SECONDS",
+                        str(self._index_stale_tick_seconds),
+                    )
+                )
                 if spot_age is not None and spot_age > spot_max_age:
                     spot_stale = True
 
@@ -5385,6 +5389,42 @@ class StrategyRunner:
 
                 # 8B. PREMIUM MOMENTUM SQUEEZE (Shift Brain to Options)
                 if generated_signal is None and self._indicator_engine.has_min_bars(symbol, 20):
+                    upper_symbol = symbol.upper()
+                    if not upper_symbol.endswith(("CE", "PE")) or "FUT" in upper_symbol:
+                        log_throttled(
+                            self._logger,
+                            f"premium_squeeze_skip_{upper_symbol}",
+                            "PREMIUM_SQUEEZE_SKIPPED",
+                            interval_sec=self._cooldown_log_throttle_seconds,
+                            level=logging.DEBUG,
+                            extra={
+                                "event": "PREMIUM_SQUEEZE_SKIPPED",
+                                "symbol": symbol,
+                                "reason": "non_option_instrument",
+                            },
+                        )
+                    else:
+                        underlying = self._extract_underlying(symbol) or "NIFTY"
+                        now_epoch = time.time()
+                        last_ts = float(
+                            self._premium_squeeze_last_signal_ts.get(underlying, 0.0)
+                        )
+                        if (
+                            now_epoch - last_ts
+                            < self._underlying_signal_cooldown_seconds
+                        ):
+                            log_throttled(
+                                self._logger,
+                                f"premium_squeeze_generation_suppressed_{underlying}",
+                                "PREMIUM_SQUEEZE_GENERATION_SUPPRESSED",
+                                interval_sec=self._cooldown_log_throttle_seconds,
+                                level=logging.DEBUG,
+                                extra={
+                                    "event": "PREMIUM_SQUEEZE_GENERATION_SUPPRESSED",
+                                    "underlying": underlying,
+                                },
+                            )
+                            upper_symbol = ""
                     inds = self._indicator_engine.get_indicators(symbol)
                     
                     rsi = inds.get("rsi")
@@ -5400,7 +5440,11 @@ class StrategyRunner:
                             
                         is_momentum_active = 60 < rsi < 85 
                         
-                        if is_bullish_premium and is_momentum_active:
+                        if (
+                            is_bullish_premium
+                            and is_momentum_active
+                            and upper_symbol
+                        ):
                             self._logger.info(f"🔥 Premium Squeeze Detected on {symbol}! RSI: {rsi:.2f}")
                             
                             # Dynamic TP/SL based on premium
@@ -5414,7 +5458,7 @@ class StrategyRunner:
                                 action="BUY",
                                 symbol=symbol,
                                 quantity=1,  # interpreted as lots and normalized before order submit
-                                confidence=0.85,
+                                confidence=0.8,
                                 reason="premium_momentum_squeeze",
                                 stop_loss=calculated_sl,  
                                 take_profit=calculated_tp, 
@@ -5423,8 +5467,11 @@ class StrategyRunner:
                                     "vwap": vwap,
                                     "rsi": rsi,
                                     "tag": "premium_squeeze",
+                                    "feature": "premium_momentum_squeeze",
+                                    "feature_score": 8.0,
                                 },
                             )
+                            self._premium_squeeze_last_signal_ts[underlying] = now_epoch
 
                 # 8C. VWAP CROSSOVER (Requires VWAP > 0)
                 if (
@@ -5836,11 +5883,10 @@ class StrategyRunner:
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
                                 stage="phase9",
-                                reason="market_data_is_stale",
-                                allowed=False,
+                                reason="market_data_global_stale_diagnostic",
+                                allowed=True,
                                 trace_id=trace_id,
                             )
-                            return
 
                         mdm_last_tick = getattr(
                             self._market_data, "_last_tick_time", {}
@@ -6850,6 +6896,50 @@ class StrategyRunner:
                 return SignalExecutionResult(False, "max_order_attempts_per_minute")
             if reason_key == "premium_momentum_squeeze":
                 self._premium_squeeze_last_signal_ts[underlying] = now_epoch
+
+            metadata = dict(signal.metadata or {})
+            quality = score_signal_quality(
+                direction_score=float(metadata.get("direction_score", 8.0)),
+                strategy_score=float(metadata.get("strategy_score", 8.0)),
+                option_score=float(metadata.get("option_score", 8.0)),
+                data_score=float(metadata.get("data_score", 8.0)),
+                rr_score=float(metadata.get("rr_score", 8.0)),
+            )
+            self._logger.info(
+                "SIGNAL_SCORE final=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f allowed=%s reasons=%s trace_id=%s",
+                quality.final_score,
+                quality.direction_score,
+                quality.strategy_score,
+                quality.option_score,
+                quality.data_score,
+                quality.rr_score,
+                quality.allowed,
+                quality.reasons,
+                trace_id,
+                extra={
+                    "event": "SIGNAL_SCORE",
+                    "symbol": base_symbol,
+                    "trace_id": trace_id,
+                    "allowed": quality.allowed,
+                    "final_score": quality.final_score,
+                },
+            )
+            if not quality.allowed:
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(
+                    False,
+                    "score_below_threshold",
+                    details={"trace_id": trace_id, "score": quality.final_score},
+                )
+            signal = dataclasses.replace(
+                signal,
+                confidence=max(0.0, min(1.0, quality.final_score / 10.0)),
+                metadata={
+                    **metadata,
+                    "final_score": quality.final_score,
+                    "signal_quality": quality.components,
+                },
+            )
 
             self._logger.info(
                 "SIGNAL_RECEIVED symbol=%s action=%s qty_lots=%s price=%s sl=%s tp=%s confidence=%.2f reason=%s trace_id=%s",

@@ -48,3 +48,19 @@ def test_offhours_override_disabled_in_live_mode(monkeypatch) -> None:
     monkeypatch.setenv('ENABLE_LIVE', 'true')
 
     assert market_hours._override_enabled() is False  # noqa: SLF001
+
+
+def test_offhours_override_disabled_when_enable_live_is_true(monkeypatch) -> None:
+    """Args: monkeypatch. Returns: None. Raises: AssertionError."""
+    monkeypatch.setenv('SESSION_ALLOW_OUT_OF_HOURS', 'true')
+    monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
+    monkeypatch.setenv('ENABLE_LIVE', 'true')
+    assert market_hours.allow_offhours_testing_safe() is False
+
+
+def test_offhours_override_allowed_in_shadow_mode(monkeypatch) -> None:
+    """Args: monkeypatch. Returns: None. Raises: AssertionError."""
+    monkeypatch.setenv('SESSION_ALLOW_OUT_OF_HOURS', 'true')
+    monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
+    monkeypatch.setenv('ENABLE_LIVE', 'false')
+    assert market_hours.allow_offhours_testing_safe() is True
