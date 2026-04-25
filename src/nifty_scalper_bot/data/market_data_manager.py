@@ -203,7 +203,26 @@ class MarketDataManager:
         self._ltp_stale_seconds = self._parse_float_env(
             "MDM_LTP_STALE_SECONDS", default=5.0, minimum=1.0
         )
+        self._index_ltp_stale_seconds = self._parse_float_env(
+            "MDM_INDEX_LTP_STALE_SECONDS", default=120.0, minimum=1.0
+        )
+        self._offmarket_index_ltp_stale_seconds = self._parse_float_env(
+            "MDM_OFFMARKET_INDEX_LTP_STALE_SECONDS", default=3600.0, minimum=60.0
+        )
+        self._option_ltp_stale_seconds = self._parse_float_env(
+            "MDM_OPTION_LTP_STALE_SECONDS", default=30.0, minimum=1.0
+        )
+        self._future_ltp_stale_seconds = self._parse_float_env(
+            "MDM_FUTURE_LTP_STALE_SECONDS", default=30.0, minimum=1.0
+        )
+        self._generic_ltp_stale_seconds = self._parse_float_env(
+            "MDM_GENERIC_LTP_STALE_SECONDS", default=30.0, minimum=1.0
+        )
         self._ltp_stale_warn_last: dict[str, float] = {}
+        self._spot_ws_first_tick_seen = False
+        self._last_spot_resubscribe_attempt = 0.0
+        self._last_spot_stale_log = 0.0
+        self._pending_subscription_tokens: set[int] = set()
         self._tick_warn_last: dict[str, float] = (
             {}
         )  # ✅ FIX: rate-limit cache-miss warnings
@@ -843,7 +862,18 @@ class MarketDataManager:
 
         self._ws_connected = bool(connected)
         if self._ws_connected:
+            pending_tokens = sorted(self._pending_subscription_tokens)
+            if pending_tokens:
+                self._logger.info(
+                    "WS_PENDING_SUBSCRIPTION_FLUSH count=%s",
+                    len(pending_tokens),
+                    extra={
+                        "event": "WS_PENDING_SUBSCRIPTION_FLUSH",
+                        "count": len(pending_tokens),
+                    },
+                )
             self._reconcile_ws_subscriptions()
+            self._pending_subscription_tokens.clear()
 
     def register_heartbeat_callback(self, callback: Callable[[float], None]) -> None:
         """Register callback invoked whenever a heartbeat is recorded.
@@ -1171,6 +1201,9 @@ class MarketDataManager:
         if ws is None:
             return
         if not hasattr(ws, "set_tokens"):
+            return
+        if hasattr(ws, "is_connected") and not self._is_ws_connected():
+            self._pending_subscription_tokens.update(self._desired_tokens)
             return
         try:
             ws.set_tokens(sorted(self._desired_tokens))
@@ -1505,7 +1538,7 @@ class MarketDataManager:
             float | None: Latest price or None if unavailable from all sources.
         """
         canonical_symbol = self._canonical_symbol(symbol)
-        _STALE_SECONDS = float(self._ltp_stale_seconds)
+        stale_seconds = self._ltp_stale_threshold_for_symbol(canonical_symbol)
         now = time.time()
 
         # 1. Try tick cache with freshness check
@@ -1518,18 +1551,42 @@ class MarketDataManager:
             try:
                 ltp = float(tick["ltp"])
                 if ltp > 0:
-                    if tick_age is None or tick_age <= _STALE_SECONDS:
+                    if tick_age is None or tick_age <= stale_seconds:
                         return ltp
                     # Tick exists but is stale — log and fall through to broker
                     last_warn = self._ltp_stale_warn_last.get(canonical_symbol, 0.0)
-                    if now - last_warn >= 60.0:
+                    market_state = get_market_state()
+                    log_interval = 900.0 if market_state != MarketState.OPEN else 60.0
+                    if now - last_warn >= log_interval:
                         self._ltp_stale_warn_last[canonical_symbol] = now
-                        self._logger.warning(
-                            "STALE_DATA symbol=%s age=%.2fs — falling back to broker REST",
-                            canonical_symbol,
-                            tick_age,
-                            extra={"event": "STALE_DATA", "symbol": canonical_symbol, "age_s": round(float(tick_age), 3)},
-                        )
+                        if market_state == MarketState.OPEN:
+                            self._logger.warning(
+                                "STALE_DATA symbol=%s age=%.2fs threshold=%.2fs — falling back to broker REST",
+                                canonical_symbol,
+                                tick_age,
+                                stale_seconds,
+                                extra={
+                                    "event": "STALE_DATA",
+                                    "symbol": canonical_symbol,
+                                    "age_s": round(float(tick_age), 3),
+                                    "threshold_s": stale_seconds,
+                                },
+                            )
+                        else:
+                            self._logger.debug(
+                                "OFF_MARKET_LTP_STALE symbol=%s age=%.2fs threshold=%.2fs state=%s",
+                                canonical_symbol,
+                                tick_age,
+                                stale_seconds,
+                                market_state.value,
+                                extra={
+                                    "event": "OFF_MARKET_LTP_STALE",
+                                    "symbol": canonical_symbol,
+                                    "age_s": round(float(tick_age), 3),
+                                    "threshold_s": stale_seconds,
+                                    "state": market_state.value,
+                                },
+                            )
             except (KeyError, TypeError, ValueError):
                 pass
 
@@ -1544,7 +1601,7 @@ class MarketDataManager:
                     if price:
                         p = float(price)
                         if p > 0:
-                            self._logger.debug(
+                            self._logger.info(
                                 "MDM_REST_FALLBACK_USED symbol=%s reason=stale_ws_tick price=%.2f",
                                 canonical_symbol,
                                 p,
@@ -2729,12 +2786,25 @@ class MarketDataManager:
         market_state = get_market_state()
         if market_state != MarketState.OPEN:
             self._logger.info(
-                "Readiness bypassed outside live market session "
-                "(state=%s, historical data active)",
+                "MDM_READY_BYPASS_OFF_MARKET state=%s dashboard_ready=true trading_ready=false",
                 market_state.value,
+                extra={
+                    "event": "MDM_READY_BYPASS_OFF_MARKET",
+                    "state": market_state.value,
+                    "dashboard_ready": True,
+                    "trading_ready": False,
+                    "off_market_ready_bypass": True,
+                },
             )
             self.ready = True
             self.degraded = False
+            self._last_readiness_state.update(
+                {
+                    "off_market_ready_bypass": True,
+                    "dashboard_ready": True,
+                    "trading_ready": False,
+                }
+            )
             return
 
         if self.hydration_complete:
@@ -3520,10 +3590,14 @@ class MarketDataManager:
                 datahub.register_symbol(normalized_symbol, token_int)
             if normalized_symbol == "NSE:NIFTY":
                 self._logger.info(
-                    "SPOT_SUBSCRIPTION_READY symbol=%s token=%s",
+                    "SPOT_TOKEN_RESOLVED symbol=%s token=%s",
                     normalized_symbol,
                     token_int,
-                    extra={"event": "SPOT_SUBSCRIPTION_READY", "symbol": normalized_symbol, "token": token_int},
+                    extra={
+                        "event": "SPOT_TOKEN_RESOLVED",
+                        "symbol": normalized_symbol,
+                        "token": token_int,
+                    },
                 )
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Resolver/DataHub sync skipped: %s", exc, exc_info=exc)
@@ -3606,6 +3680,19 @@ class MarketDataManager:
                 },
             )
             if source == "ws" and symbol == "NSE:NIFTY":
+                if not self._spot_ws_first_tick_seen:
+                    self._spot_ws_first_tick_seen = True
+                    self._logger.info(
+                        "MDM_WS_FIRST_TICK symbol=NSE:NIFTY token=%s ltp=%s",
+                        _token_val,
+                        _price_val,
+                        extra={
+                            "event": "MDM_WS_FIRST_TICK",
+                            "symbol": "NSE:NIFTY",
+                            "token": _token_val,
+                            "ltp": _price_val,
+                        },
+                    )
                 tick_age = 0.0
                 try:
                     tick_age = max(time.time() - float(self._last_tick_time.get(symbol, 0.0) or 0.0), 0.0)
@@ -3934,6 +4021,7 @@ class MarketDataManager:
         if not is_market_open():
             self._zombie_stale_logged = False
             return
+        self._monitor_spot_ws_health()
         if not self._is_ws_healthy():
             self._zombie_stale_logged = False
             return
@@ -5101,6 +5189,86 @@ class MarketDataManager:
             self._emit_tick(symbol, normalized, source="rest")
         self._process_poll_quote(symbol, normalized)
 
+    def _ltp_stale_threshold_for_symbol(self, symbol: str) -> float:
+        """Return per-symbol stale threshold. Args: symbol. Returns: seconds. Raises: none."""
+        upper = (symbol or "").upper()
+        if upper in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY 50", "NIFTY 50"}:
+            if get_market_state() != MarketState.OPEN:
+                return float(self._offmarket_index_ltp_stale_seconds)
+            return float(self._index_ltp_stale_seconds)
+        if upper.endswith(("CE", "PE")):
+            return float(self._option_ltp_stale_seconds)
+        if upper.endswith("FUT"):
+            return float(self._future_ltp_stale_seconds)
+        if self._generic_ltp_stale_seconds > 0:
+            return float(self._generic_ltp_stale_seconds)
+        return float(self._ltp_stale_seconds)
+
+    def _monitor_spot_ws_health(self) -> None:
+        """Monitor NSE spot tick freshness and trigger throttled resubscribe. Args: none. Returns: none. Raises: none."""
+        if get_market_state() != MarketState.OPEN:
+            return
+        symbol = "NSE:NIFTY"
+        age_ms = self.symbol_data_age_ms(symbol)
+        threshold_ms = self._ltp_stale_threshold_for_symbol(symbol) * 1000.0
+        if age_ms <= threshold_ms:
+            return
+        now = time.time()
+        if now - self._last_spot_stale_log >= 60.0:
+            self._last_spot_stale_log = now
+            self._logger.warning(
+                "MDM_WS_TICK_STALE symbol=%s age=%.2fs",
+                symbol,
+                age_ms / 1000.0,
+                extra={
+                    "event": "MDM_WS_TICK_STALE",
+                    "symbol": symbol,
+                    "age_s": round(age_ms / 1000.0, 3),
+                },
+            )
+        if now - self._last_spot_resubscribe_attempt < 120.0:
+            return
+        self._last_spot_resubscribe_attempt = now
+        try:
+            token = int(
+                self._symbol_to_token.get(symbol)
+                or self._token_by_symbol.get(symbol)
+                or 0
+            )
+            if token <= 0:
+                return
+            self._logger.info(
+                "WS_RESUBSCRIBE_REQUESTED symbol=%s reason=stale_index_tick",
+                symbol,
+                extra={
+                    "event": "WS_RESUBSCRIBE_REQUESTED",
+                    "symbol": symbol,
+                    "reason": "stale_index_tick",
+                },
+            )
+            self.request_token_subscription(token, symbol=symbol)
+            self._logger.info(
+                "WS_RESUBSCRIBE_SUCCESS symbol=%s token=%s",
+                symbol,
+                token,
+                extra={
+                    "event": "WS_RESUBSCRIBE_SUCCESS",
+                    "symbol": symbol,
+                    "token": token,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                "WS_RESUBSCRIBE_FAILED symbol=%s error=%s",
+                symbol,
+                exc,
+                extra={
+                    "event": "WS_RESUBSCRIBE_FAILED",
+                    "symbol": symbol,
+                    "error": str(exc),
+                },
+            )
+
     def _has_recent_rest_ticks(self) -> bool:
         cutoff = time.time() - max(self._rest_poll_interval * 2.0, 5.0)
         with self._lock:
@@ -5138,7 +5306,27 @@ class MarketDataManager:
             if changed:
                 token = self._symbol_to_token.get(symbol)
                 if token:
-                    self._logger.info(f"WS SUBSCRIPTION REQUESTED: {symbol} ({token})")
+                    self._logger.info(
+                        "WS_SUBSCRIBE_REQUESTED symbol=%s token=%s",
+                        symbol,
+                        token,
+                        extra={
+                            "event": "WS_SUBSCRIBE_REQUESTED",
+                            "symbol": symbol,
+                            "token": token,
+                        },
+                    )
+                    if not hasattr(self._ws, "is_connected") or self._is_ws_connected():
+                        self._logger.info(
+                            "WS_SUBSCRIBE_CONFIRMED symbol=%s token=%s",
+                            symbol,
+                            token,
+                            extra={
+                                "event": "WS_SUBSCRIBE_CONFIRMED",
+                                "symbol": symbol,
+                                "token": token,
+                            },
+                        )
         except Exception as exc:  # noqa: BLE001
             # Log both message and details so it shows up even if the logger ignores
             # 'extra'.
