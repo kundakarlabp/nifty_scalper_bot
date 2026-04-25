@@ -537,7 +537,7 @@ class StrategyRunner:
         )
         self._index_stale_tick_seconds = max(
             1.0,
-            float(os.getenv("RUNNER_INDEX_STALE_TICK_SECONDS", "30")),
+            float(os.getenv("RUNNER_INDEX_STALE_TICK_SECONDS", "120")),
         )
         self._future_stale_tick_seconds = max(
             1.0,
@@ -6356,13 +6356,18 @@ class StrategyRunner:
         try:
             action = signal.action
             base_symbol = self._normalize_symbol(signal.symbol)
-            _ = self._transition_execution_state(
-                base_symbol, ExecutionState.EXIT_PENDING
-            )
             trade_symbol = base_symbol
             trade_price = price
 
             if action in {"BUY", "SELL"}:
+                if not self._transition_execution_state(
+                    base_symbol, ExecutionState.SIGNAL_RECEIVED
+                ):
+                    return SignalExecutionResult(
+                        False,
+                        "signal_state_rejected",
+                        details={"trace_id": trace_id},
+                    )
                 return self._handle_entry_signal(
                     signal,
                     base_symbol,
@@ -6373,6 +6378,7 @@ class StrategyRunner:
                 )
 
             elif action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+                self._transition_execution_state(base_symbol, ExecutionState.EXIT_PENDING)
                 self._handle_exit_signal(
                     signal, base_symbol, trade_symbol, trade_price, timestamp
                 )
@@ -6782,25 +6788,12 @@ class StrategyRunner:
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
             )
 
-            # ── PHASE 2: SIGNAL_RECEIVED log ────────────────────────────────
-            self._logger.info(
-                "SIGNAL_RECEIVED symbol=%s action=%s qty_lots=%s price=%s sl=%s tp=%s confidence=%.2f reason=%s trace_id=%s",
-                signal.symbol,
-                signal.action,
-                signal.quantity,
-                trade_price,
-                signal.stop_loss,
-                signal.take_profit,
-                signal.confidence,
-                signal.reason,
-                trace_id,
-            )
-
             if not self._order_manager:
                 self._logger.error(
                     "ORDER_BLOCKED: order_manager is None — cannot execute entry for %s",
                     base_symbol,
                 )
+                self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "order_manager_missing")
 
             qty = int(signal.quantity or 0)
@@ -6808,6 +6801,7 @@ class StrategyRunner:
                 self._logger.critical(
                     "ORDER_BLOCKED: invalid quantity=%s for %s", qty, base_symbol
                 )
+                self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "invalid_quantity")
 
             # Cooldown + burst guard
@@ -6826,6 +6820,7 @@ class StrategyRunner:
                         level=logging.DEBUG,
                         extra={"event": "PREMIUM_SQUEEZE_SKIPPED", "symbol": trade_symbol or base_symbol, "reason": "non_option_instrument"},
                     )
+                    self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "non_option_instrument")
                 last_premium_ts = float(self._premium_squeeze_last_signal_ts.get(underlying, 0.0))
                 if now_epoch - last_premium_ts < self._underlying_signal_cooldown_seconds:
@@ -6837,18 +6832,37 @@ class StrategyRunner:
                         level=logging.INFO,
                         extra={"event": "PREMIUM_SQUEEZE_SUPPRESSED", "underlying": underlying, "reason": "cooldown"},
                     )
+                    self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "premium_squeeze_cooldown")
             if now_epoch - float(self._underlying_last_signal_ts.get(underlying, 0.0)) < self._underlying_signal_cooldown_seconds:
                 log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
+                self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "underlying_cooldown")
             if now_epoch - float(self._reason_last_signal_ts.get(underlying_reason_key, 0.0)) < self._reason_signal_cooldown_seconds:
                 log_throttled(self._logger, f"runner_reason_cd_{reason_key}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "reason_cooldown"})
+                self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "reason_cooldown")
             while self._order_attempt_window and (now_epoch - self._order_attempt_window[0]) > 60.0:
                 self._order_attempt_window.popleft()
             if len(self._order_attempt_window) >= self._max_order_attempts_per_minute:
                 log_throttled(self._logger, "runner_order_attempt_rate", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=300.0, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "max_order_attempts_per_minute"})
+                self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "max_order_attempts_per_minute")
+            if reason_key == "premium_momentum_squeeze":
+                self._premium_squeeze_last_signal_ts[underlying] = now_epoch
+
+            self._logger.info(
+                "SIGNAL_RECEIVED symbol=%s action=%s qty_lots=%s price=%s sl=%s tp=%s confidence=%.2f reason=%s trace_id=%s",
+                signal.symbol,
+                signal.action,
+                signal.quantity,
+                trade_price,
+                signal.stop_loss,
+                signal.take_profit,
+                signal.confidence,
+                signal.reason,
+                trace_id,
+            )
 
             lot_size = 1
             final_qty = qty
@@ -6858,19 +6872,22 @@ class StrategyRunner:
                     lot_size = int(self._order_manager.resolve_lot_size(trade_symbol or base_symbol))
                 final_qty = qty_lots * lot_size
                 self._logger.info(
-                    "ORDER_QTY_NORMALIZED symbol=%s input_qty_lots=%s lot_size=%s final_qty=%s",
+                    "ORDER_QTY_NORMALIZED symbol=%s input_qty_lots=%s lot_size=%s final_qty=%s trace_id=%s",
                     trade_symbol or base_symbol,
                     qty_lots,
                     lot_size,
                     final_qty,
+                    trace_id,
                     extra={"event": "ORDER_QTY_NORMALIZED", "symbol": trade_symbol or base_symbol, "input_qty_lots": qty_lots, "lot_size": lot_size, "final_qty": final_qty},
                 )
             except Exception as lot_exc:
                 self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s error=%s", trade_symbol or base_symbol, lot_exc)
+                self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "invalid_lot_quantity")
             qty = final_qty
             if qty <= 0 or (lot_size > 0 and qty % lot_size != 0):
                 self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s", trade_symbol or base_symbol, qty, lot_size)
+                self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "invalid_lot_quantity")
 
             # Resolve price: prefer signal metadata, fall back to live tick
@@ -6894,8 +6911,14 @@ class StrategyRunner:
                 or "runner"
             )
 
+            if not self._transition_execution_state(
+                base_symbol, ExecutionState.ORDER_PENDING
+            ):
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(False, "order_state_rejected", details={"trace_id": trace_id})
+
             self._logger.info(
-                "TRADE_ATTEMPT symbol=%s side=%s qty=%s price=%s sl=%s tp=%s strategy=%s",
+                "RUNNER_ORDER_REQUEST symbol=%s side=%s qty=%s price=%s sl=%s tp=%s strategy=%s trace_id=%s",
                 base_symbol,
                 signal.action,
                 qty,
@@ -6903,6 +6926,12 @@ class StrategyRunner:
                 stop_loss,
                 take_profit,
                 strategy_name,
+                trace_id,
+                extra={
+                    "event": "RUNNER_ORDER_REQUEST",
+                    "symbol": base_symbol,
+                    "trace_id": trace_id,
+                },
             )
 
             self._order_attempt_window.append(now_epoch)
@@ -6922,13 +6951,11 @@ class StrategyRunner:
 
             if order_id:
                 self._logger.info(
-                    "ORDER_SUBMITTED order_id=%s symbol=%s side=%s qty=%s",
-                    order_id, base_symbol, signal.action, qty,
+                    "ORDER_SUBMITTED order_id=%s symbol=%s side=%s qty=%s trace_id=%s",
+                    order_id, base_symbol, signal.action, qty, trace_id,
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
                 self._reason_last_signal_ts[underlying_reason_key] = now_epoch
-                if reason_key == "premium_momentum_squeeze":
-                    self._premium_squeeze_last_signal_ts[underlying] = now_epoch
                 self._order_attempt_window.append(now_epoch)
                 try:
                     self._record_trade(
@@ -6940,10 +6967,12 @@ class StrategyRunner:
                 return SignalExecutionResult(True, "order_submitted", order_id=order_id, details={"trace_id": trace_id})
             else:
                 log_throttled(self._logger, f"runner_order_rejected_{base_symbol}", "ORDER_REJECTED by order_manager", interval_sec=300.0, level=logging.WARNING, extra={"event": "ORDER_REJECTED", "symbol": base_symbol})
+                self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "order_rejected", details={"trace_id": trace_id})
 
         except Exception as exc:
             self._logger.error("🔴 ENTRY LOGIC CRASH: %s", exc, exc_info=True)
+            self._reset_execution_state(base_symbol)
             return SignalExecutionResult(False, "entry_exception", details={"trace_id": trace_id, "error": str(exc)})
 
     def _get_atr_with_fallback(

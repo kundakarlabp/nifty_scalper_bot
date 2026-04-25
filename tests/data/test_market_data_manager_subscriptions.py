@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.utils.market_hours import MarketState
 
 
 class DummyBroker:
@@ -24,10 +25,14 @@ class DummyResolver:
 class DummyWebSocket:
     def __init__(self) -> None:
         self.calls: list[list[int]] = []
+        self.connected = True
 
     def set_tokens(self, tokens) -> bool:  # noqa: ANN001
         self.calls.append(list(tokens))
         return True
+
+    def is_connected(self) -> bool:
+        return self.connected
 
 
 def test_request_symbol_subscription_reconciles_once() -> None:
@@ -136,3 +141,34 @@ def test_ensure_subscription_uses_request_api() -> None:
     mdm._ensure_subscription('NSE:NIFTY')  # noqa: SLF001
 
     assert calls == ['NSE:NIFTY']
+
+
+def test_pending_subscriptions_flush_on_connect() -> None:
+    ws = DummyWebSocket()
+    ws.connected = False
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+
+    changed = mdm.request_symbol_subscription('NSE:NIFTY')
+    assert changed is True
+    assert ws.calls == []
+    assert 256265 in mdm._pending_subscription_tokens  # noqa: SLF001
+
+    ws.connected = True
+    mdm.set_ws_connected(True)
+    assert ws.calls == [[256265]]
+
+
+def test_ltp_stale_thresholds_are_symbol_specific(monkeypatch) -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    monkeypatch.setattr(
+        'nifty_scalper_bot.data.market_data_manager.get_market_state',
+        lambda: MarketState.OPEN,
+    )
+    assert mdm._ltp_stale_threshold_for_symbol('NSE:NIFTY') == 120.0  # noqa: SLF001
+    assert mdm._ltp_stale_threshold_for_symbol('NFO:NIFTY26APR23800PE') == 30.0  # noqa: SLF001
+
+    monkeypatch.setattr(
+        'nifty_scalper_bot.data.market_data_manager.get_market_state',
+        lambda: MarketState.CLOSED,
+    )
+    assert mdm._ltp_stale_threshold_for_symbol('NSE:NIFTY') == 3600.0  # noqa: SLF001

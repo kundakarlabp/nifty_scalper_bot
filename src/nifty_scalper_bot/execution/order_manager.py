@@ -63,6 +63,7 @@ from nifty_scalper_bot.utils.circuit_breaker import CircuitBreaker
 from nifty_scalper_bot.utils.errors import RateLimitError
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
+from nifty_scalper_bot.utils.market_hours import get_time_status
 from nifty_scalper_bot.utils.pricing import canonical_price_source
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import canonical
@@ -78,11 +79,6 @@ SOFT_BLOCK_CODES: set[str] = {
     "AMO_ONLY",
     "MARKET_CLOSED",
 }
-SAFE_WINDOW_START = (9, 30)
-SAFE_WINDOW_END = (15, 15)
-MARKET_WINDOW_START = (9, 15)
-MARKET_WINDOW_END = (15, 30)
-
 _REFERENCE_LOGGER = get_logger(__name__)
 
 BrokerError = execution_exceptions.BrokerError
@@ -739,7 +735,7 @@ class OrderManager:
         self._consecutive_failures: int = 0
         self._max_failures: int = max(1, int(os.getenv("ORDER_KILL_SWITCH_MAX_FAILURES", "5") or 5))
         self._kill_switch_auto_reset_seconds: int = max(60, int(os.getenv("ORDER_KILL_SWITCH_AUTO_RESET_SECONDS", "900") or 900))
-        self._kill_switch_allow_auto_reset: bool = os.getenv("ORDER_KILL_SWITCH_ALLOW_AUTO_RESET", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self._kill_switch_allow_auto_reset: bool = os.getenv("ORDER_KILL_SWITCH_ALLOW_AUTO_RESET", "false").strip().lower() in {"1", "true", "yes", "on"}
         self._kill_switch_engaged_at: datetime | None = None
         self._kill_switch_reason: str | None = None
         self._last_kill_switch_log_ts: float = 0.0
@@ -2026,33 +2022,31 @@ class OrderManager:
                     return None
 
         # ---------------------------------------------------------------------
-        # 2. TIME GUARD (Safe Window: 09:30 - 15:15 IST)
+        # 2. TIME GUARD (central market_hours source of truth)
         # ---------------------------------------------------------------------
         if variety == "regular" and not is_system_exit:
             try:
-                ist = ZoneInfo("Asia/Kolkata")
-                now = datetime.now(ist).time()
-                safe_start = dtime(*SAFE_WINDOW_START)
-                safe_end = dtime(*SAFE_WINDOW_END)
-                market_open = dtime(*MARKET_WINDOW_START)
-                market_close = dtime(*MARKET_WINDOW_END)
-
-                if not (safe_start <= now <= safe_end):
-                    reason = "Market Closed"
-                    if market_open <= now < safe_start:
-                        reason = f"Opening Volatility Buffer (Wait until {safe_start.strftime('%H:%M')})"
-                    elif safe_end < now <= market_close:
-                        reason = f"EOD Safety Cutoff (No trades after {safe_end.strftime('%H:%M')})"
-
-                    self._logger.warning(
-                        f"🛑 Order Blocked: {reason}. Current Time: {now.strftime('%H:%M:%S')}",
+                execution_mode = os.getenv("EXECUTION_MODE", "SHADOW").strip().upper()
+                enable_live = os.getenv("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"}
+                is_live_mode = execution_mode == "LIVE" or enable_live
+                allowed, detail = get_time_status()
+                if is_live_mode and not allowed:
+                    self._logger.info(
+                        "ORDER_BLOCKED reason=time_guard detail=%s symbol=%s",
+                        detail,
+                        normalized_symbol,
                         extra={
+                            "event": "ORDER_BLOCKED",
+                            "reason": "time_guard",
+                            "detail": detail,
                             "symbol": normalized_symbol,
-                            "event": "time_guard_block",
                         },
                     )
-                    self._logger.info("ORDER_BLOCKED: time_guard reason=%s symbol=%s time=%s", reason, normalized_symbol, now.strftime("%H:%M:%S"))
-                    _log_order_decision(allowed=False, block_reason="time_guard_block")
+                    _log_order_decision(
+                        allowed=False,
+                        block_reason="time_guard",
+                        detail=detail,
+                    )
                     return None
             except Exception as e:
                 self._logger.error(
