@@ -39,3 +39,12 @@ def test_market_hours_blocks_weekend_even_inside_safe_clock(
 
     assert market_hours.is_market_hours() is False
     assert market_hours.is_market_hours_cached() is False
+
+
+def test_offhours_override_disabled_in_live_mode(monkeypatch) -> None:
+    """Args: monkeypatch. Returns: None. Raises: AssertionError."""
+    monkeypatch.setenv('SESSION_ALLOW_OUT_OF_HOURS', 'true')
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE', 'true')
+
+    assert market_hours._override_enabled() is False  # noqa: SLF001

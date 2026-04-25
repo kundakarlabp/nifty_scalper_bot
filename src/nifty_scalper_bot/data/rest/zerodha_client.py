@@ -219,6 +219,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._last_log_ltp_bulk = 0.0
         self._last_log_margins = 0.0
         self._last_log_balance = 0.0
+        self._last_balance_snapshot: dict[str, float] | None = None
+        self._last_balance_snapshot_at: float = 0.0
         self._last_log_instrument_load = 0.0
         self._rest_cache_ttl = max(
             1.0, get_float("BROKER_REST_CACHE_TTL_SEC", default=15.0)
@@ -1423,6 +1425,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             },
         )
         summary: dict[str, float] | None = None
+        account_payload: Mapping[str, Any] | None = None
         account_error: Exception | None = None
         try:
             account_payload = self.get_account_margins(segment=normalized_segment)
@@ -1513,19 +1516,75 @@ class ZerodhaKiteClient(BaseBrokerClient):
             )
             return fallback_balance
 
-        # [CORRECTED] Aligned correctly and placed before return
+        available_cash = float(available)
+        live_balance = 0.0
+        opening_balance = 0.0
+        net = float(summary.get("net", available_cash) or available_cash)
+        if isinstance(account_payload, Mapping):
+            equity = account_payload.get("equity")
+            equity_map = equity if isinstance(equity, Mapping) else {}
+            available_map_raw = equity_map.get("available")
+            available_map = (
+                available_map_raw if isinstance(available_map_raw, Mapping) else {}
+            )
+            available_cash = float(
+                available_map.get("cash")
+                or available_map.get("live_balance")
+                or available_map.get("opening_balance")
+                or available_cash
+                or 0.0
+            )
+            live_balance = float(available_map.get("live_balance") or 0.0)
+            opening_balance = float(available_map.get("opening_balance") or 0.0)
+            net = float(equity_map.get("net") or summary.get("net") or available_cash or 0.0)
+        else:
+            live_balance = float(summary.get("live_balance", 0.0) or 0.0)
+            opening_balance = float(summary.get("opening_balance", 0.0) or 0.0)
+
+        snapshot = {
+            "available_cash": round(available_cash, 2),
+            "live_balance": round(live_balance, 2),
+            "opening_balance": round(opening_balance, 2),
+            "net": round(net, 2),
+        }
         now = time.time()
-        if now - self._last_log_balance >= self._log_throttle_interval:
-            # [FIX] Keep as INFO, throttled by _log_throttle_interval (default 60s)
+        should_info_log = self._last_balance_snapshot != snapshot
+        if not should_info_log:
+            should_info_log = (now - self._last_log_balance) >= 900.0
+        if should_info_log:
             LOGGER.info(
-                "zerodha_available_balance_success",
+                (
+                    "ZERODHA_BALANCE_REFRESH_SUCCESS available_cash=%.2f "
+                    "live_balance=%.2f opening_balance=%.2f net=%.2f"
+                ),
+                snapshot["available_cash"],
+                snapshot["live_balance"],
+                snapshot["opening_balance"],
+                snapshot["net"],
                 extra={
-                    "event": "zerodha_available_balance_success",
+                    "event": "ZERODHA_BALANCE_REFRESH_SUCCESS",
                     "segment": normalized_segment,
-                    "available": available,
+                    "available_cash": snapshot["available_cash"],
+                    "live_balance": snapshot["live_balance"],
+                    "opening_balance": snapshot["opening_balance"],
+                    "net": snapshot["net"],
                 },
             )
             self._last_log_balance = now
+            self._last_balance_snapshot = snapshot
+            self._last_balance_snapshot_at = now
+        else:
+            LOGGER.debug(
+                "ZERODHA_BALANCE_REFRESH_UNCHANGED available_cash=%0.2f net=%0.2f",
+                snapshot["available_cash"],
+                snapshot["net"],
+                extra={
+                    "event": "ZERODHA_BALANCE_REFRESH_UNCHANGED",
+                    "segment": normalized_segment,
+                    "available_cash": snapshot["available_cash"],
+                    "net": snapshot["net"],
+                },
+            )
         return available
 
     def _resolve_balance_fallback(self) -> float:
