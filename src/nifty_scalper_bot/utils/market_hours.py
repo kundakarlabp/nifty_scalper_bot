@@ -43,7 +43,22 @@ class MarketState(Enum):
 
 
 def _override_enabled() -> bool:
-    return os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
+    """Args: none; Returns: bool; Raises: none."""
+    execution_mode = os.getenv("EXECUTION_MODE", "SHADOW").strip().upper()
+    enable_live = os.getenv("ENABLE_LIVE", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if execution_mode == "LIVE" or enable_live:
+        return False
+    return os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _now_ist() -> datetime:

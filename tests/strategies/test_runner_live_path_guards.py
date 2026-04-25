@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+import threading
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 from nifty_scalper_bot.strategies.signal_generator import Signal
@@ -52,6 +53,7 @@ def _build_runner() -> StrategyRunner:
     runner._order_attempt_window = deque()
     runner._max_order_attempts_per_minute = 100
     runner._record_trade = lambda *args, **kwargs: None
+    runner._entry_lock = threading.Lock()
     return runner
 
 
@@ -116,8 +118,41 @@ def test_stale_thresholds_are_instrument_specific() -> None:
     runner = _build_runner()
     runner._option_stale_tick_seconds = 900.0
     runner._future_stale_tick_seconds = 120.0
-    runner._index_stale_tick_seconds = 30.0
+    runner._index_stale_tick_seconds = 120.0
     runner._generic_stale_tick_seconds = 60.0
-    assert runner._stale_tick_threshold_for_symbol('NSE:NIFTY') == 30.0
+    assert runner._stale_tick_threshold_for_symbol('NSE:NIFTY') == 120.0
     assert runner._stale_tick_threshold_for_symbol('NFO:NIFTY26APR23800PE') == 900.0
     assert runner._stale_tick_threshold_for_symbol('NFO:NIFTY26APRFUT') == 120.0
+
+
+def test_handle_signal_entry_transitions_to_signal_and_order_pending(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setattr(
+        'nifty_scalper_bot.strategies.runner.is_market_hours_cached',
+        lambda: True,
+    )
+    transition_states: list[str] = []
+    runner._normalize_symbol = lambda value: value
+    runner._transition_execution_state = lambda _symbol, state: transition_states.append(state.value) or True
+    runner._reset_execution_state = lambda _symbol: None
+
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.9,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={},
+    )
+    result = runner._handle_signal(
+        signal,
+        price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='trace-entry-state',
+    )
+
+    assert result.accepted is True
+    assert transition_states[:2] == ['SIGNAL_RECEIVED', 'ORDER_PENDING']
+    assert 'EXIT_PENDING' not in transition_states
