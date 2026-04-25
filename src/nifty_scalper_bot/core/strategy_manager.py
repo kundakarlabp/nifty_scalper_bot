@@ -2105,6 +2105,7 @@ class StrategyManager(_BaseStrategyManager):
         position = self._position_manager.get_position(symbol)
 
         signals: list[Signal] = []
+        max_votes = max(1, int(getattr(app_settings, "MAX_STRATEGY_VOTES", 5)))
         disabled: list[str] = []
         empty: list[str] = []
         errors: list[str] = []
@@ -2144,7 +2145,8 @@ class StrategyManager(_BaseStrategyManager):
                 base_signal, strategy.name, entry
             )
             signals.append(adjusted)
-            break
+            if len(signals) >= max_votes:
+                break
 
         elapsed = time.monotonic() - evaluation_start
         if elapsed > 3.0:

@@ -484,7 +484,11 @@ from nifty_scalper_bot.utils.env import (
 )
 from nifty_scalper_bot.utils.errors import ConfigurationError
 from nifty_scalper_bot.utils.logging import get_logger, setup_logging
-from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
+from nifty_scalper_bot.utils.market_hours import (
+    MarketState,
+    allow_offhours_testing_safe,
+    get_market_state,
+)
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
@@ -1015,7 +1019,7 @@ class TradingSessionGuard:
         market_close: time = time(15, 30),
         session_max_age_hours: float = 22.0,
         timezone_name: str = "Asia/Kolkata",
-        allow_out_of_hours: bool = True,
+        allow_out_of_hours: bool = False,
     ) -> None:
         self._rate_limiter = rate_limiter
         self._risk_manager = risk_manager
@@ -2343,7 +2347,7 @@ def _get_symbols(
     ltp: float = 0.0
     spot_symbol = "NSE:NIFTY"
 
-    _allow_offhours = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower() == "true"
+    _allow_offhours = allow_offhours_testing_safe()
     _wait_timeout = 0.5 if _allow_offhours else 15.0
     first_tick = _wait_for_first_tick(spot_symbol, timeout=_wait_timeout)
     if first_tick:
@@ -4176,14 +4180,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     session_guard = TradingSessionGuard(
         rate_limiter=rate_limiter,
         risk_manager=risk_manager,
-        allow_out_of_hours=coalesce_bool("SESSION_ALLOW_OUT_OF_HOURS", default=True),
+        allow_out_of_hours=allow_offhours_testing_safe(),
     )
-    session_allow_override = coalesce_bool(
-        "SESSION_ALLOW_OUT_OF_HOURS",
-        "SESSION__ALLOW_OUT_OF_HOURS",
-        "ALLOW_OFFHOURS_TESTING",
-        default=settings.session_allow_out_of_hours,
-    )
+    session_allow_override = allow_offhours_testing_safe()
     session_guard.set_allow_out_of_hours(session_allow_override)
     settings.session_allow_out_of_hours = session_allow_override
     current_open, current_close = session_guard.get_trading_window()
