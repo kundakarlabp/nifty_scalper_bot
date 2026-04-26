@@ -82,7 +82,10 @@ from nifty_scalper_bot.strategies.market_regime_engine import (
     MarketRegimeEngine,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
-from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
+from nifty_scalper_bot.strategies.signal_quality import (
+    missing_score_components,
+    score_signal_quality,
+)
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.logging import LogThrottle, get_logger
@@ -5435,7 +5438,7 @@ class StrategyRunner:
                                 action="BUY",
                                 symbol=symbol,
                                 quantity=1,
-                                confidence=0.75,
+                                confidence=0.0,
                                 reason="vwap_crossover_up",
                                 stop_loss=calculated_sl,
                                 take_profit=calculated_tp,
@@ -5460,7 +5463,7 @@ class StrategyRunner:
                                 action="SELL",
                                 symbol=symbol,
                                 quantity=1,
-                                confidence=0.75,
+                                confidence=0.0,
                                 reason="vwap_crossover_down",
                                 stop_loss=calculated_sl,
                                 take_profit=calculated_tp,
@@ -5620,8 +5623,10 @@ class StrategyRunner:
                 )
                 return
 
-            # 🚨 ALL PHASE 9 STATE GATES REMOVED
-            current_state = SymbolState.READY
+            current_state = SymbolState.DEGRADED
+            if state.active:
+                ready_state = SymbolState.READY
+                current_state = ready_state
 
             if signal is None and self._required_candles:
                 should_evaluate = False
@@ -6886,18 +6891,7 @@ class StrategyRunner:
                 self._premium_squeeze_last_signal_ts[underlying] = now_epoch
 
             metadata = dict(signal.metadata or {})
-            required_score_keys = (
-                "direction_score",
-                "strategy_score",
-                "option_score",
-                "data_score",
-                "rr_score",
-            )
-            missing_components = [
-                key
-                for key in required_score_keys
-                if metadata.get(key, None) is None
-            ]
+            missing_components = missing_score_components(metadata)
             mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
             is_live_mode = mode == "LIVE" or (
                 str(os.getenv("ENABLE_LIVE", "false")).strip().lower()

@@ -184,6 +184,42 @@ def test_missing_score_components_block_live_mode(monkeypatch) -> None:
     assert result.reason == 'missing_signal_score_components'
 
 
+def test_final_confidence_is_derived_from_final_score(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.99,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={
+            'direction_score': 9.0,
+            'strategy_score': 8.0,
+            'option_score': 8.0,
+            'data_score': 7.0,
+            'rr_score': 8.0,
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NFO:NIFTY26APR23800PE',
+        trade_symbol='NFO:NIFTY26APR23800PE',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='confidence-from-score',
+    )
+    assert result.accepted is True
+    assert runner._order_manager.calls == 1
+    confidence_used = float(
+        runner._order_manager.place_order.call_args.kwargs.get('confidence') or 0.0
+    )
+    expected_score = (0.30 * 9.0) + (0.25 * 8.0) + (0.20 * 8.0) + (0.15 * 7.0) + (0.10 * 8.0)
+    assert confidence_used == expected_score / 10.0
+
+
 def test_premium_helper_respects_generation_cooldown_before_indicator_eval() -> None:
     runner = _build_runner()
     runner._indicator_engine = MagicMock()

@@ -129,7 +129,7 @@ class RSIDivergenceStrategy(EliteStrategy):
                         return EliteSignal(
                             symbol=symbol,
                             signal="BUY",
-                            confidence=0.80,
+                            confidence=0.0,
                             entry_price=current_price,
                             stop_loss=current_price - (atr * 2.0),
                             target=current_price + (atr * 4.0),
