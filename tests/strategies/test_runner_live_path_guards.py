@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 import threading
+from unittest.mock import MagicMock
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 from nifty_scalper_bot.strategies.signal_generator import Signal
@@ -156,3 +157,56 @@ def test_handle_signal_entry_transitions_to_signal_and_order_pending(monkeypatch
     assert result.accepted is True
     assert transition_states[:2] == ['SIGNAL_RECEIVED', 'ORDER_PENDING']
     assert 'EXIT_PENDING' not in transition_states
+
+
+def test_missing_score_components_block_live_mode(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.9,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NFO:NIFTY26APR23800PE',
+        trade_symbol='NFO:NIFTY26APR23800PE',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='live-missing',
+    )
+    assert result.accepted is False
+    assert result.reason == 'missing_signal_score_components'
+
+
+def test_premium_helper_respects_generation_cooldown_before_indicator_eval() -> None:
+    runner = _build_runner()
+    runner._indicator_engine = MagicMock()
+    runner._extract_underlying = lambda _symbol: 'NIFTY'
+    runner._premium_squeeze_last_signal_ts['NIFTY'] = datetime.now(
+        timezone.utc
+    ).timestamp()
+    generated = runner._maybe_generate_premium_squeeze_signal(
+        'NFO:NIFTY26APR23800CE',
+        110.0,
+        trace_id='premium-cooldown',
+    )
+    assert generated is None
+    runner._indicator_engine.get_indicators.assert_not_called()
+
+
+def test_premium_helper_skips_future_symbols() -> None:
+    runner = _build_runner()
+    runner._indicator_engine = MagicMock()
+    generated = runner._maybe_generate_premium_squeeze_signal(
+        'NFO:NIFTY26APRFUT',
+        110.0,
+        trace_id='premium-fut',
+    )
+    assert generated is None
+    runner._indicator_engine.get_indicators.assert_not_called()
