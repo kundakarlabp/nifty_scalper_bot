@@ -5,6 +5,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+REQUIRED_SCORE_COMPONENTS: tuple[str, ...] = (
+    'direction_score',
+    'strategy_score',
+    'option_score',
+    'data_score',
+    'rr_score',
+)
+
 
 @dataclass(slots=True)
 class SignalQualityScore:
@@ -19,6 +27,12 @@ class SignalQualityScore:
     allowed: bool
     reasons: list[str]
     components: dict[str, float] = field(default_factory=dict)
+
+
+def missing_score_components(metadata: dict[str, object] | None) -> list[str]:
+    """Args: score metadata dict. Returns: missing score keys. Raises: none."""
+    payload = dict(metadata or {})
+    return [key for key in REQUIRED_SCORE_COMPONENTS if payload.get(key) is None]
 
 
 def _mode_threshold() -> float:
