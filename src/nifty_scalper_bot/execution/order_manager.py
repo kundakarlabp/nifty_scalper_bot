@@ -2429,38 +2429,6 @@ class OrderManager:
                         self._logger.info(
                             f"🟡 ORDER SUBMITTED (fill pending): {order_id}"
                         )
-                        # ✅ FIX: Force-activate bracket even without fill confirmation
-                        # This ensures protection starts immediately
-                        # confirm_entry_fill will update entry price when fill comes through
-                        if self._bracket_manager:
-                            try:
-                                # Use expected price for pre-activation
-                                activation_price = float(price or 0.0)
-                                if activation_price <= 0:
-                                    # Fallback: Try to get fresh quote via DataHub (SSOT)
-                                    _hub = self._data_hub or self._market_data
-                                    if _hub:
-                                        q = _hub.get_quote(normalized_symbol)
-                                        if q:
-                                            activation_price = float(
-                                                q.get("ltp")
-                                                or q.get("last_price")
-                                                or 0.0
-                                            )
-
-                                if activation_price > 0:
-                                    self._bracket_manager.confirm_entry_fill(
-                                        order_id, activation_price
-                                    )
-                                    self._logger.info(
-                                        f"🛡️ Bracket PRE-ACTIVATED: {order_id} @ {activation_price:.2f} "
-                                        "(Will update on actual fill)"
-                                    )
-                            except Exception as exc:
-                                # Don't fail the order just because pre-activation had issues
-                                self._logger.debug(
-                                    f"Pre-activation note (non-critical): {exc}"
-                                )
 
                     if not is_system_exit:
                         self._signal_arbitrator.register(normalized_symbol, side)
