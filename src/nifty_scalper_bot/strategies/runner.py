@@ -5389,89 +5389,11 @@ class StrategyRunner:
 
                 # 8B. PREMIUM MOMENTUM SQUEEZE (Shift Brain to Options)
                 if generated_signal is None and self._indicator_engine.has_min_bars(symbol, 20):
-                    upper_symbol = symbol.upper()
-                    if not upper_symbol.endswith(("CE", "PE")) or "FUT" in upper_symbol:
-                        log_throttled(
-                            self._logger,
-                            f"premium_squeeze_skip_{upper_symbol}",
-                            "PREMIUM_SQUEEZE_SKIPPED",
-                            interval_sec=self._cooldown_log_throttle_seconds,
-                            level=logging.DEBUG,
-                            extra={
-                                "event": "PREMIUM_SQUEEZE_SKIPPED",
-                                "symbol": symbol,
-                                "reason": "non_option_instrument",
-                            },
-                        )
-                    else:
-                        underlying = self._extract_underlying(symbol) or "NIFTY"
-                        now_epoch = time.time()
-                        last_ts = float(
-                            self._premium_squeeze_last_signal_ts.get(underlying, 0.0)
-                        )
-                        if (
-                            now_epoch - last_ts
-                            < self._underlying_signal_cooldown_seconds
-                        ):
-                            log_throttled(
-                                self._logger,
-                                f"premium_squeeze_generation_suppressed_{underlying}",
-                                "PREMIUM_SQUEEZE_GENERATION_SUPPRESSED",
-                                interval_sec=self._cooldown_log_throttle_seconds,
-                                level=logging.DEBUG,
-                                extra={
-                                    "event": "PREMIUM_SQUEEZE_GENERATION_SUPPRESSED",
-                                    "underlying": underlying,
-                                },
-                            )
-                            upper_symbol = ""
-                    inds = self._indicator_engine.get_indicators(symbol)
-                    
-                    rsi = inds.get("rsi")
-                    vwap = inds.get("vwap")
-                    ema = inds.get("ema") # Fallback to None if EMA isn't calculated
-                    close_price = price
-
-                    # Only evaluate if RSI and VWAP are valid
-                    if rsi is not None and vwap is not None and vwap > 0:
-                        is_bullish_premium = close_price > vwap
-                        if ema is not None:
-                            is_bullish_premium = is_bullish_premium and close_price > ema
-                            
-                        is_momentum_active = 60 < rsi < 85 
-                        
-                        if (
-                            is_bullish_premium
-                            and is_momentum_active
-                            and upper_symbol
-                        ):
-                            self._logger.info(f"🔥 Premium Squeeze Detected on {symbol}! RSI: {rsi:.2f}")
-                            
-                            # Dynamic TP/SL based on premium
-                            sl_pct = self._vwap_sl_pct  
-                            tp_pct = self._vwap_tp_pct  
-
-                            calculated_sl = price * (1 - sl_pct / 100)
-                            calculated_tp = price * (1 + tp_pct / 100)
-
-                            generated_signal = Signal(
-                                action="BUY",
-                                symbol=symbol,
-                                quantity=1,  # interpreted as lots and normalized before order submit
-                                confidence=0.8,
-                                reason="premium_momentum_squeeze",
-                                stop_loss=calculated_sl,  
-                                take_profit=calculated_tp, 
-                                metadata={
-                                    "strategy": "premium_momentum",
-                                    "vwap": vwap,
-                                    "rsi": rsi,
-                                    "tag": "premium_squeeze",
-                                    "feature": "premium_momentum_squeeze",
-                                    "feature_score": 8.0,
-                                },
-                            )
-                            self._premium_squeeze_last_signal_ts[underlying] = now_epoch
+                    generated_signal = self._maybe_generate_premium_squeeze_signal(
+                        symbol,
+                        price,
+                        trace_id=trace_id,
+                    )
 
                 # 8C. VWAP CROSSOVER (Requires VWAP > 0)
                 if (
@@ -5865,239 +5787,237 @@ class StrategyRunner:
                         interval_sec=30.0,
                         level=logging.DEBUG,
                     )
-                    # 🚨 ALL DEEP STRATEGY GATES REMOVED (Indicators & Regime checks bypassed)
-                    if True:
-                        # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
-                        log_throttled(
-                            self._logger,
-                            f"indicators_ready_{symbol}",
-                            f"✅ INDICATORS READY: {symbol} | Calling StrategyManager...",
-                            interval_sec=60.0,
-                            level=logging.DEBUG,
-                        )
-                        if (
-                            self._market_data is not None
-                            and hasattr(self._market_data, "is_data_stale")
-                            and self._market_data.is_data_stale()
-                        ):
-                            self._emit_runner_eval_decision(
-                                symbol=symbol,
-                                stage="phase9",
-                                reason="market_data_global_stale_diagnostic",
-                                allowed=True,
-                                trace_id=trace_id,
-                            )
-
-                        mdm_last_tick = getattr(
-                            self._market_data, "_last_tick_time", {}
-                        ).get(symbol)
-                        _stale_thresh = self._stale_tick_threshold_for_symbol(symbol)
-                        if (
-                            isinstance(mdm_last_tick, (int, float))
-                            and time.time() - float(mdm_last_tick) > _stale_thresh
-                        ):
-                            _mdm_age = time.time() - float(mdm_last_tick)
-                            upper_symbol = symbol.upper()
-                            if upper_symbol in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY 50", "NIFTY 50"}:
-                                fallback_ltp = None
-                                if self._market_data is not None and hasattr(self._market_data, "get_ltp"):
-                                    try:
-                                        fallback_ltp = self._market_data.get_ltp(symbol)
-                                    except Exception:
-                                        fallback_ltp = None
-                                log_throttled(
-                                    self._logger,
-                                    f"stale_mdm_tick_{symbol}",
-                                    f"Stale MDM tick for {symbol} age={_mdm_age:.1f}s; using fallback and continuing",
-                                    interval_sec=60.0,
-                                    level=logging.WARNING,
-                                )
-                                if fallback_ltp and fallback_ltp > 0:
-                                    self._logger.info(
-                                        "MDM_REST_FALLBACK_USED symbol=%s reason=stale_ws_tick",
-                                        symbol,
-                                        extra={"event": "MDM_REST_FALLBACK_USED", "symbol": symbol, "reason": "stale_ws_tick"},
-                                    )
-                                self._emit_runner_eval_decision(
-                                    symbol=symbol,
-                                    stage="phase9",
-                                    reason="stale_mdm_tick_index_fallback",
-                                    allowed=True,
-                                    trace_id=trace_id,
-                                    mdm_tick_age_s=_mdm_age,
-                                    stale_tick_threshold_s=_stale_thresh,
-                                )
-                            else:
-                                log_throttled(
-                                    self._logger,
-                                    f"stale_mdm_tick_{symbol}",
-                                    f"Stale MDM tick — skipping: {symbol} age={_mdm_age:.1f}s",
-                                    interval_sec=60.0,
-                                    level=logging.WARNING,
-                                )
-                                self._emit_runner_eval_decision(
-                                    symbol=symbol,
-                                    stage="phase9",
-                                    reason="stale_mdm_tick",
-                                    allowed=False,
-                                    trace_id=trace_id,
-                                    mdm_tick_age_s=_mdm_age,
-                                    stale_tick_threshold_s=_stale_thresh,
-                                )
-                                return
-                        self._last_global_eval_ts = time.monotonic()
-                        self._logger.debug(
-                            "strategy_evaluation_start",
-                            extra={
-                                "event": "strategy_evaluation_start",
-                                "symbol": symbol,
-                                "price": price,
-                                "state": current_state.value,
-                            },
-                        )
+                    # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
+                    log_throttled(
+                        self._logger,
+                        f"indicators_ready_{symbol}",
+                        f"✅ INDICATORS READY: {symbol} | Calling StrategyManager...",
+                        interval_sec=60.0,
+                        level=logging.DEBUG,
+                    )
+                    if (
+                        self._market_data is not None
+                        and hasattr(self._market_data, "is_data_stale")
+                        and self._market_data.is_data_stale()
+                    ):
                         self._emit_runner_eval_decision(
                             symbol=symbol,
                             stage="phase9",
-                            reason="evaluation_entered",
+                            reason="market_data_global_stale_diagnostic",
                             allowed=True,
                             trace_id=trace_id,
-                            price=price,
                         )
-                        try:
-                            # --- Objective 2: Block signals if market depth insufficient ---
-                            if not self.validate_market_depth():
-                                self._emit_runner_eval_decision(
-                                    symbol=symbol,
-                                    stage="phase9",
-                                    reason="market_depth_invalid",
-                                    allowed=False,
-                                    trace_id=trace_id,
-                                )
-                                return
 
-                            signal = self._strategy_manager.generate_signal(
-                                symbol,
-                                price,
+                    mdm_last_tick = getattr(
+                        self._market_data, "_last_tick_time", {}
+                    ).get(symbol)
+                    _stale_thresh = self._stale_tick_threshold_for_symbol(symbol)
+                    if (
+                        isinstance(mdm_last_tick, (int, float))
+                        and time.time() - float(mdm_last_tick) > _stale_thresh
+                    ):
+                        _mdm_age = time.time() - float(mdm_last_tick)
+                        upper_symbol = symbol.upper()
+                        if upper_symbol in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY 50", "NIFTY 50"}:
+                            fallback_ltp = None
+                            if self._market_data is not None and hasattr(self._market_data, "get_ltp"):
+                                try:
+                                    fallback_ltp = self._market_data.get_ltp(symbol)
+                                except Exception:
+                                    fallback_ltp = None
+                            log_throttled(
+                                self._logger,
+                                f"stale_mdm_tick_{symbol}",
+                                f"Stale MDM tick for {symbol} age={_mdm_age:.1f}s; using fallback and continuing",
+                                interval_sec=60.0,
+                                level=logging.WARNING,
+                            )
+                            if fallback_ltp and fallback_ltp > 0:
+                                self._logger.info(
+                                    "MDM_REST_FALLBACK_USED symbol=%s reason=stale_ws_tick",
+                                    symbol,
+                                    extra={"event": "MDM_REST_FALLBACK_USED", "symbol": symbol, "reason": "stale_ws_tick"},
+                                )
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="stale_mdm_tick_index_fallback",
+                                allowed=True,
+                                trace_id=trace_id,
+                                mdm_tick_age_s=_mdm_age,
+                                stale_tick_threshold_s=_stale_thresh,
+                            )
+                        else:
+                            log_throttled(
+                                self._logger,
+                                f"stale_mdm_tick_{symbol}",
+                                f"Stale MDM tick — skipping: {symbol} age={_mdm_age:.1f}s",
+                                interval_sec=60.0,
+                                level=logging.WARNING,
+                            )
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="stale_mdm_tick",
+                                allowed=False,
+                                trace_id=trace_id,
+                                mdm_tick_age_s=_mdm_age,
+                                stale_tick_threshold_s=_stale_thresh,
+                            )
+                            return
+                    self._last_global_eval_ts = time.monotonic()
+                    self._logger.debug(
+                        "strategy_evaluation_start",
+                        extra={
+                            "event": "strategy_evaluation_start",
+                            "symbol": symbol,
+                            "price": price,
+                            "state": current_state.value,
+                        },
+                    )
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="phase9",
+                        reason="evaluation_entered",
+                        allowed=True,
+                        trace_id=trace_id,
+                        price=price,
+                    )
+                    try:
+                        # --- Objective 2: Block signals if market depth insufficient ---
+                        if not self.validate_market_depth():
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="market_depth_invalid",
+                                allowed=False,
                                 trace_id=trace_id,
                             )
-                            if signal is None:
-                                self._emit_runner_eval_decision(
-                                    symbol=symbol,
-                                    stage="phase9",
-                                    reason="evaluation_no_signal",
-                                    allowed=True,
-                                    trace_id=trace_id,
-                                    price=price,
-                                )
-                            else:
-                                self._emit_runner_eval_decision(
-                                    symbol=symbol,
-                                    stage="signal_forward",
-                                    reason="signal_forwarded",
-                                    allowed=True,
-                                    trace_id=trace_id,
-                                    signal_action=signal.action,
-                                    signal_confidence=getattr(signal, "confidence", None),
-                                )
-                            self._logger.info(
-                                "STRATEGY_EVALUATED",
-                                extra={
-                                    "event": "strategy_evaluated",
-                                    "symbol": symbol,
-                                    "price": price,
-                                    "has_signal": signal is not None,
-                                    "signal_action": signal.action if signal else None
-                                }
-                            )
-                            self._last_strategy_versions[symbol] = current_version
-                        except Exception:
-                            self._logger.exception("Signal evaluation failure")
-                            signal = None
-                        self._strategy_window_symbols.add(symbol)
-                        if signal is not None:
-                            self._signal_counter += 1
-                            self._strategy_window_signals += 1
-                            
-                            # --- Objective 8: Prometheus metrics ---
-                            signals_generated_total.labels(
-                                symbol=symbol,
-                                strategy=str(signal.metadata.get("strategy") if signal.metadata else "unknown")
-                            ).inc()
+                            return
 
-                            self._logger.info(
-                                "SIGNAL_GENERATED",
-                                extra={
-                                    "strategy": str(
-                                        signal.metadata.get("strategy")
-                                        if signal.metadata
-                                        else "unknown"
-                                    ),
-                                    "symbol": symbol,
-                                    "direction": signal.action,
-                                },
-                            )
-                            self._signals_last_hour.append(time.time())
-
-                        now_ts = time.time()
-                        if now_ts - self._last_signal_frequency_check_ts >= 300.0:
-                            self._last_signal_frequency_check_ts = now_ts
-                            signals_last_60m = sum(
-                                1
-                                for signal_ts in self._signals_last_hour
-                                if now_ts - signal_ts <= 3600
-                            )
-                            if signals_last_60m < 2:
-                                self._logger.warning(
-                                    "Low signal frequency detected (%s in last hour)",
-                                    signals_last_60m,
-                                    extra={"event": "low_signal_frequency"},
-                                )
-                        cycle_stats = getattr(self, "_strategy_cycle_stats", None)
-                        if cycle_stats is None:
-                            cycle_stats = {}
-                            self._strategy_cycle_stats = cycle_stats
-                        bar_key = (
-                            last_bar_ts.isoformat() if last_bar_ts else now.isoformat()
+                        signal = self._strategy_manager.generate_signal(
+                            symbol,
+                            price,
+                            trace_id=trace_id,
                         )
-                        cycle = cycle_stats.setdefault(
-                            bar_key,
-                            {
-                                "symbols": set(),
-                                "total_signals": 0,
-                                "reject_reason_counts": defaultdict(int),
+                        if signal is None:
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="evaluation_no_signal",
+                                allowed=True,
+                                trace_id=trace_id,
+                                price=price,
+                            )
+                        else:
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="signal_forward",
+                                reason="signal_forwarded",
+                                allowed=True,
+                                trace_id=trace_id,
+                                signal_action=signal.action,
+                                signal_confidence=getattr(signal, "confidence", None),
+                            )
+                        self._logger.info(
+                            "STRATEGY_EVALUATED",
+                            extra={
+                                "event": "strategy_evaluated",
+                                "symbol": symbol,
+                                "price": price,
+                                "has_signal": signal is not None,
+                                "signal_action": signal.action if signal else None
+                            }
+                        )
+                        self._last_strategy_versions[symbol] = current_version
+                    except Exception:
+                        self._logger.exception("Signal evaluation failure")
+                        signal = None
+                    self._strategy_window_symbols.add(symbol)
+                    if signal is not None:
+                        self._signal_counter += 1
+                        self._strategy_window_signals += 1
+                        
+                        # --- Objective 8: Prometheus metrics ---
+                        signals_generated_total.labels(
+                            symbol=symbol,
+                            strategy=str(signal.metadata.get("strategy") if signal.metadata else "unknown")
+                        ).inc()
+
+                        self._logger.info(
+                            "SIGNAL_GENERATED",
+                            extra={
+                                "strategy": str(
+                                    signal.metadata.get("strategy")
+                                    if signal.metadata
+                                    else "unknown"
+                                ),
+                                "symbol": symbol,
+                                "direction": signal.action,
                             },
                         )
-                        cycle["symbols"].add(symbol)
-                        if signal is None:
-                            cycle["reject_reason_counts"]["no_signal"] += 1
-                        else:
-                            cycle["total_signals"] += 1
-                        expected_symbols = [
-                            sym
-                            for sym in self._active_symbols
-                            if not (
-                                sym.upper().startswith("NSE:")
-                                and "NIFTY" in sym.upper()
-                                and "CE" not in sym.upper()
-                                and "PE" not in sym.upper()
-                                and "FUT" not in sym.upper()
+                        self._signals_last_hour.append(time.time())
+
+                    now_ts = time.time()
+                    if now_ts - self._last_signal_frequency_check_ts >= 300.0:
+                        self._last_signal_frequency_check_ts = now_ts
+                        signals_last_60m = sum(
+                            1
+                            for signal_ts in self._signals_last_hour
+                            if now_ts - signal_ts <= 3600
+                        )
+                        if signals_last_60m < 2:
+                            self._logger.warning(
+                                "Low signal frequency detected (%s in last hour)",
+                                signals_last_60m,
+                                extra={"event": "low_signal_frequency"},
                             )
-                        ]
-                        if expected_symbols and len(cycle["symbols"]) >= len(
-                            expected_symbols
-                        ):
-                            self._logger.info(
-                                "strategy_cycle_summary",
-                                extra={
-                                    "event": "strategy_cycle_summary",
-                                    "total_symbols": len(cycle["symbols"]),
-                                    "total_signals": cycle["total_signals"],
-                                    "reject_reason_counts": dict(
-                                        cycle["reject_reason_counts"]
-                                    ),
-                                },
-                            )
-                            cycle_stats.pop(bar_key, None)
+                    cycle_stats = getattr(self, "_strategy_cycle_stats", None)
+                    if cycle_stats is None:
+                        cycle_stats = {}
+                        self._strategy_cycle_stats = cycle_stats
+                    bar_key = (
+                        last_bar_ts.isoformat() if last_bar_ts else now.isoformat()
+                    )
+                    cycle = cycle_stats.setdefault(
+                        bar_key,
+                        {
+                            "symbols": set(),
+                            "total_signals": 0,
+                            "reject_reason_counts": defaultdict(int),
+                        },
+                    )
+                    cycle["symbols"].add(symbol)
+                    if signal is None:
+                        cycle["reject_reason_counts"]["no_signal"] += 1
+                    else:
+                        cycle["total_signals"] += 1
+                    expected_symbols = [
+                        sym
+                        for sym in self._active_symbols
+                        if not (
+                            sym.upper().startswith("NSE:")
+                            and "NIFTY" in sym.upper()
+                            and "CE" not in sym.upper()
+                            and "PE" not in sym.upper()
+                            and "FUT" not in sym.upper()
+                        )
+                    ]
+                    if expected_symbols and len(cycle["symbols"]) >= len(
+                        expected_symbols
+                    ):
+                        self._logger.info(
+                            "strategy_cycle_summary",
+                            extra={
+                                "event": "strategy_cycle_summary",
+                                "total_symbols": len(cycle["symbols"]),
+                                "total_signals": cycle["total_signals"],
+                                "reject_reason_counts": dict(
+                                    cycle["reject_reason_counts"]
+                                ),
+                            },
+                        )
+                        cycle_stats.pop(bar_key, None)
 
             # =================================================================
             # PHASE 10: EXECUTE SIGNAL
@@ -6349,6 +6269,74 @@ class StrategyRunner:
                 extra={"event": "strategy_eval_backoff_error"},
                 exc_info=exc,
             )
+
+    def _maybe_generate_premium_squeeze_signal(
+        self,
+        symbol: str,
+        price: float,
+        *,
+        trace_id: str | None = None,
+    ) -> Signal | None:
+        """Args: symbol, price, trace_id. Returns: Signal | None. Raises: none."""
+        upper_symbol = symbol.upper()
+        if not upper_symbol.endswith(("CE", "PE")) or "FUT" in upper_symbol:
+            return None
+        underlying = self._extract_underlying(symbol) or "NIFTY"
+        now_epoch = time.time()
+        last_ts = float(self._premium_squeeze_last_signal_ts.get(underlying, 0.0))
+        if now_epoch - last_ts < self._underlying_signal_cooldown_seconds:
+            log_throttled(
+                self._logger,
+                f"premium_squeeze_generation_suppressed_{underlying}",
+                "PREMIUM_SQUEEZE_GENERATION_SUPPRESSED",
+                interval_sec=self._cooldown_log_throttle_seconds,
+                level=logging.DEBUG,
+                extra={
+                    "event": "PREMIUM_SQUEEZE_GENERATION_SUPPRESSED",
+                    "underlying": underlying,
+                    "trace_id": trace_id,
+                },
+            )
+            return None
+        inds = self._indicator_engine.get_indicators(symbol)
+        rsi = inds.get("rsi")
+        vwap = inds.get("vwap")
+        ema = inds.get("ema")
+        if rsi is None or vwap is None or vwap <= 0:
+            return None
+        is_bullish_premium = price > vwap
+        if ema is not None:
+            is_bullish_premium = is_bullish_premium and price > ema
+        is_momentum_active = 60 < rsi < 85
+        if not (is_bullish_premium and is_momentum_active):
+            return None
+        sl_pct = self._vwap_sl_pct
+        tp_pct = self._vwap_tp_pct
+        calculated_sl = price * (1 - sl_pct / 100)
+        calculated_tp = price * (1 + tp_pct / 100)
+        self._premium_squeeze_last_signal_ts[underlying] = now_epoch
+        self._logger.info(
+            "PREMIUM_SQUEEZE_SIGNAL_EMITTED symbol=%s rsi=%.2f trace_id=%s",
+            symbol,
+            float(rsi),
+            trace_id,
+        )
+        return Signal(
+            action="BUY",
+            symbol=symbol,
+            quantity=1,
+            confidence=0.0,
+            reason="premium_momentum_squeeze",
+            stop_loss=calculated_sl,
+            take_profit=calculated_tp,
+            metadata={
+                "strategy": "premium_momentum",
+                "vwap": vwap,
+                "rsi": rsi,
+                "tag": "premium_squeeze",
+                "feature": "premium_momentum_squeeze",
+            },
+        )
 
     def _handle_signal(
         self,
@@ -6898,21 +6886,57 @@ class StrategyRunner:
                 self._premium_squeeze_last_signal_ts[underlying] = now_epoch
 
             metadata = dict(signal.metadata or {})
+            required_score_keys = (
+                "direction_score",
+                "strategy_score",
+                "option_score",
+                "data_score",
+                "rr_score",
+            )
+            missing_components = [
+                key
+                for key in required_score_keys
+                if metadata.get(key, None) is None
+            ]
+            mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+            is_live_mode = mode == "LIVE" or (
+                str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+            if missing_components and is_live_mode:
+                self._logger.info(
+                    "SIGNAL_SCORE_BLOCKED reason=missing_signal_score_components missing=%s trace_id=%s",
+                    missing_components,
+                    trace_id,
+                    extra={
+                        "event": "SIGNAL_SCORE_BLOCKED",
+                        "reason": "missing_signal_score_components",
+                        "missing": missing_components,
+                        "trace_id": trace_id,
+                    },
+                )
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(
+                    False,
+                    "missing_signal_score_components",
+                    details={"trace_id": trace_id, "missing": missing_components},
+                )
             quality = score_signal_quality(
-                direction_score=float(metadata.get("direction_score", 8.0)),
-                strategy_score=float(metadata.get("strategy_score", 8.0)),
-                option_score=float(metadata.get("option_score", 8.0)),
-                data_score=float(metadata.get("data_score", 8.0)),
-                rr_score=float(metadata.get("rr_score", 8.0)),
+                direction_score=float(metadata.get("direction_score", 0.0) or 0.0),
+                strategy_score=float(metadata.get("strategy_score", 0.0) or 0.0),
+                option_score=float(metadata.get("option_score", 0.0) or 0.0),
+                data_score=float(metadata.get("data_score", 0.0) or 0.0),
+                rr_score=float(metadata.get("rr_score", 0.0) or 0.0),
             )
             self._logger.info(
-                "SIGNAL_SCORE final=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f allowed=%s reasons=%s trace_id=%s",
+                "SIGNAL_SCORE final=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
                 quality.final_score,
                 quality.direction_score,
                 quality.strategy_score,
                 quality.option_score,
                 quality.data_score,
                 quality.rr_score,
+                max(0.0, min(1.0, quality.final_score / 10.0)),
                 quality.allowed,
                 quality.reasons,
                 trace_id,

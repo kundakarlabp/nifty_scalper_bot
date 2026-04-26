@@ -70,7 +70,17 @@ def _load_enabled_strategy_modules() -> list[str]:
             "No elite modules enabled; using defaults",
             extra={"event": "strategy_config_empty"},
         )
-        return ['smc_liquidity']
+        default_modules = list(ELITE_STRATEGY_MODULES)
+        LOGGER.info(
+            "STRATEGY_REGISTRY_LOADED strategies=%s source=default",
+            default_modules,
+            extra={
+                "event": "STRATEGY_REGISTRY_LOADED",
+                "strategies": default_modules,
+                "source": "default",
+            },
+        )
+        return default_modules
     LOGGER.info(
         "STRATEGY_REGISTRY_LOADED strategies=%s source=config",
         normalized,
