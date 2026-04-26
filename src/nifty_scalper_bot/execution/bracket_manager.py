@@ -348,12 +348,23 @@ class BracketManager:
                     for bracket in self._brackets.values():
                         ltp = float(bracket.last_ltp or 0.0)
                         if (
+                            not bracket.active
+                            or not bracket.entry_confirmed
+                            or bracket.entry_status != "ACTIVE"
+                            or
                             bracket.exit_executed
                             or bracket.exit_in_progress
                             or bracket.remaining_quantity <= 0
                             or bracket.sl_trigger_price <= 0
                             or ltp <= 0
                         ):
+                            self._log_throttled(
+                                'debug',
+                                f'watchdog_skip_{bracket.entry_order_id}',
+                                60.0,
+                                'BRACKET_WATCHDOG_SKIP symbol=%s reason=pending_or_inactive',
+                                bracket.symbol,
+                            )
                             continue
                         if bracket.side == 'BUY' and self._sl_crossed(bracket, ltp):
                             pending.append((bracket, {
@@ -1138,9 +1149,21 @@ class BracketManager:
             for bracket, action in exits:
                 if bracket.exit_executed or bracket.exit_in_progress:
                     continue
-                action_type = str(action.get('type', '')).upper()
-                is_protective_exit = action_type in {'SL', 'FINAL_TP', 'PARTIAL_TP'}
-                if (not bracket.active and not is_protective_exit) or bracket.remaining_quantity <= 0:
+                if (
+                    not bracket.active
+                    or not bracket.entry_confirmed
+                    or bracket.entry_status != "ACTIVE"
+                    or bracket.remaining_quantity <= 0
+                    or bracket.exit_executed
+                    or bracket.exit_in_progress
+                ):
+                    self._log_throttled(
+                        'debug',
+                        f'bracket_exit_skipped_{bracket.entry_order_id}',
+                        60.0,
+                        'BRACKET_EXIT_SKIPPED symbol=%s reason=inactive_or_unconfirmed',
+                        bracket.symbol,
+                    )
                     continue
                 last_attempt = self._exit_cooldowns.get(bracket.entry_order_id, 0.0)
                 if now - last_attempt < 0.5:
@@ -1367,7 +1390,11 @@ class BracketManager:
         """
         if not bracket.trailing_enabled:
             return
-        if not bracket.active or not bracket.entry_confirmed:
+        if (
+            not bracket.active
+            or not bracket.entry_confirmed
+            or bracket.entry_status != "ACTIVE"
+        ):
             return
         
         ltp = bracket.last_ltp
@@ -1903,6 +1930,18 @@ class BracketManager:
             if not filled:
                 LOGGER.warning("EXIT_ORDER_NOT_FILLED order_id=%s fallback=market", order_id)
                 return self._market_fallback_exit(bracket, qty, exit_side, reason)
+            if not is_partial and not self._verify_position_closed(bracket.symbol):
+                LOGGER.warning(
+                    "EXIT_FILL_STATUS_BUT_POSITION_OPEN symbol=%s order_id=%s",
+                    bracket.symbol,
+                    order_id,
+                    extra={
+                        "event": "EXIT_FILL_STATUS_BUT_POSITION_OPEN",
+                        "symbol": bracket.symbol,
+                        "order_id": str(order_id),
+                    },
+                )
+                return self._market_fallback_exit(bracket, qty, exit_side, reason)
             
             # Metrics
             if METRICS_AVAILABLE and METRICS:
@@ -1912,7 +1951,14 @@ class BracketManager:
                     LOGGER.exception("Unhandled exception", exc_info=True)
                     raise
                 
-            return ExitExecutionResult(True, True, str(order_id), int(qty), reason, status="FILLED")
+            return ExitExecutionResult(
+                True,
+                True,
+                str(order_id),
+                int(qty),
+                reason,
+                status="FILLED",
+            )
 
         except Exception as e:
             LOGGER.critical(f"🛑 EXIT FAILED for {bracket.symbol}: {e}", exc_info=True)
@@ -2485,6 +2531,7 @@ class BracketManager:
         quantity: int,
         strategy: str = "auto",
         order_id: str | None = None,
+        confirmed_position: bool = False,
     ) -> str:
         """
         Create a virtual bracket with specified SL/TP levels.
@@ -2556,7 +2603,7 @@ class BracketManager:
             tp=take_profit,
             tag=strategy,
             trailing_atr_mult=1.5,  # Enable ATR-based trailing
-            activate_immediately=True,  # Start monitoring immediately
+            activate_immediately=confirmed_position,
         )
         
         LOGGER.info(

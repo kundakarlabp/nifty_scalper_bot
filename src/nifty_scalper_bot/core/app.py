@@ -483,7 +483,7 @@ from nifty_scalper_bot.utils.env import (
     normalize_path,
 )
 from nifty_scalper_bot.utils.errors import ConfigurationError
-from nifty_scalper_bot.utils.logging import get_logger, setup_logging
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled, setup_logging
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     allow_offhours_testing_safe,
@@ -3447,38 +3447,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # [FIX] Polling Tick Handler & Throttling Helper
     # ------------------------------------------------------------------
 
-    # 1. Define the throttling cache and helper locally to guarantee existence.
-    #    This fixes the "NameError: name 'log_throttled' is not defined".
-    _log_throttling_cache: dict[str, float] = {}
+    # ------------------------------------------------------------------
+    # Streamer Selection Logic (Polling vs WebSocket)
+    # ------------------------------------------------------------------
 
-    def log_throttled(
-        logger: Any,
-        key: str,
-        msg: str,
-        interval_sec: float = 60.0,
-        level: int = logging.INFO,
-    ) -> None:
-        """
-        Thread-safe helper to log messages only once per interval.
-        Prevents log file flooding during high-frequency tick updates.
-        """
-        try:
-            # Use the global time_module alias defined at top of file
-            now = time_module.time()
-            last_time = _log_throttling_cache.get(key, 0.0)
-
-            if now - last_time >= interval_sec:
-                logger.log(level, msg)
-                _log_throttling_cache[key] = now
-        except Exception:
-            # Failsafe: Never crash the trading bot just because logging failed
-            pass
-            
-        # ------------------------------------------------------------------
-        # Streamer Selection Logic (Polling vs WebSocket)
-        # ------------------------------------------------------------------
-
-    
     def _on_poll_tick(tick: dict[str, Any]) -> None:
         if not tick or type(tick) is not dict:
             return
@@ -8103,11 +8075,27 @@ class NiftyScalperApp:
                 await self._health_task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Health task failed during shutdown: %s",
+                    exc,
+                    extra={"event": "health_task_shutdown_error"},
+                    exc_info=True,
+                )
             self._health_task = None
         if self._self_test_task:
             self._self_test_task.cancel()
-            with suppress(asyncio.CancelledError):
+            try:
                 await self._self_test_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Self-test task failed during shutdown: %s",
+                    exc,
+                    extra={"event": "self_test_task_shutdown_error"},
+                    exc_info=True,
+                )
             self._self_test_task = None
         if (
             self._ctx.telegram_application is not None
@@ -8322,10 +8310,26 @@ class NiftyScalperApp:
         while not self._shutdown_event.is_set():
             try:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
+                break
             except asyncio.TimeoutError:
                 now = time_module.monotonic()
                 if now - last_heavy >= heavy_interval:
-                    _health_check(self._ctx)
+                    try:
+                        _health_check(self._ctx)
+                    except asyncio.CancelledError:
+                        LOGGER.debug(
+                            "Health loop cancelled",
+                            extra={"event": "health_loop_cancelled"},
+                        )
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.error(
+                            "Failure in health loop: %s",
+                            exc,
+                            extra={"event": "health_loop_error"},
+                            exc_info=True,
+                        )
+                        await asyncio.sleep(5.0)
                     try:
                         await _reconcile_state(self._ctx)
                     except Exception as exc:  # noqa: BLE001
@@ -8350,7 +8354,12 @@ class NiftyScalperApp:
                         )
                     last_heavy = now
                 continue
-            break
+            except asyncio.CancelledError:
+                LOGGER.debug(
+                    "Health loop cancelled",
+                    extra={"event": "health_loop_cancelled"},
+                )
+                raise
 
 
 # ----------------------------------------------------------------
