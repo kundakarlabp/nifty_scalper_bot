@@ -28,6 +28,7 @@ def test_stop_loss_cross_detection_on_jump() -> None:
         sl=100.0,
         tp=120.0,
     )
+    manager.confirm_entry_fill('entry-1', 105.0)
 
     manager.on_tick('NFO:NIFTYTEST', 105.0)
     manager.on_tick('NFO:NIFTYTEST', 104.0)
@@ -51,6 +52,7 @@ def test_trailing_stop_never_moves_backwards() -> None:
         sl=95.0,
         tp=120.0,
     )
+    manager.confirm_entry_fill('entry-2', 100.0)
     manager.update_trailing_sl('NFO:NIFTYTEST2', 98.0)
     manager.update_trailing_sl('NFO:NIFTYTEST2', 96.0)
     bracket = manager.get_bracket('entry-2')
@@ -74,6 +76,7 @@ def test_fallback_market_exit_executes_after_retry_exhaustion() -> None:
         sl=99.0,
         tp=120.0,
     )
+    manager.confirm_entry_fill('entry-3', 100.0)
 
     manager.on_tick('NFO:NIFTYTEST3', 98.0)
 
@@ -99,6 +102,7 @@ def test_exit_state_mutates_only_after_broker_confirmation() -> None:
         sl=99.0,
         tp=120.0,
     )
+    manager.confirm_entry_fill('entry-4', 100.0)
 
     manager.on_tick('NFO:NIFTYTEST4', 98.0)
     bracket = manager.get_bracket('entry-4')
@@ -119,6 +123,7 @@ def test_websocket_tick_jump_scenario_triggers_sl() -> None:
         sl=100.0,
         tp=120.0,
     )
+    manager.confirm_entry_fill('entry-5', 105.0)
 
     for tick in [105.0, 104.0, 97.0]:
         manager.on_tick_event({'symbol': 'NFO:NIFTYTEST5', 'ltp': tick})
