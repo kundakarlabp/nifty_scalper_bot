@@ -11125,6 +11125,54 @@ class OrderManager:
                 f"Base: {base_price} | SL: {sl_price} | TP: {tp_price}",
                 extra={"event": "orphan_guarding", "symbol": symbol},
             )
+            broker_position_qty = 0
+            broker = getattr(self, "_broker", None)
+            get_positions = getattr(broker, "get_positions", None)
+            if callable(get_positions):
+                try:
+                    positions = get_positions() or []
+                    normalized_symbol = normalize_symbol(symbol)
+                    for position in positions:
+                        if not isinstance(position, Mapping):
+                            continue
+                        pos_symbol = normalize_symbol(
+                            str(
+                                position.get("symbol")
+                                or position.get("tradingsymbol")
+                                or ""
+                            )
+                        )
+                        if pos_symbol != normalized_symbol:
+                            continue
+                        broker_position_qty = int(
+                            float(
+                                position.get("quantity")
+                                or position.get("net_quantity")
+                                or 0
+                            )
+                        )
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        "Failure in orphan broker position verification: %s",
+                        exc,
+                        extra={
+                            "event": "orphan_broker_position_verify_error",
+                            "symbol": symbol,
+                        },
+                        exc_info=exc,
+                    )
+            if broker_position_qty <= 0:
+                self._logger.warning(
+                    "ORPHAN_BRACKET_SKIPPED symbol=%s reason=no_broker_position",
+                    symbol,
+                    extra={
+                        "event": "ORPHAN_BRACKET_SKIPPED",
+                        "symbol": symbol,
+                        "reason": "no_broker_position",
+                    },
+                )
+                return False
 
             # Register
             self._bracket_manager.register_virtual_bracket(
@@ -11137,6 +11185,18 @@ class OrderManager:
                 tp=tp_price,
                 tag=strategy_tag,
                 activate_immediately=True,
+            )
+            self._logger.info(
+                "ORPHAN_POSITION_BRACKET_ATTACHED symbol=%s qty=%s base_price=%s",
+                symbol,
+                abs_qty,
+                base_price,
+                extra={
+                    "event": "ORPHAN_POSITION_BRACKET_ATTACHED",
+                    "symbol": symbol,
+                    "qty": abs_qty,
+                    "base_price": base_price,
+                },
             )
 
             self._log_trade_event(

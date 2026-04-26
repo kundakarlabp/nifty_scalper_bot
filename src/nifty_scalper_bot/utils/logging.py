@@ -540,9 +540,10 @@ def log_throttled(
     key: str,
     msg: str,
     *,
+    interval_sec: float = 60.0,
     level: int = logging.INFO,
-    interval_sec: float | None = None,
     extra: Optional[dict[str, Any]] = None,
+    exc_info: bool | BaseException | None = None,
 ) -> None:
     """Emit a log record at most once during the specified interval."""
     logger.debug(
@@ -555,18 +556,14 @@ def log_throttled(
         },
     )
     try:
-        interval = (
-            _resolve_float("LOG_THROTTLE_DEFAULT_SEC", 5.0)
-            if interval_sec is None
-            else float(interval_sec)
-        )
+        interval = float(interval_sec)
         now = time.time()
         with _THROTTLE_LOCK:
             last_emit = _THROTTLE_STATE.get(key, 0.0)
             if now - last_emit < interval:
                 return
             _THROTTLE_STATE[key] = now
-        logger.log(level, msg, extra=extra or {})
+        logger.log(level, msg, extra=extra or {}, exc_info=exc_info)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "Failure in log_throttled: %s",

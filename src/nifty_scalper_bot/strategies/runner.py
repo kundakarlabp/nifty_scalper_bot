@@ -86,9 +86,10 @@ from nifty_scalper_bot.strategies.signal_quality import (
     missing_score_components,
     score_signal_quality,
 )
+from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
-from nifty_scalper_bot.utils.logging import LogThrottle, get_logger
+from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     allow_offhours_testing_safe,
@@ -114,40 +115,8 @@ LOGGER = get_logger(__name__)
 RELAX_REGIME_FILTER = (
     os.getenv("RELAX_REGIME_FILTER", "true").lower() != "false"
 )  # default True: regime starts with no snapshot
-_THROTTLE_CACHE: Dict[str, float] = {}
-_THROTTLE_LOCK = threading.Lock()
 MIN_EVAL_INTERVAL_SECONDS = 5.0
 _IST = ZoneInfo("Asia/Kolkata")
-
-
-def log_throttled(
-    logger: Any,
-    key: str,
-    msg: str,
-    interval_sec: float = 60.0,
-    level: int | str = logging.INFO,
-    extra: dict[str, Any] | None = None,
-) -> None:
-    """Log throttled message. Args: logger, key, msg. Returns: None. Raises: Exception."""
-    try:
-        with _THROTTLE_LOCK:
-            now = time.time()
-            last_time = _THROTTLE_CACHE.get(key, 0.0)
-            if now - last_time < interval_sec:
-                return
-            _THROTTLE_CACHE[key] = now
-
-        # Normalize log level (accept str or logging.* int)
-        if isinstance(level, int):
-            logger.log(level, msg, extra=extra or {})
-        else:
-            log_method = getattr(logger, str(level).lower(), logger.info)
-            if extra:
-                log_method(msg, extra=extra)
-            else:
-                log_method(msg)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failure in log_throttled: %s", exc, exc_info=True)
 
 
 _STRATEGY_SKIP_COUNTER = Counter(
@@ -622,6 +591,7 @@ class StrategyRunner:
         self._execution_totals: Dict[str, Dict[str, int]] = defaultdict(
             lambda: {"success": 0, "error": 0}
         )
+        self._trade_candidate_selector = TradeCandidateSelector()
         self._trade_counter_by_symbol_candle: Dict[str, dict] = {}
         self._settings = get_settings()
         try:
@@ -6891,6 +6861,57 @@ class StrategyRunner:
                 self._premium_squeeze_last_signal_ts[underlying] = now_epoch
 
             metadata = dict(signal.metadata or {})
+            candidate_snapshots_obj = metadata.get("candidate_snapshots")
+            if isinstance(candidate_snapshots_obj, list):
+                direction_bias = "CE" if str(signal.action).upper() == "BUY" else "PE"
+                try:
+                    candidate = self._trade_candidate_selector.select_best_candidate(
+                        underlying=underlying,
+                        direction_bias=direction_bias,
+                        atm_strike=int(metadata.get("atm_strike") or 0),
+                        snapshots=[
+                            snap
+                            for snap in candidate_snapshots_obj
+                            if isinstance(snap, dict)
+                        ],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        "Failure in trade candidate selection: %s",
+                        exc,
+                        extra={
+                            "event": "candidate_selection_error",
+                            "symbol": base_symbol,
+                            "trace_id": trace_id,
+                        },
+                        exc_info=exc,
+                    )
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "no_valid_candidate")
+                if candidate is None:
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "no_valid_candidate")
+                if normalize_symbol(signal.symbol) != normalize_symbol(candidate.symbol):
+                    self._logger.info(
+                        "SIGNAL_EXECUTION_RESULT accepted=False reason=not_selected_candidate symbol=%s selected_symbol=%s trace_id=%s",
+                        signal.symbol,
+                        candidate.symbol,
+                        trace_id,
+                        extra={
+                            "event": "SIGNAL_EXECUTION_RESULT",
+                            "accepted": False,
+                            "reason": "not_selected_candidate",
+                            "symbol": signal.symbol,
+                            "selected_symbol": candidate.symbol,
+                            "trace_id": trace_id,
+                        },
+                    )
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "not_selected_candidate")
+                metadata["option_score"] = candidate.score
+                metadata["data_score"] = candidate.data_quality_score
+                metadata["spread_pct"] = candidate.spread_pct
+                metadata["candidate_score"] = candidate.score
             missing_components = missing_score_components(metadata)
             mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
             is_live_mode = mode == "LIVE" or (
@@ -6898,6 +6919,11 @@ class StrategyRunner:
                 in {"1", "true", "yes", "on"}
             )
             if missing_components and is_live_mode:
+                if reason_key == "premium_momentum_squeeze":
+                    metadata["shadow_only"] = True
+                    metadata["missing_reason"] = (
+                        "premium_squeeze_score_components_not_implemented"
+                    )
                 self._logger.info(
                     "SIGNAL_SCORE_BLOCKED reason=missing_signal_score_components missing=%s trace_id=%s",
                     missing_components,

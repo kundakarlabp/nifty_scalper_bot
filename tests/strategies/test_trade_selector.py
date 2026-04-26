@@ -67,3 +67,9 @@ def test_selector_rejects_wide_spread_invalid_bid_ask_and_stale() -> None:
         )
         is None
     )
+
+
+def test_selector_default_tick_age_from_env(monkeypatch) -> None:
+    monkeypatch.delenv('MAX_OPTION_TICK_AGE_SECONDS', raising=False)
+    selector = TradeCandidateSelector()
+    assert selector.max_tick_age_s == 10.0

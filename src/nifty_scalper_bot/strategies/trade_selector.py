@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import logging
 from dataclasses import dataclass
 from typing import Any
 
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
 
@@ -44,14 +46,19 @@ class TradeCandidateSelector:
         max_option_spread_pct: float = 0.05,
         min_option_premium: float = 20.0,
         max_option_premium: float = 400.0,
-        max_tick_age_s: float = 2.5,
+        max_tick_age_s: float | None = None,
         min_real_ticks_last_60s: int = 1,
     ) -> None:
         self.option_strike_window_each_side = max(1, int(option_strike_window_each_side))
         self.max_option_spread_pct = max(0.0, float(max_option_spread_pct))
         self.min_option_premium = max(0.0, float(min_option_premium))
         self.max_option_premium = max(self.min_option_premium, float(max_option_premium))
-        self.max_tick_age_s = max(0.0, float(max_tick_age_s))
+        configured_tick_age = (
+            float(os.getenv('MAX_OPTION_TICK_AGE_SECONDS', '10'))
+            if max_tick_age_s is None
+            else float(max_tick_age_s)
+        )
+        self.max_tick_age_s = max(0.0, configured_tick_age)
         self.min_real_ticks_last_60s = max(0, int(min_real_ticks_last_60s))
 
     def evaluate_data_quality(self, snapshot: dict[str, Any]) -> DataQualityResult:
@@ -104,7 +111,7 @@ class TradeCandidateSelector:
         }
         allowed = len(hard_blocks.intersection(reasons)) == 0
         score = max(0.0, min(10.0, score - 1.0 * len(hard_blocks.intersection(reasons))))
-        LOGGER.info(
+        LOGGER.debug(
             'DATA_QUALITY_CHECK symbol=%s allowed=%s score=%.2f reasons=%s',
             snapshot.get('symbol'),
             allowed,
@@ -113,10 +120,12 @@ class TradeCandidateSelector:
             extra={'event': 'DATA_QUALITY_CHECK', 'allowed': allowed, 'score': score, 'reasons': reasons},
         )
         if not allowed:
-            LOGGER.info(
-                'DATA_QUALITY_BLOCKED symbol=%s reasons=%s',
-                snapshot.get('symbol'),
-                reasons,
+            log_throttled(
+                LOGGER,
+                key=f"data_quality_blocked_{snapshot.get('symbol')}",
+                msg=f"DATA_QUALITY_BLOCKED symbol={snapshot.get('symbol')} reasons={reasons}",
+                level=logging.DEBUG,
+                interval_sec=60.0,
                 extra={'event': 'DATA_QUALITY_BLOCKED', 'reasons': reasons},
             )
         return DataQualityResult(allowed=allowed, score=score, reasons=reasons)
@@ -195,10 +204,12 @@ class TradeCandidateSelector:
 
     def _log_rejection(self, symbol: str, reason: str) -> None:
         """Args: symbol and reason. Returns: None. Raises: none."""
-        LOGGER.info(
-            'CANDIDATE_REJECTED symbol=%s reason=%s',
-            symbol,
-            reason,
+        log_throttled(
+            LOGGER,
+            key=f'candidate_rejected_{symbol}_{reason}',
+            msg=f'CANDIDATE_REJECTED symbol={symbol} reason={reason}',
+            interval_sec=60.0,
+            level=logging.DEBUG,
             extra={'event': 'CANDIDATE_REJECTED', 'symbol': symbol, 'reason': reason},
         )
 

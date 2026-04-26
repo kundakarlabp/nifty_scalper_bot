@@ -69,6 +69,30 @@ class TestBracketManager:
         assert bracket.side == "BUY"
         assert bracket.sl_trigger_price == pytest.approx(95.0)
         assert bracket.tp_trigger_price == pytest.approx(110.0)
+        assert bracket.active is False
+        assert bracket.entry_confirmed is False
+        assert bracket.entry_status == "PENDING_ENTRY"
+
+    def test_create_bracket_confirmed_position_activates_immediately(self) -> None:
+        """create_bracket should activate only when confirmed_position is true."""
+        broker = Mock()
+        manager = BracketManager(broker_client=broker)
+
+        order_id = manager.create_bracket(
+            symbol="NIFTYTEST",
+            side="LONG",
+            entry_price=100.0,
+            stop_loss=95.0,
+            take_profit=110.0,
+            quantity=1,
+            strategy="unit_test",
+            confirmed_position=True,
+        )
+        bracket = manager.get_bracket(order_id)
+        assert bracket is not None
+        assert bracket.active is True
+        assert bracket.entry_confirmed is True
+        assert bracket.entry_status == "ACTIVE"
 
     @pytest.mark.flaky(reruns=1)
     def test_race_between_stop_and_target_is_serialised(self) -> None:
