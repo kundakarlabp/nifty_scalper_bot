@@ -33,6 +33,15 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 log = get_logger(__name__)
 
+REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
+    "TREND_UP": {"SMC": 1.2, "VWAPPro": 1.2, "ORBPro": 1.15, "BBSqueeze": 1.1, "OrderFlow": 1.15, "RSIDivergence": 0.8},
+    "TREND_DOWN": {"SMC": 1.2, "VWAPPro": 1.2, "ORBPro": 1.15, "BBSqueeze": 1.1, "OrderFlow": 1.15, "RSIDivergence": 0.8},
+    "RANGE": {"RSIDivergence": 1.15, "OIMaxPain": 1.05, "ORBPro": 0.7, "VWAPPro": 0.8, "SMC": 0.85},
+    "CHOPPY": {"SMC": 0.2, "VWAPPro": 0.2, "ORBPro": 0.2, "BBSqueeze": 0.3, "OrderFlow": 0.25},
+    "EXPIRY_GAMMA": {"GammaScalping": 1.25, "EliteTuesdayGammaBuyer": 1.25},
+    "LOW_VOLATILITY": {"BBSqueeze": 0.6, "VWAPPro": 0.7, "ORBPro": 0.6},
+}
+
 
 class StrategyInterface(ABC):
     """Define the standardised contract expected from all strategies."""
@@ -287,15 +296,21 @@ class StrategyVote:
 def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     """Args: signal + strategy name. Returns: normalized vote. Raises: none."""
     metadata = dict(signal.metadata or {})
-    side = infer_option_side(signal.symbol, metadata)
+    side = str(metadata.get("side") or infer_option_side(signal.symbol, metadata)).upper()
+    if signal.action == "HOLD" and side not in {"CE", "PE"}:
+        side = "NO_TRADE"
     score_candidate = float(metadata.get('strategy_score') or 0.0)
     score = float(signal.confidence or 0.0) * 10.0
     if score <= 0.0:
         score = score_candidate
     reason = str(signal.reason or '').strip()
+    metadata.setdefault("strategy", strategy_name)
+    metadata.setdefault("required_data_present", True)
+    metadata.setdefault("setup_quality", score_candidate)
+    metadata.setdefault("score_reasons", [reason] if reason else [])
     return StrategyVote(
         strategy=strategy_name,
-        side=side if side in {'CE', 'PE'} else 'UNKNOWN',
+        side=side if side in {'CE', 'PE', 'NO_TRADE'} else 'UNKNOWN',
         score=max(0.0, min(10.0, score)),
         confidence=max(0.0, min(1.0, float(signal.confidence or 0.0))),
         reasons=[reason] if reason else [],
@@ -2174,11 +2189,11 @@ class StrategyManager(_BaseStrategyManager):
                 empty.append(strategy.name)
                 continue
             entry = score_map.get(strategy.name)
-            adjusted = self._apply_weighted_confidence(
-                base_signal, strategy.name, entry
-            )
+            adjusted = self._apply_weighted_confidence(base_signal, strategy.name, entry)
             signals.append(adjusted)
-            signal_votes.append((adjusted, signal_to_vote(adjusted, strategy.name)))
+            vote = signal_to_vote(adjusted, strategy.name)
+            vote = self._apply_regime_vote_weight(vote=vote, regime_name=regime_name)
+            signal_votes.append((adjusted, vote))
             if len(signals) >= max_votes:
                 break
 
@@ -2503,6 +2518,42 @@ class StrategyManager(_BaseStrategyManager):
         except Exception as exc:  # noqa: BLE001
             log.error("Failure in StrategyManager._extract_regime_scale: %s", exc)
             return 1.0
+
+    def _apply_regime_vote_weight(
+        self, *, vote: StrategyVote, regime_name: str | None
+    ) -> StrategyVote:
+        """Args: vote + regime_name. Returns: weighted StrategyVote. Raises: none."""
+        try:
+            regime_key = str(regime_name or "").upper()
+            weight_map = REGIME_STRATEGY_WEIGHTS.get(regime_key, {})
+            weight = float(weight_map.get(vote.strategy, 1.0))
+            weighted_score = max(0.0, min(10.0, vote.score * weight))
+            log.debug(
+                "STRATEGY_REGIME_WEIGHT strategy=%s regime=%s weight=%.3f",
+                vote.strategy,
+                regime_key or "UNKNOWN",
+                weight,
+                extra={
+                    "event": "STRATEGY_REGIME_WEIGHT",
+                    "strategy": vote.strategy,
+                    "regime": regime_key or "UNKNOWN",
+                    "weight": weight,
+                },
+            )
+            metadata = dict(vote.metadata or {})
+            metadata["regime_weight"] = weight
+            metadata["strategy_score"] = weighted_score
+            return StrategyVote(
+                strategy=vote.strategy,
+                side=vote.side,
+                score=weighted_score,
+                confidence=vote.confidence,
+                reasons=list(vote.reasons),
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in StrategyManager._apply_regime_vote_weight: %s", exc)
+            return vote
 
     def _bounded_confidence(self, candidate: float | None) -> float:
         """Clamp candidate confidence to an acceptable range.

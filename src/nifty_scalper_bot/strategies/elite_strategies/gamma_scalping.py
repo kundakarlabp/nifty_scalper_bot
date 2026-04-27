@@ -1,233 +1,97 @@
-"""
-Gamma Scalping Strategy.
-World-Class implementation with Greeks Validation (Gamma/Theta Efficiency) and Momentum.
-Refactored for Push-Based Architecture (Zero-Latency).
-"""
-
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import os
+from datetime import datetime
+from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
-    EliteSignal,
-    EliteStrategy,
-)
-from nifty_scalper_bot.strategies.elite_strategies.config_models import (
-    GammaScalpingStrategyConfig,
-)
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
+from nifty_scalper_bot.strategies.elite_strategies.config_models import GammaScalpingStrategyConfig
 from nifty_scalper_bot.utils.logging import get_logger
 
-# Initialize structured logger
 LOGGER = get_logger(__name__)
 
 
 class GammaScalpingStrategy(EliteStrategy):
-    """
-    Trade directional gamma edges.
-    Captures explosive moves where Gamma (Acceleration) justifies the Theta (Decay) cost.
-    Entry: High Momentum + Positive Gamma Environment.
-    """
+    """Expiry-gamma strategy gated by explicit mode flags."""
 
     MIN_BARS_REQUIRED = 3
 
-    # ✅ OPTIMIZATION: Use slots for memory efficiency
-    __slots__ = ("_gamma_config",)
-
-    def __init__(
-        self, config: GammaScalpingStrategyConfig, indicator_engine: Any
-    ) -> None:
-        """
-        Initialize strategy with configuration and engine.
-
-        Args:
-            config: Strategy configuration dataclass.
-            indicator_engine: Data provider.
-        """
+    def __init__(self, config: GammaScalpingStrategyConfig, indicator_engine: Any) -> None:
+        """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
-        self._gamma_config = config
+        self._cfg = config
 
     def get_required_indicators(self) -> set[str]:
-        """
-        Declare which indicators this strategy needs pre-calculated.
-        The StrategyManager will inject these into _evaluate_signal.
-        """
-        return {
-            "gamma",
-            "theta",
-            "delta",
-            "ltp",
-            "volume",
-            "avg_volume",
-            "macd",  # Momentum Trigger
-            "macd_signal",  # Signal Line
-            "atr",  # Volatility for stops
-            "futures_vwap",
-        }
+        """Args: none. Returns: indicators set. Raises: Exception."""
+        return {'gamma', 'theta', 'atr', 'direction_bias', 'volatility_expansion_confirmed'}
 
-    def _evaluate_signal(
-        self,
-        symbol: str,
-        indicators: Dict[str, Any],
-        current_price: float,
-        position: Any | None = None,
-    ) -> EliteSignal | None:
+    def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
-        LOGGER.debug(
-            "Entered GammaScalpingStrategy._evaluate_signal",
-            extra={"event": "gamma_scalping_enter", "symbol": symbol},
-        )
+        del position
         try:
-            # 1. Safe Data Extraction (Fast Path)
-            gamma = float(indicators.get("gamma") or 0.0)
-            theta = float(indicators.get("theta") or 0.0)
-            delta = float(indicators.get("delta") or 0.0)
-
-            macd = float(indicators.get("macd") or 0.0)
-            signal_line = float(indicators.get("macd_signal") or 0.0)
-
-            atr = float(indicators.get("atr") or 0.0)
-            vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("avg_volume") or 1.0)
-            futures_vwap = float(
-                indicators.get("futures_vwap")
-                or indicators.get("nifty_fut_vwap")
-                or indicators.get("nifty_index_vwap")
-                or 0.0
-            )
-
-            # Sanity Checks
-            if current_price <= 0 or futures_vwap <= 0:
+            strategy_mode = str(os.getenv('STRATEGY_MODE', 'directional_scalp')).lower()
+            gamma_enabled = str(os.getenv('ALLOW_EXPIRY_GAMMA_STRATEGIES', 'false')).lower() in {'1', 'true', 'yes', 'on'}
+            if not (strategy_mode == 'expiry_gamma' and gamma_enabled):
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=GammaScalping reason=gamma_mode_disabled')
                 return None
 
-            # 2. Logic: Gamma Filter (Acceleration)
-            # We are looking for "Long Gamma" setups (Buying explosive moves).
-            # Gamma must be positive and significant enough to drive price.
-            # (Note: Gamma is usually small, e.g., 0.001 to 0.05)
-            min_gamma = getattr(self._gamma_config, "min_gamma", 0.0005)
-            if gamma < min_gamma:
+            gamma = float(indicators.get('gamma') or 0.0)
+            theta = float(indicators.get('theta') or 0.0)
+            atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
+            direction = str(indicators.get('direction_bias') or '').upper()
+            if gamma <= float(getattr(self._cfg, 'min_gamma', 0.0005)):
+                return None
+            if theta >= 0:
                 return None
 
-            # 3. Logic: Theta Efficiency (Cost of Time)
-            # Don't buy if Theta is burning too hard relative to the move.
-            # Theta is usually negative for long options.
-            # If Theta < -10 (burning fast) AND Gamma is not super high, skip.
-            if theta < -15.0 and gamma < 0.002:
-                # Too expensive to hold this position
-                return None
+            side = direction if direction in {'CE', 'PE'} else 'CE'
+            premium_decay_risk = min(1.0, abs(theta) / max(current_price, 1.0))
+            vol_exp = bool(indicators.get('volatility_expansion_confirmed') or gamma > 0.0015)
 
-            # Bullish Crossover: MACD crosses above Signal
-            bullish_momentum = (macd > signal_line) and (macd - signal_line) > 0.5
+            score = 2.0 + (2.0 if vol_exp else 0.0)
+            reasons = ['gamma_enabled_mode']
+            if vol_exp:
+                reasons.append('volatility_expansion_confirmed')
+            if direction in {'CE', 'PE'}:
+                score += 2.0
+                reasons.append('direction_context')
+            strategy_score = max(0.0, min(6.0, score))
 
-            # Bearish Crossover: MACD crosses below Signal
-            bearish_momentum = (macd < signal_line) and (signal_line - macd) > 0.5
-
-            # Skip if no momentum in either direction
-            if not bullish_momentum and not bearish_momentum:
-                return None
-
-            # 5. Logic: Volume Confirmation
-            # Acceleration needs fuel.
-            vol_ratio = vol / avg_vol
-            if vol_ratio < 1.0:  # At least average volume
-                return None
-
-            # 6. Construct Signal — always long-only (BUY options, never sell/short)
-            # Bullish momentum → BUY CE (Call). Bearish momentum → BUY PE (Put).
-            # SELL was only reachable if OPTIONS_LONG_ONLY=false env var was set,
-            # which was a footgun: Zerodha needs margin to sell options.
-            option_type = None
-            if bullish_momentum:
-                side = "BUY"
-                option_type = "CE"
-            else:
-                # Bearish momentum → buy PE option (long put, not short call)
-                side = "BUY"
-                option_type = "PE"
-
-            # Fallback ATR
-            if atr <= 0:
-                atr = current_price * 0.01
-
-            risk_mult = 1.0 if vol_ratio <= 1.5 else 1.2
-            risk = max(atr * risk_mult, current_price * 0.004)
-            rr_1 = 1.4
-            rr_2 = 2.8
-
-            stop_loss = current_price - risk
-            tp1 = current_price + (risk * rr_1)
-            tp2 = current_price + (risk * rr_2)
-
-            if stop_loss >= current_price or tp1 <= current_price:
-                LOGGER.info(
-                    "Condition met: invalid gamma scalping brackets",
-                    extra={
-                        "event": "gamma_scalping_invalid_bracket",
-                        "symbol": symbol,
-                        "side": side,
-                        "entry": current_price,
-                        "stop_loss": stop_loss,
-                        "tp1": tp1,
-                        "tp2": tp2,
-                    },
-                )
-                return None
-
-            # 7. Confidence Scoring
-            # Base 65% (Scalping is noisy).
-            confidence = 0.65
-
-            # Boost if Gamma is high (Acceleration is likely)
-            if gamma > 0.002:
-                confidence += 0.15
-
-            # Boost if Volume is Absorbing (>2x)
-            if vol_ratio > 2.0:
-                confidence += 0.10
-
-            LOGGER.info(
-                "Condition met: gamma_scalping_signal",
-                extra={
-                    "event": "gamma_scalping_signal",
-                    "symbol": symbol,
-                    "gamma": gamma,
-                    "theta": theta,
-                    "vol_ratio": vol_ratio,
-                    "detail": (
-                        f"⚡ Gamma Scalp: {symbol} {side} | Gamma: {gamma:.4f} | "
-                        f"Theta: {theta:.2f} | MACD Diff: {(macd - signal_line):.2f}"
-                    ),
-                },
-            )
-
+            today = datetime.utcnow().date()
+            metadata = {
+                'strategy': 'GammaScalping',
+                'side': side,
+                'direction_bias': side,
+                'strategy_score': strategy_score,
+                'setup_quality': strategy_score,
+                'setup_type': 'expiry_gamma',
+                'required_data_present': True,
+                'stale_data_used': bool(indicators.get('stale_data_used')),
+                'candidate_symbol': symbol,
+                'score_reasons': reasons,
+                'rejection_reasons': [],
+                'expiry_day': today.weekday() in {1, 3},
+                'days_to_expiry': indicators.get('days_to_expiry'),
+                'gamma_mode_enabled': True,
+                'premium_decay_risk': round(premium_decay_risk, 4),
+                'volatility_expansion_confirmed': vol_exp,
+                'invalidation_level': current_price - atr if side == 'CE' else current_price + atr,
+            }
+            LOGGER.info('STRATEGY_VOTE strategy=GammaScalping side=%s score=%.2f', side, strategy_score)
             return EliteSignal(
                 symbol=symbol,
-                signal=side,
-                confidence=min(confidence, 0.99),
+                signal='BUY',
+                confidence=max(0.1, min(0.75, strategy_score / 10.0)),
                 entry_price=current_price,
-                stop_loss=stop_loss,
-                target=tp2,
-                take_profit_1=tp1,
-                take_profit_2=tp2,
-                quantity=self._gamma_config.quantity or 1,
-                strategy_name="Gamma_Scalp_Pro",
-                metadata={
-                    "type": "Momentum_Acceleration",
-                    "gamma_efficiency": f"{gamma:.4f}/{theta:.1f}",
-                    "momentum": "MACD_Bullish",
-                    "vol_ratio": round(vol_ratio, 2),
-                    "option_type": option_type,
-                    "tp1": tp1,
-                    "tp2": tp2,
-                    "sl_atr_mult": risk_mult,
-                    "tp1_rr": rr_1,
-                    "tp2_rr": rr_2,
-                    "tp1_qty_pct": 0.5,
-                },
+                stop_loss=float(metadata['invalidation_level']),
+                target=current_price + (1.8 * atr),
+                quantity=self._cfg.quantity or 1,
+                strategy_name='GammaScalping',
+                metadata=metadata,
             )
-
         except Exception as e:
-            LOGGER.error(f"Gamma Strategy Error on {symbol}: {e}", exc_info=True)
+            LOGGER.error('Failure in GammaScalpingStrategy._evaluate_signal: %s', e, exc_info=e)
             return None
 
 
-__all__ = ["GammaScalpingStrategy"]
+__all__ = ['GammaScalpingStrategy']

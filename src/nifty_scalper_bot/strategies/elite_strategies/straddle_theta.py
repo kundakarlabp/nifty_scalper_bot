@@ -1,161 +1,72 @@
-"""
-Straddle/Strangle Theta Decay Strategy.
-World-Class implementation with ADX Range Filtering, Greeks Validation, and Delta Guards.
-Refactored for Push-Based Architecture (Zero-Latency).
-"""
-
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import os
+from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
-    EliteSignal,
-    EliteStrategy,
-)
-from nifty_scalper_bot.strategies.elite_strategies.config_models import (
-    StraddleThetaStrategyConfig,
-)
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
+from nifty_scalper_bot.strategies.elite_strategies.config_models import StraddleThetaStrategyConfig
 from nifty_scalper_bot.utils.logging import get_logger
 
-# Initialize structured logger
 LOGGER = get_logger(__name__)
 
 
 class StraddleThetaStrategy(EliteStrategy):
-    """
-    Delta-Neutral-ish / Theta-Positive strategy.
-    Shorts ATM/OTM options when market is range-bound (Low ADX) and IV is decent.
-    """
-    MIN_BARS_REQUIRED = 3
-
-    # ✅ OPTIMIZATION: Use slots for memory efficiency
-    __slots__ = ("_theta_config",)
+    """Theta strategy emits vote only when STRATEGY_MODE=theta."""
 
     def __init__(self, config: StraddleThetaStrategyConfig, indicator_engine: Any) -> None:
-        """
-        Initialize strategy with configuration and engine.
-        
-        Args:
-            config: Strategy configuration dataclass.
-            indicator_engine: Data provider.
-        """
+        """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
-        self._theta_config = config
+        self._cfg = config
 
     def get_required_indicators(self) -> set[str]:
-        """
-        Declare which indicators this strategy needs pre-calculated.
-        The StrategyManager will inject these into _evaluate_signal.
-        Note: We request Greeks here. ADX (Market Regime) is fetched from underlying.
-        """
-        return {
-            "theta", 
-            "delta", 
-            "iv", 
-            "ltp", 
-            "volume", 
-            "open_interest"
-        }
+        """Args: none. Returns: required indicators. Raises: Exception."""
+        return {'theta', 'iv', 'delta', 'atr'}
 
-    def _evaluate_signal(
-        self, 
-        symbol: str, 
-        indicators: Dict[str, Any], 
-        current_price: float, 
-        position: Any | None = None
-    ) -> EliteSignal | None:
-        """
-        Modern Signature: Evaluates signal using injected data.
-        
-        Args:
-            symbol: Option Symbol (e.g., NIFTY24JAN22000CE).
-            indicators: Dictionary containing pre-fetched Greeks.
-            current_price: Latest Premium.
-            position: Current open position (if any).
-        """
+    def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
+        """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
+        del position
         try:
-            # 1. Safe Data Extraction (Fast Path)
-            theta = float(indicators.get("theta") or 0.0)
-            delta = abs(float(indicators.get("delta") or 0.0)) # Absolute delta
-            iv = float(indicators.get("iv") or 0.0)
-            oi = float(indicators.get("open_interest") or 0.0)
-            
-            # Sanity Check: If Theta is positive (impossible for long options, but rare data error)
-            # or if price is effectively zero, skip.
-            if current_price < 2.0 or theta >= 0:
+            if str(os.getenv('STRATEGY_MODE', 'directional_scalp')).lower() != 'theta':
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=StraddleTheta reason=theta_mode_required')
                 return None
 
-            # 2. Market Regime Check (Range Bound?)
-            # We need the Underlying's ADX. Since 'indicators' dict contains data for the
-            # OPTION symbol, we must look up the underlying via the engine safely.
-            # This is a "Hybrid Access" - Push for Option, Pull for Underlying.
-            
-            # Get Underlying ADX (Default to 50 to block trade if missing)
-            # We assume the StrategyRunner or Engine creates a mapping for this.
-            # If unavailable, we can skip or use a strict default.
-            adx = 0.0
-            try:
-                # Assuming standard NIFTY/BANKNIFTY underlying
-                # You might need logic to detect the specific underlying based on symbol name
-                underlying = "NSE:NIFTY" if "NIFTY" in symbol else "NSE:BANKNIFTY"
-                adx = self._indicator_engine.compute_adx(underlying, period=14) or 50.0
-            except Exception:
-                # Fail safe: if we can't confirm market is ranging, don't short.
+            theta = float(indicators.get('theta') or 0.0)
+            iv = float(indicators.get('iv') or 0.0)
+            delta = abs(float(indicators.get('delta') or 0.0))
+            atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
+            if theta >= -1.0 or iv < float(getattr(self._cfg, 'min_iv', 12.0)) or delta > 0.35:
                 return None
 
-            # CRITICAL FILTER: Only trade when Market is Choppy (ADX < 25)
-            # High ADX means trending -> Shorting options is dangerous.
-            adx_threshold = getattr(self._theta_config, "adx_threshold", 25.0)
-            if adx > adx_threshold:
-                return None
-
-            # 3. IV Filter (Is Premium Rich?)
-            # We want to sell when IV is relatively high (Standard deviation logic or absolute)
-            # For simplicity in this robust version, we check absolute IV vs config
-            min_iv = getattr(self._theta_config, "min_iv", 12.0)
-            if iv < min_iv:
-                return None
-
-            # 4. Delta Guard (Don't short Deep ITM)
-            # We want to short OTM/ATM options where Theta is highest and risk is managed.
-            # Delta > 0.6 means it's getting deep ITM.
-            if delta > 0.60:
-                return None
-
-            # 5. Theta Efficiency Check
-            # We want significantly negative theta (high decay).
-            # e.g., We want to earn at least 2 points of theta per day.
-            if theta > -2.0: 
-                return None
-
-            # 6. Risk Management (Short Premium)
-            # Stop Loss: 20% of Premium (Tight stop for shorting to avoid gamma spikes)
-            # Take Profit: 50% of Premium (Capture the decay)
-            stop_loss = current_price * 1.25 
-            tp1 = current_price * 0.50 
-            tp2 = current_price * 0.10 # Runner
-
-            # 7. Confidence Scoring
-            # Base 75%. Boost if Theta is massive or ADX is dead flat.
-            confidence = 0.75  # Was 75.0 — wrong scale (should be 0.0–1.0)
-            if adx < 15.0: confidence += 0.10
-            if theta < -5.0: confidence += 0.10
-
-            # 8. Straddle/theta selling requires option WRITING (margin ~₹1L+ per lot).
-            # This bot buys options only. Emitting SELL here would be rejected by the broker
-            # (no margin) and conflicts with VWAPPro BUY signals in _combine_signals.
-            # Strategy is correctly disabled by default (STRADDLE_ENABLED=false).
-            # Guard here prevents accidental activation from creating SELL signals.
-            LOGGER.debug(
-                f"⚡ Theta Setup skipped (long-only bot cannot write options): {symbol}",
-                extra={"event": "straddle_theta_skip_long_only", "symbol": symbol},
+            strategy_score = 5.0
+            metadata = {
+                'strategy': 'StraddleTheta',
+                'side': 'NO_TRADE',
+                'direction_bias': 'UNKNOWN',
+                'strategy_score': strategy_score,
+                'setup_quality': strategy_score,
+                'setup_type': 'theta_non_directional',
+                'required_data_present': True,
+                'stale_data_used': bool(indicators.get('stale_data_used')),
+                'candidate_symbol': symbol,
+                'score_reasons': ['theta_mode_enabled', 'theta_decay_setup'],
+                'rejection_reasons': [],
+                'invalidation_level': None,
+            }
+            LOGGER.info('STRATEGY_VOTE strategy=StraddleTheta side=NO_TRADE score=%.2f', strategy_score)
+            return EliteSignal(
+                symbol=symbol,
+                signal='HOLD',
+                confidence=0.35,
+                entry_price=current_price,
+                stop_loss=current_price - atr,
+                target=current_price + atr,
+                quantity=self._cfg.quantity or 1,
+                strategy_name='StraddleTheta',
+                metadata=metadata,
             )
-            return None
-
         except Exception as e:
-            # Prevent single strategy crash from stopping the bot
-            LOGGER.error(f"Theta Strategy Error on {symbol}: {e}", exc_info=True)
+            LOGGER.error('Failure in StraddleThetaStrategy._evaluate_signal: %s', e, exc_info=e)
             return None
 
 
-__all__ = ["StraddleThetaStrategy"]
+__all__ = ['StraddleThetaStrategy']

@@ -1,209 +1,114 @@
-"""
-Smart Money Concepts (SMC) Liquidity Sweep Strategy.
-World-Class implementation with Sweep Detection, Volume Absorption, and Greeks Validation.
-Refactored for Push-Based Architecture (Zero-Latency).
-"""
-
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
-import time as time_module 
+from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
-    EliteSignal,
-    EliteStrategy,
-)
-from nifty_scalper_bot.strategies.elite_strategies.config_models import (
-    SMCStrategyConfig,
-)
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
+from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
 from nifty_scalper_bot.utils.logging import get_logger
 
-# Initialize structured logger
 LOGGER = get_logger(__name__)
 
 
 class SMCStrategy(EliteStrategy):
-    """
-    Detects Liquidity Sweeps (Stop Hunts).
-    Enters on Rejection Candles where price pierces a level (Bollinger Band) but closes back inside.
-    """
-    MIN_BARS_REQUIRED = 15
-    COOLDOWN_SECONDS = 120
+    """SMC liquidity sweep strategy producing structured votes only."""
 
-    # ✅ OPTIMIZATION: Use slots for memory efficiency
-    __slots__ = ("_smc_config", "_cooldown_tracker", "_last_sweep_key")  # ✅ Added trackers
+    MIN_BARS_REQUIRED = 15
 
     def __init__(self, config: SMCStrategyConfig, indicator_engine: Any) -> None:
-        """
-        Initialize strategy with configuration and engine.
-        
-        Args:
-            config: Strategy configuration dataclass.
-            indicator_engine: Data provider.
-        """
+        """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
-        self._smc_config = config
-        self._cooldown_tracker: Dict[str, float] = {}       # ✅ symbol → last_fire_time
-        self._last_sweep_key: Dict[str, str] = {} 
+        self._cfg = config
 
     def get_required_indicators(self) -> set[str]:
-        """
-        Declare which indicators this strategy needs pre-calculated.
-        The StrategyManager will inject these into _evaluate_signal.
-        """
-        return {
-            "bollinger_upper", 
-            "bollinger_lower", 
-            "volume", 
-            "avg_volume", # Usually SMA(Volume, 20)
-            "atr", 
-            "vwap",
-            "high",
-            "low",
-            "close",
-            "open"
-        }
+        """Args: none. Returns: indicators set. Raises: Exception."""
+        return {'high', 'low', 'close', 'open', 'atr', 'direction_bias', 'bos_confirmed', 'choch_confirmed', 'retest_confirmed'}
 
-    def _evaluate_signal(
-        self, 
-        symbol: str, 
-        indicators: Dict[str, Any], 
-        current_price: float, 
-        position: Any | None = None
-    ) -> EliteSignal | None:
-        """
-        Modern Signature: Evaluates signal using injected data.
-        
-        Args:
-            symbol: Ticker symbol.
-            indicators: Dictionary containing pre-fetched indicators.
-            current_price: Latest LTP.
-            position: Current open position (if any).
-        """
+    def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
+        """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
+        del position
         try:
-            # 1. Safe Data Extraction (Fast Path)
-            # Use defaults to prevent crashing if an indicator is temporarily missing
-            upper = float(indicators.get("bollinger_upper") or 0.0)
-            lower = float(indicators.get("bollinger_lower") or 0.0)
-            vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("avg_volume") or 1.0) # Avoid div/0
-            atr = float(indicators.get("atr") or 0.0)
-            vwap = float(indicators.get("vwap") or current_price)
-            
-            # Candle OHLC (needed for wick detection)
-            high = float(indicators.get("high") or current_price)
-            low = float(indicators.get("low") or current_price)
-            close = float(indicators.get("close") or current_price)
-            # open_price = float(indicators.get("open") or current_price)
+            high = float(indicators.get('high') or current_price)
+            low = float(indicators.get('low') or current_price)
+            close = float(indicators.get('close') or current_price)
+            open_price = float(indicators.get('open') or current_price)
+            atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
+            direction = str(indicators.get('direction_bias') or '').upper()
+            stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
 
-            # Sanity Check: If bands are collapsed or data is invalid, skip
-            if upper <= lower or avg_vol <= 0:
+            if stale_data or current_price <= 0:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=stale_or_invalid_data')
                 return None
 
-            # 2. Logic: Detect Liquidity Sweep
-            # A sweep occurs when price wick goes OUTSIDE the band, but candle closes INSIDE.
-            
-            # --- Bearish Sweep (Short) ---
-            # Wick pierces Upper Band, but Close is below Upper Band
-            bearish_sweep = (high > upper) and (close < upper)
-            
-            # --- Bullish Sweep (Long) ---
-            # Wick pierces Lower Band, but Close is above Lower Band
-            bullish_sweep = (low < lower) and (close > lower)
-
-            if not bearish_sweep and not bullish_sweep:
+            body = abs(close - open_price)
+            displacement_score = body / atr
+            bullish_sweep = low < (open_price - 0.3 * atr) and close > open_price
+            bearish_sweep = high > (open_price + 0.3 * atr) and close < open_price
+            if not bullish_sweep and not bearish_sweep:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=no_sweep')
                 return None
 
-            # 3. Logic: Check Volume Absorption
-            # We want high volume on the rejection candle (Absorption)
-            vol_ratio = vol / avg_vol
-            if vol_ratio < 1.2: # Minimum 20% higher than average
+            side = 'CE' if bullish_sweep else 'PE'
+            sweep_level = low if bullish_sweep else high
+            structure_confirmed = bool(indicators.get('bos_confirmed') or indicators.get('choch_confirmed') or displacement_score >= 0.6)
+            retest_confirmed = bool(indicators.get('retest_confirmed') or indicators.get('mitigation_confirmed'))
+
+            score = 2.0
+            reasons = ['liquidity_sweep']
+            if displacement_score >= 0.7:
+                score += 2.0
+                reasons.append('displacement')
+            if structure_confirmed:
+                score += 2.0
+                reasons.append('structure_confirmation')
+            if retest_confirmed:
+                score += 1.0
+                reasons.append('retest_mitigation')
+            if direction in {'CE', 'PE'} and direction == side:
+                score += 2.0
+                reasons.append('direction_alignment')
+            if displacement_score >= 0.9:
+                score += 1.0
+                reasons.append('clean_invalidation_rr')
+
+            strategy_score = max(0.0, min(10.0, score))
+            if strategy_score < 4.0:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=low_quality')
                 return None
 
-            # 4. Construct Signal
-            signal_side = ""
-            sweep_level = 0.0
-            stop_loss = 0.0
-            tp1 = 0.0
-            tp2 = 0.0
-            
-            # ✅ ATR fallback to prevent zero stop-loss
-            if atr <= 0:
-                atr = current_price * 0.01  # 1% fallback
-            buffer = max(atr * 0.2, current_price * 0.002)  # Min 0.2% buffer
-
-            if bullish_sweep:
-                signal_side = "BUY"
-                sweep_level = low
-                # SL below the sweep wick
-                stop_loss = low - buffer
-                # TP1: VWAP (Liquidity Equilibrium)
-                tp1 = vwap
-                # TP2: Upper Band
-                tp2 = upper
-                
-            elif bearish_sweep:
-                # In options buying mode, bearish sweep = skip (can't short options)
-                # A bearish sweep means price pierced upper band and reversed DOWN.
-                # This is a SHORT signal — not actionable in long-only mode.
-                LOGGER.debug(
-                    f"SMC bearish sweep SKIPPED (long-only): {symbol} | Wick: {high}",
-                    extra={"event": "smc_bearish_skip", "symbol": symbol},
-                )
-                return None 
-
-            # 5. Confidence Scoring
-            # Base confidence 75%, +15% if volume is massive (>2x avg)
-            confidence = 0.75
-            if vol_ratio > 2.0:
-                confidence += 0.15
-
-            # ✅ FIX B5: Set cooldown and dedup
-            now = time_module.time()
-
-            # Cooldown check (was missing — COOLDOWN_SECONDS defined but never used)
-            last_fire = self._cooldown_tracker.get(symbol, 0.0)
-            if now - last_fire < self.COOLDOWN_SECONDS:
-                return None
-
-            # Dedup check
-            sweep_key = f"{symbol}:{signal_side}:{sweep_level:.1f}"
-            if self._last_sweep_key.get(symbol) == sweep_key:
-                return None  # ✅ Exact same sweep, skip
-            self._cooldown_tracker[symbol] = now              # ✅ Set 120s cooldown
-            self._last_sweep_key[symbol] = sweep_key 
-
-            LOGGER.info(
-                f"🚀 SMC Sweep Detected: {symbol} {signal_side} | Vol: {vol_ratio:.1f}x | Wick: {sweep_level}",
-                extra={
-                    "event": "smc_sweep_signal",
-                    "symbol": symbol,
-                    "sweep_level": sweep_level,
-                    "volume_ratio": vol_ratio
-                }
-            )
-
+            invalidation_level = sweep_level - 0.2 * atr if side == 'CE' else sweep_level + 0.2 * atr
+            metadata = {
+                'strategy': 'SMC',
+                'side': side,
+                'direction_bias': side,
+                'strategy_score': strategy_score,
+                'score_reasons': reasons,
+                'setup_quality': strategy_score,
+                'setup_type': 'liquidity_sweep_reclaim',
+                'required_data_present': True,
+                'stale_data_used': stale_data,
+                'candidate_symbol': symbol,
+                'rejection_reasons': [],
+                'sweep_level': sweep_level,
+                'displacement_score': round(displacement_score, 3),
+                'structure_confirmed': structure_confirmed,
+                'retest_confirmed': retest_confirmed,
+                'invalidation_level': invalidation_level,
+            }
+            LOGGER.info('STRATEGY_VOTE strategy=SMC side=%s score=%.2f', side, strategy_score)
             return EliteSignal(
                 symbol=symbol,
-                signal=signal_side, # Standardized to "BUY" / "SELL"
-                confidence=min(confidence, 0.99),
-                entry_price=close, # Enter at close of rejection candle
-                stop_loss=stop_loss,
-                target=tp1, # Primary Target
-                quantity=self._smc_config.quantity or 1,
-                strategy_name="SMC_Liquidity_Pro",
-                metadata={
-                    "type": "Bollinger_Rejection",
-                    "volume_ratio": round(vol_ratio, 2),
-                    "sweep_level": sweep_level,
-                    "vwap_target": vwap,
-                    "tp2": tp2
-                }
+                signal='BUY',
+                confidence=max(0.1, min(0.88, strategy_score / 10.0)),
+                entry_price=current_price,
+                stop_loss=invalidation_level,
+                target=current_price + (2.0 * atr),
+                quantity=self._cfg.quantity or 1,
+                strategy_name='SMC',
+                metadata=metadata,
             )
-
         except Exception as e:
-            LOGGER.error(f"SMC Strategy Error on {symbol}: {e}", exc_info=True)
+            LOGGER.error('Failure in SMCStrategy._evaluate_signal: %s', e, exc_info=e)
             return None
 
 
-__all__ = ["SMCStrategy"]
+__all__ = ['SMCStrategy']

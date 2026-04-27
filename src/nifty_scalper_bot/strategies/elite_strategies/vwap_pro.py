@@ -1,1030 +1,152 @@
 from __future__ import annotations
 
 import os
-import time as time_module
-from typing import Any, Dict
+from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
-    EliteSignal,
-    EliteStrategy,
-)
-from nifty_scalper_bot.strategies.elite_strategies.config_models import (
-    VWAPProStrategyConfig,
-)
-from nifty_scalper_bot.utils.logging import get_logger, log_throttled
-from nifty_scalper_bot.utils.smart_symbol import WEEKLY_EXPIRY_WEEKDAY
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
+from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
+from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
-MIN_OPTION_PREMIUM = 3.0
 
 
 class VWAPProStrategy(EliteStrategy):
-    """
-    VWAP Pro – Production Hardened Version (Final Audit Applied)
-    -------------------------------------------------------------
-    • Direction-safe SL/TP (CE/PE correctly handled)
-    • Aggressive acceptance resets on all rejections and post-signal
-    • Futures-only Index Bias (Hardened against Spot VWAP=0)
-    • Single option per expiry+direction isolated state
-    """
+    """VWAP continuation/pullback strategy emitting scored strategy votes."""
 
     MIN_BARS_REQUIRED = 10
-    COOLDOWN_SECONDS = 20  # ✅ Scalping fix: shorter directional cooldown for rapid continuation legs
-    VWAP_ACCEPTANCE_BARS = 1  # ✅ FIX #5: Reduced from 2 → 1; index bias gate is already a strong 2-condition filter
-    TELEMETRY_LOG_EVERY = 50
-    VOLUME_GRACE_SECONDS = 900.0  # ✅ FIX C: Extended from 120s → 900s (15 min). NFO options tick ≈once/13min between batches; 120s grace expired before next tick arrived → volume_below_threshold on every call.
 
-    __slots__ = (
-        "_vwap_config",
-        "_signal_cooldown_tracker",
-        "_vwap_acceptance_tracker",
-        "_strike_lock",
-        "_last_expiry",
-        "_telemetry",
-        "_last_valid_volume",
-        "_last_valid_avg_volume",
-        "_last_valid_volume_ts",
-        "_reject_reason_counts",
-        "_index_bias_degraded_logged",
-        "_index_bias_missing_logged",  # ✅ FIX #5b: Was missing from __slots__ but set in __init__ and read in _evaluate_signal
-        "_last_valid_index_vwap",
-        "_bias_failover_logged_bar",
-        "_cfg_allow_vwap_pullback",
-        "_cfg_vwap_slack_atr_mult",
-        "_cfg_max_vwap_distance_pct",
-        "_cfg_telemetry_log_every",
-    )
-
-    def __init__(
-        self,
-        config: VWAPProStrategyConfig,
-        indicator_engine: Any,
-    ) -> None:
+    def __init__(self, config: VWAPProStrategyConfig, indicator_engine: Any) -> None:
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
-        self._vwap_config = config
-
-        self._signal_cooldown_tracker: Dict[str, float] = {}
-        self._vwap_acceptance_tracker: Dict[str, int] = {}
-        self._strike_lock: Dict[str, str] = {}
-        self._last_expiry: str | None = None
-        self._last_valid_volume: Dict[str, float] = {}
-        self._last_valid_avg_volume: Dict[str, float] = {}
-        self._last_valid_volume_ts: Dict[str, float] = {}
-
-        self._telemetry: Dict[str, int] = {
-            "evaluations": 0,
-            "signals": 0,
-            "skipped_cooldown": 0,
-            "skipped_strike_lock": 0,
-            "skipped_bias": 0,
-            "skipped_no_vwap": 0,
-            "skipped_vwap": 0,
-            "skipped_volume": 0,
-            "skipped_data": 0,
-            "skipped_overextended": 0,
-            "skipped_acceptance": 0,
-        }
-        self._reject_reason_counts: Dict[str, int] = {}
-        self._index_bias_missing_logged: bool = False
-        self._index_bias_degraded_logged: bool = False
-        self._last_valid_index_vwap: float = 0.0
-        self._bias_failover_logged_bar: Dict[str, str] = {}
-
-        # FIX S16-3: Cache env-var config once at __init__.
-        # These 5 os.getenv() calls were on the per-tick hot path (100+ calls/sec).
-        self._cfg_bias_tolerance: float = float(
-            os.getenv("VWAP_BIAS_TOLERANCE", "0.005")
-        )
-        self._cfg_min_premium: float = float(
-            os.getenv("VWAP_MIN_PREMIUM", str(MIN_OPTION_PREMIUM))
-        )
-        self._cfg_allow_low_premium: bool = str(
-            os.getenv("ALLOW_LOW_PREMIUM_SCALPING", "1")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._cfg_max_spread_pct: float = float(
-            os.getenv("VWAP_MAX_SPREAD_PCT", "30.0")
-        )
-        # Cache expiry weekday (used every eval for _is_expiry_day)
-        try:
-            self._cfg_expiry_weekday: int = int(
-                os.getenv("NIFTY_EXPIRY_WEEKDAY", str(WEEKLY_EXPIRY_WEEKDAY))
-            )
-        except ValueError:
-            self._cfg_expiry_weekday = WEEKLY_EXPIRY_WEEKDAY
-        self._cfg_allow_vwap_pullback = str(
-            os.getenv("VWAP_ALLOW_PULLBACK_ENTRY", "1")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._cfg_vwap_slack_atr_mult = float(
-            os.getenv("VWAP_SLACK_ATR_MULT", "1.5")
-        )
-        self._cfg_max_vwap_distance_pct = float(
-            os.getenv("VWAP_MAX_OPTION_DISTANCE_PCT", "0.18")
-        )
-        self._cfg_telemetry_log_every = max(
-            1, int(os.getenv("VWAP_TELEMETRY_LOG_EVERY", "50") or 50)
-        )
-
-    # ------------------------------------------------------------------ #
-    # Helpers
-    # ------------------------------------------------------------------ #
+        self._cfg = config
+        self._allow_pullback = str(os.getenv('VWAP_ALLOW_PULLBACK_ENTRY', '1')).lower() in {'1', 'true', 'yes', 'on'}
+        self._slack_atr_mult = float(os.getenv('VWAP_SLACK_ATR_MULT', '1.5') or 1.5)
+        self._max_distance_pct = float(os.getenv('VWAP_MAX_OPTION_DISTANCE_PCT', '0.18') or 0.18)
 
     def get_required_indicators(self) -> set[str]:
-        """Declare ALL indicators VWAPPro needs."""
-        return {
-            "vwap",
-            "futures_vwap",
-            "atr",
-            "volume",
-            "avg_volume",
-            "rsi",  # for potential future use
-            "bid",
-            "ask",
-            "spread_pct",  # execution-cost gate — injected from live quote in strategy_manager
-        }
+        """Args: none. Returns: indicators set. Raises: Exception."""
+        return {'vwap', 'atr', 'close', 'open', 'high', 'low', 'volume', 'avg_volume', 'direction_bias'}
 
-    def _extract_expiry(self, symbol: str) -> str:
-        digits = "".join(c for c in symbol if c.isdigit())
-        return digits[:5] if len(digits) >= 5 else "UNK"
-
-    def _dynamic_volume_threshold(self) -> float:
-        t = time_module.localtime()
-        minutes = t.tm_hour * 60 + t.tm_min
-        if 630 < minutes <= 870:  # Mid-day
-            return 1.2
-        return 0.9
-
-    def _is_expiry_day(self) -> bool:
-        """Args: None. Returns: bool. Raises: Exception."""
-        LOGGER.debug(
-            "Entered VWAPProStrategy._is_expiry_day",
-            extra={"event": "vwap_pro_expiry_day_enter"},
-        )
-        try:
-            # FIX S16-3: use cached value (set at __init__ from env or WEEKLY_EXPIRY_WEEKDAY)
-            expiry_day = self._cfg_expiry_weekday
-            # Guard: invalid value falls back to WEEKLY_EXPIRY_WEEKDAY (Tuesday=1)
-            if expiry_day not in range(7):
-                expiry_day = WEEKLY_EXPIRY_WEEKDAY
-            # Guard: reject Thursday=3 (old Zerodha default) in favour of Tuesday=1
-            if expiry_day == 3:
-                expiry_day = WEEKLY_EXPIRY_WEEKDAY
-            is_expiry = time_module.localtime().tm_wday == expiry_day
-            if is_expiry:
-                log_throttled(
-                    LOGGER,
-                    "vwap_pro_expiry_active",
-                    "Condition met: expiry_day_active",
-                    interval_sec=3600.0,
-                )
-            return is_expiry
-        except Exception as e:
-            LOGGER.error(
-                "Failure in VWAPProStrategy._is_expiry_day: %s",
-                e,
-                extra={"event": "vwap_pro_expiry_day_error"},
-                exc_info=e,
-            )
-            return False
-
-    def _log_no_signal_reason(
-        self,
-        reason_code: str,
-        *,
-        symbol: str,
-        ltp: float | None = None,
-        vwap: float | None = None,
-        vol: float | None = None,
-        avg_vol: float | None = None,
-        context: Dict[str, Any] | None = None,
-    ) -> None:
-        """Args: reason_code, symbol, ltp, vwap, vol, avg_vol, context. Returns: None. Raises: Exception."""
-        try:
-            self._reject_reason_counts[reason_code] = (
-                self._reject_reason_counts.get(reason_code, 0) + 1
-            )
-            payload: Dict[str, Any] = {
-                "event": "vwap_pro_no_signal_reason",
-                "reason_code": reason_code,
-                "symbol": symbol,
-            }
-            if ltp is not None:
-                payload["ltp"] = ltp
-            if vwap is not None:
-                payload["vwap"] = vwap
-            if vol is not None:
-                payload["vol"] = vol
-            if avg_vol is not None:
-                payload["avg_vol"] = avg_vol
-            if context:
-                payload.update(context)
-            LOGGER.debug(
-                "VWAP_PRO_REJECT | reason=%s",
-                reason_code,
-                extra=payload,
-            )
-        except Exception as exc:
-            LOGGER.error(
-                "Failure in VWAPProStrategy._log_no_signal_reason: %s",
-                exc,
-                extra={
-                    "event": "vwap_pro_no_signal_reason_error",
-                    "symbol": symbol,
-                },
-                exc_info=exc,
-            )
-
-    def _reset_acceptance(self, key: str, *, symbol: str, reason_code: str) -> None:
-        """Args: key, symbol, reason_code. Returns: None. Raises: Exception."""
-        try:
-            transient_reasons = {
-                "missing_bar",
-                "vwap_zero_or_invalid",
-                "volume_too_low",
-                "filler_data_lag",
-            }
-            if reason_code in transient_reasons:
-                return  # keep acceptance persistence across transient data glitches.
-            self._vwap_acceptance_tracker[key] = 0
-            LOGGER.debug(
-                "⏳ ACCEPTANCE RESET | symbol=%s reason=%s",
-                symbol,
-                reason_code,
-                extra={
-                    "event": "vwap_pro_acceptance_reset",
-                    "symbol": symbol,
-                    "reason_code": reason_code,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "Failure in VWAPProStrategy._reset_acceptance: %s",
-                exc,
-                extra={
-                    "event": "vwap_pro_acceptance_reset_error",
-                    "symbol": symbol,
-                    "reason_code": reason_code,
-                },
-                exc_info=exc,
-            )
-
-    # ------------------------------------------------------------------ #
-    # Core Signal Logic
-    # ------------------------------------------------------------------ #
-    def _evaluate_signal(
-        self,
-        symbol: str,
-        indicators: Dict[str, Any],
-        current_price: float,
-        position: Any | None = None,
-    ) -> EliteSignal | None:
+    def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
-        LOGGER.debug(
-            "Entered VWAPProStrategy._evaluate_signal",
-            extra={"event": "vwap_pro_signal_enter", "symbol": symbol},
-        )
+        del position
         try:
-            vwap = 0.0  # prevent closure error
-
-            def _emit_no_signal(reason_code: str) -> None:
-                """Args: reason_code. Returns: None. Raises: Exception."""
-                try:
-                    vol_val = float(indicators.get("volume") or 0.0)
-                    avg_vol_val = float(indicators.get("avg_volume") or 0.0)
-                    accept_count = int(
-                        self._vwap_acceptance_tracker.get(acc_key, 0) or 0
-                    )
-                    vwap_diff = float(current_price - (vwap or 0.0))
-                    LOGGER.debug(
-                        "📉 NO SIGNAL | %s reason=%s",
-                        symbol,
-                        reason_code,
-                        extra={
-                            "event": "vwap_pro_no_signal",
-                            "symbol": symbol,
-                            "reason_code": reason_code,
-                            "ltp": current_price,
-                            "vwap": vwap,
-                            "vwap_diff": vwap_diff,
-                            "vol": vol_val,
-                            "avg_vol": avg_vol_val,
-                            "vol_avg_ratio": (
-                                (vol_val / avg_vol_val) if avg_vol_val > 0 else 0.0
-                            ),
-                            "accept": accept_count,
-                        },
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.error(
-                        "Failure in VWAPProStrategy._emit_no_signal: %s",
-                        exc,
-                        extra={
-                            "event": "vwap_pro_no_signal_error",
-                            "symbol": symbol,
-                            "reason_code": reason_code,
-                        },
-                        exc_info=exc,
-                    )
-
-            now = time_module.time()
-            expiry = self._extract_expiry(symbol)
-            is_ce = "CE" in symbol.upper()
-            direction = "CE" if is_ce else "PE"
-
-            # ✅ FIX B6: Periodic telemetry dump
-            self._telemetry["evaluations"] += 1
-            _evals = self._telemetry["evaluations"]
-            if _evals == 1 or _evals % self._cfg_telemetry_log_every == 0:
-                dominant_reject_reason = None
-                if self._reject_reason_counts:
-                    dominant_reject_reason = max(
-                        self._reject_reason_counts.items(),
-                        key=lambda item: item[1],
-                    )[0]
-                LOGGER.debug(
-                    f"📊 VWAPPro TELEMETRY [{symbol}]: evals={_evals} "
-                    f"signals={self._telemetry['signals']} "
-                    f"cool={self._telemetry['skipped_cooldown']} "
-                    f"lock={self._telemetry['skipped_strike_lock']} "
-                    f"bias={self._telemetry['skipped_bias']} "
-                    f"vwap0={self._telemetry['skipped_no_vwap']} "
-                    f"vwap={self._telemetry['skipped_vwap']} "
-                    f"vol={self._telemetry['skipped_volume']} "
-                    f"data={self._telemetry['skipped_data']} "
-                    f"overext={self._telemetry['skipped_overextended']} "
-                    f"accept={self._telemetry['skipped_acceptance']} "
-                    f"dominant_reject_reason={dominant_reject_reason} "
-                    f"reject_counts={dict(self._reject_reason_counts)}",
-                    extra={
-                        "event": "vwap_pro_telemetry",
-                        "symbol": symbol,
-                        "dominant_reject_reason": dominant_reject_reason,
-                        "reject_counts_by_reason": dict(self._reject_reason_counts),
-                    },
-                )
-
-            lock_key = f"NIFTY:{expiry}:{direction}"
-            cooldown_key = f"{expiry}:{direction}"
-            acc_key = f"{symbol}_{direction}_accept"
-
-            if acc_key not in self._vwap_acceptance_tracker:
-                self._vwap_acceptance_tracker[acc_key] = 0
-
-            # 🔐 ISSUE 3 FIX: Reset acceptance on Strike Lock violation
-            if position is not None and getattr(position, "quantity", 0) > 0:
-                self._strike_lock[lock_key] = symbol
-            else:
-                self._strike_lock.pop(lock_key, None)
-
-            if lock_key in self._strike_lock and self._strike_lock[lock_key] != symbol:
-                self._telemetry["skipped_strike_lock"] += 1
-                if self._telemetry["skipped_strike_lock"] <= 3:
-                    LOGGER.info(
-                        f"🔐 STRIKE LOCK: {symbol} blocked | Active={self._strike_lock[lock_key]}",
-                        extra={"event": "vwap_pro_strike_lock", "symbol": symbol},
-                    )
-                self._log_no_signal_reason(
-                    "strike_lock_active",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=indicators.get("vwap"),
-                    context={"active_symbol": self._strike_lock.get(lock_key)},
-                )
-                self._reset_acceptance(
-                    acc_key, symbol=symbol, reason_code="strike_lock_active"
-                )
-                _emit_no_signal("strike_lock_active")
-                return None
-
-            last_fire = self._signal_cooldown_tracker.get(cooldown_key, 0.0)
-            if (now - last_fire) < self.COOLDOWN_SECONDS:
-                self._telemetry["skipped_cooldown"] += 1
-                if self._telemetry["skipped_cooldown"] <= 3:
-                    LOGGER.info(
-                        f"⏳ COOLDOWN: {symbol} {direction} | "
-                        f"Remaining={self.COOLDOWN_SECONDS - (now - last_fire):.0f}s",
-                        extra={"event": "vwap_pro_cooldown", "symbol": symbol},
-                    )
-                self._log_no_signal_reason(
-                    "cooldown_active",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=indicators.get("vwap"),
-                    context={
-                        "cooldown_remaining_s": max(
-                            0.0, self.COOLDOWN_SECONDS - (now - last_fire)
-                        )
-                    },
-                )
-                # ✅ FIX 4a: Don't reset acceptance on cooldown (temporary)
-                _emit_no_signal("cooldown_active")
-                return None
-
-            # Use underlying futures VWAP for option decisions.
-            vwap = float(
-                indicators.get("futures_vwap")
-                or indicators.get("nifty_fut_vwap")
-                or indicators.get("nifty_index_vwap")
-                or 0.0
-            )
-
-            # ✅ FIX 1: Enforce minimum ATR floor.
-            # Option 1-min bars produce micro-ATR (e.g. 0.24 for 828₹ option).
-            # Floor at 1% of premium ensures meaningful SL/TP distances.
-            _raw_atr = float(indicators.get("atr") or 0.0)
-            _min_atr = max(current_price * 0.01, 1.0)
-            atr = max(_raw_atr, _min_atr)
-            entropy = float(indicators.get("entropy_5") or 0.5)
-
-            index_ltp = float(
-                indicators.get("nifty_fut_ltp")
-                or indicators.get("nifty_index_ltp")
-                or 0.0
-            )
-            index_vwap = float(
-                indicators.get("nifty_fut_vwap")
-                or indicators.get("nifty_index_vwap")
-                or 0.0
-            )
-            index_volume = float(indicators.get("futures_volume") or 0.0)
-            if index_vwap > 0:
-                self._last_valid_index_vwap = index_vwap
-            bar_marker = str(
-                indicators.get("bar_ts")
-                or indicators.get("timestamp")
-                or indicators.get("bar_time")
-                or int(now // 60)
-            )
-            if index_vwap <= 0:
-                failover_vwap = 0.0
-                failover_source = "none"
-                if self._last_valid_index_vwap > 0:
-                    failover_vwap = float(self._last_valid_index_vwap)
-                    failover_source = "last_valid_index_vwap"
-                elif float(indicators.get("nifty_fut_vwap") or 0.0) > 0:
-                    failover_vwap = float(indicators.get("nifty_fut_vwap") or 0.0)
-                    failover_source = "futures_vwap"
-                if failover_vwap > 0:
-                    index_vwap = failover_vwap
-                    if self._bias_failover_logged_bar.get(symbol) != bar_marker:
-                        self._bias_failover_logged_bar[symbol] = bar_marker
-                        LOGGER.info(
-                            "Failover bias used",
-                            extra={
-                                "event": "vwap_pro_bias_failover",
-                                "symbol": symbol,
-                                "source": failover_source,
-                                "index_vwap": index_vwap,
-                                "bar": bar_marker,
-                            },
-                        )
-
-            # ✅ FIX: Decouple index_volume from direction-gating.
-            # index_volume=0 means futures volume data is unavailable, NOT that we are
-            # blind to direction.  Only block when index_vwap is missing entirely —
-            # that is when we have no price reference to compare against.
-            # Old code blocked ALL PE options whenever futures volume was 0, which
-            # happened consistently at the start of every session and on slow ticks,
-            # causing ~30% of rejections to be spurious "index_bias_degraded" blocks.
-            if index_vwap <= 0:
-                if not self._index_bias_degraded_logged:
-                    LOGGER.info(
-                        "🚫 INDEX BIAS DEGRADED → NO VWAP REFERENCE, blocking both CE/PE",
-                        extra={
-                            "event": "vwap_pro_index_bias_degraded",
-                            "symbol": symbol,
-                            "index_vwap": index_vwap,
-                            "index_volume": index_volume,
-                        },
-                    )
-                    self._index_bias_degraded_logged = True
-                if index_ltp <= 0:
-                    self._log_no_signal_reason(
-                        "index_bias_invalid",
-                        symbol=symbol,
-                        ltp=current_price,
-                        vwap=vwap,
-                        context={
-                            "index_ltp": index_ltp,
-                            "index_vwap": index_vwap,
-                            "index_volume": index_volume,
-                        },
-                    )
-                    self._reset_acceptance(
-                        acc_key, symbol=symbol, reason_code="index_bias_invalid"
-                    )
-                    _emit_no_signal("index_bias_invalid")
-                    return None
-                # index_vwap==0 but index_ltp>0: use ltp as proxy vwap for bias check
-                index_vwap = index_ltp
-            if index_ltp <= 0:
-                if not self._index_bias_missing_logged:
-                    LOGGER.error(
-                        "INVALID INDEX DATA — blocking signal",
-                        extra={"event": "vwap_pro_index_invalid", "symbol": symbol},
-                    )
-                    self._index_bias_missing_logged = True
-                self._log_no_signal_reason(
-                    "index_bias_invalid",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=vwap,
-                    context={"index_ltp": index_ltp, "index_vwap": index_vwap},
-                )
-                # ✅ FIX 4b: Don't reset acceptance on transient index data gap
-                _emit_no_signal("index_bias_invalid")
-                return None
-
-            self._index_bias_missing_logged = False
-            # Reset degraded log when VWAP is available (volume availability is irrelevant)
-            if index_vwap > 0:
-                self._index_bias_degraded_logged = False
-
-            # ✅ FIX: Widen bias tolerance to 0.5% (was 0.15%).
-            # 0.15% is far too tight — NIFTY oscillates around VWAP continuously
-            # throughout the session. At 0.15%, any minor pullback blocks the entire
-            # CE direction for minutes. 0.5% requires a deliberate directional move
-            # (~125 pts on 25000 NIFTY) before blocking the opposite option type.
-            # Configurable via VWAP_BIAS_TOLERANCE env var (e.g. "0.003" = 0.3%).
-            _bias_tolerance = index_vwap * float(
-                self._cfg_bias_tolerance
-            )
-            if (is_ce and index_ltp < (index_vwap - _bias_tolerance)) or (
-                not is_ce and index_ltp > (index_vwap + _bias_tolerance)
-            ):
-                self._telemetry["skipped_bias"] += 1
-                if (
-                    self._telemetry["skipped_bias"] <= 3
-                    or self._telemetry["skipped_bias"] % self._cfg_telemetry_log_every == 0
-                ):
-                    LOGGER.info(
-                        f"🧭 BIAS GATE: {symbol} {direction} blocked | "
-                        f"IdxLTP={index_ltp:.2f} IdxVWAP={index_vwap:.2f} "
-                        f"Need={'BULL' if is_ce else 'BEAR'}",
-                        extra={"event": "vwap_pro_bias_reject", "symbol": symbol},
-                    )
-                self._log_no_signal_reason(
-                    "index_bias_invalid",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=vwap,
-                    context={
-                        "index_ltp": index_ltp,
-                        "index_vwap": index_vwap,
-                        "direction": direction,
-                    },
-                )
-                self._reset_acceptance(
-                    acc_key, symbol=symbol, reason_code="index_bias_invalid"
-                )
-                _emit_no_signal("index_bias_invalid")
-                return None
+            vwap = float(indicators.get('vwap') or indicators.get('exchange_vwap') or 0.0)
+            atr = float(indicators.get('atr') or 0.0)
+            close = float(indicators.get('close') or current_price)
+            open_price = float(indicators.get('open') or current_price)
+            high = float(indicators.get('high') or current_price)
+            low = float(indicators.get('low') or current_price)
+            vol = float(indicators.get('volume') or 0.0)
+            avg_vol = float(indicators.get('avg_volume') or 0.0)
+            spread_pct = float(indicators.get('spread_pct') or 0.0)
+            direction = str(indicators.get('direction_bias') or '').upper()
+            stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
 
             if current_price <= 0 or vwap <= 0:
-                self._telemetry["skipped_no_vwap"] += 1
-                if self._telemetry["skipped_no_vwap"] <= 5:
-                    LOGGER.warning(
-                        f"⚠️ VWAP ZERO: {symbol} | price={current_price:.2f} vwap={vwap:.2f}",
-                        extra={"event": "vwap_pro_zero_block", "symbol": symbol},
-                    )
-                self._log_no_signal_reason(
-                    "vwap_zero_or_invalid",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=vwap,
-                )
-                # ✅ FIX 4c: Don't reset acceptance on VWAP zero (data lag)
-                _emit_no_signal("vwap_zero_or_invalid")
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=missing_vwap')
                 return None
 
-            # 💰 MINIMUM PREMIUM FILTER — avoid truly illiquid deep OTM options.
-            # ₹10 floor: options below ₹10 have near-zero open interest and
-            # bid-ask spreads that dwarf the premium itself (e.g. ₹0.05/₹0.30 spread
-            # on a ₹0.15 option = 100% spread cost). Options ₹10-₹30 can be
-            # near-ATM on expiry day and represent legitimate momentum trades.
-            # Set VWAP_MIN_PREMIUM env var to override (e.g. "20" for more safety).
-            _min_premium = self._cfg_min_premium  # FIX S16-3: cached
-            allow_low_premium_scalping = self._cfg_allow_low_premium  # FIX S16-3: cached
-            if current_price < _min_premium:
-                if not allow_low_premium_scalping:
-                    self._telemetry["skipped_data"] += 1
-                    if (
-                        self._telemetry["skipped_data"] <= 5
-                        or self._telemetry["skipped_data"] % self._cfg_telemetry_log_every
-                        == 0
-                    ):
-                        LOGGER.info(
-                            f"💰 MIN PREMIUM: {symbol} | price={current_price:.2f} < min={_min_premium:.0f} — skipping illiquid option",
-                            extra={
-                                "event": "vwap_pro_min_premium_reject",
-                                "symbol": symbol,
-                                "price": current_price,
-                            },
-                        )
-                    self._log_no_signal_reason(
-                        "premium_too_low",
-                        symbol=symbol,
-                        ltp=current_price,
-                        vwap=vwap,
-                        context={"min_premium": _min_premium},
-                    )
-                    _emit_no_signal("premium_too_low")
-                    return None
-                LOGGER.info(
-                    "Condition met: low_premium_high_risk_allowed",
-                    extra={
-                        "event": "low_premium_high_risk_allowed",
-                        "symbol": symbol,
-                        "price": current_price,
-                        "min_premium": _min_premium,
-                    },
-                )
-
-            # 💹 BID-ASK SPREAD GATE — reject when execution cost is too high.
-            # Option spreads of 10-40% are common for lightly-traded strikes.
-            # Entering at ask+1% buffer with a 30-spread already puts the trade
-            # 15-25% underwater at fill. Max spread is env-configurable; default
-            # 30% rejects only truly illiquid options while allowing normal ATM trades.
-            _spread_pct = float(indicators.get("spread_pct") or 0.0)
-            _max_spread = self._cfg_max_spread_pct  # FIX S16-3: cached
-            if _spread_pct > 0 and _max_spread > 0 and _spread_pct > _max_spread:
-                self._telemetry.setdefault("skipped_spread", 0)
-                self._telemetry["skipped_spread"] += 1
-                if (
-                    self._telemetry["skipped_spread"] <= 3
-                    or self._telemetry["skipped_spread"] % self._cfg_telemetry_log_every == 0
-                ):
-                    LOGGER.info(
-                        f"💹 SPREAD REJECT: {symbol} | spread={_spread_pct:.1f}% > max={_max_spread:.0f}%",
-                        extra={
-                            "event": "vwap_pro_spread_reject",
-                            "symbol": symbol,
-                            "spread_pct": _spread_pct,
-                            "max_spread_pct": _max_spread,
-                        },
-                    )
-                self._log_no_signal_reason(
-                    "spread_too_wide",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=vwap,
-                    context={"spread_pct": _spread_pct, "max_spread_pct": _max_spread},
-                )
-                _emit_no_signal("spread_too_wide")
+            required_data_present = bool(vwap > 0 and atr >= 0)
+            distance_pct = abs(current_price - vwap) / max(vwap, 1e-9)
+            overextended = distance_pct > self._max_distance_pct
+            if overextended:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=overextended')
+                return None
+            if stale_data:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=stale_data')
+                return None
+            if spread_pct > 28.0:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=wide_spread')
                 return None
 
-            # ✅ FIX A: Collapsing-premium guard uses OPTION VWAP, not futures VWAP.
-            # Bug: `vwap` above = futures VWAP (~24,625).  Comparing option premium
-            # (₹100–400) against futures VWAP made the check ALWAYS True → 100% rejection.
-            # Fix: use the option's own session VWAP (exchange-provided or indicator-computed).
-            # Only reject when the option premium has collapsed well below its own VWAP.
-            # If the option VWAP is unavailable, skip the gate (index-bias already guards direction).
-            _option_vwap = float(
-                indicators.get("vwap") or indicators.get("exchange_vwap") or 0.0
-            )
-            _vwap_slack = atr * self._cfg_vwap_slack_atr_mult
-            price_below_vwap = _option_vwap > 0 and current_price < (_option_vwap - _vwap_slack)
-            if price_below_vwap and not self._cfg_allow_vwap_pullback:
-                self._telemetry["skipped_vwap"] += 1
-                if (
-                    self._telemetry["skipped_vwap"] <= 3
-                    or self._telemetry["skipped_vwap"] % self._cfg_telemetry_log_every == 0
-                ):
-                    LOGGER.info(
-                        f"📏 OPT VWAP: {symbol} {direction} | "
-                        f"Price={current_price:.2f} OptVWAP={_option_vwap:.2f}",
-                        extra={"event": "vwap_pro_opt_vwap_reject", "symbol": symbol},
-                    )
-                self._log_no_signal_reason(
-                    "price_below_vwap",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=_option_vwap,
-                )
-                self._reset_acceptance(
-                    acc_key, symbol=symbol, reason_code="price_below_vwap"
-                )
-                _emit_no_signal("price_below_vwap")
-                return None
+            score = 0.0
+            reasons: list[str] = []
+            side = 'UNKNOWN'
+            trend_alignment = False
+            pullback_flag = False
+            continuation_confirmed = False
 
-            distance = 0.0
-            if _option_vwap > 0:
-                distance = abs(current_price - _option_vwap) / _option_vwap
-                if distance > self._cfg_max_vwap_distance_pct:
-                    self._log_no_signal_reason(
-                        "vwap_distance_extension",
-                        symbol=symbol,
-                        ltp=current_price,
-                        vwap=_option_vwap,
-                        context={
-                            "distance": distance,
-                            "max_distance": self._cfg_max_vwap_distance_pct,
-                        },
-                    )
-                    self._reset_acceptance(
-                        acc_key,
-                        symbol=symbol,
-                        reason_code="vwap_distance_extension",
-                    )
-                    _emit_no_signal("vwap_distance_extension")
-                    return None
-
-            pullback_ok = True
-            if _option_vwap > 0:
-                pullback_ok = abs(current_price - _option_vwap) <= max(atr * 0.6, 1.0)
-            momentum_confirmation = bool(
-                indicators.get("momentum_confirmation")
-                or indicators.get("confirmation_candle")
-                or indicators.get("trend_momentum_confirm")
-            )
-            breakout_detected = bool(
-                indicators.get("breakout_detected")
-                or indicators.get("breakout_signal")
-                or indicators.get("orb_breakout")
-            )
-            soft_flag = False
-            if not pullback_ok or not momentum_confirmation or (
-                price_below_vwap and self._cfg_allow_vwap_pullback
-            ):
-                soft_flag = True
-                self._log_no_signal_reason(
-                    "vwap_pullback_soft_flag",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=_option_vwap or vwap,
-                    context={
-                        "pullback_ok": pullback_ok,
-                        "momentum_confirmation": momentum_confirmation,
-                        "breakout_detected": breakout_detected,
-                    },
-                )
-                if not breakout_detected and (not self._cfg_allow_vwap_pullback or not price_below_vwap):
-                    _emit_no_signal("vwap_pullback_not_confirmed")
-                    return None
-
-            # 📏 Over-extension filter
-            vwap_std = float(indicators.get("vwap_std") or 0.0)
-            if vwap_std > 0:
-                z = abs(current_price - vwap) / vwap_std
-                if z > 2.2:
-                    self._telemetry["skipped_overextended"] += 1
-                    if self._telemetry["skipped_overextended"] <= 3:
-                        LOGGER.info(
-                            f"📐 OVEREXT: {symbol} | z={z:.2f} > 2.2 | "
-                            f"Price={current_price:.2f} VWAP={vwap:.2f} Std={vwap_std:.2f}",
-                            extra={
-                                "event": "vwap_pro_overext_reject",
-                                "symbol": symbol,
-                            },
-                        )
-                    self._log_no_signal_reason(
-                        "overextension_filter",
-                        symbol=symbol,
-                        ltp=current_price,
-                        vwap=vwap,
-                        context={"vwap_std": vwap_std, "z_score": z},
-                    )
-                    self._reset_acceptance(
-                        acc_key, symbol=symbol, reason_code="overextension_filter"
-                    )
-                    _emit_no_signal("overextension_filter")
-                    return None
-
-            # 🔊 ISSUE 4 FIX: Reset acceptance on Volume rejection
-            vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(
-                indicators.get("avg_volume") or indicators.get("average_volume") or 0.0
-            )
-            # FIX S10-3: Index symbols (NSE:NIFTY etc.) report vol=0 by exchange design.
-            # Bypass all volume validation for them — substituting dummy 1.0 so downstream
-            # vol/avg_vol gates don't reject the tick and inflate skipped_data telemetry.
-            _is_tradeable = any(x in symbol.upper() for x in ("CE", "PE", "FUT"))
-            if not _is_tradeable:
-                vol = 1.0
-                avg_vol = 1.0
-            # ✅ FIX B: Seed last_valid_volume from hydration data on first call.
-            # Options with sparse ticks (≈1 per 13 min) never complete a 60-second live
-            # bar, so indicators["volume"] is always 0 for the current bar.  The grace-
-            # period fallback only helps if the cache was PREVIOUSLY seeded.  Without this
-            # seed, every option evaluation hits volume_below_threshold → 100% rejection.
-            # Hydration loads historical session bars with real volumes; use the last
-            # historical bar as the initial "valid" reading so grace-period kicks in.
-            if symbol not in self._last_valid_volume and avg_vol > 0:
-                # Use avg_volume itself as a proxy for the last valid bar volume.
-                # This is conservative: any bar whose vol ≥ avg*0.9 would pass anyway.
-                self._last_valid_volume[symbol] = avg_vol
-                self._last_valid_avg_volume[symbol] = avg_vol
-                self._last_valid_volume_ts[symbol] = now
-            if vol > 0 and avg_vol > 0:
-                self._last_valid_volume[symbol] = vol
-                self._last_valid_avg_volume[symbol] = avg_vol
-                self._last_valid_volume_ts[symbol] = now
+            if current_price >= vwap:
+                side = 'CE'
+                score += 2.0
+                reasons.append('above_or_below_vwap:above')
             else:
-                last_vol = self._last_valid_volume.get(symbol)
-                last_avg = self._last_valid_avg_volume.get(symbol)
-                last_ts = self._last_valid_volume_ts.get(symbol, 0.0)
-                if (
-                    last_vol is not None
-                    and last_avg is not None
-                    and (now - last_ts) <= self.VOLUME_GRACE_SECONDS
-                ):
-                    LOGGER.info(
-                        "Condition met: vwap_pro_volume_grace_fallback",
-                        extra={
-                            "event": "vwap_pro_volume_grace_fallback",
-                            "symbol": symbol,
-                            "fallback_volume": last_vol,
-                            "fallback_avg_volume": last_avg,
-                        },
-                    )
-                    vol = last_vol
-                    avg_vol = last_avg
+                side = 'PE'
+                score += 2.0
+                reasons.append('above_or_below_vwap:below')
+
+            candle_body = abs(close - open_price)
+            atr_safe = max(atr, current_price * 0.01, 1.0)
+            continuation_confirmed = candle_body >= (0.35 * atr_safe)
+            if continuation_confirmed:
+                score += 2.0
+                reasons.append('continuation_confirmed')
+
+            reclaim_long = low <= (vwap - (atr_safe * self._slack_atr_mult * 0.2)) and close >= vwap
+            reclaim_short = high >= (vwap + (atr_safe * self._slack_atr_mult * 0.2)) and close <= vwap
+            if self._allow_pullback and ((side == 'CE' and reclaim_long) or (side == 'PE' and reclaim_short)):
+                pullback_flag = True
+                score += 1.0
+                reasons.append('pullback_reclaim')
+
+            if distance_pct <= self._max_distance_pct * 0.7:
+                score += 2.0
+                reasons.append('not_overextended')
+
+            if avg_vol > 0 and vol >= 0.6 * avg_vol:
+                score += 1.0
+
+            if direction in {'CE', 'PE'}:
+                trend_alignment = direction == side
+                if trend_alignment:
+                    score += 2.0
+                    reasons.append('trend_alignment')
                 else:
-                    self._telemetry["skipped_data"] += 1
-                    if (
-                        self._telemetry["skipped_data"] <= 5
-                        or self._telemetry["skipped_data"] % self._cfg_telemetry_log_every
-                        == 0
-                    ):
-                        LOGGER.warning(
-                            f"⚠️ DATA INVALID: {symbol} | "
-                            f"vol={vol:.0f} avg_vol={avg_vol:.0f}",
-                            extra={
-                                "event": "vwap_pro_data_invalid",
-                                "symbol": symbol,
-                            },
-                        )
-                        LOGGER.debug(
-                            "volume_below_threshold",
-                            extra={
-                                "event": "volume_below_threshold",
-                                "symbol": symbol,
-                                "vol": vol,
-                                "avg_vol": avg_vol,
-                                "required_volume": None,
-                            },
-                        )
-                    self._log_no_signal_reason(
-                        "volume_below_threshold",
-                        symbol=symbol,
-                        ltp=current_price,
-                        vwap=vwap,
-                        vol=vol,
-                        avg_vol=avg_vol,
-                    )
-                    # ✅ FIX 4d: Don't reset acceptance on transient volume data gap
-                    _emit_no_signal("volume_below_threshold")
-                    return None
-            vol_thresh = self._dynamic_volume_threshold()
-            if vol < avg_vol * vol_thresh:
-                self._telemetry["skipped_volume"] += 1
-                if (
-                    self._telemetry["skipped_volume"] <= 5
-                    or self._telemetry["skipped_volume"] % self._cfg_telemetry_log_every == 0
-                ):
-                    LOGGER.info(
-                        f"🔊 VOL GATE: {symbol} | vol={vol:.0f} < avg={avg_vol:.0f}×{vol_thresh}={avg_vol*vol_thresh:.0f}",
-                        extra={"event": "vwap_pro_vol_reject", "symbol": symbol},
-                    )
-                    LOGGER.debug(
-                        "volume_below_threshold",
-                        extra={
-                            "event": "volume_below_threshold",
-                            "symbol": symbol,
-                            "vol": vol,
-                            "avg_vol": avg_vol,
-                            "volume_threshold": vol_thresh,
-                            "required_volume": avg_vol * vol_thresh,
-                        },
-                    )
-                self._log_no_signal_reason(
-                    "volume_below_threshold",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=vwap,
-                    vol=vol,
-                    avg_vol=avg_vol,
-                    context={
-                        "volume_threshold": vol_thresh,
-                        "required_volume": avg_vol * vol_thresh,
-                    },
-                )
-                # ✅ FIX 4e: Don't reset acceptance on volume dip (can recover)
-                _emit_no_signal("volume_below_threshold")
+                    score -= 2.0
+                    reasons.append('direction_conflict')
+
+            if score < 3.0:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=low_score')
                 return None
 
-            self._vwap_acceptance_tracker[acc_key] += 1
-            if self._vwap_acceptance_tracker[acc_key] < self.VWAP_ACCEPTANCE_BARS:
-                self._telemetry["skipped_acceptance"] += 1
-                LOGGER.info(
-                    f"⏳ ACCEPTANCE: {symbol} {direction} | "
-                    f"Bar {self._vwap_acceptance_tracker[acc_key]}/{self.VWAP_ACCEPTANCE_BARS}",
-                    extra={"event": "vwap_pro_acceptance", "symbol": symbol},
-                )
-                self._log_no_signal_reason(
-                    "acceptance_bars_insufficient",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=vwap,
-                    context={
-                        "acceptance_bars": self._vwap_acceptance_tracker[acc_key],
-                        "required_bars": self.VWAP_ACCEPTANCE_BARS,
-                    },
-                )
-                _emit_no_signal("acceptance_bars_insufficient")
-                return None
-
-            # ═══════════════════════════════════════════════════════════════════
-            # ✅ WORLD-CLASS FIX: SL/TP Based on OPTION PREMIUM Direction
-            # We trade OPTION PREMIUM, not the index.
-            # LONG any option (CE or PE) → profit when PREMIUM rises
-            # Therefore: SL below entry, TP above entry (ALWAYS for LONG)
-            # ═══════════════════════════════════════════════════════════════════
-            sl_mult = (1.2 if self._is_expiry_day() else 1.5) * (
-                0.85 if entropy > 0.75 else 1.0
-            )
-            tp2_mult = 3.0
-
-            # LONG position: SL below, TP above (regardless of CE/PE)
-            sl = current_price - (atr * sl_mult)
-            tp2 = current_price + (atr * tp2_mult)
-
-            # Validation: LONG must have SL < entry < TP
-            invalid = sl >= current_price or tp2 <= current_price
-
-            if invalid:
-                LOGGER.error(
-                    "Invalid SL/TP for LONG",
-                    extra={
-                        "symbol": symbol,
-                        "entry": current_price,
-                        "sl": sl,
-                        "tp": tp2,
-                        "atr": atr,
-                    },
-                )
-                self._log_no_signal_reason(
-                    "overextension_filter",
-                    symbol=symbol,
-                    ltp=current_price,
-                    vwap=vwap,
-                    context={"sl": sl, "tp": tp2, "atr": atr},
-                )
-                self._reset_acceptance(
-                    acc_key, symbol=symbol, reason_code="overextension_filter"
-                )
-                _emit_no_signal("overextension_filter")
-                return None
-
-            # 🎯 Final Signal Prep
-            base_qty = int(self._vwap_config.quantity or 1)
-            confidence = 0.85 if entropy < 0.7 else 0.65
-            qty = max(1, int(base_qty * confidence))
-
-            # 🏁 CRITICAL ISSUE 3 FIX: Reset acceptance after firing
-            self._reset_acceptance(acc_key, symbol=symbol, reason_code="signal_fired")
-            self._signal_cooldown_tracker[cooldown_key] = now
-            self._telemetry["signals"] += 1
-
-            LOGGER.info(
-                "Condition met: vwap_pro_signal_ready",
-                extra={
-                    "event": "vwap_pro_signal_ready",
-                    "symbol": symbol,
-                    "direction": direction,
-                    "entry": current_price,
-                    "sl": sl,
-                    "tp2": tp2,
-                },
-            )
-
+            strategy_score = max(0.0, min(10.0, score))
+            confidence = max(0.1, min(0.85, strategy_score / 10.0))
+            metadata = {
+                'strategy': 'VWAPPro',
+                'side': side,
+                'direction_bias': side,
+                'strategy_score': strategy_score,
+                'score_reasons': reasons,
+                'setup_type': 'continuation_pullback',
+                'setup_quality': strategy_score,
+                'required_data_present': required_data_present,
+                'stale_data_used': stale_data,
+                'candidate_symbol': symbol,
+                'rejection_reasons': [],
+                'vwap': vwap,
+                'distance_pct': round(distance_pct, 4),
+                'atr': atr_safe,
+                'pullback_flag': pullback_flag,
+                'trend_alignment': trend_alignment,
+                'continuation_confirmed': continuation_confirmed,
+                'invalidation_level': (vwap - atr_safe) if side == 'CE' else (vwap + atr_safe),
+            }
+            LOGGER.info('STRATEGY_VOTE strategy=VWAPPro side=%s score=%.2f', side, strategy_score)
             return EliteSignal(
                 symbol=symbol,
-                signal="BUY",
+                signal='BUY',
                 confidence=confidence,
                 entry_price=current_price,
-                stop_loss=sl,
-                target=tp2,
-                quantity=qty,
-                strategy_name="VWAP_Pro_WorldClass",
-                metadata={
-                    "bracket_type": "VIRTUAL",
-                    "sl_mode": "ATR_TRAIL",
-                    "sl_atr_mult": sl_mult,
-                    "tp1_atr_mult": 1.5,
-                    "tp2_atr_mult": tp2_mult,
-                    "tp1_qty_pct": 0.5,
-                    "runner_trail_after_tp1": True,
-                    "direction": direction,
-                    "soft_flag": soft_flag,
-                    "breakout_detected": breakout_detected,
-                    "bypass_vwap_pullback": breakout_detected,
-                },
+                stop_loss=float(metadata['invalidation_level']),
+                target=current_price + (atr_safe * 2.0),
+                quantity=self._cfg.quantity or 1,
+                strategy_name='VWAPPro',
+                metadata=metadata,
             )
-
-        except Exception as exc:
-            LOGGER.error("VWAP-Pro fatal error: %s", exc, exc_info=True)
+        except Exception as e:
+            LOGGER.error('Failure in VWAPProStrategy._evaluate_signal: %s', e, exc_info=e)
             return None
 
 
-__all__ = ["VWAPProStrategy"]
+__all__ = ['VWAPProStrategy']

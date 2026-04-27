@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import os
 from typing import Any, Mapping
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
@@ -128,6 +129,12 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
             if clock and callable(getattr(clock, 'now_local', None)):
                 now_local = clock.now_local()
 
+            strategy_mode = str(os.getenv('STRATEGY_MODE', 'directional_scalp')).lower()
+            gamma_enabled = str(os.getenv('ALLOW_EXPIRY_GAMMA_STRATEGIES', 'false')).lower() in {'1', 'true', 'yes', 'on'}
+            if not (strategy_mode == 'expiry_gamma' and gamma_enabled):
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=EliteTuesdayGammaBuyer reason=gamma_mode_disabled')
+                return None
+
             if now_local is not None:
                 if now_local.weekday() != 1:
                     return None
@@ -235,6 +242,22 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
                 quantity=quantity,
                 strategy_name='EliteTuesdayGammaBuyer',
                 metadata={
+                    'strategy': 'EliteTuesdayGammaBuyer',
+                    'side': option_type,
+                    'direction_bias': option_type,
+                    'strategy_score': max(0.0, min(8.0, float(score))),
+                    'setup_quality': max(0.0, min(8.0, float(score))),
+                    'setup_type': 'expiry_gamma',
+                    'required_data_present': True,
+                    'stale_data_used': bool(indicators.get('stale_data_used')),
+                    'candidate_symbol': symbol,
+                    'score_reasons': ['expiry_gamma_mode', 'intraday_momentum_filter'],
+                    'rejection_reasons': [],
+                    'expiry_day': True,
+                    'days_to_expiry': indicators.get('days_to_expiry'),
+                    'gamma_mode_enabled': True,
+                    'premium_decay_risk': round(abs(float(indicators.get('theta') or 0.0)) / max(current_price, 1.0), 4),
+                    'volatility_expansion_confirmed': bool(atr > atr_ma and atr_ma > 0),
                     'option_type': option_type,
                     'bracket_type': 'VIRTUAL',
                     'sl_mode': 'ATR_TRAIL',
