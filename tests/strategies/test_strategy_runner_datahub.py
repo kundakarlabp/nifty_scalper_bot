@@ -30,6 +30,8 @@ class _StubMDM:
         self.unsubscribed: list[str] = []
         self.started = False
         self.degraded = False
+        self.requested_symbols: list[str] = []
+        self._resolver = self
 
     def subscribe(self, symbol: str, callback) -> None:
         self.subscribed.append(symbol)
@@ -66,6 +68,28 @@ class _StubMDM:
         if symbol in {"NIFTY", "NSE:NIFTY", "NIFTY 50"}:
             return _Snapshot("NSE:NIFTY", 25025.0)
         return _Snapshot(symbol, 100.0)
+
+    def lookup(self, symbol: str):
+        text = symbol.split(':')[-1].upper()
+        if text.startswith('NIFTY') and text.endswith(('CE', 'PE')):
+            try:
+                strike = int(text[-7:-2])
+            except ValueError:
+                return None
+            return {
+                'tradingsymbol': text,
+                'exchange': 'NFO',
+                'strike': strike,
+                'instrument_type': text[-2:],
+            }
+        return None
+
+    def request_symbol_subscription(self, symbol: str) -> bool:
+        self.requested_symbols.append(symbol)
+        return True
+
+    async def ensure_fresh_tick(self, _symbol: str):
+        return None
 
     def tracked_snapshot(self) -> list[str]:
         return [
@@ -175,10 +199,25 @@ def test_runner_start_skips_when_market_data_degraded() -> None:
 
 
 def test_build_candidate_snapshots_uses_canonical_spot() -> None:
-    runner, _ = _make_runner(None)
+    runner, mdm = _make_runner(None)
     candidates = runner.build_candidate_snapshots(
         underlying="NIFTY 50", direction_bias="CE", window_each_side=2
     )
     assert candidates
     assert all(row["symbol"].startswith("NFO:NIFTY") for row in candidates)
     assert all("tick_age_s" in row for row in candidates)
+    assert mdm.requested_symbols
+
+
+def test_build_candidate_snapshots_returns_empty_when_spot_missing() -> None:
+    runner, mdm = _make_runner(None)
+    original_get_snapshot = mdm.get_symbol_snapshot
+
+    def _bad_spot(symbol: str):
+        snap = original_get_snapshot('NFO:NIFTY26MAY25000CE')
+        snap.canonical_symbol = 'NSE:NIFTY'
+        snap.ltp = None
+        return snap
+
+    mdm.get_symbol_snapshot = _bad_spot  # type: ignore[method-assign]
+    assert runner.build_candidate_snapshots(underlying='NIFTY', direction_bias='CE') == []

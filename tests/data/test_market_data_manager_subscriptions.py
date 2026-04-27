@@ -14,6 +14,20 @@ class DummyBroker:
         return []
 
 
+class DummyBrokerQuoteList(DummyBroker):
+    def quote(self, symbols: list[str]) -> dict[str, dict[str, float]]:
+        symbol = symbols[0]
+        return {symbol: {'last_price': 123.0, 'bid': 122.0, 'ask': 124.0}}
+
+
+class DummyBrokerGetQuoteList(DummyBroker):
+    def get_quote(self, symbols):  # noqa: ANN001
+        if isinstance(symbols, list):
+            symbol = symbols[0]
+            return {symbol: {'last_price': 123.0, 'bid': 122.0, 'ask': 124.0}}
+        return {'last_price': 123.0, 'bid': 122.0, 'ask': 124.0}
+
+
 class DummyResolver:
     def __init__(self) -> None:
         self._map = {'NSE:NIFTY': 256265}
@@ -214,6 +228,37 @@ def test_snapshot_marks_ltp_only_quote_not_tradable() -> None:
     assert snap.bid is None
     assert snap.ask is None
     assert snap.tradable_quote is False
+
+
+def test_snapshot_unknown_bid_ask_source_is_not_tradable() -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    mdm._emit_tick(  # noqa: SLF001
+        'NFO:NIFTY26APR23800CE',
+        {
+            'symbol': 'NFO:NIFTY26APR23800CE',
+            'last_price': 123.0,
+            'ltp': 123.0,
+            'bid': 122.0,
+            'ask': 124.0,
+            'bid_ask_source': 'unknown_source',
+            'source': 'custom',
+        },
+        source='custom',
+    )
+    snap = mdm.get_symbol_snapshot('NFO:NIFTY26APR23800CE')
+    assert snap.tradable_quote is False
+
+
+def test_broker_quote_helper_supports_quote_and_get_quote_variants() -> None:
+    quote_mdm = MarketDataManager(DummyBrokerQuoteList(), websocket=None, resolver=DummyResolver())
+    quote_payload = quote_mdm._broker_quote(quote_mdm._broker, 'NFO:NIFTY26APR23800CE')  # type: ignore[arg-type]  # noqa: SLF001
+    assert quote_payload is not None
+    assert float(quote_payload['bid']) == 122.0
+
+    get_quote_mdm = MarketDataManager(DummyBrokerGetQuoteList(), websocket=None, resolver=DummyResolver())
+    get_quote_payload = get_quote_mdm._broker_quote(get_quote_mdm._broker, 'NFO:NIFTY26APR23800CE')  # type: ignore[arg-type]  # noqa: SLF001
+    assert get_quote_payload is not None
+    assert float(get_quote_payload['ask']) == 124.0
 
 
 def test_ensure_fresh_tick_uses_polling_fallback_owner(monkeypatch) -> None:

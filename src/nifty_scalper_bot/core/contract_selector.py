@@ -28,8 +28,9 @@ from typing import Any
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.contract_selector")
 
-_STRIKE_BAND = 200      # include strikes ATM ± this many points
+_STRIKE_BAND = 100      # include strikes ATM ± this many points (ATM±2 for 50-step)
 _STRIKE_STEP_DEFAULT = 50  # fallback step when no instruments loaded
+_MAX_CONTRACTS = max(1, int(os.getenv("HYDRATION_MAX_CONTRACTS", "12") or 12))
 
 # Liquidity check knobs — the old 3-day / 10-bar gate was too strict and
 # repeatedly rejected ATM contracts for freshly listed weekly series.  The
@@ -273,6 +274,8 @@ def get_atm_contracts(
             f"ContractSelector: no NIFTY contracts found for expiry={nearest_expiry} "
             f"ATM={atm} band=±{strike_band}. Spot={underlying_price}"
         )
+
+    selected = sorted(selected, key=lambda row: abs(float(row.get("strike", 0.0)) - float(atm)))[:_MAX_CONTRACTS]
 
     LOGGER.info(
         "ContractSelector: selected %d contracts | expiry=%s | ATM=%s | band=±%s",

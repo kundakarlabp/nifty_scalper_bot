@@ -1666,8 +1666,8 @@ class MarketDataManager:
             return None
         try:
             quote_payload: Any = None
-            if canonical.endswith(("CE", "PE")) and hasattr(broker, "get_quote"):
-                quote_payload = {broker_symbol: broker.get_quote(broker_symbol)}
+            if canonical.endswith(("CE", "PE")):
+                quote_payload = self._broker_quote(broker, broker_symbol)
             elif hasattr(broker, "ltp"):
                 quote_payload = broker.ltp([broker_symbol])
             elif hasattr(broker, "get_ltp"):
@@ -1689,17 +1689,11 @@ class MarketDataManager:
                     or quote_payload.get(f"NSE:{canonical.split(':')[-1]}")
                 )
             if not isinstance(quote, Mapping):
-                self._logger.debug(
-                    "MDM_REST_REFRESH_SKIPPED symbol=%s reason=invalid_ltp",
-                    canonical,
-                )
+                self._logger.info("MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=invalid_quote_payload", canonical)
                 return None
             ltp = _coerce_positive_float(quote.get("ltp") or quote.get("last_price"))
             if ltp is None:
-                self._logger.debug(
-                    "MDM_REST_REFRESH_SKIPPED symbol=%s reason=invalid_ltp",
-                    canonical,
-                )
+                self._logger.info("MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=invalid_ltp", canonical)
                 return None
             tick = {
                 "symbol": canonical,
@@ -1715,6 +1709,7 @@ class MarketDataManager:
                 previous = self._latest_ticks.get(canonical)
             normalized = self._normalize_tick(canonical, tick, previous)
             if normalized is None:
+                self._logger.info("MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=normalization_failed", canonical)
                 return None
             self._emit_tick(canonical, normalized, source="rest")
             if canonical.endswith(("CE", "PE")):
@@ -4973,10 +4968,11 @@ class MarketDataManager:
         depth_available = isinstance(tick.get("depth"), Mapping) and bool(tick.get("depth"))
         bid_missing = bool(tick.get("bid_missing")) or bid is None or bid <= 0
         ask_missing = bool(tick.get("ask_missing")) or ask is None or ask <= 0
-        bid_ask_source = str(tick.get("bid_ask_source") or ("market_depth" if depth_available else "missing"))
-        tradable_quote = (not bid_missing and not ask_missing) and bool(
-            tick.get("tradable_quote", True)
-        )
+        bid_ask_source = str(
+            tick.get("bid_ask_source") or ("market_depth" if depth_available else "missing")
+        ).lower()
+        source_ok = bid_ask_source in {"market_depth", "quote", "rest_quote", "ws_full"}
+        tradable_quote = (not bid_missing and not ask_missing) and source_ok
         snapshot = MarketSnapshot(
             symbol=str(symbol),
             canonical_symbol=canonical,
@@ -5229,55 +5225,70 @@ class MarketDataManager:
         normalized_key: str | int = key
         if isinstance(key, str) and not key.strip().isdigit():
             normalized_key = self._canonical_symbol(key)
+        return self._broker_quote(broker, normalized_key)
+
+    def _broker_quote(self, broker: Any, broker_symbol: str | int) -> dict[str, Any] | None:
+        """Fetch quote via broker.quote/get_quote variants. Args: broker + symbol. Returns: quote dict or None. Raises: none."""
         try:
-            quote_any_fn = getattr(broker, "quote_any", None)
-            if callable(quote_any_fn):
-                try:
-                    raw_any = quote_any_fn([normalized_key])  # type: ignore[arg-type]
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in _broker_quote_any quote_any: %s",
-                        exc,
-                        extra={"event": "mdm_quote_any_error", "key": normalized_key},
-                        exc_info=exc,
-                    )
-                else:
-                    if isinstance(raw_any, Mapping) and raw_any:
-                        key_candidates: list[str] = []
-                        if isinstance(normalized_key, int):
-                            key_candidates.append(str(int(normalized_key)))
-                        elif isinstance(normalized_key, str):
-                            symbol_aliases = [
-                                normalized_key,
-                                normalized_key.upper(),
-                                normalized_key.split(":", 1)[-1],
-                            ]
-                            for alias in symbol_aliases:
-                                if alias not in key_candidates:
-                                    key_candidates.append(alias)
-                        for alias in key_candidates:
-                            payload = raw_any.get(alias)
+            aliases: list[str] = []
+            if isinstance(broker_symbol, int):
+                aliases.append(str(int(broker_symbol)))
+            else:
+                aliases.extend(
+                    [
+                        str(broker_symbol),
+                        str(broker_symbol).upper(),
+                        str(broker_symbol).split(":", 1)[-1],
+                    ]
+                )
+            quote_fn = getattr(broker, "quote", None)
+            if callable(quote_fn):
+                raw_quote = quote_fn([broker_symbol])  # type: ignore[arg-type]
+                if isinstance(raw_quote, Mapping):
+                    for alias in aliases:
+                        payload = raw_quote.get(alias)
+                        if isinstance(payload, Mapping):
+                            return dict(payload)
+                    for payload in raw_quote.values():
+                        if isinstance(payload, Mapping):
+                            return dict(payload)
+            get_quote_fn = getattr(broker, "get_quote", None)
+            if callable(get_quote_fn):
+                for arg in ([broker_symbol], broker_symbol):
+                    raw_quote = get_quote_fn(arg)  # type: ignore[misc]
+                    if isinstance(raw_quote, Mapping):
+                        for alias in aliases:
+                            payload = raw_quote.get(alias)
                             if isinstance(payload, Mapping):
                                 return dict(payload)
-                        for value in raw_any.values():
-                            if isinstance(value, Mapping):
-                                return dict(value)
-            if isinstance(normalized_key, int):
-                if hasattr(broker, "get_quote_by_token"):
-                    quote = broker.get_quote_by_token(normalized_key)
-                else:
-                    return None
-            else:
-                quote = broker.get_quote(normalized_key)
+                        if any(key in raw_quote for key in ("ltp", "last_price", "bid", "ask")):
+                            return dict(raw_quote)
+                        for payload in raw_quote.values():
+                            if isinstance(payload, Mapping):
+                                return dict(payload)
+            quote_any_fn = getattr(broker, "quote_any", None)
+            if callable(quote_any_fn):
+                raw_any = quote_any_fn([broker_symbol])  # type: ignore[arg-type]
+                if isinstance(raw_any, Mapping):
+                    for alias in aliases:
+                        payload = raw_any.get(alias)
+                        if isinstance(payload, Mapping):
+                            return dict(payload)
+                    for payload in raw_any.values():
+                        if isinstance(payload, Mapping):
+                            return dict(payload)
+            if isinstance(broker_symbol, int):
+                get_quote_by_token = getattr(broker, "get_quote_by_token", None)
+                if callable(get_quote_by_token):
+                    raw_token_quote = get_quote_by_token(int(broker_symbol))
+                    if isinstance(raw_token_quote, Mapping):
+                        return dict(raw_token_quote)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
-                "Failure in _broker_quote_any: %s",
+                "Failure in _broker_quote: %s",
                 exc,
-                extra={"event": "mdm_quote_fetch_failed", "key": normalized_key},
+                extra={"event": "mdm_quote_fetch_failed", "key": broker_symbol},
             )
-            return None
-        if isinstance(quote, Mapping) and quote:
-            return dict(quote)
         return None
 
     def refresh_quote_now(
@@ -5857,7 +5868,14 @@ class MarketDataManager:
 
         bid_missing = bid is None or float(bid) <= 0
         ask_missing = ask is None or float(ask) <= 0
-        tradable_quote = not bid_missing and not ask_missing
+        bid_ask_source = "market_depth" if depth else "missing"
+        source = tick.get("source")
+        if isinstance(source, str) and source:
+            source_lower = source.lower()
+            if source_lower in {"quote", "rest_quote", "ws_full"} and not depth:
+                bid_ask_source = source_lower
+        source_ok = bid_ask_source in {"market_depth", "quote", "rest_quote", "ws_full"}
+        tradable_quote = (not bid_missing and not ask_missing) and source_ok
 
         timestamp = self._coerce_timestamp(tick)
 
@@ -5875,16 +5893,15 @@ class MarketDataManager:
             "depth": depth,
             "bid_missing": bid_missing,
             "ask_missing": ask_missing,
-            "bid_ask_source": "market_depth" if depth else "missing",
+            "bid_ask_source": bid_ask_source,
             "tradable_quote": tradable_quote,
             "ltq": tick.get("last_quantity"),
             "oi": self._coerce_float(tick, "oi", "open_interest"),
         }
-        source = tick.get("source")
         if isinstance(source, str) and source:
             normalized["source"] = source
             if tradable_quote and not depth:
-                normalized["bid_ask_source"] = source
+                normalized["bid_ask_source"] = source.lower()
         broker_timestamp = tick.get("broker_timestamp")
         if broker_timestamp is not None:
             normalized["broker_timestamp"] = broker_timestamp

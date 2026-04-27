@@ -193,7 +193,7 @@ class TradeCandidateSelector:
             score = quality.score - spread_pct * 10.0 - (float(atm_distance or 0) * 0.4)
             candidate = TradeCandidate(
                 symbol=symbol,
-                side='BUY',
+                side=target_suffix,
                 score=round(score, 3),
                 reasons=['candidate_valid'],
                 spread_pct=spread_pct,
@@ -207,8 +207,9 @@ class TradeCandidateSelector:
 
         if best:
             LOGGER.info(
-                'CANDIDATE_SELECTED symbol=%s score=%.2f spread_pct=%s tick_age_s=%s',
+                'CANDIDATE_SELECTED symbol=%s side=%s score=%.2f spread_pct=%s tick_age_s=%s',
                 best.symbol,
+                best.side,
                 best.score,
                 best.spread_pct,
                 best.tick_age_s,

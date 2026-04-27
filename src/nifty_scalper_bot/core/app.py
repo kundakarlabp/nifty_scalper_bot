@@ -5721,6 +5721,9 @@ async def startup_sequence(ctx: BotContext) -> None:
         try:
             from nifty_scalper_bot.core.hydration import assert_valid_token, hydrate_contracts
             from nifty_scalper_bot.core.contract_selector import get_atm_contracts
+            hydration_max_contracts = max(1, int(os.getenv("HYDRATION_MAX_CONTRACTS", "12") or 12))
+            hydration_min_bars = max(1, int(os.getenv("HYDRATION_MIN_BARS", "100") or 100))
+            hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
 
             # Resolve the underlying sync broker (ZerodhaKiteClient)
             _sync_broker_for_hydration = getattr(
@@ -5744,21 +5747,25 @@ async def startup_sequence(ctx: BotContext) -> None:
             _atm_contracts = get_atm_contracts(
                 _sync_broker_for_hydration,
                 _spot_for_hydration,
+                strike_band=100,
                 preloaded_instruments=_preloaded or None,
             )
-            _atm_tokens = [int(c["instrument_token"]) for c in _atm_contracts]
+            _atm_tokens = [int(c["instrument_token"]) for c in _atm_contracts[:hydration_max_contracts]]
             # Validate all tokens before hydration
             for _t in _atm_tokens:
                 assert_valid_token(_t)
 
             LOGGER.info(
-                "Token-based pre-hydration: %d ATM contracts selected, spot=%.2f",
+                "HYDRATION_PLAN symbols=%d bars_target=%d lookback_days=%d spot=%.2f",
                 len(_atm_tokens),
+                hydration_min_bars,
+                hydration_lookback_days,
                 _spot_for_hydration,
                 extra={
-                    "event": "token_hydration_start",
-                    "count": len(_atm_tokens),
-                    "spot": _spot_for_hydration,
+                    "event": "HYDRATION_PLAN",
+                    "symbols": len(_atm_tokens),
+                    "bars_target": hydration_min_bars,
+                    "lookback_days": hydration_lookback_days,
                 },
             )
 
@@ -5768,8 +5775,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                 hydrate_contracts,
                 _sync_broker_for_hydration,
                 _atm_tokens,
-                min_bars=50,
-                lookback_days=7,
+                min_bars=hydration_min_bars,
+                lookback_days=hydration_lookback_days,
                 fail_fast=False,  # Continue with other tokens even if some fail
             )
             LOGGER.info(
@@ -5862,7 +5869,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     spot_ltp=spot_ltp,
                     futures_symbol=future_symbol,
                     strike_step=int(ctx.settings.option_universe.strike_step or 50),
-                    strikes_around_atm=3,
+                    strikes_around_atm=2,
                 )
                 targets = list(dict.fromkeys(basket["symbols"]))
                 LOGGER.info(
@@ -5894,7 +5901,11 @@ async def startup_sequence(ctx: BotContext) -> None:
             # 0 bars for the current session) don't cause hydration_zero_bars.
             # Weekly options may have no same-day candles early in the week — a
             # multi-day window guarantees at least 50 bars from recent sessions.
-            start_dt = end_dt - timedelta(days=3)
+            hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
+            hydration_min_bars = max(1, int(os.getenv("HYDRATION_MIN_BARS", "100") or 100))
+            hydration_max_bars = max(hydration_min_bars, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300))
+            hydration_max_contracts = max(1, int(os.getenv("HYDRATION_MAX_CONTRACTS", "12") or 12))
+            start_dt = end_dt - timedelta(days=hydration_lookback_days)
             from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -5945,6 +5956,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
                     continue
                 symbols_to_hydrate.append(_sym)
+            symbols_to_hydrate = symbols_to_hydrate[:hydration_max_contracts]
+            LOGGER.info(
+                "HYDRATION_PLAN symbols=%d bars_target=%d lookback_days=%d",
+                len(symbols_to_hydrate),
+                hydration_max_bars,
+                hydration_lookback_days,
+                extra={
+                    "event": "HYDRATION_PLAN",
+                    "symbols": len(symbols_to_hydrate),
+                    "bars_target": hydration_max_bars,
+                    "lookback_days": hydration_lookback_days,
+                },
+            )
 
             LOGGER.info(
                 "Starting multi-symbol hydration for %d/%d instruments (after token validation)...",
@@ -5961,6 +5985,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                     from_str,
                     to_str,
                 )
+                if records and len(records) > hydration_max_bars:
+                    records = list(records)[-hydration_max_bars:]
                 record_count = len(records or [])
                 if record_count == 0:
                     LOGGER.error(
@@ -5970,12 +5996,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                         symbol,
                         extra={"event": "hydration_zero_bars", "symbol": symbol},
                     )
-                elif record_count < 20:
+                elif record_count < hydration_min_bars:
                     LOGGER.info(
-                        "insufficient_bars_for_strategy: %s returned only %d bars (need ≥20) — "
+                        "insufficient_bars_for_strategy: %s returned only %d bars (need ≥%d) — "
                         "strategy indicators will be unreliable",
                         symbol,
                         record_count,
+                        hydration_min_bars,
                         extra={
                             "event": "insufficient_bars_for_strategy",
                             "symbol": symbol,
@@ -6590,8 +6617,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             and ws_ok
                                         ):
                                             LOGGER.info(
-                                                "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s",
+                                                "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s",
                                                 spot_age_ms,
+                                                quote_stale_ms,
+                                                ws_ok,
                                             )
                                             await asyncio.sleep(1.0)
                                             continue

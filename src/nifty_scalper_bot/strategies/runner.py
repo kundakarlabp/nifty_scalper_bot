@@ -1517,24 +1517,64 @@ class StrategyRunner:
             side = str(direction_bias).upper()
             if side not in {"CE", "PE"}:
                 side = "CE"
-            tracked = []
-            tracked_fn = getattr(self._market_data, "tracked_snapshot", None)
-            if callable(tracked_fn):
-                tracked = [str(sym) for sym in tracked_fn()]
             selected: list[tuple[str, int]] = []
-            for sym in tracked:
-                norm = enforce_canonical(normalize_symbol(sym))
-                if not norm.startswith("NFO:NIFTY") or not norm.endswith(side):
-                    continue
-                match = re.search(r"(\d{5})(CE|PE)$", norm)
-                if match is None:
-                    continue
-                strike = int(match.group(1))
-                if abs(strike - atm) <= max(1, int(window_each_side)) * 50:
-                    selected.append((norm, strike))
-            selected.sort(key=lambda item: abs(item[1] - atm))
+            target_strikes = {
+                atm + 50 * offset
+                for offset in range(-max(1, int(window_each_side)), max(1, int(window_each_side)) + 1)
+            }
+            resolver = getattr(self._market_data, "_resolver", None)
+            candidate_symbols: set[str] = set()
+            if resolver is not None:
+                for strike_value in sorted(target_strikes):
+                    for prefix in ("NFO:", ""):
+                        candidate_symbols.add(f"{prefix}NIFTY{strike_value}{side}")
+            for symbol_candidate in candidate_symbols:
+                lookup = None
+                if resolver is not None and hasattr(resolver, "lookup"):
+                    try:
+                        lookup = resolver.lookup(symbol_candidate)
+                    except Exception:
+                        lookup = None
+                if isinstance(lookup, Mapping):
+                    strike_val = int(float(lookup.get("strike") or 0))
+                    tsym = str(lookup.get("tradingsymbol") or symbol_candidate)
+                    exchange = str(lookup.get("exchange") or "NFO").upper()
+                    if strike_val in target_strikes and str(lookup.get("instrument_type") or side).upper() == side:
+                        selected.append((f"{exchange}:{tsym}", strike_val))
+            if not selected:
+                tracked = []
+                tracked_fn = getattr(self._market_data, "tracked_snapshot", None)
+                if callable(tracked_fn):
+                    tracked = [str(sym) for sym in tracked_fn()]
+                for sym in tracked:
+                    norm = enforce_canonical(normalize_symbol(sym))
+                    if not norm.startswith("NFO:NIFTY") or not norm.endswith(side):
+                        continue
+                    match = re.search(r"(\d{5})(CE|PE)$", norm)
+                    if match is None:
+                        continue
+                    strike = int(match.group(1))
+                    if strike in target_strikes:
+                        selected.append((norm, strike))
+            selected = sorted(set(selected), key=lambda item: abs(item[1] - atm))
             candidates: list[dict[str, Any]] = []
             for sym, strike in selected[: max(1, 2 * window_each_side + 1)]:
+                try:
+                    self._market_data.request_symbol_subscription(sym)
+                except Exception:
+                    pass
+                try:
+                    ensure_tick_fn = getattr(self._market_data, "ensure_fresh_tick", None)
+                    if callable(ensure_tick_fn):
+                        coro = ensure_tick_fn(sym)
+                        if asyncio.iscoroutine(coro):
+                            try:
+                                loop = asyncio.get_running_loop()
+                                loop.create_task(coro)
+                            except RuntimeError:
+                                asyncio.run(coro)
+                except Exception:
+                    pass
                 snap = self._market_data.get_symbol_snapshot(sym)
                 spread_pct = None
                 if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
@@ -1555,9 +1595,9 @@ class StrategyRunner:
                         "real_ticks_last_60s": snap.real_ticks_last_60s,
                         "latest_candle_provisional": snap.latest_candle_provisional,
                         "latest_candle_synthetic": snap.latest_candle_synthetic,
-                        "latest_candle_volume": None,
+                        "latest_candle_volume": float(getattr(snap, "latest_candle_volume", 0.0) or 0.0),
                         "ohlc_valid": snap.ohlc_valid,
-                        "atm_distance": abs(strike - atm),
+                        "atm_distance": int(abs(strike - atm) / 50),
                         "bid_missing": snap.bid_missing,
                         "ask_missing": snap.ask_missing,
                         "bid_ask_source": snap.bid_ask_source,
@@ -7055,12 +7095,12 @@ class StrategyRunner:
                 metadata["spread_pct"] = candidate.spread_pct
                 metadata["candidate_score"] = candidate.score
             missing_components = missing_score_components(metadata)
+            if missing_components and reason_key == "premium_momentum_squeeze":
+                metadata["shadow_only"] = True
+                metadata["missing_reason"] = (
+                    "premium_squeeze_score_components_not_implemented"
+                )
             if missing_components and is_live_mode:
-                if reason_key == "premium_momentum_squeeze":
-                    metadata["shadow_only"] = True
-                    metadata["missing_reason"] = (
-                        "premium_squeeze_score_components_not_implemented"
-                    )
                 self._logger.info(
                     "SIGNAL_SCORE_BLOCKED reason=missing_signal_score_components missing=%s trace_id=%s",
                     missing_components,
