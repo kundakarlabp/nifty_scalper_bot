@@ -43,6 +43,35 @@ class _StubMDM:
     def stop(self) -> None:
         self.started = False
 
+    def get_symbol_snapshot(self, symbol: str):
+        class _Snapshot:
+            def __init__(self, canonical_symbol: str, ltp: float | None) -> None:
+                self.symbol = symbol
+                self.canonical_symbol = canonical_symbol
+                self.ltp = ltp
+                self.bid = None
+                self.ask = None
+                self.mid = None
+                self.tick_age_s = 1.0
+                self.source = "ws"
+                self.real_ticks_last_60s = 5
+                self.latest_candle_provisional = False
+                self.latest_candle_synthetic = False
+                self.ohlc_valid = True
+
+        if symbol in {"NIFTY", "NSE:NIFTY", "NIFTY 50"}:
+            return _Snapshot("NSE:NIFTY", 25025.0)
+        return _Snapshot(symbol, 100.0)
+
+    def tracked_snapshot(self) -> list[str]:
+        return [
+            "NFO:NIFTY26MAY25000CE",
+            "NFO:NIFTY26MAY25050CE",
+            "NFO:NIFTY26MAY25100CE",
+            "NFO:NIFTY26MAY25150CE",
+            "NFO:NIFTY26MAY25200CE",
+        ]
+
 
 def _make_runner(hub: _StubHub | None) -> tuple[StrategyRunner, _StubMDM]:
     mdm = _StubMDM()
@@ -139,3 +168,13 @@ def test_runner_start_skips_when_market_data_degraded() -> None:
 
     assert mdm.started is False
     assert mdm.subscribed == []
+
+
+def test_build_candidate_snapshots_uses_canonical_spot() -> None:
+    runner, _ = _make_runner(None)
+    candidates = runner.build_candidate_snapshots(
+        underlying="NIFTY 50", direction_bias="CE", window_each_side=2
+    )
+    assert candidates
+    assert all(row["symbol"].startswith("NFO:NIFTY") for row in candidates)
+    assert all("tick_age_s" in row for row in candidates)
