@@ -1504,7 +1504,7 @@ class StrategyRunner:
         atm_strike: int | None = None,
         window_each_side: int = 2,
     ) -> list[dict[str, Any]]:
-        """Build option candidate snapshots around ATM for the chosen side."""
+        """Build candidate snapshots for sync/offline usage only. Args: context fields. Returns: snapshots. Raises: RuntimeError."""
         try:
             asyncio.get_running_loop()
             self._logger.warning(
@@ -1620,6 +1620,38 @@ class StrategyRunner:
             self._logger.error("CANDIDATE_SNAPSHOT_BUILD_FAILED reason=%s", exc)
             return [], True
 
+    @staticmethod
+    def _call_contract_resolver(
+        fetch: Callable[..., Any], *, side: str, target_strikes: set[int]
+    ) -> list[Any]:
+        """Invoke resolver with compatible kwargs. Args: fetch/side/strikes. Returns: rows. Raises: none."""
+        attempts = [
+            {
+                "underlying": "NIFTY",
+                "side": side,
+                "option_type": side,
+                "strikes": sorted(target_strikes),
+                "expiry": "nearest_weekly",
+            },
+            {
+                "underlying": "NIFTY",
+                "option_type": side,
+                "strikes": sorted(target_strikes),
+            },
+            {"side": side, "strikes": sorted(target_strikes)},
+            {"option_type": side},
+            {},
+        ]
+        for kwargs in attempts:
+            try:
+                result = fetch(**kwargs)
+                return list(result or [])
+            except TypeError:
+                continue
+            except Exception:
+                continue
+        return []
+
     def _resolve_candidate_contracts(
         self, *, side: str, target_strikes: set[int]
     ) -> list[tuple[str, int]]:
@@ -1637,19 +1669,41 @@ class StrategyRunner:
                 fetch = getattr(source, method, None)
                 if not callable(fetch):
                     continue
-                try:
-                    rows = list(fetch())
-                except Exception:
+                rows = self._call_contract_resolver(
+                    fetch, side=side, target_strikes=target_strikes
+                )
+                if not rows:
                     continue
                 selected: list[tuple[str, int]] = []
                 for row in rows:
-                    if not isinstance(row, Mapping):
+                    row_mapping: Mapping[str, Any]
+                    if isinstance(row, Mapping):
+                        row_mapping = row
+                    elif hasattr(row, "__dict__"):
+                        row_mapping = cast(Mapping[str, Any], vars(row))
+                    else:
                         continue
-                    option_type = str(row.get("option_type") or row.get("instrument_type") or "").upper()
-                    strike = int(float(row.get("strike") or 0))
-                    exchange = str(row.get("exchange") or "NFO").upper()
-                    tradingsymbol = str(row.get("tradingsymbol") or "").upper()
-                    if option_type != side or strike not in target_strikes or not tradingsymbol:
+                    option_type = str(
+                        row_mapping.get("option_type")
+                        or row_mapping.get("instrument_type")
+                        or ""
+                    ).upper()
+                    if option_type not in {"CE", "PE"}:
+                        continue
+                    try:
+                        strike = int(float(row_mapping.get("strike") or 0))
+                    except (TypeError, ValueError):
+                        continue
+                    exchange = str(row_mapping.get("exchange") or "NFO").upper()
+                    tradingsymbol = str(row_mapping.get("tradingsymbol") or "").upper()
+                    expiry = str(row_mapping.get("expiry") or "").upper()
+                    if (
+                        option_type != side
+                        or strike not in target_strikes
+                        or not tradingsymbol
+                        or not expiry
+                        or re.search(r"\d{1,2}[A-Z]{3}", tradingsymbol) is None
+                    ):
                         continue
                     selected.append((f"{exchange}:{tradingsymbol}", strike))
                 if selected:
@@ -1669,7 +1723,7 @@ class StrategyRunner:
             norm = enforce_canonical(normalize_symbol(sym))
             if not norm.startswith("NFO:NIFTY") or not norm.endswith(side):
                 continue
-            match = re.search(r"(\d{5})(CE|PE)$", norm)
+            match = re.search(r"^NFO:NIFTY\d{1,2}[A-Z]{3}(\d{5})(CE|PE)$", norm)
             if match is None:
                 continue
             strike = int(match.group(1))
@@ -1680,6 +1734,14 @@ class StrategyRunner:
             len(selected),
             extra={"event": "CANDIDATE_RESOLVER_FALLBACK", "source": "tracked_symbols", "reason": "resolver_unavailable", "count": len(selected)},
         )
+        if not selected:
+            self._logger.warning(
+                "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=resolver_empty",
+                extra={
+                    "event": "CANDIDATE_SNAPSHOT_BUILD_FAILED",
+                    "reason": "resolver_empty",
+                },
+            )
         return selected
 
     # ==================== STATE & PERSISTENCE ====================
@@ -2595,25 +2657,35 @@ class StrategyRunner:
             gap_count = int(self._session_gap_count.get(symbol, 0))
             if gap_count > 1:
                 self._logger.warning(
-                    "SOFT_DATA_ISSUE symbol=%s reason=%s",
+                    "SOFT_DATA_ISSUE symbol=%s reason=%s source=%s age_s=%s",
                     symbol,
                     "repeated_missing_candles",
+                    "candle_gap_detector",
+                    None,
                     extra={
                         "event": "SOFT_DATA_ISSUE",
                         "symbol": symbol,
                         "reason": "repeated_missing_candles",
+                        "source": "candle_gap_detector",
+                        "age_s": None,
+                        "details": {"gaps": gap_count},
                         "gaps": gap_count,
                     },
                 )
                 return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
             self._logger.warning(
-                "SOFT_DATA_ISSUE symbol=%s reason=%s",
+                "SOFT_DATA_ISSUE symbol=%s reason=%s source=%s age_s=%s",
                 symbol,
                 "single_missing_candle",
+                "candle_gap_detector",
+                None,
                 extra={
                     "event": "SOFT_DATA_ISSUE",
                     "symbol": symbol,
                     "reason": "single_missing_candle",
+                    "source": "candle_gap_detector",
+                    "age_s": None,
+                    "details": {"gaps": gap_count},
                 },
             )
             return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
@@ -5773,7 +5845,13 @@ class StrategyRunner:
                 readiness = getattr(
                     self._market_data, "readiness_state_snapshot", lambda: {}
                 )()
-                if not bool(readiness.get("hard_ready")):
+                hard_ready_fn = getattr(self._market_data, "hard_ready", None)
+                hard_ready = (
+                    bool(hard_ready_fn())
+                    if callable(hard_ready_fn)
+                    else bool(readiness.get("hard_ready"))
+                )
+                if not hard_ready:
                     self._emit_runner_eval_decision(
                         symbol=symbol,
                         stage="phase9",
@@ -7120,7 +7198,13 @@ class StrategyRunner:
                 readiness = getattr(
                     self._market_data, "readiness_state_snapshot", lambda: {}
                 )()
-                if not bool(readiness.get("hard_ready")):
+                hard_ready_fn = getattr(self._market_data, "hard_ready", None)
+                hard_ready = (
+                    bool(hard_ready_fn())
+                    if callable(hard_ready_fn)
+                    else bool(readiness.get("hard_ready"))
+                )
+                if not hard_ready:
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "startup_pipeline_not_ready")
             option_side = infer_option_side(signal.symbol, metadata)
@@ -7202,6 +7286,52 @@ class StrategyRunner:
                 metadata["data_score"] = candidate.data_quality_score
                 metadata["spread_pct"] = candidate.spread_pct
                 metadata["candidate_score"] = candidate.score
+                metadata["candidate_selected"] = True
+                selected_snapshot = next(
+                    (
+                        snap
+                        for snap in candidate_snapshots_obj
+                        if isinstance(snap, dict)
+                        and normalize_symbol(str(snap.get("symbol") or ""))
+                        == normalize_symbol(candidate.symbol)
+                    ),
+                    {},
+                )
+                metadata["tradable_quote"] = bool(
+                    (selected_snapshot or {}).get("tradable_quote")
+                )
+            requires_final_score = bool(metadata.get("preliminary_only")) or bool(
+                metadata.get("requires_runner_final_score")
+            )
+            if requires_final_score:
+                required_components = (
+                    "direction_score",
+                    "strategy_score",
+                    "option_score",
+                    "data_score",
+                    "rr_score",
+                )
+                has_components = all(
+                    metadata.get(component) is not None
+                    for component in required_components
+                )
+                has_candidate = bool(metadata.get("candidate_selected"))
+                has_tradable_quote = bool(metadata.get("tradable_quote"))
+                if not (has_components and has_candidate and has_tradable_quote):
+                    self._logger.info(
+                        "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required symbol=%s trace_id=%s",
+                        base_symbol,
+                        trace_id,
+                        extra={
+                            "event": "SIGNAL_EXECUTION_RESULT",
+                            "accepted": False,
+                            "reason": "final_score_required",
+                            "symbol": base_symbol,
+                            "trace_id": trace_id,
+                        },
+                    )
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "final_score_required")
             missing_components = missing_score_components(metadata)
             if missing_components and reason_key == "premium_momentum_squeeze":
                 metadata["shadow_only"] = True
@@ -7253,6 +7383,25 @@ class StrategyRunner:
                     "final_score": quality.final_score,
                 },
             )
+            if requires_final_score:
+                live_threshold = float(quality.components.get("threshold", 0.0) or 0.0)
+                if quality.final_score < live_threshold:
+                    self._logger.info(
+                        "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required symbol=%s trace_id=%s",
+                        base_symbol,
+                        trace_id,
+                        extra={
+                            "event": "SIGNAL_EXECUTION_RESULT",
+                            "accepted": False,
+                            "reason": "final_score_required",
+                            "symbol": base_symbol,
+                            "trace_id": trace_id,
+                            "final_score": quality.final_score,
+                            "required_score": live_threshold,
+                        },
+                    )
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "final_score_required")
             if not quality.allowed:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(
