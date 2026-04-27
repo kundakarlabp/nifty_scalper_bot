@@ -23,8 +23,8 @@ from typing import Any
 LOGGER = logging.getLogger("nifty_scalper_bot.core.hydration")
 
 # Conservative default: 3-day window ensures same-day gaps don't produce 0 bars
-_DEFAULT_LOOKBACK_DAYS = 7
-_DEFAULT_MIN_BARS = 50
+_DEFAULT_LOOKBACK_DAYS = 2
+_DEFAULT_MIN_BARS = 100
 
 
 def assert_valid_token(token: Any) -> int:

@@ -381,9 +381,13 @@ class StrategyOrchestrator:
                 self._direction_lock_time = _t.time()
 
         self._logger.info(
-            f"✅ SIGNAL APPROVED: {symbol} | {action} | conf={confidence:.2f} | Strategy: {strategy_name}",
+            "ORCHESTRATOR_PREFILTER_PASSED symbol=%s action=%s conf=%.2f strategy=%s",
+            symbol,
+            action,
+            confidence,
+            strategy_name,
             extra={
-                "event": "orchestrator_approved",
+                "event": "orchestrator_prefilter_passed",
                 "symbol": symbol,
                 "action": action,
             },

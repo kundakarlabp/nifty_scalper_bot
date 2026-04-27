@@ -36,6 +36,7 @@ def test_selector_picks_highest_valid_candidate() -> None:
     )
     assert best is not None
     assert best.symbol == 'NFO:NIFTY23500CE'
+    assert best.side == 'CE'
 
 
 def test_selector_rejects_wide_spread_invalid_bid_ask_and_stale() -> None:
@@ -91,3 +92,15 @@ def test_no_recent_real_tick_is_block_when_strict_mode() -> None:
     )
     assert quality.allowed is False
     assert 'no_recent_real_tick' in quality.reasons
+
+
+def test_selector_sets_pe_side_for_pe_bias() -> None:
+    selector = TradeCandidateSelector()
+    best = selector.select_best_candidate(
+        underlying='NIFTY',
+        direction_bias='PE',
+        atm_strike=23500,
+        snapshots=[_snapshot('NFO:NIFTY23500PE', 23500)],
+    )
+    assert best is not None
+    assert best.side == 'PE'

@@ -2429,8 +2429,6 @@ class StrategyManager(_BaseStrategyManager):
         """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
         if not signals:
             return None
-        if len(signals) == 1:
-            return signals[0][0]
         by_side: dict[str, list[tuple[Signal, StrategyVote]]] = {
             'CE': [],
             'PE': [],
@@ -2454,6 +2452,53 @@ class StrategyManager(_BaseStrategyManager):
         winning = ce_votes if winning_side == 'CE' else pe_votes
         if not winning:
             return self._combine_signals([signal for signal, _ in signals])
+        if len(winning) == 1:
+            single_signal, single_vote = winning[0]
+            if single_vote.score < 8.5:
+                log.info(
+                    'STRATEGY_CONSENSUS side=NO_TRADE score=%.2f votes=1 reason=single_vote_low_score',
+                    single_vote.score,
+                    extra={
+                        'event': 'STRATEGY_CONSENSUS',
+                        'side': 'NO_TRADE',
+                        'score': single_vote.score,
+                        'votes': 1,
+                        'conflict': False,
+                        'reason': 'single_vote_low_score',
+                    },
+                )
+                return None
+            metadata = dict(single_signal.metadata or {})
+            metadata['strategy_score'] = round(
+                max(float(metadata.get('strategy_score') or 0.0), single_vote.score),
+                3,
+            )
+            metadata['confirming_votes'] = [single_vote.strategy]
+            metadata['direction_bias'] = winning_side
+            metadata['consensus_stage'] = 'preliminary_single_high_conviction'
+            log.info(
+                'STRATEGY_CONSENSUS side=%s score=%.2f votes=1 conflict=False reason=single_vote_high_conviction',
+                winning_side,
+                single_vote.score,
+                extra={
+                    'event': 'STRATEGY_CONSENSUS',
+                    'side': winning_side,
+                    'score': single_vote.score,
+                    'votes': 1,
+                    'conflict': False,
+                    'reason': 'single_vote_high_conviction',
+                },
+            )
+            return Signal(
+                action='BUY',
+                symbol=single_signal.symbol,
+                quantity=single_signal.quantity,
+                confidence=single_signal.confidence,
+                reason=single_signal.reason,
+                stop_loss=single_signal.stop_loss,
+                take_profit=single_signal.take_profit,
+                metadata=metadata,
+            )
         direction_score = float(indicators.get('direction_score') or 0.0)
         data_score = float(indicators.get('data_score') or 0.0)
         option_score = float(indicators.get('option_score') or 0.0)
