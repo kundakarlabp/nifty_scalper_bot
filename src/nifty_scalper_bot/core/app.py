@@ -3629,6 +3629,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             warn_on_rate_limit=poll_warn_rate_limit,
         )
         market_data_manager.disable_rest_polling(reason="polling_streamer_fallback")
+        market_data_manager.set_polling_fallback_streamer(polling_fallback_streamer)
         polling_fallback_streamer.set_websocket_mode(True)
 
         def _activate_polling_fallback() -> None:
@@ -6546,7 +6547,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                         recovered_since: float | None = None
                         activate_after = 3.0
                         recover_cooldown = 10.0
-                        quote_stale_ms = 5000
+                        fallback_stale_sec = max(
+                            1.0,
+                            float(
+                                os.getenv(
+                                    "POLLING_SUPERVISOR_INDEX_STALE_SECONDS", "120"
+                                )
+                                or 120.0
+                            ),
+                        )
+                        quote_stale_ms = int(fallback_stale_sec * 1000.0)
                         while True:
                             try:
                                 ws_ok = bool(ctx.websocket_manager.is_connected())
@@ -6574,12 +6584,23 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         now_mono - degraded_since >= activate_after
                                         and not polling_fallback.is_running()
                                     ):
+                                        if (
+                                            spot_age_ms is not None
+                                            and float(spot_age_ms) <= float(quote_stale_ms)
+                                            and ws_ok
+                                        ):
+                                            LOGGER.info(
+                                                "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s",
+                                                spot_age_ms,
+                                            )
+                                            await asyncio.sleep(1.0)
+                                            continue
                                         LOGGER.warning(
-                                            "Polling fallback activate (supervisor) ws_ok=%s stale=%s lagging=%s spot_quote_age_ms=%s",
-                                            ws_ok,
-                                            not bool(feed_health.get("trading_feed_healthy")),
-                                            lagging,
+                                            "POLLING_FALLBACK_ACTIVATE reason=spot_stale age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s",
                                             spot_age_ms,
+                                            quote_stale_ms,
+                                            ws_ok,
+                                            lagging,
                                             extra={
                                                 "event": "poll_fallback_activate",
                                                 "reason": (

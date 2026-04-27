@@ -85,6 +85,21 @@ class MarketSnapshot:
     latest_candle_synthetic: bool
     ohlc_valid: bool
     depth_available: bool = False
+    bid_missing: bool = False
+    ask_missing: bool = False
+    bid_ask_source: str = "missing"
+    tradable_quote: bool = False
+
+
+@dataclass(slots=True)
+class ResolvedInstrument:
+    """Resolved instrument details. Args: symbol. Returns: normalized payload. Raises: none."""
+
+    canonical_symbol: str
+    broker_symbol: str
+    instrument_token: int | None
+    exchange: str
+    tradingsymbol: str
 
 
 def canonical_symbol(symbol: str) -> str:
@@ -335,6 +350,7 @@ class MarketDataManager:
         self._zombie_restart_consecutive = 0
         self._zombie_stale_logged = False
         self._rest_refresh_inflight: set[str] = set()
+        self._polling_fallback_streamer: Any | None = None
         self._tick_stale_threshold_ms = self._parse_int_env(
             "TICK_STALE_MS", default=2_000, minimum=0
         )
@@ -1245,6 +1261,53 @@ class MarketDataManager:
             )
         return value
 
+    def _resolve_instrument(self, symbol: str) -> ResolvedInstrument:
+        """Resolve canonical and broker symbols. Args: symbol; Returns: resolved instrument; Raises: none."""
+        canonical_value = self._canonical_symbol(symbol)
+        exchange, tradingsymbol = canonical_value.split(":", 1)
+        broker_symbol = canonical_value
+        token = self._symbol_to_token.get(canonical_value) or self._token_by_symbol.get(
+            canonical_value
+        )
+        resolver = getattr(self, "_resolver", None)
+        if resolver is not None and hasattr(resolver, "resolve_symbol"):
+            try:
+                resolved = resolver.resolve_symbol(canonical_value)
+                if resolved:
+                    broker_symbol = str(
+                        resolved.get("broker_symbol")
+                        or resolved.get("exchange_symbol")
+                        or f"{resolved.get('exchange', exchange)}:{resolved.get('tradingsymbol', tradingsymbol)}"
+                    )
+                    token = int(
+                        resolved.get("instrument_token")
+                        or resolved.get("token")
+                        or token
+                        or 0
+                    ) or None
+                    exchange = str(resolved.get("exchange") or exchange)
+                    tradingsymbol = str(resolved.get("tradingsymbol") or tradingsymbol)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error("Failure in _resolve_instrument: %s", exc)
+        if canonical_value == "NSE:NIFTY":
+            if token is None:
+                self._logger.error(
+                    "SPOT_TOKEN_RESOLUTION_FAILED symbol=NSE:NIFTY reason=token_not_found"
+                )
+            else:
+                self._logger.info(
+                    "SPOT_BROKER_SYMBOL_RESOLVED canonical=NSE:NIFTY broker_symbol=%s token=%s",
+                    broker_symbol,
+                    token,
+                )
+        return ResolvedInstrument(
+            canonical_symbol=canonical_value,
+            broker_symbol=broker_symbol,
+            instrument_token=token,
+            exchange=exchange,
+            tradingsymbol=tradingsymbol,
+        )
+
     def _reconcile_ws_subscriptions(self) -> None:
         """Apply desired token set to websocket transport. Args: none. Returns: none. Raises: none."""
 
@@ -1418,6 +1481,52 @@ class MarketDataManager:
                 extra={"event": "mdm_internal_rest_poller_disabled", "reason": reason},
             )
 
+    def set_polling_fallback_streamer(self, streamer: Any) -> None:
+        """Attach polling fallback owner. Args: streamer; Returns: none; Raises: none."""
+        self._polling_fallback_streamer = streamer
+
+    def request_fallback_refresh(self, symbol: str, *, reason: str) -> bool:
+        """Request a fallback refresh. Args: symbol/reason; Returns: dispatched flag; Raises: none."""
+        resolved = self._resolve_instrument(symbol)
+        streamer = self._polling_fallback_streamer
+        owner = "polling_streamer" if streamer is not None else "mdm_rest"
+        self._logger.info(
+            "MDM_FALLBACK_REFRESH_REQUESTED symbol=%s owner=%s reason=%s",
+            resolved.canonical_symbol,
+            owner,
+            reason,
+        )
+        if streamer is not None:
+            token = resolved.instrument_token
+            if token is None:
+                self._logger.info(
+                    "MDM_FALLBACK_REFRESH_SKIPPED symbol=%s reason=missing_token",
+                    resolved.canonical_symbol,
+                )
+                return False
+            try:
+                if hasattr(streamer, "subscribe"):
+                    streamer.subscribe([int(token)])
+                if hasattr(streamer, "start") and hasattr(streamer, "is_running"):
+                    if not bool(streamer.is_running()):
+                        streamer.start()
+                return True
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "MDM_FALLBACK_REFRESH_SKIPPED symbol=%s reason=%s",
+                    resolved.canonical_symbol,
+                    exc,
+                )
+                return False
+        if not self._should_refresh_symbol(resolved.canonical_symbol):
+            self._logger.info(
+                "MDM_FALLBACK_REFRESH_SKIPPED symbol=%s reason=rate_limited",
+                resolved.canonical_symbol,
+            )
+            return False
+        self._schedule_rest_refresh(resolved.canonical_symbol)
+        return True
+
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
@@ -1523,8 +1632,8 @@ class MarketDataManager:
             and stale_threshold > 0.0
             and tick_age > stale_threshold
         )
-        if tick_stale and self._should_refresh_symbol(normalized_symbol):
-            self._schedule_rest_refresh(normalized_symbol)
+        if tick_stale:
+            self.request_fallback_refresh(normalized_symbol, reason="stale_tick")
         return tick
 
     def time_since_last_tick(self, symbol: str) -> float | None:
@@ -1544,7 +1653,9 @@ class MarketDataManager:
 
     async def _rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
-        canonical = self._canonical_symbol(symbol)
+        resolved = self._resolve_instrument(symbol)
+        canonical = resolved.canonical_symbol
+        broker_symbol = resolved.broker_symbol
         broker = self._broker or getattr(self, "_kite", None) or getattr(
             self, "_client", None
         )
@@ -1555,12 +1666,14 @@ class MarketDataManager:
             return None
         try:
             quote_payload: Any = None
-            if hasattr(broker, "ltp"):
-                quote_payload = broker.ltp([canonical])
+            if canonical.endswith(("CE", "PE")) and hasattr(broker, "get_quote"):
+                quote_payload = {broker_symbol: broker.get_quote(broker_symbol)}
+            elif hasattr(broker, "ltp"):
+                quote_payload = broker.ltp([broker_symbol])
             elif hasattr(broker, "get_ltp"):
-                quote_payload = {canonical: {"last_price": broker.get_ltp(canonical)}}
+                quote_payload = {broker_symbol: {"last_price": broker.get_ltp(broker_symbol)}}
             elif hasattr(broker, "get_quote"):
-                quote_payload = {canonical: broker.get_quote(canonical)}
+                quote_payload = {broker_symbol: broker.get_quote(broker_symbol)}
             else:
                 self._logger.debug(
                     "MDM_REST_REFRESH_SKIPPED symbol=%s reason=no_ltp_method",
@@ -1570,8 +1683,10 @@ class MarketDataManager:
 
             quote = quote_payload
             if isinstance(quote_payload, Mapping):
-                quote = quote_payload.get(canonical) or quote_payload.get(
-                    f"NSE:{canonical.split(':')[-1]}"
+                quote = (
+                    quote_payload.get(broker_symbol)
+                    or quote_payload.get(canonical)
+                    or quote_payload.get(f"NSE:{canonical.split(':')[-1]}")
                 )
             if not isinstance(quote, Mapping):
                 self._logger.debug(
@@ -1590,9 +1705,11 @@ class MarketDataManager:
                 "symbol": canonical,
                 "ltp": float(ltp),
                 "last_price": float(ltp),
+                "bid": _coerce_positive_float(quote.get("bid") or quote.get("buy_price")),
+                "ask": _coerce_positive_float(quote.get("ask") or quote.get("sell_price")),
                 "received_at": time.time(),
                 "timestamp": time.time(),
-                "source": "rest",
+                "source": "rest_quote" if canonical.endswith(("CE", "PE")) else "rest_ltp",
             }
             with self._lock:
                 previous = self._latest_ticks.get(canonical)
@@ -1600,16 +1717,19 @@ class MarketDataManager:
             if normalized is None:
                 return None
             self._emit_tick(canonical, normalized, source="rest")
-            self._logger.info(
-                "MDM_REST_FALLBACK_USED symbol=%s ltp=%s",
-                canonical,
-                float(ltp),
-                extra={
-                    "event": "MDM_REST_FALLBACK_USED",
-                    "symbol": canonical,
-                    "ltp": float(ltp),
-                },
-            )
+            if canonical.endswith(("CE", "PE")):
+                self._logger.info(
+                    "MDM_REST_QUOTE_FALLBACK_USED symbol=%s bid=%s ask=%s",
+                    canonical,
+                    tick.get("bid"),
+                    tick.get("ask"),
+                )
+            else:
+                self._logger.info(
+                    "MDM_REST_FALLBACK_USED symbol=%s ltp=%s",
+                    canonical,
+                    float(ltp),
+                )
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "MDM_REST_REFRESH_FAILED symbol=%s error=%s", canonical, exc
@@ -3124,7 +3244,7 @@ class MarketDataManager:
             return False
         self._spot_refresh_last_attempt_mono = now_mono
         self._logger.info("spot_rest_refresh_attempt symbol=%s", canonical_symbol)
-        self.request_refresh(canonical_symbol)
+        self.request_fallback_refresh(canonical_symbol, reason="spot_reference_stale")
         return False
 
     def get_hydration_status(self, symbol: str) -> str:
@@ -4851,6 +4971,12 @@ class MarketDataManager:
         latest_candle_synthetic = bool(latest.get("synthetic")) if isinstance(latest, Mapping) else False
         ohlc_valid = bool(bars)
         depth_available = isinstance(tick.get("depth"), Mapping) and bool(tick.get("depth"))
+        bid_missing = bool(tick.get("bid_missing")) or bid is None or bid <= 0
+        ask_missing = bool(tick.get("ask_missing")) or ask is None or ask <= 0
+        bid_ask_source = str(tick.get("bid_ask_source") or ("market_depth" if depth_available else "missing"))
+        tradable_quote = (not bid_missing and not ask_missing) and bool(
+            tick.get("tradable_quote", True)
+        )
         snapshot = MarketSnapshot(
             symbol=str(symbol),
             canonical_symbol=canonical,
@@ -4865,6 +4991,10 @@ class MarketDataManager:
             latest_candle_synthetic=latest_candle_synthetic,
             ohlc_valid=ohlc_valid,
             depth_available=depth_available,
+            bid_missing=bid_missing,
+            ask_missing=ask_missing,
+            bid_ask_source=bid_ask_source,
+            tradable_quote=tradable_quote,
         )
         age_value = snapshot.tick_age_s
         stale_threshold = self._ltp_stale_threshold_for_symbol(canonical)
@@ -5710,32 +5840,24 @@ class MarketDataManager:
         if ask is None:
             ask = self._coerce_from_depth(depth, "sell")
 
-        # 4. Handle Empty Depth Gracefully (Prevent Errors)
+        # 4. Preserve missing bid/ask (do not fabricate from LTP)
         if bid is None:
             buy_levels = depth.get("buy")
             if isinstance(buy_levels, list) and not buy_levels:
-                # Empty list = valid "no buyers" state
                 self._logger.debug(
                     "Depth present but buy side empty", extra={"symbol": symbol}
                 )
-            # Fallback: Previous > LTP
-            bid = previous.get("bid") if previous else ltp
 
         if ask is None:
             sell_levels = depth.get("sell")
             if isinstance(sell_levels, list) and not sell_levels:
-                # Empty list = valid "no sellers" state
                 self._logger.debug(
                     "Depth present but sell side empty", extra={"symbol": symbol}
                 )
-            # Fallback: Previous > LTP
-            ask = previous.get("ask") if previous else ltp
 
-        # Final Safety
-        if bid is None:
-            bid = ltp
-        if ask is None:
-            ask = ltp
+        bid_missing = bid is None or float(bid) <= 0
+        ask_missing = ask is None or float(ask) <= 0
+        tradable_quote = not bid_missing and not ask_missing
 
         timestamp = self._coerce_timestamp(tick)
 
@@ -5743,20 +5865,26 @@ class MarketDataManager:
             "symbol": symbol,
             "ltp": float(ltp),
             "last_price": float(ltp),
-            "bid": float(bid),
-            "ask": float(ask),
+            "bid": float(bid) if not bid_missing else None,
+            "ask": float(ask) if not ask_missing else None,
             "timestamp": timestamp,
             "received_at": self._parse_wallclock(
                 tick.get("received_at") or tick.get("wallclock")
             )
             or time.time(),
             "depth": depth,
+            "bid_missing": bid_missing,
+            "ask_missing": ask_missing,
+            "bid_ask_source": "market_depth" if depth else "missing",
+            "tradable_quote": tradable_quote,
             "ltq": tick.get("last_quantity"),
             "oi": self._coerce_float(tick, "oi", "open_interest"),
         }
         source = tick.get("source")
         if isinstance(source, str) and source:
             normalized["source"] = source
+            if tradable_quote and not depth:
+                normalized["bid_ask_source"] = source
         broker_timestamp = tick.get("broker_timestamp")
         if broker_timestamp is not None:
             normalized["broker_timestamp"] = broker_timestamp

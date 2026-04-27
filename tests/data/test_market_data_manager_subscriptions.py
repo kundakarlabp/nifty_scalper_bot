@@ -172,3 +172,59 @@ def test_ltp_stale_thresholds_are_symbol_specific(monkeypatch) -> None:
         lambda: MarketState.CLOSED,
     )
     assert mdm._ltp_stale_threshold_for_symbol('NSE:NIFTY') == 3600.0  # noqa: SLF001
+
+
+class DummyPollingFallback:
+    def __init__(self) -> None:
+        self.subscribed: list[list[int]] = []
+        self.started = False
+
+    def subscribe(self, tokens: list[int]) -> None:
+        self.subscribed.append(tokens)
+
+    def is_running(self) -> bool:
+        return self.started
+
+    def start(self) -> None:
+        self.started = True
+
+
+def test_normalize_tick_does_not_fabricate_bid_ask() -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+
+    tick = mdm._normalize_tick('NFO:NIFTY26APR23800CE', {'last_price': 123.0})  # noqa: SLF001
+
+    assert tick is not None
+    assert tick['bid'] is None
+    assert tick['ask'] is None
+    assert tick['tradable_quote'] is False
+    assert tick['bid_ask_source'] == 'missing'
+
+
+def test_snapshot_marks_ltp_only_quote_not_tradable() -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    mdm._emit_tick(  # noqa: SLF001
+        'NFO:NIFTY26APR23800CE',
+        {'symbol': 'NFO:NIFTY26APR23800CE', 'last_price': 123.0, 'ltp': 123.0, 'source': 'rest_ltp'},
+        source='rest_ltp',
+    )
+
+    snap = mdm.get_symbol_snapshot('NFO:NIFTY26APR23800CE')
+
+    assert snap.bid is None
+    assert snap.ask is None
+    assert snap.tradable_quote is False
+
+
+def test_ensure_fresh_tick_uses_polling_fallback_owner(monkeypatch) -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    fallback = DummyPollingFallback()
+    mdm.set_polling_fallback_streamer(fallback)
+    monkeypatch.setattr(mdm, 'get_latest_tick', lambda _symbol: None)
+    monkeypatch.setattr(mdm, 'time_since_last_tick', lambda _symbol: 999.0)
+
+    import asyncio
+
+    asyncio.run(mdm.ensure_fresh_tick('NSE:NIFTY'))
+
+    assert fallback.subscribed
