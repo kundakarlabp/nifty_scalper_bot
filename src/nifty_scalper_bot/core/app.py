@@ -1694,6 +1694,9 @@ class BotContext:
     telegram_wired: bool = False
     background_tasks_started: bool = False
     data_hub_listeners_registered: bool = False
+    live_orders_armed: bool = False
+    trading_ready: bool = False
+    readiness_mode: str = "SHADOW"
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -5555,11 +5558,18 @@ def force_enable_trading_override() -> str:
 
 async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration and Option-Only Trading."""
-
+    configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+    if configured_mode not in {"LIVE", "PAPER", "SHADOW"}:
+        configured_mode = "SHADOW"
+    ctx.live_orders_armed = False
+    ctx.trading_ready = False
+    ctx.readiness_mode = "DATA_WARMUP" if configured_mode == "LIVE" else configured_mode
     LOGGER.info(
-        "Startup | mode=%s | live=%s | data_dir=%s | port=%s",
-        ctx.settings.execution_mode,
-        ctx.settings.enable_live,
+        "Startup | configured_mode=%s | effective_mode=%s | live_orders_armed=%s | trading_ready=%s | data_dir=%s | port=%s",
+        configured_mode,
+        ctx.readiness_mode,
+        ctx.live_orders_armed,
+        ctx.trading_ready,
         ctx.settings.data_dir,
         os.getenv("PORT"),
     )
@@ -7277,16 +7287,37 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "ws_connected": ws_connected,
                                     },
                                 )
-                            live_mode = (
-                                str(os.getenv("EXECUTION_MODE", "SHADOW"))
-                                .strip()
-                                .upper()
-                                == "LIVE"
-                                or str(os.getenv("ENABLE_LIVE", "false"))
+                            live_mode = configured_mode == "LIVE" or (
+                                str(os.getenv("ENABLE_LIVE", "false"))
                                 .strip()
                                 .lower()
                                 in {"1", "true", "yes", "on"}
                             )
+                            quote_available = True
+                            quote_error = None
+                            ws_quote_proof = False
+                            quote_status_fn = getattr(
+                                ctx.market_data_manager, "quote_api_status_snapshot", None
+                            )
+                            if callable(quote_status_fn):
+                                quote_status = quote_status_fn() or {}
+                                quote_available = bool(quote_status.get("available", True))
+                                quote_error = quote_status.get("error")
+                            ws_quote_proof_fn = getattr(
+                                ctx.market_data_manager, "has_ws_tradable_quote", None
+                            )
+                            if callable(ws_quote_proof_fn):
+                                ws_quote_proof = bool(ws_quote_proof_fn())
+                            if live_mode and not quote_available:
+                                LOGGER.info(
+                                    "BROKER_QUOTE_CAPABILITY status=unavailable reason=%s",
+                                    quote_error or "unknown",
+                                    extra={
+                                        "event": "BROKER_QUOTE_CAPABILITY",
+                                        "status": "unavailable",
+                                        "reason": quote_error or "unknown",
+                                    },
+                                )
                             if hard_ready:
                                 LOGGER.info(
                                     "DATA_PIPELINE_READY hard_ready=%s spot_ready=%s symbols_ready=%s",
@@ -7302,6 +7333,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         ),
                                     },
                                 )
+                            if live_mode and hard_ready and quote_available:
+                                ctx.live_orders_armed = True
+                                ctx.trading_ready = True
+                                ctx.readiness_mode = "LIVE"
                             if live_mode and not hard_ready:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
@@ -7317,6 +7352,28 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "spot_ready": spot_ready,
                                     },
                                 )
+                            if (
+                                live_mode
+                                and not quote_available
+                                and not ws_quote_proof
+                            ):
+                                ctx.live_orders_armed = False
+                                ctx.trading_ready = False
+                                ctx.readiness_mode = "DATA_WARMUP"
+                                LOGGER.error(
+                                    "LIVE_TRADING_BLOCKED reason=broker_quote_access_denied",
+                                    extra={
+                                        "event": "LIVE_TRADING_BLOCKED",
+                                        "reason": "broker_quote_access_denied",
+                                    },
+                                )
+                            LOGGER.info(
+                                "Startup | configured_mode=%s | effective_mode=%s | live_orders_armed=%s | trading_ready=%s",
+                                configured_mode,
+                                ctx.readiness_mode,
+                                bool(getattr(ctx, "live_orders_armed", False)),
+                                bool(getattr(ctx, "trading_ready", False)),
+                            )
                         except Exception as ready_exc:
                             LOGGER.critical(
                                 "Startup readiness gate failed: %s",

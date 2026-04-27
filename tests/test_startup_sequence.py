@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -431,3 +432,14 @@ def test_settings_execution_mode_and_data_dir_compat() -> None:
     settings.paper_mode = False
     settings.enable_live = True
     assert settings.execution_mode == 'LIVE'
+
+
+def test_startup_logging_uses_configured_and_effective_mode_fields() -> None:
+    source = Path('src/nifty_scalper_bot/core/app.py').read_text(encoding='utf-8')
+    assert 'Startup | configured_mode=%s | effective_mode=%s | live_orders_armed=%s | trading_ready=%s' in source
+
+
+def test_startup_blocks_live_on_quote_access_denied() -> None:
+    source = Path('src/nifty_scalper_bot/core/app.py').read_text(encoding='utf-8')
+    assert 'LIVE_TRADING_BLOCKED reason=broker_quote_access_denied' in source
+    assert 'BROKER_QUOTE_CAPABILITY status=unavailable reason=%s' in source

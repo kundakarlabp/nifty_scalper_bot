@@ -228,6 +228,39 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._positions_cache: _RestCacheEntry | None = None
         self._orders_cache: _RestCacheEntry | None = None
         self._margins_cache: dict[str, _RestCacheEntry] = {}
+        self._quote_api_available = True
+        self._quote_api_error: str | None = None
+        self._quote_api_last_checked_at: float | None = None
+
+    def quote_api_available(self) -> bool:
+        """Return quote API capability flag."""
+        return bool(self._quote_api_available)
+
+    def quote_api_status_snapshot(self) -> dict[str, Any]:
+        """Return quote API capability status."""
+        return {
+            "available": bool(self._quote_api_available),
+            "error": self._quote_api_error,
+            "last_checked_at": self._quote_api_last_checked_at,
+        }
+
+    def _is_quote_access_denied(self, exc: Exception) -> bool:
+        """Detect terminal access denied state from broker quote calls."""
+        text = str(exc).lower()
+        return (
+            "access denied" in text
+            or "forbidden" in text
+            or "http 403" in text
+            or "403" in text
+        )
+
+    def _mark_quote_api_status(
+        self, *, available: bool, error: str | None = None
+    ) -> None:
+        """Record quote API capability state."""
+        self._quote_api_available = bool(available)
+        self._quote_api_error = str(error) if error else None
+        self._quote_api_last_checked_at = time.time()
 
     def _load_rest_cache(
         self, cache: _RestCacheEntry | None, *, label: str
@@ -336,6 +369,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 self._make_request("GET", "/quote", params={"i": ordered_items})
             )
         except Exception as exc:  # noqa: BLE001
+            if self._is_quote_access_denied(exc):
+                self._mark_quote_api_status(available=False, error="access_denied")
             LOGGER.error(
                 "Failure in ZerodhaKiteClient.quote_any request: %s",
                 exc,
@@ -345,6 +380,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             return None
 
         data = response.get("data")
+        self._mark_quote_api_status(available=True)
         if not isinstance(data, Mapping):
             LOGGER.info(
                 "Condition met: zerodha_quote_any_empty",
@@ -428,10 +464,16 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         # Send every alias to Kite so a single round-trip covers any naming
         # mismatch.  Kite silently drops unknown keys from the response.
-        response = self._ensure_json(
-            self._make_request("GET", "/quote", params={"i": variants})
-        )
+        try:
+            response = self._ensure_json(
+                self._make_request("GET", "/quote", params={"i": variants})
+            )
+        except Exception as exc:
+            if self._is_quote_access_denied(exc):
+                self._mark_quote_api_status(available=False, error="access_denied")
+            raise
         data = response.get("data", {})
+        self._mark_quote_api_status(available=True)
         quote_data: Mapping[str, Any] | None = None
         if isinstance(data, Mapping):
             direct = data.get(kite_symbol)

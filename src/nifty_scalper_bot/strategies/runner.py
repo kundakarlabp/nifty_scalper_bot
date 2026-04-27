@@ -806,6 +806,8 @@ class StrategyRunner:
         await self._process_token(token, candles, indicators)
 
     async def _process_token(self, token, candles, indicators):
+        """Process token candles into signals. Args: token, candles, indicators. Returns: None. Raises: none."""
+        del indicators
         symbol = None
         if self._market_data and hasattr(self._market_data, "_symbol_by_token"):
             symbol = self._market_data._symbol_by_token.get(token)
@@ -818,14 +820,37 @@ class StrategyRunner:
                 return
             latest_candle = candles.iloc[-1]
             price = float(latest_candle['close'])
+            trace_id = f"{symbol}-{int(time.time() * 1000)}"
 
             signal = self._strategy_manager.generate_signal(symbol, price)
             if signal:
                 from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
-                self._handle_signal(signal, price, now, trace_id=trace_id)
+                prepared_signal: Signal | None = None
+                prepare_reason: str | None = None
+                try:
+                    asyncio.get_running_loop()
+                    prepare_reason = "candidate_refresh_pending"
+                except RuntimeError:
+                    prepared_signal, prepare_reason = asyncio.run(
+                        self._prepare_signal_for_handling(
+                            signal,
+                            price,
+                            trace_id,
+                        )
+                    )
+                if prepared_signal is None:
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="token_process",
+                        reason=str(prepare_reason or "signal_prepare_failed"),
+                        allowed=False,
+                        trace_id=trace_id,
+                    )
+                    return
+                self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
 
-            print(f"STRATEGY TRIGGERED: {token}")
+            self._logger.debug("STRATEGY_TRIGGERED token=%s symbol=%s", token, symbol)
         except Exception as e:
             self._logger.error(f"Error in _process_token for {symbol}: {e}")
 
@@ -1620,6 +1645,56 @@ class StrategyRunner:
             self._logger.error("CANDIDATE_SNAPSHOT_BUILD_FAILED reason=%s", exc)
             return [], True
 
+    async def _prepare_signal_for_handling(
+        self,
+        signal: Signal,
+        price: float,
+        trace_id: str | None,
+    ) -> tuple[Signal | None, str | None]:
+        """Prepare signal metadata pre-sync handler. Args: signal, price, trace_id. Returns: prepared signal + block reason. Raises: none."""
+        del price
+        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+        is_live_mode = mode == "LIVE" or (
+            str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if not is_live_mode:
+            return signal, None
+        if self._market_data is not None:
+            readiness = getattr(
+                self._market_data, "readiness_state_snapshot", lambda: {}
+            )()
+            hard_ready_fn = getattr(self._market_data, "hard_ready", None)
+            hard_ready = (
+                bool(hard_ready_fn())
+                if callable(hard_ready_fn)
+                else bool(readiness.get("hard_ready"))
+            )
+            if not hard_ready:
+                return None, "startup_pipeline_not_ready"
+        metadata = dict(signal.metadata or {})
+        option_side = infer_option_side(signal.symbol, metadata)
+        is_directional_option = option_side in {"CE", "PE"}
+        if not is_directional_option:
+            return dataclasses.replace(signal, metadata=metadata), None
+        candidate_snapshots_obj = metadata.get("candidate_snapshots")
+        if not isinstance(candidate_snapshots_obj, list):
+            underlying = self._extract_underlying(signal.symbol) or "NIFTY"
+            atm_strike = int(metadata.get("atm_strike") or 0)
+            built, refresh_pending = await self.build_candidate_snapshots_async(
+                direction_bias=cast(Literal["CE", "PE"], option_side),
+                atm_strike=atm_strike,
+                underlying=underlying,
+            )
+            if refresh_pending:
+                return None, "candidate_refresh_pending"
+            if not built:
+                return None, "missing_candidate_snapshots"
+            metadata["candidate_snapshots"] = built
+        if not metadata.get("candidate_snapshots"):
+            return None, "missing_candidate_snapshots"
+        return dataclasses.replace(signal, metadata=metadata), None
+
     @staticmethod
     def _call_contract_resolver(
         fetch: Callable[..., Any], *, side: str, target_strikes: set[int]
@@ -1683,11 +1758,13 @@ class StrategyRunner:
                         row_mapping = cast(Mapping[str, Any], vars(row))
                     else:
                         continue
-                    option_type = str(
-                        row_mapping.get("option_type")
-                        or row_mapping.get("instrument_type")
-                        or ""
-                    ).upper()
+                    option_type = str(row_mapping.get("option_type") or "").upper()
+                    tradingsymbol = str(row_mapping.get("tradingsymbol") or "").upper()
+                    if option_type not in {"CE", "PE"}:
+                        if tradingsymbol.endswith("CE"):
+                            option_type = "CE"
+                        elif tradingsymbol.endswith("PE"):
+                            option_type = "PE"
                     if option_type not in {"CE", "PE"}:
                         continue
                     try:
@@ -1695,7 +1772,6 @@ class StrategyRunner:
                     except (TypeError, ValueError):
                         continue
                     exchange = str(row_mapping.get("exchange") or "NFO").upper()
-                    tradingsymbol = str(row_mapping.get("tradingsymbol") or "").upper()
                     expiry = str(row_mapping.get("expiry") or "").upper()
                     if (
                         option_type != side
@@ -6405,13 +6481,42 @@ class StrategyRunner:
                             "timestamp": now.isoformat(),
                         }
 
-                self._logger.info(
+                self._logger.debug(
                     "SIGNAL_EXECUTING symbol=%s action=%s reason=%s price=%.2f",
                     symbol, signal.action, signal.reason, price,
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
-                result = self._handle_signal(signal, price, now, trace_id=trace_id)
+                prepared_signal: Signal | None = None
+                prepare_reason: str | None = None
+                try:
+                    asyncio.get_running_loop()
+                    prepare_reason = "candidate_refresh_pending"
+                except RuntimeError:
+                    prepared_signal, prepare_reason = asyncio.run(
+                        self._prepare_signal_for_handling(
+                            signal,
+                            price,
+                            trace_id,
+                        )
+                    )
+                if prepared_signal is None:
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="phase10_execute",
+                        reason=str(prepare_reason or "signal_prepare_failed"),
+                        allowed=False,
+                        trace_id=trace_id,
+                    )
+                    self._logger.info(
+                        "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
+                        symbol, False, prepare_reason, None, trace_id,
+                        extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": symbol, "accepted": False, "reason": prepare_reason, "order_id": None, "trace_id": trace_id},
+                    )
+                    return
+                result = self._handle_signal(
+                    prepared_signal, price, now, trace_id=trace_id
+                )
                 if result.accepted:
                     self._symbol_last_signal_ts[symbol] = time.time()
                 self._logger.info(
@@ -6672,6 +6777,31 @@ class StrategyRunner:
                 },
             )
             return SignalExecutionResult(False, "outside_market_hours", details={"trace_id": trace_id})
+        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+        is_live_mode = mode == "LIVE" or (
+            str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if is_live_mode and self._market_data is not None:
+            readiness = getattr(
+                self._market_data, "readiness_state_snapshot", lambda: {}
+            )()
+            hard_ready_fn = getattr(self._market_data, "hard_ready", None)
+            hard_ready = (
+                bool(hard_ready_fn())
+                if callable(hard_ready_fn)
+                else bool(readiness.get("hard_ready"))
+            )
+            if not hard_ready:
+                self._emit_runner_eval_decision(
+                    symbol=self._normalize_symbol(signal.symbol),
+                    stage="handle_signal",
+                    reason="startup_pipeline_not_ready",
+                    allowed=False,
+                    trace_id=trace_id,
+                    readiness=readiness,
+                )
+                return SignalExecutionResult(False, "startup_pipeline_not_ready")
         self._logger.info(
             "RUNNER_SIGNAL_DECISION",
             extra={
@@ -7363,6 +7493,7 @@ class StrategyRunner:
                 data_score=float(metadata.get("data_score", 0.0) or 0.0),
                 rr_score=float(metadata.get("rr_score", 0.0) or 0.0),
             )
+            final_confidence = max(0.0, min(1.0, quality.final_score / 10.0))
             self._logger.info(
                 "SIGNAL_SCORE final=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
                 quality.final_score,
@@ -7371,7 +7502,7 @@ class StrategyRunner:
                 quality.option_score,
                 quality.data_score,
                 quality.rr_score,
-                max(0.0, min(1.0, quality.final_score / 10.0)),
+                final_confidence,
                 quality.allowed,
                 quality.reasons,
                 trace_id,
@@ -7411,7 +7542,7 @@ class StrategyRunner:
                 )
             signal = dataclasses.replace(
                 signal,
-                confidence=max(0.0, min(1.0, quality.final_score / 10.0)),
+                confidence=final_confidence,
                 metadata={
                     **metadata,
                     "final_score": quality.final_score,
