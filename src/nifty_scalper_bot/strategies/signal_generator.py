@@ -1539,6 +1539,7 @@ class StrategyManager:
                         **(signal.metadata or {}),
                         "single_vote_high_conviction": True,
                         "preliminary_only": True,
+                        "requires_runner_final_score": True,
                     },
                 )
 

@@ -276,7 +276,7 @@ class DataHub:
         with self._lock:
             self._positions = new_positions
         self.checkpoint()
-        LOGGER.info("Positions replaced in DataHub | count=%s", len(self._positions))
+        LOGGER.debug("Positions replaced in DataHub | count=%s", len(self._positions))
 
     def get_positions(self) -> dict:
         with self._lock:

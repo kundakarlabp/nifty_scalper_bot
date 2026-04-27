@@ -249,7 +249,7 @@ class StrategyOrchestrator:
             and (now - self._last_signal_time) < signal_cooldown
         ):
             elapsed = now - self._last_signal_time
-            self._logger.info(  # ✅ CHANGED: DEBUG → INFO
+            self._logger.debug(
                 f"⏳ RATE LIMIT: {symbol} | Wait {signal_cooldown - elapsed:.1f}s (global {signal_cooldown}s cooldown)",
                 extra={
                     "event": "orchestrator_rate_limit",

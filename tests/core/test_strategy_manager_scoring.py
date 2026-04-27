@@ -274,3 +274,4 @@ def test_strategy_manager_single_strong_vote_is_preliminary_only() -> None:
     signal = manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0)
     assert signal is not None
     assert bool(signal.metadata.get('preliminary_only')) is True
+    assert bool(signal.metadata.get('requires_runner_final_score')) is True
