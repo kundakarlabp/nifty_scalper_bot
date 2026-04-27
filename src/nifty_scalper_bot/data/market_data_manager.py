@@ -201,6 +201,7 @@ class MarketDataManager:
             "spot_ready": False,
             "missing_hard": [],
         }
+        self._spot_ready_logged = False
         self._spot_refresh_last_attempt_mono: float = 0.0
         # Bounded queue: drops oldest when full so a stall in the async
         # consumer never grows memory without bound. Size 10 000 is ~8 s
@@ -3017,7 +3018,40 @@ class MarketDataManager:
             readiness_state = self._readiness_state(bars, min_bars, requirements)
             self._last_readiness_state = dict(readiness_state)
             valid_symbols = [s for s, count in bars.items() if count >= min_bars]
+            spot_symbol = str(requirements.get("spot") or "NSE:NIFTY")
+            spot_age_ms = self.symbol_data_age_ms(spot_symbol) if spot_symbol else -1
+            if readiness_state["spot_ready"] and not self._spot_ready_logged:
+                spot_source = str(self._last_tick_source.get(spot_symbol, "unknown"))
+                source = "ws" if spot_source == "ws" else "rest_ltp"
+                token = self._token_by_symbol.get(spot_symbol)
+                self._spot_ready_logged = True
+                self._logger.info(
+                    "SPOT_READY symbol=%s source=%s age_ms=%s token=%s",
+                    spot_symbol,
+                    source,
+                    max(0, int(spot_age_ms)),
+                    token,
+                    extra={
+                        "event": "SPOT_READY",
+                        "symbol": spot_symbol,
+                        "source": source,
+                        "age_ms": max(0, int(spot_age_ms)),
+                        "token": token,
+                    },
+                )
             if readiness_state["hard_ready"]:
+                self._logger.info(
+                    "DATA_PIPELINE_READY hard_ready=%s spot_ready=%s symbols_ready=%s",
+                    True,
+                    readiness_state["spot_ready"],
+                    len(valid_symbols),
+                    extra={
+                        "event": "DATA_PIPELINE_READY",
+                        "hard_ready": True,
+                        "spot_ready": readiness_state["spot_ready"],
+                        "symbols_ready": len(valid_symbols),
+                    },
+                )
                 self.ready = True
                 self.degraded = False
                 self.hydration_complete = True
@@ -3031,6 +3065,18 @@ class MarketDataManager:
                     },
                 )
                 return
+            self._logger.info(
+                "DATA_PIPELINE_NOT_READY hard_ready=%s spot_ready=%s missing=%s",
+                False,
+                readiness_state["spot_ready"],
+                readiness_state.get("missing_hard") or [],
+                extra={
+                    "event": "DATA_PIPELINE_NOT_READY",
+                    "hard_ready": False,
+                    "spot_ready": readiness_state["spot_ready"],
+                    "missing": readiness_state.get("missing_hard") or [],
+                },
+            )
             await asyncio.sleep(0.1)
 
         market_state = get_market_state()
@@ -3148,6 +3194,18 @@ class MarketDataManager:
     def readiness_state_snapshot(self) -> dict[str, Any]:
         """Return latest readiness classification snapshot."""
         return dict(self._last_readiness_state)
+
+    def hard_ready(self) -> bool:
+        """Args: none; Returns: hard readiness flag; Raises: none."""
+        return bool(self._last_readiness_state.get("hard_ready"))
+
+    def spot_ready(self) -> bool:
+        """Args: none; Returns: spot readiness flag; Raises: none."""
+        return bool(self._last_readiness_state.get("spot_ready"))
+
+    def missing_hard(self) -> list[str]:
+        """Args: none; Returns: missing hard dependencies; Raises: none."""
+        return list(self._last_readiness_state.get("missing_hard") or [])
 
     def _is_symbol_fresh(self, symbol: str, max_age_ms: int) -> bool:
         """Return whether a symbol has a fresh enough tick age."""

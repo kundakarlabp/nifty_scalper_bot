@@ -1796,7 +1796,7 @@ class StrategyManager(_BaseStrategyManager):
         required_missing = sorted(
             name for name in self._required_indicators if indicators.get(name) is None
         )
-        log.info(
+        log.debug(
             "STRATEGY_MANAGER_ENTER",
             extra={
                 "event": "STRATEGY_MANAGER_ENTER",
@@ -1831,7 +1831,7 @@ class StrategyManager(_BaseStrategyManager):
 
         def _emit_strategy_exit() -> None:
             """Emit terminal strategy manager summary. Args: none. Returns: none. Raises: none."""
-            log.info(
+            log.debug(
                 "STRATEGY_MANAGER_EXIT",
                 extra={
                     "event": "STRATEGY_MANAGER_EXIT",

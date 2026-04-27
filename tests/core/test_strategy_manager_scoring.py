@@ -254,3 +254,23 @@ def test_strategy_manager_same_side_votes_increase_strategy_score() -> None:
     signal = manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0)
     assert signal is not None
     assert float(signal.metadata.get('strategy_score') or 0.0) > 8.0
+
+
+def test_strategy_manager_single_weak_vote_returns_none() -> None:
+    manager = StrategyManager(
+        [_FixedSymbolSignalStrategy('Alpha', 'NFO:NIFTY26FEB22500CE', 0.80)],
+        _DummyIndicatorEngine(),
+        _DummyPositionManager(),
+    )
+    assert manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0) is None
+
+
+def test_strategy_manager_single_strong_vote_is_preliminary_only() -> None:
+    manager = StrategyManager(
+        [_FixedSymbolSignalStrategy('Alpha', 'NFO:NIFTY26FEB22500CE', 0.90)],
+        _DummyIndicatorEngine(),
+        _DummyPositionManager(),
+    )
+    signal = manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0)
+    assert signal is not None
+    assert bool(signal.metadata.get('preliminary_only')) is True

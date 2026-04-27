@@ -1516,7 +1516,31 @@ class StrategyManager:
                 return None
 
             if len(signals) == 1:
-                return signals[0]
+                signal = signals[0]
+                raw_conf = float(getattr(signal, "confidence", 0.0) or 0.0)
+                normalized_conf = raw_conf / 100.0 if raw_conf > 1.0 else raw_conf
+                preliminary_score = max(0.0, min(10.0, normalized_conf * 10.0))
+                if preliminary_score < 8.5:
+                    self._logger.info(
+                        "STRATEGY_CONSENSUS side=NO_TRADE score=%.2f votes=1 reason=single_vote_low_score",
+                        preliminary_score,
+                        extra={
+                            "event": "STRATEGY_CONSENSUS",
+                            "side": "NO_TRADE",
+                            "score": preliminary_score,
+                            "votes": 1,
+                            "reason": "single_vote_low_score",
+                        },
+                    )
+                    return None
+                return dataclasses.replace(
+                    signal,
+                    metadata={
+                        **(signal.metadata or {}),
+                        "single_vote_high_conviction": True,
+                        "preliminary_only": True,
+                    },
+                )
 
             def _normalize_confidence(value: float) -> float:
                 scaled = float(value)
@@ -1531,6 +1555,28 @@ class StrategyManager:
             buy_signals = [
                 (signal, conf) for signal, conf in normalized if signal.action == "BUY"
             ]
+            buy_ce_signals = [
+                (signal, conf)
+                for signal, conf in buy_signals
+                if str(signal.symbol).upper().endswith("CE")
+            ]
+            buy_pe_signals = [
+                (signal, conf)
+                for signal, conf in buy_signals
+                if str(signal.symbol).upper().endswith("PE")
+            ]
+            if buy_ce_signals and buy_pe_signals:
+                self._logger.info(
+                    "STRATEGY_CONSENSUS side=NO_TRADE votes=%s reason=ce_pe_conflict",
+                    len(buy_signals),
+                    extra={
+                        "event": "STRATEGY_CONSENSUS",
+                        "side": "NO_TRADE",
+                        "votes": len(buy_signals),
+                        "reason": "ce_pe_conflict",
+                    },
+                )
+                return None
             sell_signals = [
                 (signal, conf) for signal, conf in normalized if signal.action == "SELL"
             ]
