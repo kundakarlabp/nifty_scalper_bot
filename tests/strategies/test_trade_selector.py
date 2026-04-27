@@ -73,3 +73,21 @@ def test_selector_default_tick_age_from_env(monkeypatch) -> None:
     monkeypatch.delenv('MAX_OPTION_TICK_AGE_SECONDS', raising=False)
     selector = TradeCandidateSelector()
     assert selector.max_tick_age_s == 10.0
+
+
+def test_no_recent_real_tick_is_penalty_when_soft_mode() -> None:
+    selector = TradeCandidateSelector(require_real_ticks_last_60s=False)
+    quality = selector.evaluate_data_quality(
+        _snapshot('NFO:NIFTY23500CE', 23500, real_ticks_last_60s=0)
+    )
+    assert quality.allowed is True
+    assert quality.score < 10.0
+
+
+def test_no_recent_real_tick_is_block_when_strict_mode() -> None:
+    selector = TradeCandidateSelector(require_real_ticks_last_60s=True)
+    quality = selector.evaluate_data_quality(
+        _snapshot('NFO:NIFTY23500CE', 23500, real_ticks_last_60s=0)
+    )
+    assert quality.allowed is False
+    assert 'no_recent_real_tick' in quality.reasons

@@ -48,6 +48,7 @@ class TradeCandidateSelector:
         max_option_premium: float = 400.0,
         max_tick_age_s: float | None = None,
         min_real_ticks_last_60s: int = 1,
+        require_real_ticks_last_60s: bool | None = None,
     ) -> None:
         self.option_strike_window_each_side = max(1, int(option_strike_window_each_side))
         self.max_option_spread_pct = max(0.0, float(max_option_spread_pct))
@@ -60,6 +61,14 @@ class TradeCandidateSelector:
         )
         self.max_tick_age_s = max(0.0, configured_tick_age)
         self.min_real_ticks_last_60s = max(0, int(min_real_ticks_last_60s))
+        configured_require_real_ticks = (
+            os.getenv('REQUIRE_REAL_TICKS_LAST_60S', 'false').strip().lower()
+            in {'1', 'true', 'yes', 'on'}
+        )
+        if require_real_ticks_last_60s is None:
+            self.require_real_ticks_last_60s = configured_require_real_ticks
+        else:
+            self.require_real_ticks_last_60s = bool(require_real_ticks_last_60s)
 
     def evaluate_data_quality(self, snapshot: dict[str, Any]) -> DataQualityResult:
         """Args: snapshot dict. Returns: DataQualityResult. Raises: none."""
@@ -83,6 +92,10 @@ class TradeCandidateSelector:
         real_ticks_60s = int(snapshot.get('real_ticks_last_60s') or 0)
         if real_ticks_60s < self.min_real_ticks_last_60s:
             reasons.append('no_recent_real_tick')
+            if self.require_real_ticks_last_60s:
+                score -= 2.0
+            else:
+                score -= 0.75
 
         bid = self._to_float(snapshot.get('bid'))
         ask = self._to_float(snapshot.get('ask'))
@@ -105,10 +118,11 @@ class TradeCandidateSelector:
             'stale_tick',
             'invalid_ohlc',
             'absurd_ltp_jump',
-            'no_recent_real_tick',
             'invalid_bid_ask',
             'spread_too_wide',
         }
+        if self.require_real_ticks_last_60s:
+            hard_blocks.add('no_recent_real_tick')
         allowed = len(hard_blocks.intersection(reasons)) == 0
         score = max(0.0, min(10.0, score - 1.0 * len(hard_blocks.intersection(reasons))))
         LOGGER.debug(

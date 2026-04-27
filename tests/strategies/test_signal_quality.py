@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
+from nifty_scalper_bot.strategies.signal_quality import infer_option_side, score_signal_quality
 
 
 def test_signal_quality_weighted_score_and_confidence_model(monkeypatch) -> None:
@@ -29,3 +29,12 @@ def test_signal_quality_live_threshold_blocks_low_score(monkeypatch) -> None:
     )
     assert result.allowed is False
     assert 'score_below_threshold' in result.reasons
+
+
+def test_infer_option_side_detects_ce_and_pe() -> None:
+    assert infer_option_side('NFO:NIFTY26APR23800PE', {}) == 'PE'
+    assert infer_option_side('NFO:NIFTY26APR23800CE', {}) == 'CE'
+
+
+def test_infer_option_side_unknown_uses_metadata() -> None:
+    assert infer_option_side('NSE:NIFTY', {'direction_bias': 'PE'}) == 'PE'

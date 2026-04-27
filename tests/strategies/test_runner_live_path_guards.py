@@ -55,6 +55,8 @@ def _build_runner() -> StrategyRunner:
     runner._max_order_attempts_per_minute = 100
     runner._record_trade = lambda *args, **kwargs: None
     runner._entry_lock = threading.Lock()
+    runner._trade_candidate_selector = MagicMock()
+    runner.build_candidate_snapshots = MagicMock(return_value=[])
     return runner
 
 
@@ -182,6 +184,66 @@ def test_missing_score_components_block_live_mode(monkeypatch) -> None:
     )
     assert result.accepted is False
     assert result.reason == 'missing_signal_score_components'
+
+
+def test_live_unknown_option_side_is_blocked(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    signal = Signal(
+        action='BUY',
+        symbol='NSE:NIFTY',
+        quantity=1,
+        confidence=0.7,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={
+            'direction_score': 8.0,
+            'strategy_score': 8.0,
+            'option_score': 8.0,
+            'data_score': 8.0,
+            'rr_score': 8.0,
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NSE:NIFTY',
+        trade_symbol='NSE:NIFTY',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='unknown-side',
+    )
+    assert result.accepted is False
+    assert result.reason == 'unknown_option_side'
+
+
+def test_live_option_requires_candidate_snapshots(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.7,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={
+            'direction_score': 8.0,
+            'strategy_score': 8.0,
+            'rr_score': 8.0,
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NFO:NIFTY26APR23800PE',
+        trade_symbol='NFO:NIFTY26APR23800PE',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='missing-candidates',
+    )
+    assert result.accepted is False
+    assert result.reason == 'missing_candidate_snapshots'
 
 
 def test_final_confidence_is_derived_from_final_score(monkeypatch) -> None:
