@@ -74,6 +74,11 @@ class DummyWebSocket:
         return True
 
 
+class DisconnectedWebSocket(DummyWebSocket):
+    def is_connected(self) -> bool:
+        return False
+
+
 @pytest.fixture()
 def broker() -> DummyBroker:
     broker = DummyBroker()
@@ -187,6 +192,15 @@ def test_nifty_alias_subscription_collapses_to_canonical(
 
     assert ws.subscribed[-1] == ("full", [256265])
     assert manager._active_subscribed_symbols == {"NSE:NIFTY"}
+
+
+@pytest.mark.parametrize("alias", ["NIFTY", "NIFTY 50", "NSE:NIFTY", "NSE:NIFTY 50"])
+def test_nifty_aliases_share_same_token(
+    alias: str, broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    token = manager._resolve_token(alias)  # noqa: SLF001
+    assert token == 256265
 
 
 def test_pull_quote_canonicalizes_nifty_spot_alias(
@@ -714,6 +728,120 @@ async def test_ensure_fresh_tick_schedules_background_rest_refresh(
     await asyncio.sleep(0)
 
     assert scheduled == ["NSE:NIFTY23"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_tick_uses_symbol_level_refresh_even_if_global_fresh(
+    monkeypatch: pytest.MonkeyPatch, broker: DummyBroker
+) -> None:
+    manager = MarketDataManager(broker, None)
+    manager.last_tick_time = time.time()  # authoritative stream is globally fresh
+    manager._store_tick(  # noqa: SLF001
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "ltp": 25000.0,
+            "timestamp": time.time() - 5000.0,
+            "received_at": time.time() - 5000.0,
+        },
+    )
+    scheduled: list[str] = []
+
+    async def _fake_refresh(symbol: str) -> None:
+        scheduled.append(symbol)
+
+    monkeypatch.setattr(manager, "_rest_refresh", _fake_refresh)
+    await manager.ensure_fresh_tick("NSE:NIFTY")
+    await asyncio.sleep(0)
+    assert scheduled == ["NSE:NIFTY"]
+
+
+@pytest.mark.asyncio
+async def test_rest_refresh_updates_tick_cache_with_rest_source(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    broker.set_quote("NSE:NIFTY", {"ltp": 25123.4, "last_price": 25123.4})
+    manager = MarketDataManager(broker, ws)
+    await manager._rest_refresh("NSE:NIFTY")  # noqa: SLF001
+    tick = manager.get_latest_tick("NSE:NIFTY")
+    assert tick is not None
+    assert tick["ltp"] == pytest.approx(25123.4)
+    assert tick["source"] == "rest"
+    assert isinstance(tick.get("received_at"), float)
+
+
+@pytest.mark.asyncio
+async def test_rest_refresh_invalid_payload_does_not_fake_tick(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    broker.set_quote("NSE:NIFTY", {"ltp": None, "last_price": None})
+    manager = MarketDataManager(broker, ws)
+    await manager._rest_refresh("NSE:NIFTY")  # noqa: SLF001
+    assert manager.get_latest_tick("NSE:NIFTY") is None
+
+
+def test_subscription_queued_until_ws_connected(broker: DummyBroker) -> None:
+    ws = DisconnectedWebSocket()
+    manager = MarketDataManager(broker, ws)
+    manager.subscribe("NSE:NIFTY", lambda _: None)
+    assert 256265 in manager._pending_subscriptions  # noqa: SLF001
+    assert 256265 not in manager._confirmed_subscriptions  # noqa: SLF001
+    manager.set_ws_connected(True)
+    assert 256265 not in manager._pending_subscriptions  # noqa: SLF001
+
+
+def test_first_tick_marks_subscription_confirmed(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager.subscribe("NSE:NIFTY", lambda _: None)
+    assert ws.on_tick is not None
+    ws.on_tick({"instrument_token": 256265, "last_price": 25100.0})
+    assert 256265 in manager._confirmed_subscriptions  # noqa: SLF001
+
+
+def test_tick_wallclock_prefers_received_at(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    now = time.time()
+    tick = {
+        "received_at": now,
+        "timestamp": now - 100.0,
+    }
+    assert manager._tick_wallclock(tick) == pytest.approx(now)  # noqa: SLF001
+
+
+def test_tick_wallclock_parses_datetime_and_string(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    dt = datetime.now(timezone.utc) - timedelta(seconds=1)
+    parsed_dt = manager._tick_wallclock({"timestamp": dt})  # noqa: SLF001
+    parsed_str = manager._tick_wallclock({"timestamp": dt.isoformat()})  # noqa: SLF001
+    assert parsed_dt is not None
+    assert parsed_str is not None
+
+
+def test_market_snapshot_handles_missing_bid_ask(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager._store_tick(  # noqa: SLF001
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "ltp": 25010.0,
+            "timestamp": time.time(),
+            "received_at": time.time(),
+            "source": "ws",
+        },
+    )
+    snapshot = manager.get_symbol_snapshot("NIFTY 50")
+    assert snapshot.canonical_symbol == "NSE:NIFTY"
+    assert snapshot.bid is None
+    assert snapshot.ask is None
+    assert snapshot.tick_age_s is not None
 
 
 def test_zombie_restart_respects_cooldown(

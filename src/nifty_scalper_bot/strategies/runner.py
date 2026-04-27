@@ -1494,6 +1494,80 @@ class StrategyRunner:
 
         return None
 
+    def build_candidate_snapshots(
+        self,
+        underlying: str = "NIFTY",
+        direction_bias: Literal["CE", "PE"] = "CE",
+        atm_strike: int | None = None,
+        window_each_side: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Build option candidate snapshots around ATM for the chosen side."""
+        try:
+            if self._market_data is None or not hasattr(self._market_data, "get_symbol_snapshot"):
+                return []
+            spot_snapshot = self._market_data.get_symbol_snapshot(underlying)
+            if spot_snapshot.ltp is None or spot_snapshot.canonical_symbol != "NSE:NIFTY":
+                self._logger.warning(
+                    "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=spot_missing"
+                )
+                return []
+            atm = int(atm_strike or round(float(spot_snapshot.ltp) / 50.0) * 50)
+            side = str(direction_bias).upper()
+            if side not in {"CE", "PE"}:
+                side = "CE"
+            tracked = []
+            tracked_fn = getattr(self._market_data, "tracked_snapshot", None)
+            if callable(tracked_fn):
+                tracked = [str(sym) for sym in tracked_fn()]
+            selected: list[tuple[str, int]] = []
+            for sym in tracked:
+                norm = enforce_canonical(normalize_symbol(sym))
+                if not norm.startswith("NFO:NIFTY") or not norm.endswith(side):
+                    continue
+                digits = "".join(ch for ch in norm.split(":")[-1] if ch.isdigit())
+                if len(digits) < 4:
+                    continue
+                strike = int(digits[-5:]) if len(digits) >= 5 else int(digits[-4:])
+                if abs(strike - atm) <= max(1, int(window_each_side)) * 50:
+                    selected.append((norm, strike))
+            selected.sort(key=lambda item: abs(item[1] - atm))
+            candidates: list[dict[str, Any]] = []
+            for sym, strike in selected[: max(1, 2 * window_each_side + 1)]:
+                snap = self._market_data.get_symbol_snapshot(sym)
+                spread_pct = None
+                if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
+                    mid = (snap.bid + snap.ask) / 2.0
+                    if mid > 0:
+                        spread_pct = ((snap.ask - snap.bid) / mid) * 100.0
+                candidates.append(
+                    {
+                        "symbol": snap.canonical_symbol,
+                        "strike": strike,
+                        "ltp": snap.ltp,
+                        "bid": snap.bid,
+                        "ask": snap.ask,
+                        "mid": snap.mid,
+                        "spread_pct": spread_pct,
+                        "tick_age_s": snap.tick_age_s,
+                        "source": snap.source,
+                        "real_ticks_last_60s": snap.real_ticks_last_60s,
+                        "latest_candle_provisional": snap.latest_candle_provisional,
+                        "latest_candle_synthetic": snap.latest_candle_synthetic,
+                        "latest_candle_volume": None,
+                        "ohlc_valid": snap.ohlc_valid,
+                        "atm_distance": abs(strike - atm),
+                    }
+                )
+            self._logger.debug(
+                "CANDIDATE_SNAPSHOTS_READY count=%s direction_bias=%s",
+                len(candidates),
+                side,
+            )
+            return candidates
+        except Exception as exc:
+            self._logger.error("CANDIDATE_SNAPSHOT_BUILD_FAILED reason=%s", exc)
+            return []
+
     # ==================== STATE & PERSISTENCE ====================
 
     def attach_persistent_state(self, manager: "PersistentStateManager") -> None:

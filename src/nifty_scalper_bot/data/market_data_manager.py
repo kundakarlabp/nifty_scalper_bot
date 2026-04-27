@@ -68,6 +68,33 @@ _COMPACT_EXPIRY_FORMATS: tuple[str, ...] = ("%d%b%Y", "%d%b%y")
 _logger = get_tracer_logger(__name__)
 
 
+@dataclass(slots=True)
+class MarketSnapshot:
+    """Normalized symbol snapshot for strategy quality gating."""
+
+    symbol: str
+    canonical_symbol: str
+    ltp: float | None
+    bid: float | None
+    ask: float | None
+    mid: float | None
+    tick_age_s: float | None
+    source: str
+    real_ticks_last_60s: int
+    latest_candle_provisional: bool
+    latest_candle_synthetic: bool
+    ohlc_valid: bool
+    depth_available: bool = False
+
+
+def canonical_symbol(symbol: str) -> str:
+    """Canonicalize symbols (including NIFTY spot aliases) to EXCHANGE:SYMBOL."""
+    normalized = enforce_canonical(normalize_symbol(str(symbol or "")))
+    if normalized == "NSE:NIFTY 50":
+        return "NSE:NIFTY"
+    return normalized
+
+
 class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
 
@@ -213,16 +240,20 @@ class MarketDataManager:
             "MDM_OPTION_LTP_STALE_SECONDS", default=30.0, minimum=1.0
         )
         self._future_ltp_stale_seconds = self._parse_float_env(
-            "MDM_FUTURE_LTP_STALE_SECONDS", default=30.0, minimum=1.0
+            "MDM_FUTURE_LTP_STALE_SECONDS", default=60.0, minimum=1.0
         )
         self._generic_ltp_stale_seconds = self._parse_float_env(
-            "MDM_GENERIC_LTP_STALE_SECONDS", default=30.0, minimum=1.0
+            "MDM_GENERIC_LTP_STALE_SECONDS", default=60.0, minimum=1.0
         )
         self._ltp_stale_warn_last: dict[str, float] = {}
         self._spot_ws_first_tick_seen = False
         self._last_spot_resubscribe_attempt = 0.0
         self._last_spot_stale_log = 0.0
         self._pending_subscription_tokens: set[int] = set()
+        self._pending_subscriptions: set[int] = set()
+        self._dispatched_subscriptions: set[int] = set()
+        self._confirmed_subscriptions: set[int] = set()
+        self._last_rest_refresh_attempt: dict[str, float] = {}
         self._tick_warn_last: dict[str, float] = (
             {}
         )  # ✅ FIX: rate-limit cache-miss warnings
@@ -341,6 +372,11 @@ class MarketDataManager:
         self._m_ticks = Counter("mdm_ticks_total", "Normalized ticks processed")
         self._last_balance_log_time = 0.0
         self._started = False
+        if self._ws is not None and hasattr(self._ws, "on_tick"):
+            try:
+                self._ws.on_tick = self._on_tick
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug("websocket on_tick binding skipped: %s", exc)
 
     def _initialize_instruments(self) -> None:
         """Load instrument token mappings from broker with transient retry.
@@ -862,7 +898,9 @@ class MarketDataManager:
 
         self._ws_connected = bool(connected)
         if self._ws_connected:
-            pending_tokens = sorted(self._pending_subscription_tokens)
+            pending_tokens = sorted(
+                self._pending_subscriptions or self._pending_subscription_tokens
+            )
             if pending_tokens:
                 self._logger.info(
                     "WS_PENDING_SUBSCRIPTION_FLUSH count=%s",
@@ -874,6 +912,7 @@ class MarketDataManager:
                 )
             self._reconcile_ws_subscriptions()
             self._pending_subscription_tokens.clear()
+            self._pending_subscriptions.clear()
 
     def register_heartbeat_callback(self, callback: Callable[[float], None]) -> None:
         """Register callback invoked whenever a heartbeat is recorded.
@@ -1189,9 +1228,21 @@ class MarketDataManager:
     # ------------------------------------------------------------------
     # Public API
     def _canonical_symbol(self, symbol: str) -> str:
-        value = enforce_canonical(normalize_symbol(str(symbol or "")))
+        requested = str(symbol or "")
+        value = canonical_symbol(requested)
         if value.count(":") != 1:
             raise RuntimeError(f"Malformed canonical symbol: {value}")
+        if requested.strip().upper() != value:
+            self._logger.info(
+                "SYMBOL_CANONICALIZED requested=%s canonical=%s",
+                requested,
+                value,
+                extra={
+                    "event": "SYMBOL_CANONICALIZED",
+                    "requested": requested,
+                    "canonical": value,
+                },
+            )
         return value
 
     def _reconcile_ws_subscriptions(self) -> None:
@@ -1204,9 +1255,11 @@ class MarketDataManager:
             return
         if hasattr(ws, "is_connected") and not self._is_ws_connected():
             self._pending_subscription_tokens.update(self._desired_tokens)
+            self._pending_subscriptions.update(self._desired_tokens)
             return
         try:
             ws.set_tokens(sorted(self._desired_tokens))
+            self._dispatched_subscriptions.update(self._desired_tokens)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("ws token reconcile deferred: %s", exc)
 
@@ -1461,57 +1514,139 @@ class MarketDataManager:
     async def ensure_fresh_tick(self, symbol: str) -> dict[str, Any] | None:
         """Args: symbol; Returns: cached tick; Raises: none."""
 
-        normalized_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
+        normalized_symbol = self._canonical_symbol(symbol)
         tick = self.get_latest_tick(normalized_symbol)
-        stale_threshold = max(float(self._tick_stale_threshold_ms) / 1000.0, 0.0)
+        stale_threshold = self._ltp_stale_threshold_for_symbol(normalized_symbol)
         tick_age = self.time_since_last_tick(normalized_symbol)
         tick_stale = tick is None or (
             tick_age is not None
             and stale_threshold > 0.0
             and tick_age > stale_threshold
         )
-        ws_disconnected = not self._is_ws_connected()
-        refresh_symbol = normalized_symbol
-        if isinstance(symbol, str) and ":" not in symbol:
-            refresh_symbol = f"NSE:{symbol.strip().upper()}"
-
-        if tick_stale and (ws_disconnected or self.is_data_stale()):
-            self._schedule_rest_refresh(refresh_symbol)
+        if tick_stale and self._should_refresh_symbol(normalized_symbol):
+            self._schedule_rest_refresh(normalized_symbol)
         return tick
 
     def time_since_last_tick(self, symbol: str) -> float | None:
         """Args: symbol; Returns: seconds since last tick; Raises: none."""
 
-        normalized_symbol = enforce_canonical(normalize_symbol(symbol)) or symbol
+        normalized_symbol = self._canonical_symbol(symbol)
         with self._lock:
             wallclock = self._last_tick_time.get(normalized_symbol)
             if wallclock is None:
                 tick = self._tick_cache.get(normalized_symbol)
                 if tick is None:
                     return None
-                wallclock = float(tick.get("timestamp") or 0.0)
+                wallclock = self._tick_wallclock(tick)
         if not wallclock:
             return None
         return max(time.time() - float(wallclock), 0.0)
 
     async def _rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
-        del symbol
+        canonical = self._canonical_symbol(symbol)
+        broker = self._broker or getattr(self, "_kite", None) or getattr(
+            self, "_client", None
+        )
+        if broker is None:
+            self._logger.debug(
+                "MDM_REST_REFRESH_SKIPPED symbol=%s reason=no_broker", canonical
+            )
+            return None
+        try:
+            quote_payload: Any = None
+            if hasattr(broker, "ltp"):
+                quote_payload = broker.ltp([canonical])
+            elif hasattr(broker, "get_ltp"):
+                quote_payload = {canonical: {"last_price": broker.get_ltp(canonical)}}
+            elif hasattr(broker, "get_quote"):
+                quote_payload = {canonical: broker.get_quote(canonical)}
+            else:
+                self._logger.debug(
+                    "MDM_REST_REFRESH_SKIPPED symbol=%s reason=no_ltp_method",
+                    canonical,
+                )
+                return None
+
+            quote = quote_payload
+            if isinstance(quote_payload, Mapping):
+                quote = quote_payload.get(canonical) or quote_payload.get(
+                    f"NSE:{canonical.split(':')[-1]}"
+                )
+            if not isinstance(quote, Mapping):
+                self._logger.debug(
+                    "MDM_REST_REFRESH_SKIPPED symbol=%s reason=invalid_ltp",
+                    canonical,
+                )
+                return None
+            ltp = _coerce_positive_float(quote.get("ltp") or quote.get("last_price"))
+            if ltp is None:
+                self._logger.debug(
+                    "MDM_REST_REFRESH_SKIPPED symbol=%s reason=invalid_ltp",
+                    canonical,
+                )
+                return None
+            tick = {
+                "symbol": canonical,
+                "ltp": float(ltp),
+                "last_price": float(ltp),
+                "received_at": time.time(),
+                "timestamp": time.time(),
+                "source": "rest",
+            }
+            with self._lock:
+                previous = self._latest_ticks.get(canonical)
+            normalized = self._normalize_tick(canonical, tick, previous)
+            if normalized is None:
+                return None
+            self._emit_tick(canonical, normalized, source="rest")
+            self._logger.info(
+                "MDM_REST_FALLBACK_USED symbol=%s ltp=%s",
+                canonical,
+                float(ltp),
+                extra={
+                    "event": "MDM_REST_FALLBACK_USED",
+                    "symbol": canonical,
+                    "ltp": float(ltp),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "MDM_REST_REFRESH_FAILED symbol=%s error=%s", canonical, exc
+            )
+        finally:
+            with suppress(KeyError):
+                self._rest_refresh_inflight.remove(canonical)
         return None
 
     def _schedule_rest_refresh(self, symbol: str) -> None:
         """Args: symbol; Returns: none; Raises: none."""
 
+        canonical = self._canonical_symbol(symbol)
+        if canonical in self._rest_refresh_inflight:
+            return
+        self._rest_refresh_inflight.add(canonical)
         try:
             asyncio.get_running_loop()
-            safe_task(self._rest_refresh(symbol))
+            safe_task(self._rest_refresh(canonical))
         except RuntimeError:
             thread = threading.Thread(
-                target=lambda: asyncio.run(self._rest_refresh(symbol)),
-                name=f"mdm-rest-refresh-{symbol}",
+                target=lambda: asyncio.run(self._rest_refresh(canonical)),
+                name=f"mdm-rest-refresh-{canonical}",
                 daemon=True,
             )
             thread.start()
+
+    def _should_refresh_symbol(self, symbol: str, interval_sec: float = 5.0) -> bool:
+        """Rate-limit REST refresh attempts per symbol."""
+        canonical = self._canonical_symbol(symbol)
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_rest_refresh_attempt.get(canonical, 0.0)
+            if now - last < max(interval_sec, 0.0):
+                return False
+            self._last_rest_refresh_attempt[canonical] = now
+        return True
 
     async def wait_for_live_tick(
         self, token: int, timeout: float = 5
@@ -3605,7 +3740,8 @@ class MarketDataManager:
     def _store_tick(self, symbol: str, tick: dict[str, Any]) -> None:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
 
-        wallclock = tick.get("timestamp", time.time())
+        tick.setdefault("received_at", time.time())
+        wallclock = self._tick_wallclock(tick) or time.time()
 
         # 🔥 PRODUCTION FIX — enforce canonical key
         symbol = self._canonical_symbol(symbol)
@@ -3614,7 +3750,7 @@ class MarketDataManager:
         with self._lock:
             self._latest_ticks[symbol] = cached_tick
             self._tick_cache[symbol] = cached_tick
-            self._last_tick_time[symbol] = time.time()
+            self._last_tick_time[symbol] = float(wallclock)
             if "ltp" not in cached_tick or cached_tick.get("timestamp") is None:
                 self._logger.debug(
                     "Condition met: mdm_history_append_rejected",
@@ -3679,20 +3815,28 @@ class MarketDataManager:
                     "reason": "tick_received",
                 },
             )
-            if source == "ws" and symbol == "NSE:NIFTY":
-                if not self._spot_ws_first_tick_seen:
-                    self._spot_ws_first_tick_seen = True
+            if source == "ws" and _token_val is not None:
+                token_int = int(_token_val)
+                first_for_token = token_int not in self._confirmed_subscriptions
+                self._confirmed_subscriptions.add(token_int)
+                if first_for_token:
                     self._logger.info(
-                        "MDM_WS_FIRST_TICK symbol=NSE:NIFTY token=%s ltp=%s",
-                        _token_val,
+                        "MDM_WS_FIRST_TICK symbol=%s token=%s ltp=%s",
+                        symbol,
+                        token_int,
                         _price_val,
                         extra={
                             "event": "MDM_WS_FIRST_TICK",
-                            "symbol": "NSE:NIFTY",
-                            "token": _token_val,
+                            "symbol": symbol,
+                            "token": token_int,
                             "ltp": _price_val,
                         },
                     )
+                self._pending_subscriptions.discard(token_int)
+                self._pending_subscription_tokens.discard(token_int)
+            if source == "ws" and symbol == "NSE:NIFTY":
+                if not self._spot_ws_first_tick_seen:
+                    self._spot_ws_first_tick_seen = True
                 tick_age = 0.0
                 try:
                     tick_age = max(time.time() - float(self._last_tick_time.get(symbol, 0.0) or 0.0), 0.0)
@@ -4675,6 +4819,71 @@ class MarketDataManager:
         self._last_quote_ts_ms[canonical_symbol] = now_ms
         return quote
 
+    def get_symbol_snapshot(self, symbol: str) -> MarketSnapshot:
+        """Return a unified MarketSnapshot for one symbol."""
+        canonical = self._canonical_symbol(symbol)
+        tick = self.get_latest_tick(canonical) or {}
+        ltp = _coerce_float(tick.get("ltp") or tick.get("last_price"))
+        bid = _coerce_float(tick.get("bid"))
+        ask = _coerce_float(tick.get("ask"))
+        mid = None
+        if bid is not None and ask is not None and bid > 0 and ask > 0:
+            mid = (float(bid) + float(ask)) / 2.0
+        age = None
+        wallclock = self._tick_wallclock(tick)
+        if wallclock is not None:
+            age = max(0.0, time.time() - wallclock)
+        with self._lock:
+            source = str(
+                self._last_tick_source.get(canonical) or tick.get("source") or "unknown"
+            ).lower()
+            recent_cutoff = time.time() - 60.0
+            history = list(self._history.get(canonical, ()))
+            real_ticks = sum(
+                1
+                for row in history
+                if str(row.get("source") or source).lower() == "ws"
+                and (self._tick_wallclock(row) or 0.0) >= recent_cutoff
+            )
+            bars = list(self._ohlc.get(self._bar_symbol_key(canonical), ()))
+        latest = bars[-1] if bars else {}
+        latest_candle_provisional = bool(latest.get("provisional")) if isinstance(latest, Mapping) else False
+        latest_candle_synthetic = bool(latest.get("synthetic")) if isinstance(latest, Mapping) else False
+        ohlc_valid = bool(bars)
+        depth_available = isinstance(tick.get("depth"), Mapping) and bool(tick.get("depth"))
+        snapshot = MarketSnapshot(
+            symbol=str(symbol),
+            canonical_symbol=canonical,
+            ltp=ltp,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            tick_age_s=age,
+            source=source,
+            real_ticks_last_60s=real_ticks,
+            latest_candle_provisional=latest_candle_provisional,
+            latest_candle_synthetic=latest_candle_synthetic,
+            ohlc_valid=ohlc_valid,
+            depth_available=depth_available,
+        )
+        age_value = snapshot.tick_age_s
+        stale_threshold = self._ltp_stale_threshold_for_symbol(canonical)
+        if age_value is not None and age_value > stale_threshold:
+            self._logger.debug(
+                "MARKET_SNAPSHOT_STALE symbol=%s age=%s",
+                canonical,
+                round(age_value, 3),
+            )
+        else:
+            self._logger.debug(
+                "MARKET_SNAPSHOT_READY symbol=%s ltp=%s source=%s age=%s",
+                canonical,
+                snapshot.ltp,
+                snapshot.source,
+                round(age_value, 3) if age_value is not None else None,
+            )
+        return snapshot
+
     def get_orderbook(self, symbol: str, *, levels: int = 5) -> dict[str, Any] | None:
         """Return aggregated order book metrics for *symbol*."""
 
@@ -5318,6 +5527,17 @@ class MarketDataManager:
             if changed:
                 token = self._symbol_to_token.get(symbol)
                 if token:
+                    if symbol == "NSE:NIFTY":
+                        self._logger.info(
+                            "SPOT_TOKEN_RESOLVED symbol=%s token=%s",
+                            symbol,
+                            token,
+                            extra={
+                                "event": "SPOT_TOKEN_RESOLVED",
+                                "symbol": symbol,
+                                "token": token,
+                            },
+                        )
                     self._logger.info(
                         "WS_SUBSCRIBE_REQUESTED symbol=%s token=%s",
                         symbol,
@@ -5329,12 +5549,26 @@ class MarketDataManager:
                         },
                     )
                     if not hasattr(self._ws, "is_connected") or self._is_ws_connected():
+                        self._dispatched_subscriptions.add(int(token))
                         self._logger.info(
                             "WS_SUBSCRIBE_DISPATCHED symbol=%s token=%s",
                             symbol,
                             token,
                             extra={
                                 "event": "WS_SUBSCRIBE_DISPATCHED",
+                                "symbol": symbol,
+                                "token": token,
+                            },
+                        )
+                    else:
+                        self._pending_subscriptions.add(int(token))
+                        self._pending_subscription_tokens.add(int(token))
+                        self._logger.info(
+                            "WS_SUBSCRIBE_QUEUED symbol=%s token=%s",
+                            symbol,
+                            token,
+                            extra={
+                                "event": "WS_SUBSCRIBE_QUEUED",
                                 "symbol": symbol,
                                 "token": token,
                             },
@@ -5382,7 +5616,17 @@ class MarketDataManager:
                     return t
         except Exception as e:
             self._logger.error(f"Failed live token resolution for {symbol}: {e}")
-    
+        if symbol == "NSE:NIFTY":
+            self._logger.error(
+                "SPOT_TOKEN_RESOLUTION_FAILED symbol=%s reason=%s",
+                symbol,
+                "token_not_found",
+                extra={
+                    "event": "SPOT_TOKEN_RESOLUTION_FAILED",
+                    "symbol": symbol,
+                    "reason": "token_not_found",
+                },
+            )
         return None
 
     # ------------------------------------------------------------------
@@ -5502,6 +5746,10 @@ class MarketDataManager:
             "bid": float(bid),
             "ask": float(ask),
             "timestamp": timestamp,
+            "received_at": self._parse_wallclock(
+                tick.get("received_at") or tick.get("wallclock")
+            )
+            or time.time(),
             "depth": depth,
             "ltq": tick.get("last_quantity"),
             "oi": self._coerce_float(tick, "oi", "open_interest"),
@@ -5568,13 +5816,43 @@ class MarketDataManager:
 
     @staticmethod
     def _coerce_timestamp(tick: dict[str, Any]) -> float:
-        value = tick.get("timestamp") or tick.get("ts") or tick.get("ts_ms")
+        value = (
+            tick.get("received_at")
+            or tick.get("wallclock")
+            or tick.get("timestamp")
+            or tick.get("ts")
+            or tick.get("ts_ms")
+        )
+        parsed = MarketDataManager._parse_wallclock(value)
+        return parsed if parsed is not None else time.time()
+
+    @staticmethod
+    def _parse_wallclock(value: Any) -> float | None:
+        """Parse timestamp-like values into epoch seconds."""
+        if isinstance(value, datetime):
+            dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            return float(dt.timestamp())
         if isinstance(value, (int, float)):
             val = float(value)
             if val > 1_000_000_000_000:
                 val /= 1000.0
-            return val
-        return time.time()
+            return val if val > 0 else None
+        if isinstance(value, str) and value.strip():
+            with suppress(ValueError):
+                as_float = float(value.strip())
+                return MarketDataManager._parse_wallclock(as_float)
+            with suppress(ValueError):
+                dt_value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return MarketDataManager._parse_wallclock(dt_value)
+        return None
+
+    def _tick_wallclock(self, tick: Mapping[str, Any]) -> float | None:
+        """Return wall-clock for tick freshness; prefer received_at."""
+        for key in ("received_at", "wallclock", "timestamp"):
+            parsed = self._parse_wallclock(tick.get(key))
+            if parsed is not None:
+                return parsed
+        return None
 
     @staticmethod
     def _prepare_rest_tick(tick: Mapping[str, Any], *, source: str) -> dict[str, Any]:
@@ -5590,8 +5868,10 @@ class MarketDataManager:
         payload["source"] = source
         if isinstance(observed_at, (int, float)):
             payload["timestamp"] = float(observed_at)
+            payload["received_at"] = float(observed_at)
         else:
             payload["timestamp"] = time.time()
+            payload["received_at"] = time.time()
         return payload
 
     def _is_duplicate(
