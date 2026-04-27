@@ -451,6 +451,8 @@ class TelegramDeps:
     # Optional hot-reload hook
     reload_hook: t.Callable[[], str] | None = None
     selfchecker: t.Any | None = None
+    # Bot-wide runtime context exposing readiness/live gates
+    bot_context: t.Any | None = None
 
     # NOTE: the attributes above are intentionally soft-typed; the handlers below
     # probe methods with getattr/with suppress() to avoid hard coupling with
@@ -4433,6 +4435,7 @@ class TelegramBot:
                     ("check_execution", self.cmd_check_execution, ()),
                     ("check_connectivity", self.cmd_check_connectivity, ()),
                     ("why", self.cmd_why, ()),
+                    ("preflight", self.cmd_preflight, ()),
                     ("flow", self.cmd_flow, ()),
                     ("profile", self.cmd_profile, ()),
                     ("metrics", self.cmd_metrics, ()),
@@ -15022,9 +15025,104 @@ class TelegramBot:
             )
         await self._reply(chat, ctx, text, parse_mode=ParseMode.HTML)
 
+    def _gather_preflight_state(self) -> dict[str, t.Any]:
+        """Args: none. Returns: preflight summary dict. Raises: none."""
+        bot_ctx = getattr(self.deps, "bot_context", None)
+        mdm = getattr(self.deps, "market_data_manager", None)
+        broker = getattr(self.deps, "broker_client", None)
+        quote_available = True
+        quote_error: str | None = None
+        for holder in (
+            mdm,
+            broker,
+            getattr(broker, "_broker", None),
+            getattr(broker, "broker", None),
+        ):
+            if holder is None:
+                continue
+            snap_fn = getattr(holder, "quote_api_status_snapshot", None)
+            if not callable(snap_fn):
+                continue
+            with suppress(Exception):
+                snap = snap_fn() or {}
+                if not bool(snap.get("available", True)):
+                    quote_available = False
+                    if not quote_error and snap.get("error"):
+                        quote_error = str(snap.get("error"))
+        readiness: dict[str, t.Any] = {}
+        if mdm is not None:
+            readiness_fn = getattr(mdm, "readiness_state_snapshot", None)
+            if callable(readiness_fn):
+                with suppress(Exception):
+                    readiness = dict(readiness_fn() or {})
+        hard_ready = bool(readiness.get("hard_ready"))
+        spot_ready = bool(readiness.get("spot_ready"))
+        missing_hard = list(readiness.get("missing_hard") or [])
+        market_session_state = getattr(bot_ctx, "market_session_state", None)
+        if not market_session_state:
+            with suppress(Exception):
+                from nifty_scalper_bot.utils.market_hours import (
+                    MarketState as _MS,
+                    get_market_state as _gms,
+                )
+
+                market_session_state = (
+                    "open" if _gms() == _MS.OPEN else "closed"
+                )
+        return {
+            "quote_api_available": bool(
+                quote_available
+                and bool(getattr(bot_ctx, "quote_api_available", True))
+            ),
+            "quote_api_error": quote_error
+            or getattr(bot_ctx, "quote_api_error", None),
+            "market_session_state": market_session_state or "unknown",
+            "effective_mode": getattr(bot_ctx, "readiness_mode", "unknown"),
+            "live_orders_armed": bool(
+                getattr(bot_ctx, "live_orders_armed", False)
+            ),
+            "trading_ready": bool(getattr(bot_ctx, "trading_ready", False)),
+            "hard_ready": hard_ready,
+            "spot_ready": spot_ready,
+            "missing_hard": missing_hard,
+            "live_block_reason": getattr(bot_ctx, "live_block_reason", None),
+        }
+
+    @command_meta(
+        "/preflight",
+        "Show data/quote/live readiness summary.",
+    )
+    async def cmd_preflight(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        rb = self._response_builder
+        info = self._gather_preflight_state()
+        rows = [
+            ("quote_api_available", str(info["quote_api_available"])),
+            ("quote_api_error", str(info["quote_api_error"] or "—")),
+            ("market_session_state", str(info["market_session_state"])),
+            ("effective_mode", str(info["effective_mode"])),
+            ("live_orders_armed", str(info["live_orders_armed"])),
+            ("trading_ready", str(info["trading_ready"])),
+            ("hard_ready", str(info["hard_ready"])),
+            ("spot_ready", str(info["spot_ready"])),
+            (
+                "missing_hard",
+                ",".join(info["missing_hard"]) if info["missing_hard"] else "—",
+            ),
+            ("live_block_reason", str(info["live_block_reason"] or "—")),
+        ]
+        body = f"{rb.section('Preflight')}<br>{rb.grid(rows)}"
+        text = self._compose([[body]])
+        await self._reply(chat, ctx, text, parse_mode=ParseMode.HTML)
+        return
+
     @command_meta(
         "/why",
-        "Explain risk breaker state and the last recorded error.",
+        "Explain risk breaker state, live block reason, and the last recorded error.",
     )
     async def cmd_why(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat = await self._guard(update)
@@ -15033,6 +15131,7 @@ class TelegramBot:
         rb = self._response_builder
         snap = self._coerce_risk_snapshot()
         info = self._last_error()
+        preflight = self._gather_preflight_state()
         if info is not None:
             category, message, when = info
             hint = self._hint_for(category, message)
@@ -15047,6 +15146,28 @@ class TelegramBot:
             )
         else:
             last_error_html = f"{rb.section('Last Error')}<br><i>No recent errors.</i>"
+
+        live_rows = [
+            ("effective_mode", str(preflight["effective_mode"])),
+            ("live_orders_armed", str(preflight["live_orders_armed"])),
+            ("trading_ready", str(preflight["trading_ready"])),
+            (
+                "live_block_reason",
+                str(preflight["live_block_reason"] or "—"),
+            ),
+            ("quote_api_available", str(preflight["quote_api_available"])),
+            ("quote_api_error", str(preflight["quote_api_error"] or "—")),
+            ("market_session_state", str(preflight["market_session_state"])),
+            ("hard_ready", str(preflight["hard_ready"])),
+            ("spot_ready", str(preflight["spot_ready"])),
+            (
+                "missing_hard",
+                ",".join(preflight["missing_hard"])
+                if preflight["missing_hard"]
+                else "—",
+            ),
+        ]
+        live_html = f"{rb.section('Live Gate')}<br>{rb.grid(live_rows)}"
 
         risk_html = ""
         if snap:
@@ -15077,7 +15198,10 @@ class TelegramBot:
                 f"{EMOJI['risk']} {rb.section('Risk Snapshot')}<br>{rb.grid(risk_rows)}"
             )
 
-        text = self._compose([[last_error_html]] + ([[risk_html]] if risk_html else []))
+        sections = [[last_error_html], [live_html]]
+        if risk_html:
+            sections.append([risk_html])
+        text = self._compose(sections)
 
         await self._reply(chat, ctx, text, parse_mode=ParseMode.HTML)
         return
