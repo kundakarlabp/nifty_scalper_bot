@@ -14,6 +14,17 @@ REQUIRED_SCORE_COMPONENTS: tuple[str, ...] = (
 )
 
 
+def infer_option_side(symbol: str, metadata: dict[str, object] | None = None) -> str:
+    """Args: symbol + metadata. Returns: CE/PE/UNKNOWN side. Raises: none."""
+    upper = str(symbol or '').upper()
+    if upper.endswith('CE'):
+        return 'CE'
+    if upper.endswith('PE'):
+        return 'PE'
+    payload = dict(metadata or {})
+    return str(payload.get('direction_bias', 'UNKNOWN')).upper()
+
+
 @dataclass(slots=True)
 class SignalQualityScore:
     """Args: score components. Returns: normalized score object. Raises: none."""

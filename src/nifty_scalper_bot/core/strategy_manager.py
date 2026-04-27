@@ -21,6 +21,7 @@ from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
+from nifty_scalper_bot.strategies.signal_quality import infer_option_side
 from nifty_scalper_bot.strategies.signal_generator import (
     Signal,
 )
@@ -269,6 +270,37 @@ class StrategyAdapter(StrategyInterface):
 
 
 StrategyFactory = t.Callable[..., StrategyInterface | t.Any]
+
+
+@dataclass(slots=True)
+class StrategyVote:
+    """Args: strategy vote fields. Returns: structured vote. Raises: none."""
+
+    strategy: str
+    side: str
+    score: float
+    confidence: float
+    reasons: list[str]
+    metadata: dict[str, t.Any]
+
+
+def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
+    """Args: signal + strategy name. Returns: normalized vote. Raises: none."""
+    metadata = dict(signal.metadata or {})
+    side = infer_option_side(signal.symbol, metadata)
+    score_candidate = float(metadata.get('strategy_score') or 0.0)
+    score = float(signal.confidence or 0.0) * 10.0
+    if score <= 0.0:
+        score = score_candidate
+    reason = str(signal.reason or '').strip()
+    return StrategyVote(
+        strategy=strategy_name,
+        side=side if side in {'CE', 'PE'} else 'UNKNOWN',
+        score=max(0.0, min(10.0, score)),
+        confidence=max(0.0, min(1.0, float(signal.confidence or 0.0))),
+        reasons=[reason] if reason else [],
+        metadata=metadata,
+    )
 
 
 @dataclass(slots=True)
@@ -2105,6 +2137,7 @@ class StrategyManager(_BaseStrategyManager):
         position = self._position_manager.get_position(symbol)
 
         signals: list[Signal] = []
+        signal_votes: list[tuple[Signal, StrategyVote]] = []
         max_votes = max(1, int(getattr(app_settings, "MAX_STRATEGY_VOTES", 5)))
         disabled: list[str] = []
         empty: list[str] = []
@@ -2145,6 +2178,7 @@ class StrategyManager(_BaseStrategyManager):
                 base_signal, strategy.name, entry
             )
             signals.append(adjusted)
+            signal_votes.append((adjusted, signal_to_vote(adjusted, strategy.name)))
             if len(signals) >= max_votes:
                 break
 
@@ -2212,7 +2246,11 @@ class StrategyManager(_BaseStrategyManager):
             _emit_strategy_exit()
             return None
 
-        combined = self._combine_signals(signals)
+        combined = self._combine_strategy_votes(
+            symbol=symbol,
+            signals=signal_votes,
+            indicators=indicators,
+        )
         if combined and bool(getattr(combined, "metadata", {}).get("is_approved")):
             exit_result = "signal"
             signal_action = combined.action
@@ -2364,6 +2402,82 @@ class StrategyManager(_BaseStrategyManager):
                     ).sharpe_ratio()
                 ),
             },
+        )
+
+    def _combine_strategy_votes(
+        self,
+        *,
+        symbol: str,
+        signals: list[tuple[Signal, StrategyVote]],
+        indicators: t.Mapping[str, t.Any],
+    ) -> Signal | None:
+        """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
+        if not signals:
+            return None
+        if len(signals) == 1:
+            return signals[0][0]
+        by_side: dict[str, list[tuple[Signal, StrategyVote]]] = {
+            'CE': [],
+            'PE': [],
+            'UNKNOWN': [],
+        }
+        for signal, vote in signals:
+            if signal.action in {'CLOSE_LONG', 'CLOSE_SHORT'}:
+                return signal
+            by_side.setdefault(vote.side, []).append((signal, vote))
+        ce_votes = by_side.get('CE', [])
+        pe_votes = by_side.get('PE', [])
+        conflict = bool(ce_votes and pe_votes)
+        if conflict:
+            log.info(
+                'STRATEGY_CONSENSUS side=NO_TRADE score=0.00 votes=%s conflict=True',
+                len(ce_votes) + len(pe_votes),
+                extra={'event': 'STRATEGY_CONSENSUS', 'side': 'NO_TRADE', 'score': 0.0, 'votes': len(ce_votes) + len(pe_votes), 'conflict': True},
+            )
+            return None
+        winning_side = 'CE' if len(ce_votes) >= len(pe_votes) else 'PE'
+        winning = ce_votes if winning_side == 'CE' else pe_votes
+        if not winning:
+            return self._combine_signals([signal for signal, _ in signals])
+        direction_score = float(indicators.get('direction_score') or 0.0)
+        data_score = float(indicators.get('data_score') or 0.0)
+        option_score = float(indicators.get('option_score') or 0.0)
+        high_conviction = max(vote.score for _, vote in winning) >= 8.5
+        enough_confirmations = len(winning) >= 2 or (
+            high_conviction
+            and direction_score >= 7.5
+            and data_score >= 7.0
+            and option_score >= 7.0
+        )
+        if not enough_confirmations:
+            log.info(
+                'STRATEGY_CONSENSUS side=NO_TRADE score=0.00 votes=%s conflict=False',
+                len(winning),
+                extra={'event': 'STRATEGY_CONSENSUS', 'side': 'NO_TRADE', 'score': 0.0, 'votes': len(winning), 'conflict': False},
+            )
+            return None
+        best_signal, _ = max(winning, key=lambda pair: pair[1].score)
+        strategy_score = sum(vote.score for _, vote in winning) / max(len(winning), 1)
+        metadata = dict(best_signal.metadata or {})
+        metadata['strategy_score'] = round(max(float(metadata.get('strategy_score') or 0.0), strategy_score), 3)
+        metadata['confirming_votes'] = [vote.strategy for _, vote in winning]
+        metadata['direction_bias'] = winning_side
+        log.info(
+            'STRATEGY_CONSENSUS side=%s score=%.2f votes=%s conflict=False',
+            winning_side,
+            strategy_score,
+            len(winning),
+            extra={'event': 'STRATEGY_CONSENSUS', 'side': winning_side, 'score': strategy_score, 'votes': len(winning), 'conflict': False},
+        )
+        return Signal(
+            action='BUY',
+            symbol=best_signal.symbol,
+            quantity=best_signal.quantity,
+            confidence=best_signal.confidence,
+            reason=best_signal.reason,
+            stop_loss=best_signal.stop_loss,
+            take_profit=best_signal.take_profit,
+            metadata=metadata,
         )
 
     def increment_observability_counter(self, key: str) -> None:

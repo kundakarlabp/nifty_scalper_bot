@@ -83,6 +83,7 @@ from nifty_scalper_bot.strategies.market_regime_engine import (
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.signal_quality import (
+    infer_option_side,
     missing_score_components,
     score_signal_quality,
 )
@@ -4535,6 +4536,45 @@ class StrategyRunner:
             except Exception:  # pragma: no cover - defensive
                 pass
 
+    def _strategy_evaluation_allowed(
+        self, symbol: str, trace_id: str | None = None
+    ) -> bool:
+        """Args: symbol + trace_id. Returns: bool gate verdict. Raises: none."""
+        try:
+            if symbol not in self._active_symbols:
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage='phase9',
+                    reason='symbol_not_active',
+                    allowed=False,
+                    trace_id=trace_id,
+                )
+                return False
+            if not self._indicator_engine.has_min_bars(symbol, self._required_candles):
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage='phase9',
+                    reason='insufficient_indicator_bars',
+                    allowed=False,
+                    trace_id=trace_id,
+                )
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                'Failure in StrategyRunner._strategy_evaluation_allowed: %s',
+                exc,
+                exc_info=exc,
+            )
+            self._emit_runner_eval_decision(
+                symbol=symbol,
+                stage='phase9',
+                reason='strategy_eval_gate_exception',
+                allowed=False,
+                trace_id=trace_id,
+            )
+            return False
+
     def _mark_symbol_unready(
         self,
         symbol: str,
@@ -5329,8 +5369,6 @@ class StrategyRunner:
                         symbol, SymbolState.DISCOVERED
                     )
 
-                # ── Hydration-state gate ─────────────────────────────────────────────
-                # 🚨 ALL PHASE 7 GATES REMOVED: Bypassing Hydration, Bar-Count, and Pipeline checks.
                 min_bars_needed = self._required_candles or 20
                 
 
@@ -5820,6 +5858,8 @@ class StrategyRunner:
                         should_evaluate = True
 
                 if should_evaluate:
+                    if not self._strategy_evaluation_allowed(symbol, trace_id):
+                        return
                     log_throttled(
                         self._logger,
                         f"strategy_evaluation_triggered:{symbol}",
@@ -6935,13 +6975,36 @@ class StrategyRunner:
                 self._premium_squeeze_last_signal_ts[underlying] = now_epoch
 
             metadata = dict(signal.metadata or {})
+            mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+            is_live_mode = mode == "LIVE" or (
+                str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+            option_side = infer_option_side(signal.symbol, metadata)
+            if is_live_mode and option_side == "UNKNOWN":
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(False, "unknown_option_side")
             candidate_snapshots_obj = metadata.get("candidate_snapshots")
+            is_directional_option = option_side in {"CE", "PE"}
+            if is_live_mode and is_directional_option and not isinstance(
+                candidate_snapshots_obj, list
+            ):
+                atm_strike = int(metadata.get("atm_strike") or 0)
+                built = self.build_candidate_snapshots(
+                    direction_bias=cast(Literal["CE", "PE"], option_side),
+                    atm_strike=atm_strike,
+                    underlying=underlying,
+                )
+                metadata["candidate_snapshots"] = built
+                candidate_snapshots_obj = built
+            if is_live_mode and is_directional_option and not candidate_snapshots_obj:
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(False, "missing_candidate_snapshots")
             if isinstance(candidate_snapshots_obj, list):
-                direction_bias = "CE" if str(signal.action).upper() == "BUY" else "PE"
                 try:
                     candidate = self._trade_candidate_selector.select_best_candidate(
                         underlying=underlying,
-                        direction_bias=direction_bias,
+                        direction_bias=option_side,
                         atm_strike=int(metadata.get("atm_strike") or 0),
                         snapshots=[
                             snap
@@ -6987,11 +7050,6 @@ class StrategyRunner:
                 metadata["spread_pct"] = candidate.spread_pct
                 metadata["candidate_score"] = candidate.score
             missing_components = missing_score_components(metadata)
-            mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-            is_live_mode = mode == "LIVE" or (
-                str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
-                in {"1", "true", "yes", "on"}
-            )
             if missing_components and is_live_mode:
                 if reason_key == "premium_momentum_squeeze":
                     metadata["shadow_only"] = True

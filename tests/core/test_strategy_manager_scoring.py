@@ -152,6 +152,38 @@ class _SignalStrategy(_DummyStrategy):
         )
 
 
+class _FixedSymbolSignalStrategy(_DummyStrategy):
+    """Strategy stub returning a BUY signal for a fixed option symbol side."""
+
+    def __init__(self, name: str, option_symbol: str, confidence: float = 0.8) -> None:
+        super().__init__(name)
+        self._option_symbol = option_symbol
+        self._confidence = confidence
+
+    def generate_signal(
+        self,
+        symbol: str,
+        indicators: t.Mapping[str, t.Any],
+        current_price: float,
+        position: t.Any,
+    ) -> Signal | None:
+        return Signal(
+            action='BUY',
+            symbol=self._option_symbol,
+            quantity=1,
+            confidence=self._confidence,
+            reason='vote',
+            stop_loss=current_price - 1,
+            take_profit=current_price + 2,
+            metadata={
+                'direction_score': 8.0,
+                'data_score': 8.0,
+                'option_score': 8.0,
+                'strategy_score': 8.0,
+            },
+        )
+
+
 class _BlockedRegimeManager:
     def can_trade(self, context: t.Mapping[str, t.Any] | None = None) -> bool:
         return False
@@ -193,3 +225,32 @@ def test_regime_block_can_still_block_when_adaptive_disabled(
     signal = manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0)
 
     assert signal is None
+
+
+def test_strategy_manager_conflicting_ce_pe_votes_return_no_trade() -> None:
+    manager = StrategyManager(
+        [
+            _FixedSymbolSignalStrategy('Alpha', 'NFO:NIFTY26FEB22500CE', 0.82),
+            _FixedSymbolSignalStrategy('Beta', 'NFO:NIFTY26FEB22500PE', 0.84),
+        ],
+        _DummyIndicatorEngine(),
+        _DummyPositionManager(),
+    )
+
+    signal = manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0)
+    assert signal is None
+
+
+def test_strategy_manager_same_side_votes_increase_strategy_score() -> None:
+    manager = StrategyManager(
+        [
+            _FixedSymbolSignalStrategy('Alpha', 'NFO:NIFTY26FEB22500CE', 0.82),
+            _FixedSymbolSignalStrategy('Beta', 'NFO:NIFTY26FEB22500CE', 0.86),
+        ],
+        _DummyIndicatorEngine(),
+        _DummyPositionManager(),
+    )
+
+    signal = manager.generate_signal('NFO:NIFTY26FEB22500CE', 100.0)
+    assert signal is not None
+    assert float(signal.metadata.get('strategy_score') or 0.0) > 8.0
