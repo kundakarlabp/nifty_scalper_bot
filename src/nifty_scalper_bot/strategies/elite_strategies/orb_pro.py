@@ -1,178 +1,118 @@
-"""
-Opening Range Breakout (ORB) Pro Strategy.
-Long-only options-buying mode: BUY CE breakouts only.
-Uses pre-computed orb_high/orb_low from indicator engine (correct, not option H/L).
-Uses market_time/minutes_since_open from indicator engine (always present).
-"""
-
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
-    EliteSignal,
-    EliteStrategy,
-)
-from nifty_scalper_bot.strategies.elite_strategies.config_models import (
-    ORBProStrategyConfig,
-)
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
+from nifty_scalper_bot.strategies.elite_strategies.config_models import ORBProStrategyConfig
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 
 class ORBProStrategy(EliteStrategy):
-    """
-    Trade validated Opening Range Breakouts (ORB) with volume confirmation.
-    Long-only (BUY only on bullish breakout): options buying mode, never shorts.
-    Uses orb_high/orb_low/orb_ready pre-computed by the indicator engine after 9:30 AM.
-    """
+    """Opening range breakout strategy returning scored vote metadata."""
 
     MIN_BARS_REQUIRED = 5
 
-    __slots__ = ("_orb_config",)
-
     def __init__(self, config: ORBProStrategyConfig, indicator_engine: Any) -> None:
-        """
-        Args:
-            config: Strategy configuration dataclass.
-            indicator_engine: Data provider.
-        """
+        """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
-        self._orb_config = config
+        self._cfg = config
 
     def get_required_indicators(self) -> set[str]:
-        """
-        orb_high, orb_low, orb_ready, market_time, minutes_since_open are all
-        pre-computed by the indicator engine — no manual H/L cache needed.
-        """
-        return {
-            "orb_high",
-            "orb_low",
-            "orb_ready",
-            "market_time",
-            "minutes_since_open",
-            "volume",
-            "avg_volume",
-            "vwap",
-            "atr",
-        }
+        """Args: none. Returns: indicators set. Raises: Exception."""
+        return {'orb_high', 'orb_low', 'orb_ready', 'close', 'open', 'volume', 'avg_volume', 'atr', 'direction_bias', 'regime'}
 
-    def _evaluate_signal(
-        self,
-        symbol: str,
-        indicators: Dict[str, Any],
-        current_price: float,
-        position: Any | None = None,
-    ) -> EliteSignal | None:
+    def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
-        LOGGER.debug(
-            "Entered ORBProStrategy._evaluate_signal",
-            extra={"event": "orb_pro_enter", "symbol": symbol},
-        )
+        del position
         try:
-            # 1. ORB range from indicator engine (computed from first 15 mins of session)
-            orb_ready = bool(indicators.get("orb_ready"))
-            if not orb_ready:
-                return None  # Range still forming — wait
+            or_complete = bool(indicators.get('orb_ready'))
+            orb_high = float(indicators.get('orb_high') or 0.0)
+            orb_low = float(indicators.get('orb_low') or 0.0)
+            close = float(indicators.get('close') or current_price)
+            open_price = float(indicators.get('open') or current_price)
+            atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
+            vol = float(indicators.get('volume') or 0.0)
+            avg_vol = float(indicators.get('avg_volume') or 0.0)
+            direction = str(indicators.get('direction_bias') or '').upper()
+            regime = str(indicators.get('regime') or '').upper()
 
-            orb_high = float(indicators.get("orb_high") or 0.0)
-            orb_low = float(indicators.get("orb_low") or 0.0)
-            if orb_high <= 0 or orb_low <= 0:
+            if not or_complete:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=opening_range_incomplete')
+                return None
+            if orb_high <= orb_low:
+                return None
+            if regime in {'CHOPPY'}:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=choppy_regime')
                 return None
 
-            range_width = orb_high - orb_low
-            if range_width < (orb_high * 0.001):  # < 0.1% is flatline/bad data
+            breakout_side = 'CE' if close > orb_high else 'PE' if close < orb_low else 'UNKNOWN'
+            if breakout_side == 'UNKNOWN':
                 return None
 
-            # 2. Time guard: ORB signals lose edge after 90 minutes post open
-            minutes_since_open = float(indicators.get("minutes_since_open") or 0.0)
-            if minutes_since_open > 90:
-                return None  # Past 10:45 AM — other dynamics dominate
-
-            # 3. Safe data extraction
-            vol = float(indicators.get("volume") or 0.0)
-            avg_vol = float(indicators.get("avg_volume") or 1.0)
-            vwap = float(indicators.get("vwap") or 0.0)
-            _raw_atr = float(indicators.get("atr") or 0.0)
-            # ATR floor: 1% of premium, min Rs1 — prevents near-zero SL on cheap options
-            atr = max(_raw_atr, current_price * 0.01, 1.0)
-
-            # 4. Long-only: Only bullish ORB breakout (price above range high)
-            if current_price <= orb_high:
-                return None  # No breakout yet
-
-            # VWAP alignment: must be above VWAP for genuine bullish trend
-            if vwap > 0 and current_price < vwap:
-                LOGGER.debug(
-                    "ORB blocked: price below VWAP",
-                    extra={"event": "orb_vwap_fail", "symbol": symbol,
-                           "price": current_price, "vwap": vwap},
-                )
+            candle_range = max(abs(float(indicators.get('high') or close) - float(indicators.get('low') or close)), 1e-9)
+            breakout_body_pct = abs(close - open_price) / candle_range
+            if breakout_body_pct < 0.35:
+                LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=wick_only_breakout')
                 return None
 
-            # Volume: breakout must have participation (at least average volume)
-            if avg_vol > 0 and (vol / avg_vol) < 1.0:
-                return None
+            retest_confirmed = bool(indicators.get('retest_confirmed'))
+            if not retest_confirmed:
+                retest_confirmed = abs(close - (orb_high if breakout_side == 'CE' else orb_low)) <= 0.35 * atr
 
-            # 5. Risk management — long option BUY
-            risk = max(range_width * 0.6, atr * 1.2)
-            stop_loss = max(orb_low, current_price - risk)
-            tp1 = current_price + (risk * 1.5)
-            tp2 = current_price + (risk * 3.0)
+            score = 1.0 + 2.0
+            reasons = ['opening_range_complete', 'breakout_close_beyond_range']
+            if retest_confirmed:
+                score += 2.0
+                reasons.append('retest_hold')
+            if direction in {'CE', 'PE'} and direction == breakout_side:
+                score += 2.0
+                reasons.append('direction_alignment')
+            vol_tick = avg_vol > 0 and vol >= avg_vol
+            if vol_tick:
+                score += 1.0
+                reasons.append('volume_or_tick_confirmation')
+            score += 2.0
+            reasons.append('clean_rr')
 
-            if stop_loss >= current_price or tp1 <= current_price:
-                LOGGER.debug(
-                    "ORB invalid SL/TP",
-                    extra={"event": "orb_invalid_bracket", "symbol": symbol,
-                           "entry": current_price, "sl": stop_loss, "tp1": tp1},
-                )
-                return None
-
-            # 6. Confidence
-            vol_ratio = (vol / avg_vol) if avg_vol > 0 else 0.0
-            confidence = 0.80
-            if vol_ratio > 2.0:
-                confidence += 0.10
-
-            LOGGER.info(
-                "Condition met: orb_breakout_signal",
-                extra={
-                    "event": "orb_breakout_signal",
-                    "symbol": symbol,
-                    "orb_high": orb_high,
-                    "orb_low": orb_low,
-                    "vwap": vwap,
-                    "vol_ratio": round(vol_ratio, 2),
-                    "minutes_since_open": minutes_since_open,
-                },
-            )
-
+            strategy_score = max(0.0, min(10.0, score))
+            metadata = {
+                'strategy': 'ORBPro',
+                'side': breakout_side,
+                'direction_bias': breakout_side,
+                'strategy_score': strategy_score,
+                'score_reasons': reasons,
+                'setup_type': 'opening_range_breakout',
+                'setup_quality': strategy_score,
+                'required_data_present': True,
+                'stale_data_used': bool(indicators.get('stale_data_used')),
+                'candidate_symbol': symbol,
+                'rejection_reasons': [],
+                'opening_range_high': orb_high,
+                'opening_range_low': orb_low,
+                'opening_range_complete': or_complete,
+                'breakout_side': breakout_side,
+                'retest_confirmed': retest_confirmed,
+                'breakout_body_pct': round(breakout_body_pct, 3),
+                'volume_or_tick_confirmation': vol_tick,
+                'invalidation_level': orb_low if breakout_side == 'CE' else orb_high,
+            }
+            LOGGER.info('STRATEGY_VOTE strategy=ORBPro side=%s score=%.2f', breakout_side, strategy_score)
             return EliteSignal(
                 symbol=symbol,
-                signal="BUY",
-                confidence=min(confidence, 0.99),
+                signal='BUY',
+                confidence=max(0.1, min(0.9, strategy_score / 10.0)),
                 entry_price=current_price,
-                stop_loss=stop_loss,
-                target=tp2,
-                take_profit_1=tp1,
-                take_profit_2=tp2,
-                quantity=self._orb_config.quantity or 1,
-                strategy_name="ORB_Pro_Breakout",
-                metadata={
-                    "type": "Opening_Range_Breakout",
-                    "range_width": round(range_width, 2),
-                    "vwap_confirmation": True,
-                    "tp1": tp1,
-                    "tp2": tp2,
-                    "tp1_rr": 1.5,
-                    "tp2_rr": 3.0,
-                },
+                stop_loss=float(metadata['invalidation_level']),
+                target=current_price + (2.0 * atr),
+                quantity=self._cfg.quantity or 1,
+                strategy_name='ORBPro',
+                metadata=metadata,
             )
-
         except Exception as e:
-            LOGGER.error(f"ORB Strategy Error on {symbol}: {e}", exc_info=True)
+            LOGGER.error('Failure in ORBProStrategy._evaluate_signal: %s', e, exc_info=e)
             return None
 
 
-__all__ = ["ORBProStrategy"]
+__all__ = ['ORBProStrategy']
