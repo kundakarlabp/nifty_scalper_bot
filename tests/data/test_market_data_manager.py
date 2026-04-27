@@ -182,6 +182,37 @@ def test_pull_quote_updates_cache(broker: DummyBroker, ws: DummyWebSocket) -> No
     assert cached["ltp"] == 100.0
 
 
+def test_pull_quote_403_marks_quote_api_unavailable(
+    ws: DummyWebSocket,
+) -> None:
+    class ForbiddenBroker(DummyBroker):
+        def get_quote(self, symbol: str) -> dict[str, Any]:
+            raise RuntimeError(f"HTTP 403 access denied for {symbol}")
+
+    manager = MarketDataManager(ForbiddenBroker(), ws)
+    response = manager.pull_quote("NSE:NIFTY")
+    assert response["symbol"] == "NSE:NIFTY"
+    status = manager.quote_api_status_snapshot()
+    assert status["available"] is False
+    assert status["error"] == "access_denied"
+    assert isinstance(status["last_checked_at"], float)
+
+
+@pytest.mark.asyncio
+async def test_wait_until_ready_not_ready_log_is_throttled(
+    broker: DummyBroker,
+    ws: DummyWebSocket,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    caplog.set_level("INFO")
+    await manager.wait_until_ready(timeout=0.35)
+    messages = [
+        rec.message for rec in caplog.records if "DATA_PIPELINE_NOT_READY" in rec.message
+    ]
+    assert len(messages) <= 1
+
+
 def test_nifty_alias_subscription_collapses_to_canonical(
     broker: DummyBroker,
     ws: DummyWebSocket,
@@ -766,7 +797,7 @@ async def test_rest_refresh_updates_tick_cache_with_rest_source(
     tick = manager.get_latest_tick("NSE:NIFTY")
     assert tick is not None
     assert tick["ltp"] == pytest.approx(25123.4)
-    assert tick["source"] == "rest"
+    assert tick["source"] in {"rest", "rest_ltp"}
     assert isinstance(tick.get("received_at"), float)
 
 

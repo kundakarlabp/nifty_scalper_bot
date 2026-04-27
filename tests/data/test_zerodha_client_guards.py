@@ -172,3 +172,41 @@ def test_get_quote_falls_back_to_first_payload_when_keys_are_unexpected(
     quote = client.get_quote("NSE:NIFTY")
     assert quote["ltp"] == pytest.approx(25222.15)
     client._client.close()
+
+
+def test_quote_403_marks_quote_api_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_client()
+
+    def fail_request(*_args, **_kwargs):  # noqa: ANN001
+        raise RuntimeError("HTTP 403 access denied")
+
+    monkeypatch.setattr(client, "_make_request", fail_request)
+
+    assert client.quote_api_available() is True
+    result = client.quote_any(["NSE:NIFTY"])
+    assert result is None
+    status = client.quote_api_status_snapshot()
+    assert status["available"] is False
+    assert status["error"] == "access_denied"
+    assert isinstance(status["last_checked_at"], float)
+    client._client.close()
+
+
+def test_margins_success_does_not_override_quote_api_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _make_client()
+    client._mark_quote_api_status(available=False, error="access_denied")
+
+    def fake_margins(*_args, **_kwargs):  # noqa: ANN001
+        return {"equity": {"available": {"cash": 1000.0}}}
+
+    monkeypatch.setattr(client, "_make_request", fake_margins)
+    payload = client.get_margins(segment="equity")
+    assert payload["equity"]["available"]["cash"] == pytest.approx(1000.0)
+    assert client.quote_api_available() is False
+    status = client.quote_api_status_snapshot()
+    assert status["error"] == "access_denied"
+    client._client.close()

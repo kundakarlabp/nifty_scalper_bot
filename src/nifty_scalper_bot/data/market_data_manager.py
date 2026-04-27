@@ -201,6 +201,9 @@ class MarketDataManager:
             "spot_ready": False,
             "missing_hard": [],
         }
+        self._quote_api_available = True
+        self._quote_api_error: str | None = None
+        self._quote_api_last_checked_at: float | None = None
         self._spot_ready_logged = False
         self._spot_refresh_last_attempt_mono: float = 0.0
         # Bounded queue: drops oldest when full so a stall in the async
@@ -2071,6 +2074,8 @@ class MarketDataManager:
             try:
                 raw_quote = self._broker.get_quote(canonical_symbol)
             except Exception as exc:  # noqa: BLE001
+                if self._is_quote_access_denied(exc):
+                    self._mark_quote_api_status(available=False, error="access_denied")
                 error_text = str(exc)
                 is_recoverable_miss = "Quote data missing" in error_text
                 log_fn = self._logger.warning if is_recoverable_miss else self._logger.error
@@ -2090,6 +2095,7 @@ class MarketDataManager:
                 )
                 raw_quote = None
             if isinstance(raw_quote, Mapping):
+                self._mark_quote_api_status(available=True)
                 quote = dict(raw_quote)
         if quote is None:
             with self._lock:
@@ -3065,11 +3071,17 @@ class MarketDataManager:
                     },
                 )
                 return
-            self._logger.info(
-                "DATA_PIPELINE_NOT_READY hard_ready=%s spot_ready=%s missing=%s",
-                False,
-                readiness_state["spot_ready"],
-                readiness_state.get("missing_hard") or [],
+            log_throttled(
+                self._logger,
+                "data_pipeline_not_ready",
+                "DATA_PIPELINE_NOT_READY hard_ready=%s spot_ready=%s missing=%s"
+                % (
+                    False,
+                    readiness_state["spot_ready"],
+                    readiness_state.get("missing_hard") or [],
+                ),
+                interval_sec=30,
+                level=logging.INFO,
                 extra={
                     "event": "DATA_PIPELINE_NOT_READY",
                     "hard_ready": False,
@@ -3206,6 +3218,64 @@ class MarketDataManager:
     def missing_hard(self) -> list[str]:
         """Args: none; Returns: missing hard dependencies; Raises: none."""
         return list(self._last_readiness_state.get("missing_hard") or [])
+
+    def quote_api_available(self) -> bool:
+        """Return broker quote API capability status."""
+        return bool(self._quote_api_available)
+
+    def quote_api_status_snapshot(self) -> dict[str, Any]:
+        """Return quote API capability details."""
+        return {
+            "available": bool(self._quote_api_available),
+            "error": self._quote_api_error,
+            "last_checked_at": self._quote_api_last_checked_at,
+        }
+
+    def has_ws_tradable_quote(
+        self, symbols: Sequence[str] | None = None
+    ) -> bool:
+        """Return whether websocket/depth tradable quote proof exists."""
+        with self._lock:
+            candidate_symbols = (
+                [self._canonical_symbol(sym) for sym in symbols]
+                if symbols is not None
+                else list(self._active_subscribed_symbols)
+            )
+            for symbol in candidate_symbols:
+                tick = self._latest_ticks.get(symbol)
+                if not isinstance(tick, Mapping):
+                    continue
+                source = str(
+                    tick.get("source")
+                    or self._last_tick_source.get(symbol)
+                    or ""
+                ).lower()
+                bid_ask_source = str(tick.get("bid_ask_source") or "").lower()
+                if bool(tick.get("tradable_quote")) and (
+                    source in {"ws", "ws_full", "quote", "full"}
+                    or bid_ask_source in {"market_depth", "ws_full", "quote"}
+                ):
+                    return True
+        return False
+
+    def _mark_quote_api_status(
+        self, *, available: bool, error: str | None = None
+    ) -> None:
+        """Update quote API status. Args: available/error. Returns: None. Raises: none."""
+        self._quote_api_available = bool(available)
+        self._quote_api_error = str(error) if error else None
+        self._quote_api_last_checked_at = time.time()
+
+    def _is_quote_access_denied(self, exc: Exception) -> bool:
+        """Detect terminal quote access-denied errors."""
+        text = str(exc).lower()
+        return (
+            "access denied" in text
+            or "quote api denied" in text
+            or "http 403" in text
+            or "403" in text
+            or "forbidden" in text
+        )
 
     def _is_symbol_fresh(self, symbol: str, max_age_ms: int) -> bool:
         """Return whether a symbol has a fresh enough tick age."""
@@ -5030,7 +5100,13 @@ class MarketDataManager:
             tick.get("bid_ask_source") or ("market_depth" if depth_available else "missing")
         ).lower()
         source_ok = bid_ask_source in {"market_depth", "quote", "rest_quote", "ws_full"}
-        tradable_quote = (not bid_missing and not ask_missing) and source_ok
+        quote_source = str(tick.get("source") or "").lower()
+        rest_quote_source = quote_source in {"rest", "rest_quote", "quote"}
+        tradable_quote = (
+            (not bid_missing and not ask_missing)
+            and source_ok
+            and (self._quote_api_available or not rest_quote_source)
+        )
         snapshot = MarketSnapshot(
             symbol=str(symbol),
             canonical_symbol=canonical,
@@ -5306,9 +5382,11 @@ class MarketDataManager:
                     for alias in aliases:
                         payload = raw_quote.get(alias)
                         if isinstance(payload, Mapping):
+                            self._mark_quote_api_status(available=True)
                             return dict(payload)
                     for payload in raw_quote.values():
                         if isinstance(payload, Mapping):
+                            self._mark_quote_api_status(available=True)
                             return dict(payload)
             get_quote_fn = getattr(broker, "get_quote", None)
             if callable(get_quote_fn):
@@ -5318,11 +5396,14 @@ class MarketDataManager:
                         for alias in aliases:
                             payload = raw_quote.get(alias)
                             if isinstance(payload, Mapping):
+                                self._mark_quote_api_status(available=True)
                                 return dict(payload)
                         if any(key in raw_quote for key in ("ltp", "last_price", "bid", "ask")):
+                            self._mark_quote_api_status(available=True)
                             return dict(raw_quote)
                         for payload in raw_quote.values():
                             if isinstance(payload, Mapping):
+                                self._mark_quote_api_status(available=True)
                                 return dict(payload)
             quote_any_fn = getattr(broker, "quote_any", None)
             if callable(quote_any_fn):
@@ -5331,17 +5412,22 @@ class MarketDataManager:
                     for alias in aliases:
                         payload = raw_any.get(alias)
                         if isinstance(payload, Mapping):
+                            self._mark_quote_api_status(available=True)
                             return dict(payload)
                     for payload in raw_any.values():
                         if isinstance(payload, Mapping):
+                            self._mark_quote_api_status(available=True)
                             return dict(payload)
             if isinstance(broker_symbol, int):
                 get_quote_by_token = getattr(broker, "get_quote_by_token", None)
                 if callable(get_quote_by_token):
                     raw_token_quote = get_quote_by_token(int(broker_symbol))
                     if isinstance(raw_token_quote, Mapping):
+                        self._mark_quote_api_status(available=True)
                         return dict(raw_token_quote)
         except Exception as exc:  # noqa: BLE001
+            if self._is_quote_access_denied(exc):
+                self._mark_quote_api_status(available=False, error="access_denied")
             self._logger.debug(
                 "Failure in _broker_quote: %s",
                 exc,
@@ -5933,7 +6019,13 @@ class MarketDataManager:
             if source_lower in {"quote", "rest_quote", "ws_full"} and not depth:
                 bid_ask_source = source_lower
         source_ok = bid_ask_source in {"market_depth", "quote", "rest_quote", "ws_full"}
-        tradable_quote = (not bid_missing and not ask_missing) and source_ok
+        source_lower = str(source or "").lower()
+        rest_quote_source = source_lower in {"rest", "rest_quote", "quote"}
+        tradable_quote = (
+            (not bid_missing and not ask_missing)
+            and source_ok
+            and (self._quote_api_available or not rest_quote_source)
+        )
 
         timestamp = self._coerce_timestamp(tick)
 

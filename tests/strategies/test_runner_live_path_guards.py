@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+import logging
 import threading
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -329,9 +330,21 @@ def test_preliminary_signal_requires_final_score_gate(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_async_loop_returns_candidate_refresh_pending(monkeypatch) -> None:
+async def test_live_async_path_builds_candidates_before_sync_handler(monkeypatch) -> None:
     runner = _build_runner()
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner.build_candidate_snapshots_async = AsyncMock(
+        return_value=(
+            [
+                {
+                    'symbol': 'NFO:NIFTY26APR23800PE',
+                    'strike': 23800,
+                    'tradable_quote': True,
+                }
+            ],
+            False,
+        )
+    )
     signal = Signal(
         action='BUY',
         symbol='NFO:NIFTY26APR23800PE',
@@ -348,17 +361,45 @@ async def test_live_async_loop_returns_candidate_refresh_pending(monkeypatch) ->
             'rr_score': 8.0,
         },
     )
-    result = runner._handle_entry_signal_inner(
+    prepared, reason = await runner._prepare_signal_for_handling(
         signal,
-        base_symbol='NFO:NIFTY26APR23800PE',
-        trade_symbol='NFO:NIFTY26APR23800PE',
-        trade_price=110.0,
-        timestamp=datetime.now(timezone.utc),
         trace_id='loop-pending',
+        price=110.0,
     )
-    assert result.accepted is False
-    assert result.reason == 'candidate_refresh_pending'
-    runner.build_candidate_snapshots.assert_not_called()
+    assert reason is None
+    assert prepared is not None
+    assert isinstance(prepared.metadata.get('candidate_snapshots'), list)
+    runner.build_candidate_snapshots_async.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_live_async_path_blocks_on_refresh_pending(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner.build_candidate_snapshots_async = AsyncMock(return_value=([], True))
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.8,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={
+            'direction_score': 8.0,
+            'strategy_score': 8.0,
+            'option_score': 8.0,
+            'data_score': 8.0,
+            'rr_score': 8.0,
+        },
+    )
+    prepared, reason = await runner._prepare_signal_for_handling(
+        signal,
+        trace_id='loop-pending',
+        price=110.0,
+    )
+    assert prepared is None
+    assert reason == 'candidate_refresh_pending'
 
 
 def test_contract_resolver_invoked_with_side_and_strikes() -> None:
@@ -380,6 +421,61 @@ def test_contract_resolver_invoked_with_side_and_strikes() -> None:
     assert len(store.calls) == 1
     assert store.calls[0]['strikes'] == [23800, 23850]
     assert store.calls[0]['side'] == 'CE'
+
+
+def test_contract_resolver_infers_ce_side_from_optidx_suffix() -> None:
+    runner = _build_runner()
+    runner._market_data = MagicMock()
+    runner._market_data.tracked_snapshot.return_value = []
+
+    class _OptIdxStore:
+        def get_contracts(self, **kwargs):
+            return [
+                {
+                    'exchange': 'NFO',
+                    'tradingsymbol': 'NIFTY26APR23800CE',
+                    'instrument_type': 'OPTIDX',
+                    'strike': 23800,
+                    'expiry': '2026-04-30',
+                }
+            ]
+
+    runner._options_contract_store = _OptIdxStore()
+    runner._contract_store = None
+    runner._instrument_manager = None
+    runner._contract_selector = None
+    selected = runner._resolve_candidate_contracts(side='CE', target_strikes={23800})
+    assert selected == [('NFO:NIFTY26APR23800CE', 23800)]
+
+
+def test_contract_resolver_infers_pe_side_and_rejects_wrong_side() -> None:
+    runner = _build_runner()
+    runner._market_data = MagicMock()
+    runner._market_data.tracked_snapshot.return_value = []
+
+    class _OptIdxStore:
+        def get_contracts(self, **kwargs):
+            return [
+                {
+                    'exchange': 'NFO',
+                    'tradingsymbol': 'NIFTY26APR23800PE',
+                    'strike': 23800,
+                    'expiry': '2026-04-30',
+                },
+                {
+                    'exchange': 'NFO',
+                    'tradingsymbol': 'NIFTY26APR23800CE',
+                    'strike': 23800,
+                    'expiry': '2026-04-30',
+                },
+            ]
+
+    runner._options_contract_store = _OptIdxStore()
+    runner._contract_store = None
+    runner._instrument_manager = None
+    runner._contract_selector = None
+    selected = runner._resolve_candidate_contracts(side='PE', target_strikes={23800})
+    assert selected == [('NFO:NIFTY26APR23800PE', 23800)]
 
 
 def test_contract_resolver_rejects_expiry_less_symbol_and_falls_back_tracked() -> None:
@@ -445,6 +541,41 @@ def test_final_confidence_is_derived_from_final_score(monkeypatch) -> None:
     )
     expected_score = (0.30 * 9.0) + (0.25 * 8.0) + (0.20 * 8.0) + (0.15 * 7.0) + (0.10 * 8.0)
     assert confidence_used == expected_score / 10.0
+
+
+def test_signal_score_logging_emits_without_format_error(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    runner = _build_runner()
+    runner._logger = logging.getLogger('test.runner.signal_score')
+    monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
+    caplog.set_level('INFO')
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.99,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={
+            'direction_score': 9.0,
+            'strategy_score': 8.0,
+            'option_score': 8.0,
+            'data_score': 7.0,
+            'rr_score': 8.0,
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NFO:NIFTY26APR23800PE',
+        trade_symbol='NFO:NIFTY26APR23800PE',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='signal-score-log',
+    )
+    assert result.accepted is True
+    assert any('SIGNAL_SCORE final=' in rec.message for rec in caplog.records)
 
 
 def test_premium_helper_respects_generation_cooldown_before_indicator_eval() -> None:

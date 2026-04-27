@@ -226,7 +226,7 @@ class StrategyOrchestrator:
                         },
                     )
                     self._set_skip_reason("direction_conflict")
-                    self._logger.warning(
+                    self._logger.debug(
                         "EVENT|signal_blocked|symbol=%s|reason=%s",
                         symbol,
                         "direction_lock",
@@ -258,7 +258,7 @@ class StrategyOrchestrator:
                 },
             )
             self._set_skip_reason("global_rate_limit")
-            self._logger.warning(
+            self._logger.debug(
                 "EVENT|signal_blocked|symbol=%s|reason=%s",
                 symbol,
                 "global_cooldown",
@@ -288,7 +288,7 @@ class StrategyOrchestrator:
                 },
             )
             self._set_skip_reason("underlying_rate_limit")
-            self._logger.warning(
+            self._logger.debug(
                 "EVENT|signal_blocked|symbol=%s|reason=%s",
                 symbol,
                 "underlying_cooldown",
