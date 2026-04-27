@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time, timedelta, timezone
 from enum import Enum
 import json
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -1505,77 +1506,86 @@ class StrategyRunner:
     ) -> list[dict[str, Any]]:
         """Build option candidate snapshots around ATM for the chosen side."""
         try:
+            asyncio.get_running_loop()
+            self._logger.warning(
+                "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=async_required",
+                extra={"event": "CANDIDATE_SNAPSHOT_BUILD_FAILED", "reason": "async_required"},
+            )
+            return []
+        except RuntimeError:
+            snapshots, _ = asyncio.run(
+                self.build_candidate_snapshots_async(
+                    underlying=underlying,
+                    direction_bias=direction_bias,
+                    atm_strike=atm_strike,
+                    window_each_side=window_each_side,
+                )
+            )
+            return snapshots
+
+    async def build_candidate_snapshots_async(
+        self,
+        underlying: str = "NIFTY",
+        direction_bias: Literal["CE", "PE"] = "CE",
+        atm_strike: int | None = None,
+        window_each_side: int = 2,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Args: option context. Returns: snapshots and refresh_pending flag. Raises: none."""
+        try:
             if self._market_data is None or not hasattr(self._market_data, "get_symbol_snapshot"):
-                return []
+                return [], True
             spot_snapshot = self._market_data.get_symbol_snapshot(underlying)
             if spot_snapshot.ltp is None or spot_snapshot.canonical_symbol != "NSE:NIFTY":
                 self._logger.warning(
-                    "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=spot_missing"
+                    "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=spot_missing",
+                    extra={"event": "CANDIDATE_SNAPSHOT_BUILD_FAILED", "reason": "spot_missing"},
                 )
-                return []
+                return [], True
             atm = int(atm_strike or round(float(spot_snapshot.ltp) / 50.0) * 50)
             side = str(direction_bias).upper()
             if side not in {"CE", "PE"}:
                 side = "CE"
-            selected: list[tuple[str, int]] = []
             target_strikes = {
                 atm + 50 * offset
                 for offset in range(-max(1, int(window_each_side)), max(1, int(window_each_side)) + 1)
             }
-            resolver = getattr(self._market_data, "_resolver", None)
-            candidate_symbols: set[str] = set()
-            if resolver is not None:
-                for strike_value in sorted(target_strikes):
-                    for prefix in ("NFO:", ""):
-                        candidate_symbols.add(f"{prefix}NIFTY{strike_value}{side}")
-            for symbol_candidate in candidate_symbols:
-                lookup = None
-                if resolver is not None and hasattr(resolver, "lookup"):
-                    try:
-                        lookup = resolver.lookup(symbol_candidate)
-                    except Exception:
-                        lookup = None
-                if isinstance(lookup, Mapping):
-                    strike_val = int(float(lookup.get("strike") or 0))
-                    tsym = str(lookup.get("tradingsymbol") or symbol_candidate)
-                    exchange = str(lookup.get("exchange") or "NFO").upper()
-                    if strike_val in target_strikes and str(lookup.get("instrument_type") or side).upper() == side:
-                        selected.append((f"{exchange}:{tsym}", strike_val))
-            if not selected:
-                tracked = []
-                tracked_fn = getattr(self._market_data, "tracked_snapshot", None)
-                if callable(tracked_fn):
-                    tracked = [str(sym) for sym in tracked_fn()]
-                for sym in tracked:
-                    norm = enforce_canonical(normalize_symbol(sym))
-                    if not norm.startswith("NFO:NIFTY") or not norm.endswith(side):
-                        continue
-                    match = re.search(r"(\d{5})(CE|PE)$", norm)
-                    if match is None:
-                        continue
-                    strike = int(match.group(1))
-                    if strike in target_strikes:
-                        selected.append((norm, strike))
+            selected = self._resolve_candidate_contracts(side=side, target_strikes=target_strikes)
             selected = sorted(set(selected), key=lambda item: abs(item[1] - atm))
+            refresh_pending = False
             candidates: list[dict[str, Any]] = []
             for sym, strike in selected[: max(1, 2 * window_each_side + 1)]:
                 try:
                     self._market_data.request_symbol_subscription(sym)
                 except Exception:
                     pass
-                try:
-                    ensure_tick_fn = getattr(self._market_data, "ensure_fresh_tick", None)
-                    if callable(ensure_tick_fn):
-                        coro = ensure_tick_fn(sym)
-                        if asyncio.iscoroutine(coro):
-                            try:
-                                loop = asyncio.get_running_loop()
-                                loop.create_task(coro)
-                            except RuntimeError:
-                                asyncio.run(coro)
-                except Exception:
-                    pass
+                ensure_tick_fn = getattr(self._market_data, "ensure_fresh_tick", None)
+                if callable(ensure_tick_fn):
+                    self._logger.debug(
+                        "CANDIDATE_REFRESH_REQUESTED symbol=%s", sym, extra={"event": "CANDIDATE_REFRESH_REQUESTED", "symbol": sym}
+                    )
+                    refresh_result = ensure_tick_fn(sym)
+                    if inspect.isawaitable(refresh_result):
+                        try:
+                            await asyncio.wait_for(refresh_result, timeout=2.0)
+                            self._logger.debug(
+                                "CANDIDATE_REFRESH_COMPLETE symbol=%s",
+                                sym,
+                                extra={"event": "CANDIDATE_REFRESH_COMPLETE", "symbol": sym},
+                            )
+                        except asyncio.TimeoutError:
+                            refresh_pending = True
+                            self._logger.warning(
+                                "CANDIDATE_REFRESH_TIMEOUT symbol=%s",
+                                sym,
+                                extra={"event": "CANDIDATE_REFRESH_TIMEOUT", "symbol": sym},
+                            )
                 snap = self._market_data.get_symbol_snapshot(sym)
+                if refresh_pending and (snap.ltp is None or not snap.tradable_quote):
+                    self._logger.warning(
+                        "CANDIDATE_SNAPSHOT_PENDING_REFRESH symbol=%s",
+                        sym,
+                        extra={"event": "CANDIDATE_SNAPSHOT_PENDING_REFRESH", "symbol": sym},
+                    )
                 spread_pct = None
                 if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
                     mid = (snap.bid + snap.ask) / 2.0
@@ -1602,17 +1612,75 @@ class StrategyRunner:
                         "ask_missing": snap.ask_missing,
                         "bid_ask_source": snap.bid_ask_source,
                         "tradable_quote": snap.tradable_quote,
+                        "refresh_pending": refresh_pending,
                     }
                 )
-            self._logger.debug(
-                "CANDIDATE_SNAPSHOTS_READY count=%s direction_bias=%s",
-                len(candidates),
-                side,
-            )
-            return candidates
+            return candidates, refresh_pending
         except Exception as exc:
             self._logger.error("CANDIDATE_SNAPSHOT_BUILD_FAILED reason=%s", exc)
-            return []
+            return [], True
+
+    def _resolve_candidate_contracts(
+        self, *, side: str, target_strikes: set[int]
+    ) -> list[tuple[str, int]]:
+        """Args: side and strikes. Returns: symbol/strike list. Raises: none."""
+        sources = [
+            ("OptionsContractStore", getattr(self, "_options_contract_store", None) or getattr(self, "_contract_store", None)),
+            ("InstrumentManager", getattr(self, "_instrument_manager", None)),
+            ("ContractSelector", getattr(self, "_contract_selector", None)),
+        ]
+        methods = ("get_atm_window", "get_contracts", "select_atm_contracts", "get_nearest_weekly_options")
+        for source_name, source in sources:
+            if source is None:
+                continue
+            for method in methods:
+                fetch = getattr(source, method, None)
+                if not callable(fetch):
+                    continue
+                try:
+                    rows = list(fetch())
+                except Exception:
+                    continue
+                selected: list[tuple[str, int]] = []
+                for row in rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    option_type = str(row.get("option_type") or row.get("instrument_type") or "").upper()
+                    strike = int(float(row.get("strike") or 0))
+                    exchange = str(row.get("exchange") or "NFO").upper()
+                    tradingsymbol = str(row.get("tradingsymbol") or "").upper()
+                    if option_type != side or strike not in target_strikes or not tradingsymbol:
+                        continue
+                    selected.append((f"{exchange}:{tradingsymbol}", strike))
+                if selected:
+                    self._logger.info(
+                        "CANDIDATE_RESOLVER_USED source=%s count=%s",
+                        source_name,
+                        len(selected),
+                        extra={"event": "CANDIDATE_RESOLVER_USED", "source": source_name, "count": len(selected)},
+                    )
+                    return selected
+        selected = []
+        tracked = []
+        tracked_fn = getattr(self._market_data, "tracked_snapshot", None)
+        if callable(tracked_fn):
+            tracked = [str(sym) for sym in tracked_fn()]
+        for sym in tracked:
+            norm = enforce_canonical(normalize_symbol(sym))
+            if not norm.startswith("NFO:NIFTY") or not norm.endswith(side):
+                continue
+            match = re.search(r"(\d{5})(CE|PE)$", norm)
+            if match is None:
+                continue
+            strike = int(match.group(1))
+            if strike in target_strikes:
+                selected.append((norm, strike))
+        self._logger.info(
+            "CANDIDATE_RESOLVER_FALLBACK source=tracked_symbols reason=resolver_unavailable count=%s",
+            len(selected),
+            extra={"event": "CANDIDATE_RESOLVER_FALLBACK", "source": "tracked_symbols", "reason": "resolver_unavailable", "count": len(selected)},
+        )
+        return selected
 
     # ==================== STATE & PERSISTENCE ====================
 
@@ -2527,21 +2595,25 @@ class StrategyRunner:
             gap_count = int(self._session_gap_count.get(symbol, 0))
             if gap_count > 1:
                 self._logger.warning(
-                    "soft_data_issue",
+                    "SOFT_DATA_ISSUE symbol=%s reason=%s",
+                    symbol,
+                    "repeated_missing_candles",
                     extra={
-                        "event": "soft_data_issue",
+                        "event": "SOFT_DATA_ISSUE",
                         "symbol": symbol,
-                        "issue": "repeated_missing_candles",
+                        "reason": "repeated_missing_candles",
                         "gaps": gap_count,
                     },
                 )
                 return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
             self._logger.warning(
-                "soft_data_issue",
+                "SOFT_DATA_ISSUE symbol=%s reason=%s",
+                symbol,
+                "single_missing_candle",
                 extra={
-                    "event": "soft_data_issue",
+                    "event": "SOFT_DATA_ISSUE",
                     "symbol": symbol,
-                    "issue": "single_missing_candle",
+                    "reason": "single_missing_candle",
                 },
             )
             return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
@@ -5278,7 +5350,7 @@ class StrategyRunner:
                         self._bar_log_throttle_seconds,
                     )
                     if should_info_live_bar:
-                        self._logger.info(
+                        self._logger.debug(
                             "RUNNER_LIVE_BAR_INGESTED symbol=%s timestamp=%s open=%.4f high=%.4f low=%.4f close=%.4f volume=%s runner_history_count=%d candle_version=%d",
                             symbol,
                             completed_bar.timestamp.isoformat(),
@@ -5692,6 +5764,25 @@ class StrategyRunner:
                         "tick_price": price,
                     },
                 )
+            is_live_mode = (
+                str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
+                or str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+            if is_live_mode and self._market_data is not None:
+                readiness = getattr(
+                    self._market_data, "readiness_state_snapshot", lambda: {}
+                )()
+                if not bool(readiness.get("hard_ready")):
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="phase9",
+                        reason="startup_pipeline_not_ready",
+                        allowed=False,
+                        trace_id=trace_id,
+                        readiness=readiness,
+                    )
+                    return
             upper_symbol = symbol.upper()
             is_index_symbol = (
                 upper_symbol.startswith("NSE:")
@@ -6053,7 +6144,7 @@ class StrategyRunner:
                                 signal_action=signal.action,
                                 signal_confidence=getattr(signal, "confidence", None),
                             )
-                        self._logger.info(
+                        self._logger.debug(
                             "STRATEGY_EVALUATED",
                             extra={
                                 "event": "strategy_evaluated",
@@ -7025,6 +7116,13 @@ class StrategyRunner:
                 str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
                 in {"1", "true", "yes", "on"}
             )
+            if is_live_mode and self._market_data is not None:
+                readiness = getattr(
+                    self._market_data, "readiness_state_snapshot", lambda: {}
+                )()
+                if not bool(readiness.get("hard_ready")):
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "startup_pipeline_not_ready")
             option_side = infer_option_side(signal.symbol, metadata)
             if is_live_mode and option_side == "UNKNOWN":
                 self._reset_execution_state(base_symbol)
@@ -7035,11 +7133,21 @@ class StrategyRunner:
                 candidate_snapshots_obj, list
             ):
                 atm_strike = int(metadata.get("atm_strike") or 0)
-                built = self.build_candidate_snapshots(
-                    direction_bias=cast(Literal["CE", "PE"], option_side),
-                    atm_strike=atm_strike,
-                    underlying=underlying,
-                )
+                try:
+                    asyncio.get_running_loop()
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "candidate_refresh_pending")
+                except RuntimeError:
+                    built, refresh_pending = asyncio.run(
+                        self.build_candidate_snapshots_async(
+                            direction_bias=cast(Literal["CE", "PE"], option_side),
+                            atm_strike=atm_strike,
+                            underlying=underlying,
+                        )
+                    )
+                if refresh_pending:
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "candidate_refresh_pending")
                 metadata["candidate_snapshots"] = built
                 candidate_snapshots_obj = built
             if is_live_mode and is_directional_option and not candidate_snapshots_obj:

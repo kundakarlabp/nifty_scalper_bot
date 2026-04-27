@@ -57,6 +57,7 @@ def _build_runner() -> StrategyRunner:
     runner._entry_lock = threading.Lock()
     runner._trade_candidate_selector = MagicMock()
     runner.build_candidate_snapshots = MagicMock(return_value=[])
+    runner._market_data = None
     return runner
 
 
@@ -244,6 +245,42 @@ def test_live_option_requires_candidate_snapshots(monkeypatch) -> None:
     )
     assert result.accepted is False
     assert result.reason == 'missing_candidate_snapshots'
+
+
+def test_live_mode_blocks_when_startup_pipeline_not_ready(monkeypatch) -> None:
+    class _Mdm:
+        def readiness_state_snapshot(self) -> dict[str, object]:
+            return {'hard_ready': False, 'spot_ready': False, 'missing_hard': ['futures']}
+
+    runner = _build_runner()
+    runner._market_data = _Mdm()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.7,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={
+            'direction_score': 9.0,
+            'strategy_score': 9.0,
+            'option_score': 9.0,
+            'data_score': 9.0,
+            'rr_score': 9.0,
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NFO:NIFTY26APR23800PE',
+        trade_symbol='NFO:NIFTY26APR23800PE',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='startup-not-ready',
+    )
+    assert result.accepted is False
+    assert result.reason == 'startup_pipeline_not_ready'
 
 
 def test_final_confidence_is_derived_from_final_score(monkeypatch) -> None:

@@ -7209,7 +7209,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             hard_ready = bool(readiness_state.get("hard_ready"))
                             spot_ready = bool(readiness_state.get("spot_ready"))
                             missing_hard = list(readiness_state.get("missing_hard") or [])
-                            indicators_ready_for_trading = _compute_indicator_readiness(ctx)
+                            indicators_ready_for_trading = hard_ready
                             if ctx.market_regime_manager is not None:
                                 ctx.market_regime_manager.indicators_ready = (
                                     indicators_ready_for_trading
@@ -7253,6 +7253,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     },
                                 )
                             else:
+                                LOGGER.info(
+                                    "DATA_PIPELINE_NOT_READY hard_ready=%s spot_ready=%s missing=%s",
+                                    hard_ready,
+                                    spot_ready,
+                                    missing_hard,
+                                    extra={
+                                        "event": "DATA_PIPELINE_NOT_READY",
+                                        "hard_ready": hard_ready,
+                                        "spot_ready": spot_ready,
+                                        "missing": missing_hard,
+                                    },
+                                )
                                 LOGGER.error(
                                     "startup_pipeline_incomplete missing=%s",
                                     ",".join(missing_hard) if missing_hard else "unknown",
@@ -7263,6 +7275,46 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "timed_out": not readiness_ready,
                                         "missing": missing_hard,
                                         "ws_connected": ws_connected,
+                                    },
+                                )
+                            live_mode = (
+                                str(os.getenv("EXECUTION_MODE", "SHADOW"))
+                                .strip()
+                                .upper()
+                                == "LIVE"
+                                or str(os.getenv("ENABLE_LIVE", "false"))
+                                .strip()
+                                .lower()
+                                in {"1", "true", "yes", "on"}
+                            )
+                            if hard_ready:
+                                LOGGER.info(
+                                    "DATA_PIPELINE_READY hard_ready=%s spot_ready=%s symbols_ready=%s",
+                                    hard_ready,
+                                    spot_ready,
+                                    len(readiness_state.get("ready_symbols") or []),
+                                    extra={
+                                        "event": "DATA_PIPELINE_READY",
+                                        "hard_ready": hard_ready,
+                                        "spot_ready": spot_ready,
+                                        "symbols_ready": len(
+                                            readiness_state.get("ready_symbols") or []
+                                        ),
+                                    },
+                                )
+                            if live_mode and not hard_ready:
+                                ctx.live_orders_armed = False
+                                ctx.trading_ready = False
+                                ctx.readiness_mode = "DATA_WARMUP"
+                                LOGGER.error(
+                                    "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing=%s",
+                                    missing_hard,
+                                    extra={
+                                        "event": "LIVE_TRADING_BLOCKED",
+                                        "reason": "startup_pipeline_incomplete",
+                                        "missing": missing_hard,
+                                        "hard_ready": hard_ready,
+                                        "spot_ready": spot_ready,
                                     },
                                 )
                         except Exception as ready_exc:
