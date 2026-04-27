@@ -58,6 +58,10 @@ class _StubMDM:
                 self.latest_candle_provisional = False
                 self.latest_candle_synthetic = False
                 self.ohlc_valid = True
+                self.bid_missing = True
+                self.ask_missing = True
+                self.bid_ask_source = "missing"
+                self.tradable_quote = False
 
         if symbol in {"NIFTY", "NSE:NIFTY", "NIFTY 50"}:
             return _Snapshot("NSE:NIFTY", 25025.0)

@@ -5,6 +5,7 @@ Production-Grade: Explicit Registry Mapping for Stability and Fault-Tolerance.
 
 from __future__ import annotations
 
+import os
 from typing import Any, List, Dict, Type
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
@@ -27,6 +28,11 @@ from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
+_DIRECT_DIRECTIONAL = {'smc', 'vwap', 'cpr', 'order_flow', 'bb_squeeze', 'orb'}
+_CONTEXT_ONLY = {'oi_max_pain'}
+_EXPIRY_ONLY = {'gamma_scalping', 'tuesday_gamma_buyer'}
+_THETA_ONLY = {'straddle'}
+
 def build_elite_strategies(
     settings: EliteStrategiesSettings,
     indicator_engine: Any
@@ -42,6 +48,13 @@ def build_elite_strategies(
         A list of fully initialized strategy instances.
     """
     strategies: List[EliteStrategy] = []
+    strategy_mode = str(os.getenv('STRATEGY_MODE', 'directional_scalp')).strip().lower()
+    allow_expiry_gamma = str(
+        os.getenv('ALLOW_EXPIRY_GAMMA_STRATEGIES', 'false')
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    active_names: list[str] = []
+    context_names: list[str] = []
+    disabled_names: list[str] = []
 
     # ✅ PRODUCTION REGISTRY: Maps Config Field -> Strategy Class
     # This is the "Source of Truth" for loading.
@@ -74,6 +87,23 @@ def build_elite_strategies(
             # 3. Check if strategy is enabled in .env / config.yaml
             if not strat_config or not strat_config.enabled:
                 LOGGER.debug(f"ℹ️  Strategy '{field_name}' is disabled.")
+                disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                continue
+
+            if strategy_mode == 'directional_scalp':
+                if field_name in _EXPIRY_ONLY or field_name in _THETA_ONLY:
+                    disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                    continue
+                if field_name in _CONTEXT_ONLY:
+                    context_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                    continue
+            if field_name in _EXPIRY_ONLY and not (
+                strategy_mode == 'expiry_gamma' and allow_expiry_gamma
+            ):
+                disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                continue
+            if field_name in _THETA_ONLY and strategy_mode != 'theta':
+                disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                 continue
 
             # 4. Instantiate with Dependency Injection
@@ -85,6 +115,7 @@ def build_elite_strategies(
             
             strategies.append(strategy_instance)
             LOGGER.info(f"✅ Strategy Loaded: {strategy_instance.name}")
+            active_names.append(strategy_instance.name)
 
         except Exception as e:
             # Shielding: One strategy failing to load should not kill the bot
@@ -93,6 +124,13 @@ def build_elite_strategies(
     passed = len(strategies)
     total = len(registry)
     LOGGER.info(f"📊 Strategy Build Complete: {passed}/{total} active.")
+    LOGGER.info(
+        "STRATEGY_REGISTRY_LOADED active=%s context=%s disabled=%s mode=%s",
+        active_names,
+        context_names or ['OIMaxPain'],
+        sorted(set(disabled_names)),
+        strategy_mode,
+    )
 
     return strategies
 

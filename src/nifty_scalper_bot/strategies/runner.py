@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import threading
 import time
 import time as time_module
@@ -1525,10 +1526,10 @@ class StrategyRunner:
                 norm = enforce_canonical(normalize_symbol(sym))
                 if not norm.startswith("NFO:NIFTY") or not norm.endswith(side):
                     continue
-                digits = "".join(ch for ch in norm.split(":")[-1] if ch.isdigit())
-                if len(digits) < 4:
+                match = re.search(r"(\d{5})(CE|PE)$", norm)
+                if match is None:
                     continue
-                strike = int(digits[-5:]) if len(digits) >= 5 else int(digits[-4:])
+                strike = int(match.group(1))
                 if abs(strike - atm) <= max(1, int(window_each_side)) * 50:
                     selected.append((norm, strike))
             selected.sort(key=lambda item: abs(item[1] - atm))
@@ -1539,7 +1540,7 @@ class StrategyRunner:
                 if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
                     mid = (snap.bid + snap.ask) / 2.0
                     if mid > 0:
-                        spread_pct = ((snap.ask - snap.bid) / mid) * 100.0
+                        spread_pct = (snap.ask - snap.bid) / mid
                 candidates.append(
                     {
                         "symbol": snap.canonical_symbol,
@@ -1557,6 +1558,10 @@ class StrategyRunner:
                         "latest_candle_volume": None,
                         "ohlc_valid": snap.ohlc_valid,
                         "atm_distance": abs(strike - atm),
+                        "bid_missing": snap.bid_missing,
+                        "ask_missing": snap.ask_missing,
+                        "bid_ask_source": snap.bid_ask_source,
+                        "tradable_quote": snap.tradable_quote,
                     }
                 )
             self._logger.debug(
