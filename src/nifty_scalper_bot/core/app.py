@@ -1697,6 +1697,10 @@ class BotContext:
     live_orders_armed: bool = False
     trading_ready: bool = False
     readiness_mode: str = "SHADOW"
+    live_block_reason: str | None = None
+    market_session_state: str | None = None
+    quote_api_available: bool = True
+    quote_api_error: str | None = None
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -3201,6 +3205,7 @@ def _setup_telegram(ctx: BotContext) -> None:
             data_hub=ctx.data_hub,
             instrument_resolver=getattr(ctx, "instrument_manager", None),
             enable_polling_fallback=True,
+            bot_context=ctx,
         )
 
         ctx.telegram_bot = TelegramBot(deps)
@@ -5412,6 +5417,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 reload_hook=None,
                 telegram_plain=telegram_plain_flag,
                 selfchecker=ctx.selfchecker,
+                bot_context=ctx,
             )
             telegram_bot_instance = TelegramBot(deps)
             telegram_chat_id = int(telegram_cfg.chat_id)
@@ -5554,6 +5560,36 @@ def force_enable_trading_override() -> str:
 
     LOGGER.critical(f"🚨 MANUAL OVERRIDE ACTIVATED: {', '.join(logs)}")
     return "\n".join(logs)
+
+
+def _resolve_quote_capability(ctx: BotContext) -> dict[str, Any]:
+    """Combine MDM and broker quote capability snapshots. Args: ctx. Returns: combined snapshot. Raises: none."""
+    available = True
+    error: str | None = None
+    sources: list[dict[str, Any]] = []
+    for holder in (
+        ctx.market_data_manager,
+        ctx.broker_client,
+        getattr(ctx.broker_client, "_broker", None),
+        getattr(ctx.broker_client, "broker", None),
+    ):
+        if holder is None:
+            continue
+        snap_fn = getattr(holder, "quote_api_status_snapshot", None)
+        if not callable(snap_fn):
+            continue
+        try:
+            snap = snap_fn() or {}
+        except Exception:  # noqa: BLE001
+            continue
+        snap_available = bool(snap.get("available", True))
+        snap_error = snap.get("error")
+        sources.append({"available": snap_available, "error": snap_error})
+        if not snap_available:
+            available = False
+            if snap_error and not error:
+                error = str(snap_error)
+    return {"available": available, "error": error, "sources": sources}
 
 
 async def startup_sequence(ctx: BotContext) -> None:
@@ -7293,22 +7329,31 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 .lower()
                                 in {"1", "true", "yes", "on"}
                             )
-                            quote_available = True
-                            quote_error = None
+                            quote_capability = _resolve_quote_capability(ctx)
+                            quote_available = bool(quote_capability["available"])
+                            quote_error = quote_capability["error"]
                             ws_quote_proof = False
-                            quote_status_fn = getattr(
-                                ctx.market_data_manager, "quote_api_status_snapshot", None
-                            )
-                            if callable(quote_status_fn):
-                                quote_status = quote_status_fn() or {}
-                                quote_available = bool(quote_status.get("available", True))
-                                quote_error = quote_status.get("error")
                             ws_quote_proof_fn = getattr(
                                 ctx.market_data_manager, "has_ws_tradable_quote", None
                             )
                             if callable(ws_quote_proof_fn):
                                 ws_quote_proof = bool(ws_quote_proof_fn())
-                            if live_mode and not quote_available:
+                            try:
+                                market_state = get_market_state()
+                            except Exception:  # noqa: BLE001
+                                market_state = None
+                            session_state_str = (
+                                "open" if market_state == MarketState.OPEN else "closed"
+                            )
+                            LOGGER.info(
+                                "MARKET_SESSION_STATE state=%s",
+                                session_state_str,
+                                extra={
+                                    "event": "MARKET_SESSION_STATE",
+                                    "state": session_state_str,
+                                },
+                            )
+                            if not quote_available:
                                 LOGGER.info(
                                     "BROKER_QUOTE_CAPABILITY status=unavailable reason=%s",
                                     quote_error or "unknown",
@@ -7333,6 +7378,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         ),
                                     },
                                 )
+                            data_warmup_reason: str | None = None
                             if live_mode and hard_ready and quote_available:
                                 ctx.live_orders_armed = True
                                 ctx.trading_ready = True
@@ -7341,6 +7387,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
                                 ctx.readiness_mode = "DATA_WARMUP"
+                                data_warmup_reason = "startup_pipeline_incomplete"
                                 LOGGER.error(
                                     "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing=%s",
                                     missing_hard,
@@ -7360,11 +7407,35 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
                                 ctx.readiness_mode = "DATA_WARMUP"
+                                data_warmup_reason = "broker_quote_access_denied"
                                 LOGGER.error(
                                     "LIVE_TRADING_BLOCKED reason=broker_quote_access_denied",
                                     extra={
                                         "event": "LIVE_TRADING_BLOCKED",
                                         "reason": "broker_quote_access_denied",
+                                    },
+                                )
+                            if (
+                                live_mode
+                                and ctx.readiness_mode == "DATA_WARMUP"
+                                and data_warmup_reason is None
+                            ):
+                                data_warmup_reason = (
+                                    "market_closed"
+                                    if market_state != MarketState.OPEN
+                                    else "startup_pipeline_incomplete"
+                                )
+                            ctx.live_block_reason = data_warmup_reason
+                            ctx.market_session_state = session_state_str
+                            ctx.quote_api_available = quote_available
+                            ctx.quote_api_error = quote_error
+                            if data_warmup_reason:
+                                LOGGER.info(
+                                    "DATA_WARMUP reason=%s",
+                                    data_warmup_reason,
+                                    extra={
+                                        "event": "DATA_WARMUP",
+                                        "reason": data_warmup_reason,
                                     },
                                 )
                             LOGGER.info(

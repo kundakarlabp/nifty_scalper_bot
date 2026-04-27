@@ -826,19 +826,11 @@ class StrategyRunner:
             if signal:
                 from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
-                prepared_signal: Signal | None = None
-                prepare_reason: str | None = None
-                try:
-                    asyncio.get_running_loop()
-                    prepare_reason = "candidate_refresh_pending"
-                except RuntimeError:
-                    prepared_signal, prepare_reason = asyncio.run(
-                        self._prepare_signal_for_handling(
-                            signal,
-                            price,
-                            trace_id,
-                        )
-                    )
+                prepared_signal, prepare_reason = await self._prepare_signal_for_handling(
+                    signal,
+                    price,
+                    trace_id,
+                )
                 if prepared_signal is None:
                     self._emit_runner_eval_decision(
                         symbol=symbol,
@@ -1576,9 +1568,10 @@ class StrategyRunner:
             }
             selected = self._resolve_candidate_contracts(side=side, target_strikes=target_strikes)
             selected = sorted(set(selected), key=lambda item: abs(item[1] - atm))
-            refresh_pending = False
+            any_refresh_pending = False
             candidates: list[dict[str, Any]] = []
             for sym, strike in selected[: max(1, 2 * window_each_side + 1)]:
+                symbol_refresh_pending = False
                 try:
                     self._market_data.request_symbol_subscription(sym)
                 except Exception:
@@ -1598,14 +1591,15 @@ class StrategyRunner:
                                 extra={"event": "CANDIDATE_REFRESH_COMPLETE", "symbol": sym},
                             )
                         except asyncio.TimeoutError:
-                            refresh_pending = True
+                            symbol_refresh_pending = True
+                            any_refresh_pending = True
                             self._logger.warning(
                                 "CANDIDATE_REFRESH_TIMEOUT symbol=%s",
                                 sym,
                                 extra={"event": "CANDIDATE_REFRESH_TIMEOUT", "symbol": sym},
                             )
                 snap = self._market_data.get_symbol_snapshot(sym)
-                if refresh_pending and (snap.ltp is None or not snap.tradable_quote):
+                if symbol_refresh_pending and (snap.ltp is None or not snap.tradable_quote):
                     self._logger.warning(
                         "CANDIDATE_SNAPSHOT_PENDING_REFRESH symbol=%s",
                         sym,
@@ -1637,10 +1631,16 @@ class StrategyRunner:
                         "ask_missing": snap.ask_missing,
                         "bid_ask_source": snap.bid_ask_source,
                         "tradable_quote": snap.tradable_quote,
-                        "refresh_pending": refresh_pending,
+                        "refresh_pending": symbol_refresh_pending,
                     }
                 )
-            return candidates, refresh_pending
+            no_valid_candidates = not any(
+                bool(cand.get("tradable_quote"))
+                and not bool(cand.get("refresh_pending"))
+                and cand.get("ltp") is not None
+                for cand in candidates
+            )
+            return candidates, bool(any_refresh_pending and no_valid_candidates)
         except Exception as exc:
             self._logger.error("CANDIDATE_SNAPSHOT_BUILD_FAILED reason=%s", exc)
             return [], True
@@ -6487,19 +6487,15 @@ class StrategyRunner:
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
-                prepared_signal: Signal | None = None
+                prepared_signal: Signal | None = signal
                 prepare_reason: str | None = None
-                try:
-                    asyncio.get_running_loop()
+                if isinstance(signal.metadata, dict) and isinstance(
+                    signal.metadata.get("candidate_snapshots"), list
+                ):
+                    pass
+                else:
+                    prepared_signal = None
                     prepare_reason = "candidate_refresh_pending"
-                except RuntimeError:
-                    prepared_signal, prepare_reason = asyncio.run(
-                        self._prepare_signal_for_handling(
-                            signal,
-                            price,
-                            trace_id,
-                        )
-                    )
                 if prepared_signal is None:
                     self._emit_runner_eval_decision(
                         symbol=symbol,
@@ -7346,24 +7342,8 @@ class StrategyRunner:
             if is_live_mode and is_directional_option and not isinstance(
                 candidate_snapshots_obj, list
             ):
-                atm_strike = int(metadata.get("atm_strike") or 0)
-                try:
-                    asyncio.get_running_loop()
-                    self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "candidate_refresh_pending")
-                except RuntimeError:
-                    built, refresh_pending = asyncio.run(
-                        self.build_candidate_snapshots_async(
-                            direction_bias=cast(Literal["CE", "PE"], option_side),
-                            atm_strike=atm_strike,
-                            underlying=underlying,
-                        )
-                    )
-                if refresh_pending:
-                    self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "candidate_refresh_pending")
-                metadata["candidate_snapshots"] = built
-                candidate_snapshots_obj = built
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(False, "candidate_refresh_pending")
             if is_live_mode and is_directional_option and not candidate_snapshots_obj:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "missing_candidate_snapshots")

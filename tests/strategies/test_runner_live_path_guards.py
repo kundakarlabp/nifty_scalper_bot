@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from datetime import datetime, timezone
 import logging
@@ -604,3 +605,217 @@ def test_premium_helper_skips_future_symbols() -> None:
     )
     assert generated is None
     runner._indicator_engine.get_indicators.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_token_awaits_prepare_signal_for_handling(monkeypatch) -> None:
+    runner = _build_runner()
+    captured: dict[str, object] = {}
+
+    class _StrategyManager:
+        def generate_signal(self, _symbol: str, _price: float):
+            return Signal(
+                action='BUY',
+                symbol='NFO:NIFTY26APR23800CE',
+                quantity=1,
+                confidence=0.9,
+                reason='unit_test',
+                stop_loss=100.0,
+                take_profit=120.0,
+                metadata={},
+            )
+
+    runner._strategy_manager = _StrategyManager()
+    runner._data_hub = None
+    runner._market_data = MagicMock()
+    runner._market_data._symbol_by_token = {1: 'NSE:NIFTY'}
+
+    async def _fake_prepare(signal, price, trace_id):
+        captured['called'] = True
+        captured['trace_id'] = trace_id
+        new_signal = signal
+        return new_signal, None
+
+    runner._prepare_signal_for_handling = _fake_prepare
+    runner._handle_signal = MagicMock(return_value=None)
+    runner._emit_runner_eval_decision = lambda **_kw: None
+
+    import pandas as pd
+
+    candles = pd.DataFrame(
+        [
+            {
+                'open': 100.0,
+                'high': 102.0,
+                'low': 99.0,
+                'close': 101.0,
+                'volume': 100.0,
+            }
+        ]
+    )
+    await runner._process_token(1, candles, indicators=None)
+    assert captured.get('called') is True
+    runner._handle_signal.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_build_candidate_snapshots_per_symbol_refresh_pending() -> None:
+    runner = _build_runner()
+    spot = MagicMock()
+    spot.ltp = 23800.0
+    spot.canonical_symbol = 'NSE:NIFTY'
+
+    fresh_snap = MagicMock()
+    fresh_snap.canonical_symbol = 'NFO:NIFTY26APR23800CE'
+    fresh_snap.ltp = 100.0
+    fresh_snap.bid = 99.0
+    fresh_snap.ask = 101.0
+    fresh_snap.mid = 100.0
+    fresh_snap.tick_age_s = 1.0
+    fresh_snap.source = 'ws'
+    fresh_snap.real_ticks_last_60s = 30
+    fresh_snap.latest_candle_provisional = False
+    fresh_snap.latest_candle_synthetic = False
+    fresh_snap.latest_candle_volume = 1.0
+    fresh_snap.ohlc_valid = True
+    fresh_snap.bid_missing = False
+    fresh_snap.ask_missing = False
+    fresh_snap.bid_ask_source = 'market_depth'
+    fresh_snap.tradable_quote = True
+
+    stale_snap = MagicMock()
+    stale_snap.canonical_symbol = 'NFO:NIFTY26APR23850CE'
+    stale_snap.ltp = None
+    stale_snap.bid = 0
+    stale_snap.ask = 0
+    stale_snap.mid = None
+    stale_snap.tick_age_s = 100.0
+    stale_snap.source = ''
+    stale_snap.real_ticks_last_60s = 0
+    stale_snap.latest_candle_provisional = True
+    stale_snap.latest_candle_synthetic = False
+    stale_snap.latest_candle_volume = 0.0
+    stale_snap.ohlc_valid = False
+    stale_snap.bid_missing = True
+    stale_snap.ask_missing = True
+    stale_snap.bid_ask_source = ''
+    stale_snap.tradable_quote = False
+
+    snapshots = {
+        'NIFTY': spot,
+        'NSE:NIFTY': spot,
+        'NFO:NIFTY26APR23800CE': fresh_snap,
+        'NFO:NIFTY26APR23850CE': stale_snap,
+    }
+
+    market_data = MagicMock()
+
+    def _get(symbol):
+        return snapshots.get(symbol, spot)
+
+    market_data.get_symbol_snapshot.side_effect = _get
+    market_data.request_symbol_subscription = MagicMock()
+
+    async def _ensure_fresh_tick(symbol):
+        if symbol == 'NFO:NIFTY26APR23850CE':
+            raise asyncio.TimeoutError
+        return None
+
+    market_data.ensure_fresh_tick = _ensure_fresh_tick
+    runner._market_data = market_data
+    runner._resolve_candidate_contracts = MagicMock(
+        return_value=[
+            ('NFO:NIFTY26APR23800CE', 23800),
+            ('NFO:NIFTY26APR23850CE', 23850),
+        ]
+    )
+
+    candidates, refresh_pending = await runner.build_candidate_snapshots_async(
+        underlying='NIFTY',
+        direction_bias='CE',
+        atm_strike=23800,
+        window_each_side=1,
+    )
+    assert any(
+        cand['symbol'] == 'NFO:NIFTY26APR23800CE'
+        and cand['refresh_pending'] is False
+        for cand in candidates
+    )
+    assert any(
+        cand['symbol'] == 'NFO:NIFTY26APR23850CE'
+        and cand['refresh_pending'] is True
+        for cand in candidates
+    )
+    assert refresh_pending is False  # at least one valid candidate keeps overall flag clear
+
+
+@pytest.mark.asyncio
+async def test_build_candidate_snapshots_all_pending_returns_refresh_pending() -> None:
+    runner = _build_runner()
+    spot = MagicMock()
+    spot.ltp = 23800.0
+    spot.canonical_symbol = 'NSE:NIFTY'
+
+    def _stale(name: str):
+        snap = MagicMock()
+        snap.canonical_symbol = name
+        snap.ltp = None
+        snap.bid = 0
+        snap.ask = 0
+        snap.mid = None
+        snap.tick_age_s = 100.0
+        snap.source = ''
+        snap.real_ticks_last_60s = 0
+        snap.latest_candle_provisional = True
+        snap.latest_candle_synthetic = False
+        snap.latest_candle_volume = 0.0
+        snap.ohlc_valid = False
+        snap.bid_missing = True
+        snap.ask_missing = True
+        snap.bid_ask_source = ''
+        snap.tradable_quote = False
+        return snap
+
+    snapshots = {
+        'NIFTY': spot,
+        'NSE:NIFTY': spot,
+        'NFO:NIFTY26APR23800CE': _stale('NFO:NIFTY26APR23800CE'),
+        'NFO:NIFTY26APR23850CE': _stale('NFO:NIFTY26APR23850CE'),
+    }
+
+    market_data = MagicMock()
+    market_data.get_symbol_snapshot.side_effect = lambda s: snapshots.get(s, spot)
+    market_data.request_symbol_subscription = MagicMock()
+
+    async def _ensure_fresh_tick(_symbol):
+        raise asyncio.TimeoutError
+
+    market_data.ensure_fresh_tick = _ensure_fresh_tick
+    runner._market_data = market_data
+    runner._resolve_candidate_contracts = MagicMock(
+        return_value=[
+            ('NFO:NIFTY26APR23800CE', 23800),
+            ('NFO:NIFTY26APR23850CE', 23850),
+        ]
+    )
+
+    candidates, refresh_pending = await runner.build_candidate_snapshots_async(
+        underlying='NIFTY',
+        direction_bias='CE',
+        atm_strike=23800,
+        window_each_side=1,
+    )
+    assert all(cand['refresh_pending'] is True for cand in candidates)
+    assert refresh_pending is True
+
+
+def test_runner_no_async_event_loop_fallback_in_runner_source() -> None:
+    """Regression guard: async paths must not skip prep just because event loop exists."""
+    from pathlib import Path
+    source = Path('src/nifty_scalper_bot/strategies/runner.py').read_text(encoding='utf-8')
+    # _process_token must call await self._prepare_signal_for_handling
+    assert 'await self._prepare_signal_for_handling' in source
+    # Sync candidate-builder fallback in _on_tick was removed
+    assert 'asyncio.run(\n                        self._prepare_signal_for_handling' not in source
+    # _handle_entry_signal_inner must not build snapshots in sync path
+    assert 'asyncio.run(\n                        self.build_candidate_snapshots_async' not in source

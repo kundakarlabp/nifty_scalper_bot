@@ -443,3 +443,71 @@ def test_startup_blocks_live_on_quote_access_denied() -> None:
     source = Path('src/nifty_scalper_bot/core/app.py').read_text(encoding='utf-8')
     assert 'LIVE_TRADING_BLOCKED reason=broker_quote_access_denied' in source
     assert 'BROKER_QUOTE_CAPABILITY status=unavailable reason=%s' in source
+
+
+def test_startup_emits_market_session_and_data_warmup_logs() -> None:
+    source = Path('src/nifty_scalper_bot/core/app.py').read_text(encoding='utf-8')
+    assert 'MARKET_SESSION_STATE state=%s' in source
+    assert 'DATA_WARMUP reason=%s' in source
+
+
+def test_resolve_quote_capability_combines_mdm_and_broker() -> None:
+    from nifty_scalper_bot.core.app import _resolve_quote_capability
+
+    class _MDMOk:
+        def quote_api_status_snapshot(self) -> dict[str, Any]:
+            return {"available": True, "error": None}
+
+    class _BrokerForbidden:
+        def quote_api_status_snapshot(self) -> dict[str, Any]:
+            return {"available": False, "error": "access_denied"}
+
+    class _Ctx:
+        market_data_manager = _MDMOk()
+        broker_client = _BrokerForbidden()
+
+    snap = _resolve_quote_capability(_Ctx())
+    assert snap["available"] is False
+    assert snap["error"] == "access_denied"
+
+
+def test_resolve_quote_capability_unwraps_robust_provider() -> None:
+    from nifty_scalper_bot.core.app import _resolve_quote_capability
+
+    class _Inner:
+        def quote_api_status_snapshot(self) -> dict[str, Any]:
+            return {"available": False, "error": "access_denied"}
+
+    class _RobustProvider:
+        _broker = _Inner()
+
+    class _MDMOk:
+        def quote_api_status_snapshot(self) -> dict[str, Any]:
+            return {"available": True, "error": None}
+
+    class _Ctx:
+        market_data_manager = _MDMOk()
+        broker_client = _RobustProvider()
+
+    snap = _resolve_quote_capability(_Ctx())
+    assert snap["available"] is False
+    assert snap["error"] == "access_denied"
+
+
+def test_resolve_quote_capability_margin_success_does_not_override_quote_failure() -> None:
+    from nifty_scalper_bot.core.app import _resolve_quote_capability
+
+    class _BrokerWithDeniedQuote:
+        def quote_api_status_snapshot(self) -> dict[str, Any]:
+            return {"available": False, "error": "access_denied"}
+
+        def get_margins(self, *_args, **_kwargs) -> dict[str, Any]:
+            return {"equity": {"available": {"cash": 1000.0}}}
+
+    class _Ctx:
+        market_data_manager = None
+        broker_client = _BrokerWithDeniedQuote()
+
+    snap = _resolve_quote_capability(_Ctx())
+    assert snap["available"] is False
+    assert snap["error"] == "access_denied"
