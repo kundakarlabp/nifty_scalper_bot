@@ -178,6 +178,29 @@ pytest
 | `RECONCILIATION_BROKER_IS_TRUTH` | Treat broker snapshot as the source of truth | `true` |
 | `SESSION_ALLOW_OUT_OF_HOURS` | Allow strategy startup and checks outside market hours for testing | `false` |
 | `NIFTY_FALLBACK_LTP` | Fallback NIFTY spot used when live ticks are unavailable off-hours | `24000` |
+| `MARKETDATA_PRIMARY_SOURCE` | Primary market-data source | `websocket` |
+| `MARKETDATA_REST_FALLBACK_ENABLED` | Allow REST quote fallback | `true` |
+| `MARKETDATA_REST_FALLBACK_MODE` | REST fallback activation policy | `after_ws_degraded` |
+| `MARKETDATA_SUPPRESS_REST_BEFORE_WS` | Suppress REST quote before WS start in LIVE | `true` |
+| `MARKETDATA_REQUIRE_WS_SPOT_FOR_LIVE` | Require WS spot proof for LIVE startup | `true` |
+| `MARKETDATA_ALLOW_SYNTHETIC_SPOT_IN_LIVE` | Allow synthetic spot in LIVE | `false` |
+| `NIFTY_INTERNAL_SYMBOL` | Internal bot NIFTY symbol | `NSE:NIFTY` |
+| `NIFTY_ZERODHA_QUOTE_SYMBOL` | Zerodha REST quote symbol for NIFTY index | `NSE:NIFTY 50` |
+| `NIFTY_SPOT_TOKEN` | NIFTY spot token | `256265` |
+| `NIFTY_EXCHANGE` | Spot exchange code | `NSE` |
+| `STARTUP_WAIT_FOR_WS_SPOT_SECONDS` | Max wait for fresh startup WS spot tick | `15` |
+| `STARTUP_SPOT_MAX_AGE_SECONDS` | Max accepted age for startup spot tick | `120` |
+| `STARTUP_BLOCK_LIVE_IF_NO_WS_SPOT` | Block LIVE arming when no fresh WS spot | `true` |
+| `QUOTE_CANONICALIZE_INDEX_SYMBOLS` | Canonicalize index symbols for quote calls | `true` |
+| `QUOTE_MARK_403_AS_REST_DEGRADED_ONLY` | Treat quote 403 as quote-path degradation only | `true` |
+| `QUOTE_DO_NOT_BLOCK_IF_WS_HEALTHY` | Allow readiness with WS proof when REST quote degraded | `true` |
+| `LOG_THROTTLE_QUOTE_ERRORS_SECONDS` | Quote error log throttle interval | `120` |
+| `LOG_MARKETDATA_DECISIONS` | Emit market-data policy decision logs | `true` |
+
+> Note:
+> - Internal bot symbol remains `NSE:NIFTY`.
+> - Zerodha REST quote symbol for the NIFTY index is `NSE:NIFTY 50`.
+> - REST quote fallback is intentionally suppressed before WebSocket startup in LIVE mode.
 
 ### Live trading toggles
 

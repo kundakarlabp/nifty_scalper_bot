@@ -27,6 +27,7 @@ import pandas as pd
 
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.data.candle_engine import CandleEngine
+from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.infra.metrics import METRICS
@@ -133,6 +134,7 @@ class MarketDataManager:
         # FIX: Explicitly assign self._ws for internal use
         self._ws = websocket
         self._settings = settings or {}
+        self._md_policy = MarketDataPolicy.from_env()
         self._resolver = resolver
         self._logger = get_logger(__name__)
         # FIX: Initialize cache_len before it is used
@@ -1779,7 +1781,41 @@ class MarketDataManager:
             await asyncio.sleep(0.1)
         raise RuntimeError("Live tick unavailable")
 
-    def get_ltp(self, symbol: str) -> float | None:
+    def get_cached_ltp(
+        self,
+        symbol: str,
+        *,
+        max_age_seconds: float | None = None,
+        require_ws: bool = False,
+    ) -> float | None:
+        """Cached-only LTP accessor. Args: symbol/guards. Returns: ltp. Raises: none."""
+        canonical_symbol = self._canonical_symbol(symbol)
+        tick = self.get_latest_tick(canonical_symbol)
+        if not isinstance(tick, Mapping):
+            return None
+        if max_age_seconds is not None:
+            age = self.time_since_last_tick(canonical_symbol)
+            if age is None or age > float(max_age_seconds):
+                return None
+        source = str(
+            tick.get("source") or self._last_tick_source.get(canonical_symbol) or ""
+        ).lower()
+        if require_ws and source not in {"ws", "ws_full", "full"}:
+            return None
+        price = _coerce_positive_float(
+            tick.get("last_price")
+            or tick.get("ltp")
+            or tick.get("price")
+            or tick.get("close")
+        )
+        return float(price) if price and price > 0 else None
+
+    def get_ltp(
+        self,
+        symbol: str,
+        *,
+        allow_rest_fallback: bool | None = None,
+    ) -> float | None:
         """Return latest traded price for symbol with 2-second stale guard.
 
         If the cached tick is older than 2 seconds, falls back to broker REST
@@ -1794,6 +1830,13 @@ class MarketDataManager:
         canonical_symbol = self._canonical_symbol(symbol)
         stale_seconds = self._ltp_stale_threshold_for_symbol(canonical_symbol)
         now = time.time()
+        cached = self.get_cached_ltp(
+            canonical_symbol,
+            max_age_seconds=stale_seconds,
+            require_ws=False,
+        )
+        if cached is not None:
+            return cached
 
         # 1. Try tick cache with freshness check
         tick = self.get_latest_tick(canonical_symbol)
@@ -1845,11 +1888,45 @@ class MarketDataManager:
                 pass
 
         # 2. Broker REST fallback
+        policy = getattr(self, "_md_policy", MarketDataPolicy.from_env())
+        ws_started = bool(
+            getattr(self, "_ws_started", False)
+            or getattr(self, "_websocket_started", False)
+            or getattr(self, "ws_connected", False)
+        )
+        fallback_active = bool(
+            getattr(self, "_polling_fallback_active", False)
+            or getattr(self, "_rest_fallback_active", False)
+            or getattr(self, "_fallback_active", False)
+        )
+        if policy.should_suppress_rest_quote(
+            symbol=canonical_symbol,
+            ws_started=ws_started,
+            fallback_active=fallback_active,
+            explicit_allow_rest=allow_rest_fallback,
+        ):
+            self._logger.debug(
+                "MDM_REST_QUOTE_SUPPRESSED symbol=%s ws_started=%s fallback_active=%s allow_rest_fallback=%s",
+                canonical_symbol,
+                ws_started,
+                fallback_active,
+                allow_rest_fallback,
+                extra={
+                    "event": "MDM_REST_QUOTE_SUPPRESSED",
+                    "symbol": canonical_symbol,
+                    "ws_started": ws_started,
+                    "fallback_active": fallback_active,
+                    "allow_rest_fallback": allow_rest_fallback,
+                },
+            )
+            return None
+
         broker = getattr(self, "_broker", None)
         if broker:
             try:
                 t_before_rest = time.time()
-                quote = broker.get_quote(canonical_symbol)
+                broker_symbol = policy.to_broker_quote_symbol(canonical_symbol)
+                quote = broker.get_quote(broker_symbol)
                 if isinstance(quote, dict):
                     price = quote.get("last_price") or quote.get("ltp")
                     if price:
@@ -1924,9 +2001,14 @@ class MarketDataManager:
         self._logger.warning("get_ltp: no price available for %s", canonical_symbol)
         return None
 
-    def get_latest_price(self, symbol: str) -> float | None:
+    def get_latest_price(
+        self,
+        symbol: str,
+        *,
+        allow_rest_fallback: bool | None = None,
+    ) -> float | None:
         """Alias for get_ltp — preserves backward compatibility."""
-        return self.get_ltp(symbol)
+        return self.get_ltp(symbol, allow_rest_fallback=allow_rest_fallback)
 
     def get_fresh_spot_tick(
         self,
@@ -1971,7 +2053,7 @@ class MarketDataManager:
         source = str(
             tick.get("source") or self._last_tick_source.get(canonical) or ""
         ).lower()
-        if require_ws and source not in {"ws", "ws_full", "full", "quote"}:
+        if require_ws and source not in {"ws", "ws_full", "full"}:
             return None
 
         price = _coerce_positive_float(
@@ -3345,8 +3427,8 @@ class MarketDataManager:
                 ).lower()
                 bid_ask_source = str(tick.get("bid_ask_source") or "").lower()
                 if bool(tick.get("tradable_quote")) and (
-                    source in {"ws", "ws_full", "quote", "full"}
-                    or bid_ask_source in {"market_depth", "ws_full", "quote"}
+                    source in {"ws", "ws_full", "full"}
+                    or bid_ask_source in {"market_depth", "ws_full"}
                 ):
                     return True
         return False

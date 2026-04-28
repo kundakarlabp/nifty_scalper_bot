@@ -3503,13 +3503,30 @@ class StrategyRunner:
         return None
 
     def _get_spot_price(self) -> float:
-        """Resilient spot price fetcher checking canonical variants."""
-        source = self._data_hub or self._market_data
-        if not source:
-            return 0.0
-        price = source.get_latest_price("NSE:NIFTY")
-        if price and price > 0:
-            return price
+        """Get cached-only spot. Args: none. Returns: price. Raises: none."""
+        for source in (self._data_hub, self._market_data):
+            if source is None:
+                continue
+            cached_fn = getattr(source, "get_cached_ltp", None)
+            if callable(cached_fn):
+                try:
+                    price = cached_fn(
+                        "NSE:NIFTY", max_age_seconds=300.0, require_ws=False
+                    )
+                    if price and price > 0:
+                        return float(price)
+                except Exception:
+                    pass
+            get_latest_price = getattr(source, "get_latest_price", None)
+            if callable(get_latest_price):
+                try:
+                    price = get_latest_price("NSE:NIFTY", allow_pull=False)
+                    if price and price > 0:
+                        return float(price)
+                except TypeError:
+                    pass
+                except Exception:
+                    pass
         return 0.0
 
     def _execute_order(self, *, symbol: str, base_symbol: str, side: Literal["BUY", "SELL"], quantity: int, price: float, stop_loss: float | None, take_profit: float | None, timestamp: datetime, reference_price: float | None = None, metadata: Mapping[str, Any] | None = None, ) -> tuple[str, int]:
