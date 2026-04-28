@@ -43,6 +43,7 @@ else:  # pragma: no cover - fallback type when kiteconnect missing
 InstrumentResolver = Any  # type: ignore[misc]
 
 from nifty_scalper_bot.data.rest.client import BaseBrokerClient
+from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.utils.env import get_float, get_int, get_str
 from nifty_scalper_bot.utils.errors import (
     BrokerError,
@@ -57,7 +58,6 @@ from nifty_scalper_bot.utils.retry import (
     RetryErrorContext,
     retry_with_backoff,
 )
-from nifty_scalper_bot.utils.symbols import zerodha_quote_aliases
 
 T = TypeVar("T")
 
@@ -232,6 +232,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._quote_api_available = True
         self._quote_api_error: str | None = None
         self._quote_api_last_checked_at: float | None = None
+        self._md_policy = MarketDataPolicy.from_env()
+        self._last_quote_error_log_at: dict[str, float] = {}
 
     def quote_api_available(self) -> bool:
         """Return quote API capability flag."""
@@ -434,34 +436,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
         """
 
         self._acquire_bucket(self._QUOTE_BUCKET)
+        policy = getattr(self, "_md_policy", MarketDataPolicy.from_env())
         kite_symbol = self._format_symbol(symbol)
-        raw_symbol = str(symbol or "").strip().upper()
-        formatted_symbol = str(kite_symbol or "").strip().upper()
-
-        variants: list[str] = []
-        for candidate in (
-            formatted_symbol,
-            raw_symbol,
-            formatted_symbol.split(":", 1)[-1],
-            raw_symbol.split(":", 1)[-1],
-        ):
-            if candidate and candidate not in variants:
-                variants.append(candidate)
-
-        # Known index aliases Kite accepts under different keys.
-        _INDEX_ALIASES = {
-            "NSE:NIFTY": ("NSE:NIFTY 50", "NIFTY 50"),
-            "NIFTY": ("NSE:NIFTY 50", "NIFTY 50"),
-            "NIFTY50": ("NSE:NIFTY 50", "NIFTY 50"),
-            "NSE:BANKNIFTY": ("NSE:NIFTY BANK", "NIFTY BANK"),
-            "BANKNIFTY": ("NSE:NIFTY BANK", "NIFTY BANK"),
-            "NSE:FINNIFTY": ("NSE:NIFTY FIN SERVICE", "NIFTY FIN SERVICE"),
-            "FINNIFTY": ("NSE:NIFTY FIN SERVICE", "NIFTY FIN SERVICE"),
-        }
-        for alias_key in (formatted_symbol, raw_symbol):
-            for extra in _INDEX_ALIASES.get(alias_key, ()):
-                if extra not in variants:
-                    variants.append(extra)
+        variants = policy.quote_aliases(kite_symbol)
 
         # Send every alias to Kite so a single round-trip covers any naming
         # mismatch.  Kite silently drops unknown keys from the response.
@@ -472,6 +449,34 @@ class ZerodhaKiteClient(BaseBrokerClient):
         except Exception as exc:
             if self._is_quote_access_denied(exc):
                 self._mark_quote_api_status(available=False, error="access_denied")
+                throttle_window = max(
+                    1.0, float(policy.log_throttle_quote_errors_seconds)
+                )
+                now = time.monotonic()
+                key = f"quote:{str(symbol).upper()}"
+                last = self._last_quote_error_log_at.get(key, 0.0)
+                if now - last >= throttle_window:
+                    self._last_quote_error_log_at[key] = now
+                    LOGGER.error(
+                        "quote_request_access_denied label=quote symbol=%s error=%s",
+                        symbol,
+                        exc,
+                        extra={
+                            "event": "quote_request_access_denied",
+                            "label": "quote",
+                            "symbol": str(symbol),
+                        },
+                    )
+                else:
+                    LOGGER.debug(
+                        "quote_request_access_denied_suppressed label=quote symbol=%s",
+                        symbol,
+                        extra={
+                            "event": "quote_request_access_denied_suppressed",
+                            "label": "quote",
+                            "symbol": str(symbol),
+                        },
+                    )
             raise
         data = response.get("data", {})
         self._mark_quote_api_status(available=True)
@@ -772,6 +777,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
         if not tokens:
             return {}
+        policy = getattr(self, "_md_policy", MarketDataPolicy.from_env())
 
         # When POLL_REQUIRE_DEPTH is enabled we prefer the /quote endpoint (depth)
         # so that polling mode retrieves full quote payloads (bid/ask/depth) rather
@@ -920,7 +926,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             original_symbols = [str(item).strip() for item in tokens]
             symbols = []
             for original in original_symbols:
-                aliases = zerodha_quote_aliases(original)
+                aliases = policy.quote_aliases(original)
                 # Always include the original even when not in the alias list.
                 if original and original not in aliases:
                     aliases.insert(0, original)

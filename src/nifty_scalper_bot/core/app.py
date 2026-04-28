@@ -416,6 +416,7 @@ from nifty_scalper_bot.data import (
 from nifty_scalper_bot.data.assess_data import assess_datahub_fresh
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.market_regime import MarketRegimeDetector
 from nifty_scalper_bot.data.persistent_state import PersistentStateManager
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
@@ -5656,6 +5657,7 @@ async def _wait_for_live_spot_or_raise(
             spot tick is available within ``timeout``.
     """
 
+    policy = MarketDataPolicy.from_env()
     mdm = ctx.market_data_manager
     if mdm is None:
         raise RuntimeError("MarketDataManager unavailable")
@@ -5666,10 +5668,10 @@ async def _wait_for_live_spot_or_raise(
     if callable(wait_fn):
         try:
             tick = await wait_fn(
-                "NSE:NIFTY",
+                policy.nifty_internal_symbol,
                 timeout=float(timeout),
-                max_age_seconds=120.0,
-                require_ws=live_mode,
+                max_age_seconds=policy.startup_spot_max_age_seconds,
+                require_ws=policy.require_ws_spot_for_live and live_mode,
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning(
@@ -5682,32 +5684,50 @@ async def _wait_for_live_spot_or_raise(
     price = _coerce_spot_price(tick)
     if price is not None:
         LOGGER.info(
-            "LIVE_SPOT_READY symbol=NSE:NIFTY price=%.2f source=ws",
+            "LIVE_SPOT_READY symbol=%s price=%.2f source=ws",
+            policy.nifty_internal_symbol,
             price,
             extra={
                 "event": "LIVE_SPOT_READY",
-                "symbol": "NSE:NIFTY",
+                "symbol": policy.nifty_internal_symbol,
                 "price": price,
                 "source": "ws",
             },
         )
         return float(price)
 
-    if live_mode and not _allow_synthetic_market_data():
+    if (
+        live_mode
+        and policy.block_live_if_no_ws_spot
+        and not policy.allow_synthetic_spot_in_live
+    ):
         raise RuntimeError(
             "fresh NIFTY WebSocket spot tick unavailable; "
             "cannot build live option universe"
         )
 
     # Paper / off-hours fallback path: try cached REST/poll value first.
-    cached = float(mdm.get_latest_price("NSE:NIFTY") or 0.0)
+    cached_ltp_fn = getattr(mdm, "get_cached_ltp", None)
+    cached = (
+        float(
+            cached_ltp_fn(
+                policy.nifty_internal_symbol,
+                max_age_seconds=policy.startup_spot_max_age_seconds,
+                require_ws=False,
+            )
+            or 0.0
+        )
+        if callable(cached_ltp_fn)
+        else 0.0
+    )
     if cached > 0:
         LOGGER.info(
-            "LIVE_SPOT_READY symbol=NSE:NIFTY price=%.2f source=cache",
+            "LIVE_SPOT_READY symbol=%s price=%.2f source=cache",
+            policy.nifty_internal_symbol,
             cached,
             extra={
                 "event": "LIVE_SPOT_READY",
-                "symbol": "NSE:NIFTY",
+                "symbol": policy.nifty_internal_symbol,
                 "price": cached,
                 "source": "cache",
             },
@@ -5716,11 +5736,11 @@ async def _wait_for_live_spot_or_raise(
 
     LOGGER.warning(
         "SYNTHETIC_SPOT_USED mode=%s price=%.2f reason=no_live_tick",
-        "LIVE" if live_mode else "NON_LIVE",
+        configured_mode or ("LIVE" if live_mode else "NON_LIVE"),
         _SYNTHETIC_FALLBACK_SPOT,
         extra={
             "event": "SYNTHETIC_SPOT_USED",
-            "mode": "LIVE" if live_mode else "NON_LIVE",
+            "mode": configured_mode or ("LIVE" if live_mode else "NON_LIVE"),
             "price": _SYNTHETIC_FALLBACK_SPOT,
         },
     )
@@ -5759,6 +5779,7 @@ def _resolve_quote_capability(ctx: BotContext) -> dict[str, Any]:
 
 async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration and Option-Only Trading."""
+    policy = MarketDataPolicy.from_env()
     configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
     if configured_mode not in {"LIVE", "PAPER", "SHADOW"}:
         configured_mode = "SHADOW"
@@ -5798,6 +5819,24 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info(
                 "✅ MarketDataManager started — tick consumer active (WS deferred)"
             )
+            LOGGER.info(
+                "STARTUP_WS_SPOT_FIRST_DECISION websocket_enabled=%s mdm_present=%s has_start_websocket=%s",
+                ctx.websocket_enabled,
+                ctx.market_data_manager is not None,
+                hasattr(ctx.market_data_manager, "start_websocket")
+                if ctx.market_data_manager
+                else False,
+                extra={
+                    "event": "STARTUP_WS_SPOT_FIRST_DECISION",
+                    "websocket_enabled": ctx.websocket_enabled,
+                    "mdm_present": ctx.market_data_manager is not None,
+                    "has_start_websocket": hasattr(
+                        ctx.market_data_manager, "start_websocket"
+                    )
+                    if ctx.market_data_manager
+                    else False,
+                },
+            )
         except Exception as _mdm_start_exc:
             LOGGER.error("MarketDataManager.start() failed: %s", _mdm_start_exc)
 
@@ -5818,19 +5857,20 @@ async def startup_sequence(ctx: BotContext) -> None:
             register_fn = getattr(ctx.market_data_manager, "register_symbol", None)
             if callable(register_fn):
                 try:
-                    register_fn("NSE:NIFTY", 256265)
+                    register_fn(policy.nifty_internal_symbol, policy.nifty_spot_token)
                 except Exception:  # noqa: BLE001
                     LOGGER.debug(
                         "Spot symbol registration failed (will retry later)",
                         exc_info=True,
                     )
             LOGGER.info(
-                "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED symbol=NSE:NIFTY token=%d",
-                256265,
+                "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED symbol=%s token=%d",
+                policy.nifty_internal_symbol,
+                policy.nifty_spot_token,
                 extra={
                     "event": "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED",
-                    "symbol": "NSE:NIFTY",
-                    "token": 256265,
+                    "symbol": policy.nifty_internal_symbol,
+                    "token": policy.nifty_spot_token,
                 },
             )
             ctx.market_data_manager.start_websocket()
@@ -6201,19 +6241,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                     spot_token_int: int | None = None
                     try:
                         spot_token_int = int(
-                            ctx.broker_client.get_instrument_token("NSE:NIFTY")
+                            ctx.broker_client.get_instrument_token(
+                                policy.nifty_internal_symbol
+                            )
                         )
                     except Exception:  # noqa: BLE001
-                        spot_token_int = 256265
+                        spot_token_int = int(policy.nifty_spot_token)
                     ctx.active_trading_universe = {
-                        "spot_symbol": basket["spot_symbol"],
+                        "spot_symbol": policy.nifty_internal_symbol,
                         "spot_token": spot_token_int,
                         "spot_ltp": float(spot_ltp),
                         "symbols": list(targets),
+                        "tokens": [],
                         "futures_symbol": basket["futures_symbol"],
                         "atm_strike": basket["atm_strike"],
                         "selected_at": datetime.now(timezone.utc).isoformat(),
-                        "source": "ws_spot_first_instrument_manager",
+                        "source": "ws_spot_first_marketdata_policy",
                     }
                 except Exception:  # noqa: BLE001
                     LOGGER.debug(
@@ -6649,6 +6692,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # WS-first basket selection already proved fresh; never let a
                 # synthetic 25600.0 leak into LIVE option universe selection.
                 _active_universe = getattr(ctx, "active_trading_universe", None)
+                if isinstance(_active_universe, Mapping):
+                    LOGGER.info(
+                        "ACTIVE_UNIVERSE_REUSED",
+                        extra={
+                            "event": "ACTIVE_UNIVERSE_REUSED",
+                            "source": _active_universe.get("source"),
+                        },
+                    )
                 spot_price = 0.0
                 if isinstance(_active_universe, Mapping):
                     try:
@@ -7191,8 +7242,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                             continue
 
                         spot = (
-                            ctx.market_data_manager.get_latest_price("NSE:NIFTY")
+                            ctx.market_data_manager.get_cached_ltp(
+                                policy.nifty_internal_symbol,
+                                max_age_seconds=policy.startup_spot_max_age_seconds,
+                                require_ws=False,
+                            )
                             if ctx.market_data_manager
+                            and hasattr(ctx.market_data_manager, "get_cached_ltp")
                             else None
                         )
                         
@@ -7708,6 +7764,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                             if callable(ws_quote_proof_fn):
                                 ws_quote_proof = bool(ws_quote_proof_fn())
+                            ws_quote_for_gate = bool(ws_quote_proof)
+                            if (
+                                ws_quote_for_gate
+                                and not quote_available
+                                and not policy.quote_do_not_block_if_ws_healthy
+                            ):
+                                ws_quote_for_gate = False
                             try:
                                 market_state = get_market_state()
                             except Exception:  # noqa: BLE001
@@ -7753,7 +7816,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 live_mode=bool(live_mode),
                                 hard_ready=bool(hard_ready),
                                 quote_available=bool(quote_available),
-                                ws_quote_proof=bool(ws_quote_proof),
+                                ws_quote_proof=bool(ws_quote_for_gate),
                                 market_open=bool(market_open_now),
                             )
                             data_warmup_reasons: list[str] = list(blocking_reasons)

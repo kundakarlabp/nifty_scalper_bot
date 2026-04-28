@@ -879,7 +879,7 @@ class DataHub:
             )
             self._subscribe_symbol(normalized)
         if callback is not None:
-            quote = self.get_quote(normalized, allow_pull=True)
+            quote = self.get_quote(normalized, allow_pull=False)
             if quote is not None:
                 try:
                     callback(dict(quote))
@@ -926,17 +926,62 @@ class DataHub:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("unsubscribe_orders delegate failed: %s", exc)
 
-    def get_latest_price(self, symbol: str) -> Optional[float]:
-        tick = self.get_quote(symbol)
+    def get_latest_price(
+        self,
+        symbol: str,
+        *,
+        allow_pull: bool = False,
+        allow_rest_fallback: bool | None = None,
+    ) -> Optional[float]:
+        tick = self.get_quote(symbol, allow_pull=False)
         if tick:
             return self._tick_price(tick)
+        mdm_cached = getattr(self._mdm, "get_cached_ltp", None)
+        if callable(mdm_cached):
+            try:
+                cached = mdm_cached(symbol, max_age_seconds=None, require_ws=False)
+                if cached is not None:
+                    return float(cached)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("get_cached_ltp delegate failed for %s: %s", symbol, exc)
+        if not allow_pull and allow_rest_fallback is not True:
+            return None
         mdm_fn = getattr(self._mdm, "get_latest_price", None)
         if callable(mdm_fn):
             try:
-                return mdm_fn(symbol)
+                return mdm_fn(symbol, allow_rest_fallback=allow_rest_fallback)
+            except TypeError:
+                if allow_rest_fallback is True:
+                    try:
+                        return mdm_fn(symbol)
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.debug(
+                            "get_latest_price legacy delegate failed for %s: %s",
+                            symbol,
+                            exc,
+                        )
+                return None
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("get_latest_price delegate failed for %s: %s", symbol, exc)
         return None
+
+    def get_cached_ltp(
+        self,
+        symbol: str,
+        *,
+        max_age_seconds: float | None = None,
+        require_ws: bool = False,
+    ) -> Optional[float]:
+        """Get cached LTP only. Args: symbol/guards. Returns: price. Raises: none."""
+        mdm_cached = getattr(self._mdm, "get_cached_ltp", None)
+        if callable(mdm_cached):
+            return mdm_cached(
+                symbol, max_age_seconds=max_age_seconds, require_ws=require_ws
+            )
+        quote = self.get_quote(symbol, allow_pull=False)
+        if not quote:
+            return None
+        return self._tick_price(quote)
 
     def pull_quote(self, symbol: str) -> Dict[str, Any]:
         mdm_fn = getattr(self._mdm, "pull_quote", None)
@@ -1133,9 +1178,10 @@ class DataHub:
         return dict(greeks) if greeks else None
 
     def expected_move(self, days: float) -> Optional[float]:
-        spot = self.get_latest_price("NIFTY")
-        if spot is None:
-            spot = self.get_latest_price("NSE:NIFTY")
+        spot = None
+        cached_fn = getattr(self, "get_cached_ltp", None)
+        if callable(cached_fn):
+            spot = cached_fn("NSE:NIFTY", max_age_seconds=300.0, require_ws=False)
         if spot is None:
             return None
         iv = next(iter(self._iv_cache.values()), None)
@@ -1254,14 +1300,20 @@ class DataHub:
         return self._mdm_call("heartbeat_age")
 
     def get_latest_tick(self, symbol: str) -> Optional[Tick]:
-        return self._mdm_call("get_latest_tick", symbol) or self.get_quote(symbol)
+        return self._mdm_call("get_latest_tick", symbol) or self.get_quote(
+            symbol, allow_pull=False
+        )
 
     def get_last_tick(self, symbol: str) -> Optional[Tick]:
-        return self._mdm_call("get_last_tick", symbol) or self.get_quote(symbol)
+        return self._mdm_call("get_last_tick", symbol) or self.get_quote(
+            symbol, allow_pull=False
+        )
 
     def get_ltp(self, symbol: str) -> Optional[float]:
-        value = self._mdm_call("get_ltp", symbol)
-        return value if value is not None else self.get_latest_price(symbol)
+        cached = self.get_cached_ltp(symbol, max_age_seconds=None, require_ws=False)
+        if cached is not None:
+            return float(cached)
+        return self.get_latest_price(symbol, allow_pull=False)
 
     def has_quote(self, symbol: str) -> bool:
         value = self._mdm_call("has_quote", symbol)
