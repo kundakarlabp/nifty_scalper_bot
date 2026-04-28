@@ -220,13 +220,39 @@ class IndicatorEngine:
             with self._lock:
                 history = self._histories.get(symbol)
                 if history is None:
-                    LOGGER.info(
-                        "Condition met: indicator_history_missing",
-                        extra={
-                            "event": "indicator_engine_history_missing",
-                            "symbol": symbol,
-                        },
-                    )
+                    try:
+                        from nifty_scalper_bot.utils.market_hours import (
+                            is_market_open_now,
+                        )
+
+                        market_open_now = is_market_open_now()
+                    except Exception:
+                        market_open_now = True
+                    if market_open_now:
+                        log_throttled(
+                            LOGGER,
+                            f"indicator_history_missing:{symbol}",
+                            "Condition met: indicator_history_missing",
+                            interval_sec=60.0,
+                            level=logging.INFO,
+                            extra={
+                                "event": "indicator_engine_history_missing",
+                                "symbol": symbol,
+                            },
+                        )
+                    else:
+                        log_throttled(
+                            LOGGER,
+                            f"indicator_history_missing_offmarket:{symbol}",
+                            "Condition met: indicator_history_missing (market_closed)",
+                            interval_sec=900.0,
+                            level=logging.DEBUG,
+                            extra={
+                                "event": "indicator_engine_history_missing",
+                                "symbol": symbol,
+                                "market_session_state": "closed",
+                            },
+                        )
                     return []
                 closes = history.get_closes(count)
             LOGGER.debug(

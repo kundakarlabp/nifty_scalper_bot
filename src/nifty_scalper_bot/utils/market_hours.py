@@ -119,6 +119,113 @@ def is_market_open() -> bool:
     return get_market_state() == MarketState.OPEN
 
 
+def get_market_session_state(now: datetime | None = None) -> str:
+    """Return one of "open" | "closed" | "preopen" | "unknown" for the given
+    instant (defaults to current IST time)."""
+    try:
+        if now is None:
+            current = _now_ist()
+        else:
+            current = now.astimezone(IST) if now.tzinfo else now.replace(tzinfo=IST)
+    except Exception:
+        return "unknown"
+
+    if _override_enabled():
+        return "open"
+
+    if current.weekday() >= 5:
+        return "closed"
+
+    t = current.time()
+    preopen_start = dtime(9, 0)
+    if preopen_start <= t < MARKET_OPEN:
+        return "preopen"
+    if MARKET_OPEN <= t <= MARKET_CLOSE:
+        return "open"
+    return "closed"
+
+
+def is_market_open_now() -> bool:
+    """Args: none; Returns: True iff session state is open. Raises: none."""
+    return get_market_session_state() == "open"
+
+
+def _env_float(name: str, default: float) -> float:
+    """Args: env var name, default; Returns: float; Raises: none."""
+    raw = os.getenv(name)
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def is_nifty_index_symbol(symbol: str) -> bool:
+    """Args: symbol; Returns: True for NIFTY spot/index variants; Raises: none."""
+    upper = (symbol or "").upper().strip()
+    if not upper:
+        return False
+    if upper in {
+        "NIFTY",
+        "NSE:NIFTY",
+        "NSE:NIFTY 50",
+        "NIFTY 50",
+        "NIFTY50",
+        "NSE:NIFTY50",
+        "NSE:NIFTYBANK",
+        "NIFTY BANK",
+        "BANKNIFTY",
+        "NSE:BANKNIFTY",
+    }:
+        return True
+    if upper.endswith("CE") or upper.endswith("PE") or upper.endswith("FUT"):
+        return False
+    if "NIFTY" in upper and ":" in upper and not any(
+        upper.endswith(suf) for suf in ("CE", "PE", "FUT")
+    ):
+        return True
+    return False
+
+
+def is_nifty_future_symbol(symbol: str) -> bool:
+    """Args: symbol; Returns: True if symbol is a NIFTY/BANKNIFTY future; Raises: none."""
+    upper = (symbol or "").upper().strip()
+    return upper.endswith("FUT")
+
+
+def is_nifty_option_symbol(symbol: str) -> bool:
+    """Args: symbol; Returns: True if symbol is an NFO option (CE/PE); Raises: none."""
+    upper = (symbol or "").upper().strip()
+    return upper.endswith("CE") or upper.endswith("PE")
+
+
+def stale_threshold_for_symbol(symbol: str, market_open: bool) -> float:
+    """Return the canonical staleness threshold (seconds) for a symbol.
+
+    Index/Future spots: 120s when market open, 3600s otherwise.
+    Options:           900s when market open, 3600s otherwise.
+    Anything else:     60s when market open, 3600s otherwise.
+
+    Configurable via MDM_*_LTP_STALE_SECONDS / MDM_OFFMARKET_*_LTP_STALE_SECONDS env vars.
+    """
+    if is_nifty_index_symbol(symbol):
+        if market_open:
+            return _env_float("MDM_INDEX_LTP_STALE_SECONDS", 120.0)
+        return _env_float("MDM_OFFMARKET_INDEX_LTP_STALE_SECONDS", 3600.0)
+    if is_nifty_future_symbol(symbol):
+        if market_open:
+            return _env_float("MDM_FUTURE_LTP_STALE_SECONDS", 120.0)
+        return _env_float("MDM_OFFMARKET_FUTURE_LTP_STALE_SECONDS", 3600.0)
+    if is_nifty_option_symbol(symbol):
+        if market_open:
+            return _env_float("MDM_OPTION_LTP_STALE_SECONDS", 900.0)
+        return _env_float("MDM_OFFMARKET_OPTION_LTP_STALE_SECONDS", 3600.0)
+    if market_open:
+        return _env_float("MDM_GENERIC_LTP_STALE_SECONDS", 60.0)
+    return _env_float("MDM_OFFMARKET_GENERIC_LTP_STALE_SECONDS", 3600.0)
+
+
 def get_time_status() -> Tuple[bool, str]:
     """
     Get detailed time status for logging.
@@ -180,17 +287,23 @@ def is_market_hours_cached() -> bool:
 
 __all__ = [
     "is_market_hours",
-    "is_market_open", 
+    "is_market_open",
+    "is_market_open_now",
     "is_market_hours_cached",
     "get_time_status",
     "get_current_ist_time",
     "format_time_for_log",
+    "get_market_session_state",
     "MarketState",
     "get_market_state",
     "IST",
     "MARKET_OPEN",
-    "SAFE_START", 
+    "SAFE_START",
     "SAFE_END",
     "MARKET_CLOSE",
     "allow_offhours_testing_safe",
+    "stale_threshold_for_symbol",
+    "is_nifty_index_symbol",
+    "is_nifty_future_symbol",
+    "is_nifty_option_symbol",
 ]

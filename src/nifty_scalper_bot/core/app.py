@@ -487,7 +487,9 @@ from nifty_scalper_bot.utils.logging import get_logger, log_throttled, setup_log
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     allow_offhours_testing_safe,
+    get_market_session_state,
     get_market_state,
+    is_market_open_now,
 )
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
@@ -6632,6 +6634,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         quote_stale_ms = int(fallback_stale_sec * 1000.0)
                         while True:
                             try:
+                                market_open = is_market_open_now()
                                 ws_ok = bool(ctx.websocket_manager.is_connected())
                                 feed_health = ctx.market_data_manager.trading_feed_health(
                                     max_age_ms=quote_stale_ms
@@ -6650,6 +6653,29 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     options_fresh=options_fresh,
                                 )
                                 now_mono = time_module.monotonic()
+                                if not market_open:
+                                    # Off-market: never aggressively activate
+                                    # the REST polling fallback just because the
+                                    # last quote crossed the open-market threshold.
+                                    log_throttled(
+                                        LOGGER,
+                                        "polling_fallback_skipped_market_closed",
+                                        "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s"
+                                        % spot_age_ms,
+                                        interval_sec=300.0,
+                                        level=logging.DEBUG,
+                                        extra={
+                                            "event": "POLLING_FALLBACK_SKIPPED",
+                                            "reason": "market_closed",
+                                            "age_ms": spot_age_ms,
+                                        },
+                                    )
+                                    degraded_since = None
+                                    if polling_fallback.is_running():
+                                        polling_fallback.set_websocket_mode(True)
+                                        polling_fallback.stop()
+                                    await asyncio.sleep(1.0)
+                                    continue
                                 if degraded:
                                     recovered_since = None
                                     degraded_since = degraded_since or now_mono
@@ -6662,11 +6688,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             and float(spot_age_ms) <= float(quote_stale_ms)
                                             and ws_ok
                                         ):
-                                            LOGGER.info(
-                                                "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s",
-                                                spot_age_ms,
-                                                quote_stale_ms,
-                                                ws_ok,
+                                            log_throttled(
+                                                LOGGER,
+                                                f"polling_fallback_skipped:{spot_symbol}:within_spot_stale_threshold",
+                                                "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s"
+                                                % (spot_age_ms, quote_stale_ms, ws_ok),
+                                                interval_sec=30.0,
+                                                level=logging.INFO,
+                                                extra={
+                                                    "event": "POLLING_FALLBACK_SKIPPED",
+                                                    "reason": "within_spot_stale_threshold",
+                                                    "age_ms": spot_age_ms,
+                                                    "threshold_ms": quote_stale_ms,
+                                                    "ws_ok": ws_ok,
+                                                },
                                             )
                                             await asyncio.sleep(1.0)
                                             continue
@@ -7378,8 +7413,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         ),
                                     },
                                 )
-                            data_warmup_reason: str | None = None
-                            if live_mode and hard_ready and quote_available:
+                            data_warmup_reasons: list[str] = []
+                            if live_mode and hard_ready and quote_available and market_state == MarketState.OPEN:
                                 ctx.live_orders_armed = True
                                 ctx.trading_ready = True
                                 ctx.readiness_mode = "LIVE"
@@ -7387,7 +7422,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
                                 ctx.readiness_mode = "DATA_WARMUP"
-                                data_warmup_reason = "startup_pipeline_incomplete"
+                                data_warmup_reasons.append("startup_pipeline_incomplete")
                                 LOGGER.error(
                                     "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing=%s",
                                     missing_hard,
@@ -7407,7 +7442,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
                                 ctx.readiness_mode = "DATA_WARMUP"
-                                data_warmup_reason = "broker_quote_access_denied"
+                                data_warmup_reasons.append("broker_quote_access_denied")
                                 LOGGER.error(
                                     "LIVE_TRADING_BLOCKED reason=broker_quote_access_denied",
                                     extra={
@@ -7415,16 +7450,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "reason": "broker_quote_access_denied",
                                     },
                                 )
-                            if (
-                                live_mode
-                                and ctx.readiness_mode == "DATA_WARMUP"
-                                and data_warmup_reason is None
-                            ):
-                                data_warmup_reason = (
-                                    "market_closed"
-                                    if market_state != MarketState.OPEN
-                                    else "startup_pipeline_incomplete"
-                                )
+                            if live_mode and market_state != MarketState.OPEN:
+                                ctx.live_orders_armed = False
+                                ctx.trading_ready = False
+                                ctx.readiness_mode = "DATA_WARMUP"
+                                if "market_closed" not in data_warmup_reasons:
+                                    data_warmup_reasons.append("market_closed")
+                            data_warmup_reason: str | None = (
+                                ",".join(data_warmup_reasons) if data_warmup_reasons else None
+                            )
                             ctx.live_block_reason = data_warmup_reason
                             ctx.market_session_state = session_state_str
                             ctx.quote_api_available = quote_available

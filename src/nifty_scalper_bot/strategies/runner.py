@@ -96,8 +96,11 @@ from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttl
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     allow_offhours_testing_safe,
+    get_market_session_state,
     get_market_state,
     is_market_hours_cached,
+    is_market_open_now,
+    stale_threshold_for_symbol,
 )
 from nifty_scalper_bot.utils.metrics import Counter, signals_generated_total
 from nifty_scalper_bot.utils.symbols import (
@@ -4160,13 +4163,26 @@ class StrategyRunner:
                 and now_mono - self._last_stall_warn_ts > 120.0
             ):
                 self._last_stall_warn_ts = now_mono
-                self._logger.warning(
-                    "Strategy evaluation stalled >120s (once per 120s)",
-                    extra={
-                        "event": "strategy_eval_stall",
-                        "stall_sec": round(now_mono - self._last_global_eval_ts, 1),
-                    },
-                )
+                if not is_market_open_now():
+                    log_throttled(
+                        self._logger,
+                        "strategy_stall_check_skipped_market_closed",
+                        "STALL_CHECK_SKIPPED reason=market_closed",
+                        interval_sec=300.0,
+                        level=logging.DEBUG,
+                        extra={
+                            "event": "STALL_CHECK_SKIPPED",
+                            "reason": "market_closed",
+                        },
+                    )
+                else:
+                    self._logger.warning(
+                        "Strategy evaluation stalled >120s (once per 120s)",
+                        extra={
+                            "event": "strategy_eval_stall",
+                            "stall_sec": round(now_mono - self._last_global_eval_ts, 1),
+                        },
+                    )
             self._health_watchdog()
             self._logger.debug(
                 "PIPELINE_OK",
@@ -4273,6 +4289,7 @@ class StrategyRunner:
     def _health_watchdog(self) -> None:
         """Args: none; Returns: none; Raises: none."""
         now = time.monotonic()
+        market_open = is_market_open_now()
         tick_flowing = (now - self._last_tick_seen_ts) <= 5.0
         eval_stalled = (now - self._last_global_eval_ts) > 5.0
 
@@ -4280,20 +4297,34 @@ class StrategyRunner:
         # Only warn if stall > 90s (longer than one full bar cycle) to avoid spam.
         genuine_stall = (now - self._last_global_eval_ts) > 90.0
         if self.ready and tick_flowing and eval_stalled and genuine_stall:
-            log_throttled(
-                self._logger,
-                "health_watchdog_genuine_stall",
-                "Strategy eval genuinely stalled while ticks flowing (>90s)",
-                interval_sec=120.0,
-                level=logging.WARNING,
-                extra={
-                    "event": "strategy_eval_stall",
-                    "stall_sec": round(now - self._last_global_eval_ts, 1),
-                },
-            )
+            if not market_open:
+                log_throttled(
+                    self._logger,
+                    "strategy_stall_check_skipped_market_closed",
+                    "STALL_CHECK_SKIPPED reason=market_closed",
+                    interval_sec=300.0,
+                    level=logging.DEBUG,
+                    extra={
+                        "event": "STALL_CHECK_SKIPPED",
+                        "reason": "market_closed",
+                    },
+                )
+            else:
+                log_throttled(
+                    self._logger,
+                    "health_watchdog_genuine_stall",
+                    "Strategy eval genuinely stalled while ticks flowing (>90s)",
+                    interval_sec=120.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "strategy_eval_stall",
+                        "stall_sec": round(now - self._last_global_eval_ts, 1),
+                    },
+                )
 
         now_wall = time.time()
         stale_count = 0
+        stale_symbols: list[str] = []
 
         for symbol, engine in self._candle_engines.items():
             if symbol not in self._active_symbols:
@@ -4312,11 +4343,19 @@ class StrategyRunner:
             # 1. Use .get() to prevent KeyError on newly subscribed symbols
             stale_for = now_wall - self._last_tick_time_by_symbol.get(symbol, now_wall)
 
-            # 2. Relax threshold to 15.0s (3.0s is too tight for OTM options)
-            if stale_for > 15.0:
+            # 2. Use the centralised, market-session-aware threshold so that
+            # off-market option/index tick gaps are not treated as faults.
+            symbol_stale_threshold = stale_threshold_for_symbol(symbol, market_open)
+            if stale_for > symbol_stale_threshold:
                 stale_count += 1
-                last_log_ts = self._last_ws_stale_log_ts_by_symbol.get(symbol, 0.0)
+                stale_symbols.append(symbol)
 
+                # Off-market: never trigger a per-symbol WS-stale backfill or
+                # zombie restart. Just emit one DEBUG/throttled trace.
+                if not market_open:
+                    continue
+
+                last_log_ts = self._last_ws_stale_log_ts_by_symbol.get(symbol, 0.0)
                 # 3. GATE THE ENTIRE BACKFILL PROCESS, not just the logger
                 if now_wall - last_log_ts >= 60.0:
                     self._logger.warning(
@@ -4354,6 +4393,22 @@ class StrategyRunner:
         # 5. Move WS Reconnect OUTSIDE the symbol loop.
         # We only want to evaluate a WS restart once per cycle, not once per symbol.
         if stale_count > 0:
+            if not market_open:
+                log_throttled(
+                    self._logger,
+                    "zombie_ws_restart_skipped_market_closed",
+                    "WS_RESTART_SKIPPED reason=market_closed stale_symbols=%d"
+                    % stale_count,
+                    interval_sec=300.0,
+                    level=logging.DEBUG,
+                    extra={
+                        "event": "WS_RESTART_SKIPPED",
+                        "reason": "market_closed",
+                        "stale_symbols": stale_symbols[:32],
+                        "stale_count": stale_count,
+                    },
+                )
+                return
             last_reconnect_ts = getattr(self, "_last_ws_reconnect_attempt_ts", 0.0)
             # Increase WS restart throttle to 30s to prevent bouncing the connection
             if now_wall - last_reconnect_ts >= 30.0:
@@ -5387,27 +5442,38 @@ class StrategyRunner:
             if tick_latency_ms > 5000.0:
                 skip_strategy = True
 
-            # Stale tick: NFO options/futures carry the exchange last-trade timestamp
-            # (≈13-min gaps between trades). Use 900s for NFO; 30s for REST-polled
-            # index/equity; 10s for WebSocket ticks.
-            _is_nfo_tick = any(x in symbol for x in ("CE", "PE", "FUT"))
-            stale_threshold = (
-                900.0
-                if _is_nfo_tick
-                else (30.0 if source in ("rest", "polling") else 10.0)
-            )
+            # Stale tick threshold is centrally derived per-symbol and
+            # market-session aware (utils.market_hours.stale_threshold_for_symbol).
+            market_open_now = is_market_open_now()
+            stale_threshold = stale_threshold_for_symbol(symbol, market_open_now)
 
             if tick_age > stale_threshold:
-                log_throttled(
-                    self._logger,
-                    f"stale_tick_{symbol}",
-                    (
-                        f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, "
-                        f"threshold={stale_threshold}s)"
-                    ),
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                )
+                if not market_open_now:
+                    log_throttled(
+                        self._logger,
+                        f"stale_tick_offmarket:{symbol}",
+                        f"OFFMARKET_STALE_TICK symbol={symbol} age_s={tick_age:.1f} "
+                        f"threshold={stale_threshold:.1f}",
+                        interval_sec=900.0,
+                        level=logging.DEBUG,
+                        extra={
+                            "event": "OFFMARKET_STALE_TICK",
+                            "symbol": symbol,
+                            "age_s": tick_age,
+                            "threshold_s": stale_threshold,
+                        },
+                    )
+                else:
+                    log_throttled(
+                        self._logger,
+                        f"stale_tick_{symbol}",
+                        (
+                            f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, "
+                            f"threshold={stale_threshold}s)"
+                        ),
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                    )
                 skip_strategy = True
 
             # Volume validity check (relaxed warnings for REST mode)
