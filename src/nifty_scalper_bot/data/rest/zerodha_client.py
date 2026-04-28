@@ -57,6 +57,7 @@ from nifty_scalper_bot.utils.retry import (
     RetryErrorContext,
     retry_with_backoff,
 )
+from nifty_scalper_bot.utils.symbols import zerodha_quote_aliases
 
 T = TypeVar("T")
 
@@ -910,8 +911,24 @@ class ZerodhaKiteClient(BaseBrokerClient):
         canonical_input = all(
             isinstance(item, str) and ":" in str(item).strip() for item in tokens
         )
+        # alias_to_original maps every alias variant we send to Kite back to
+        # the caller's requested symbol so the response can be re-keyed in the
+        # caller's preferred form (e.g. "NSE:NIFTY" instead of "NSE:NIFTY 50").
+        alias_to_original: dict[str, str] = {}
+        original_symbols: list[str] = []
         if canonical_input:
-            symbols = [str(item).strip() for item in tokens]
+            original_symbols = [str(item).strip() for item in tokens]
+            symbols = []
+            for original in original_symbols:
+                aliases = zerodha_quote_aliases(original)
+                # Always include the original even when not in the alias list.
+                if original and original not in aliases:
+                    aliases.insert(0, original)
+                for alias in aliases:
+                    if alias and alias not in symbols:
+                        symbols.append(alias)
+                    alias_upper = alias.strip().upper()
+                    alias_to_original.setdefault(alias_upper, original)
             symbol_map: dict[str, int] = {}
             LOGGER.debug(
                 "quote_bulk canonical fast-path",
@@ -919,6 +936,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     "event": "quote_bulk_canonical_fast_path",
                     "symbols": symbols[:8],
                     "count": len(symbols),
+                    "originals": original_symbols[:8],
                 },
             )
         else:
@@ -939,29 +957,52 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 self._make_request("GET", "/quote", params={"i": symbols})
             )
         except Exception as exc:
-            LOGGER.error(
-                "Quote bulk request failed: %s",
-                exc,
-                extra={
-                    "event": "quote_bulk_request_error",
-                    "symbols_count": len(symbols),
-                },
-            )
+            if self._is_quote_access_denied(exc):
+                self._mark_quote_api_status(available=False, error="access_denied")
+                # 403s repeat every poll interval; demote to debug after the
+                # first marker so logs do not flood.
+                LOGGER.debug(
+                    "Quote bulk denied (access_denied): %s",
+                    exc,
+                    extra={
+                        "event": "quote_bulk_access_denied",
+                        "symbols_count": len(symbols),
+                    },
+                )
+            else:
+                LOGGER.error(
+                    "Quote bulk request failed: %s",
+                    exc,
+                    extra={
+                        "event": "quote_bulk_request_error",
+                        "symbols_count": len(symbols),
+                    },
+                )
             return {}
 
         data = cast(dict[str, Any], response.get("data", {}))
+        self._mark_quote_api_status(available=True)
 
-        # ✅ FIX: Return keyed by symbol (not token) for consistency
+        # ✅ FIX: Return keyed by the caller's requested symbol when possible
+        # (so callers asking for "NSE:NIFTY" find the payload there even though
+        # Kite returned it under "NSE:NIFTY 50").
         out: dict[str, dict[str, Any]] = {}
-        for symbol, payload in data.items():
+        for returned_symbol, payload in data.items():
             if not payload:
                 continue
-            # Ensure instrument_token is present
-            if "instrument_token" not in payload:
-                token_from_map = symbol_map.get(symbol)
+            payload_dict = dict(payload)
+            if "instrument_token" not in payload_dict:
+                token_from_map = symbol_map.get(returned_symbol)
                 if token_from_map:
-                    payload["instrument_token"] = token_from_map
-            out[symbol] = payload
+                    payload_dict["instrument_token"] = token_from_map
+            original_key = alias_to_original.get(
+                str(returned_symbol).strip().upper(), returned_symbol
+            )
+            out.setdefault(original_key, payload_dict)
+            # Keep Kite's exact response key as a fallback so callers that
+            # pre-translate to "NSE:NIFTY 50" themselves still find it.
+            if returned_symbol not in out:
+                out[returned_symbol] = dict(payload_dict)
 
         return out
 

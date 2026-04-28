@@ -1928,6 +1928,99 @@ class MarketDataManager:
         """Alias for get_ltp — preserves backward compatibility."""
         return self.get_ltp(symbol)
 
+    def get_fresh_spot_tick(
+        self,
+        symbol: str = "NSE:NIFTY",
+        *,
+        max_age_seconds: float | None = None,
+        require_ws: bool = True,
+    ) -> dict[str, Any] | None:
+        """Return the cached spot tick if it satisfies freshness/source guards.
+
+        In live startup we must avoid building the option universe from a stale
+        REST quote.  This helper enforces a tick age window and (optionally) a
+        WebSocket-source requirement so callers can prove fresh exchange data
+        before arming live trading.
+
+        Args:
+            symbol: Spot symbol to inspect (default ``NSE:NIFTY``).
+            max_age_seconds: Maximum acceptable tick age in seconds.  When
+                ``None`` the per-symbol stale threshold is used.
+            require_ws: When ``True``, only WebSocket-sourced ticks are
+                accepted; REST/polling ticks are rejected.
+
+        Returns:
+            A copy of the latest tick dict that passes all guards, or ``None``
+            when no fresh proof is available.
+        """
+
+        canonical = self._canonical_symbol(symbol)
+        tick = self.get_latest_tick(canonical)
+        if not isinstance(tick, Mapping):
+            return None
+
+        age = self.time_since_last_tick(canonical)
+        threshold = (
+            float(max_age_seconds)
+            if max_age_seconds is not None
+            else float(self._ltp_stale_threshold_for_symbol(canonical) or 120.0)
+        )
+        if age is None or threshold <= 0 or age > threshold:
+            return None
+
+        source = str(
+            tick.get("source") or self._last_tick_source.get(canonical) or ""
+        ).lower()
+        if require_ws and source not in {"ws", "ws_full", "full", "quote"}:
+            return None
+
+        price = _coerce_positive_float(
+            tick.get("last_price")
+            or tick.get("ltp")
+            or tick.get("price")
+            or tick.get("close")
+        )
+        if price is None or price <= 0:
+            return None
+
+        return dict(tick)
+
+    async def wait_for_fresh_spot_tick(
+        self,
+        symbol: str = "NSE:NIFTY",
+        *,
+        timeout: float = 15.0,
+        max_age_seconds: float | None = None,
+        require_ws: bool = True,
+        poll_interval: float = 0.25,
+    ) -> dict[str, Any] | None:
+        """Block until ``symbol`` has a fresh spot tick or ``timeout`` elapses.
+
+        Args:
+            symbol: Spot symbol to wait on.
+            timeout: Maximum wait in seconds.
+            max_age_seconds: Override per-symbol stale threshold.
+            require_ws: Require a WebSocket-sourced tick when ``True``.
+            poll_interval: Seconds between checks while waiting.
+
+        Returns:
+            The fresh tick dict, or ``None`` if no fresh tick arrived in time.
+        """
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        interval = max(0.05, float(poll_interval))
+        while True:
+            tick = self.get_fresh_spot_tick(
+                symbol,
+                max_age_seconds=max_age_seconds,
+                require_ws=require_ws,
+            )
+            if tick is not None:
+                return tick
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(interval)
+
     def _resolve_underlying_price(self, symbol: str) -> float | None:
         canonical_symbol = self._canonical_symbol(symbol)
         tick_price = self.get_latest_price(canonical_symbol)

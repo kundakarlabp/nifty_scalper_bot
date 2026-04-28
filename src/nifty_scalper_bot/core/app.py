@@ -430,6 +430,7 @@ from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.execution.position_manager import ActiveContract, PositionManager
 from nifty_scalper_bot.execution.post_fill_monitor import PostFillMonitor
 from nifty_scalper_bot.execution.preflight_validator import PreFlightValidator
+from nifty_scalper_bot.execution.readiness import compute_live_readiness
 from nifty_scalper_bot.execution.safe_order_manager import SafeOrderManager
 from nifty_scalper_bot.execution.state_tracker import StateTracker
 from nifty_scalper_bot.infra.cron_refresh import schedule_instrument_refresh
@@ -1703,6 +1704,11 @@ class BotContext:
     market_session_state: str | None = None
     quote_api_available: bool = True
     quote_api_error: str | None = None
+    # Authoritative live trading universe selected by the WS-spot-first
+    # startup pipeline.  When populated, downstream legacy hydration paths
+    # must reuse this rather than rebuild with their own (potentially
+    # synthetic) spot price.
+    active_trading_universe: dict[str, Any] | None = None
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -5564,6 +5570,163 @@ def force_enable_trading_override() -> str:
     return "\n".join(logs)
 
 
+_SYNTHETIC_FALLBACK_SPOT = 25600.0
+
+
+def _is_live_execution_mode(configured_mode: str | None = None) -> bool:
+    """Return True when the bot is configured to place live broker orders.
+
+    The check honours both the explicit ``EXECUTION_MODE`` value and the
+    legacy ``ENABLE_LIVE`` flag.  Synthetic fallbacks (such as the 25600.0
+    NIFTY proxy used during off-hours simulation) MUST be gated on the
+    inverse of this so live order arming can never select strikes from a
+    fake spot price.
+
+    Args:
+        configured_mode: Optional pre-resolved ``EXECUTION_MODE`` value.
+
+    Returns:
+        True if execution mode is LIVE *or* ENABLE_LIVE is truthy.
+    """
+
+    mode = str(
+        configured_mode
+        if configured_mode is not None
+        else os.getenv("EXECUTION_MODE", "")
+    ).strip().upper()
+    if mode == "LIVE":
+        return True
+    flag = str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
+    return flag in {"1", "true", "yes", "on"}
+
+
+def _allow_synthetic_market_data() -> bool:
+    """Return True when explicit synthetic fallback is permitted.
+
+    Used so unit/integration tests can opt-in to the deterministic 25600.0
+    NIFTY fallback even while ``EXECUTION_MODE`` claims LIVE.
+    """
+
+    flag = str(os.getenv("ALLOW_SYNTHETIC_MARKET_DATA", "false")).strip().lower()
+    return flag in {"1", "true", "yes", "on"}
+
+
+def _coerce_spot_price(tick: Mapping[str, Any] | None) -> float | None:
+    """Pull a positive spot price out of an MDM tick payload."""
+
+    if not isinstance(tick, Mapping):
+        return None
+    for key in ("last_price", "ltp", "price", "close"):
+        raw = tick.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+async def _wait_for_live_spot_or_raise(
+    ctx: BotContext,
+    *,
+    timeout: float = 15.0,
+    configured_mode: str | None = None,
+) -> float:
+    """Resolve the NIFTY spot price to use for live option universe selection.
+
+    In LIVE mode this requires fresh WebSocket tick proof for ``NSE:NIFTY``
+    so the ATM basket cannot be built from a stale REST quote or synthetic
+    fallback.  In PAPER/SHADOW mode it allows REST/cached values and finally
+    a synthetic 25600.0 reference (with a clear log) so off-hours
+    simulations keep working.
+
+    Args:
+        ctx: Bot context with an attached MarketDataManager.
+        timeout: Maximum seconds to wait for a fresh WebSocket tick.
+        configured_mode: Optional pre-resolved ``EXECUTION_MODE`` value.
+
+    Returns:
+        Positive NIFTY spot price.
+
+    Raises:
+        RuntimeError: When LIVE mode is active but no fresh WebSocket
+            spot tick is available within ``timeout``.
+    """
+
+    mdm = ctx.market_data_manager
+    if mdm is None:
+        raise RuntimeError("MarketDataManager unavailable")
+
+    live_mode = _is_live_execution_mode(configured_mode)
+    wait_fn = getattr(mdm, "wait_for_fresh_spot_tick", None)
+    tick: Mapping[str, Any] | None = None
+    if callable(wait_fn):
+        try:
+            tick = await wait_fn(
+                "NSE:NIFTY",
+                timeout=float(timeout),
+                max_age_seconds=120.0,
+                require_ws=live_mode,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "wait_for_fresh_spot_tick failed: %s",
+                exc,
+                extra={"event": "wait_for_fresh_spot_tick_failed"},
+            )
+            tick = None
+
+    price = _coerce_spot_price(tick)
+    if price is not None:
+        LOGGER.info(
+            "LIVE_SPOT_READY symbol=NSE:NIFTY price=%.2f source=ws",
+            price,
+            extra={
+                "event": "LIVE_SPOT_READY",
+                "symbol": "NSE:NIFTY",
+                "price": price,
+                "source": "ws",
+            },
+        )
+        return float(price)
+
+    if live_mode and not _allow_synthetic_market_data():
+        raise RuntimeError(
+            "fresh NIFTY WebSocket spot tick unavailable; "
+            "cannot build live option universe"
+        )
+
+    # Paper / off-hours fallback path: try cached REST/poll value first.
+    cached = float(mdm.get_latest_price("NSE:NIFTY") or 0.0)
+    if cached > 0:
+        LOGGER.info(
+            "LIVE_SPOT_READY symbol=NSE:NIFTY price=%.2f source=cache",
+            cached,
+            extra={
+                "event": "LIVE_SPOT_READY",
+                "symbol": "NSE:NIFTY",
+                "price": cached,
+                "source": "cache",
+            },
+        )
+        return float(cached)
+
+    LOGGER.warning(
+        "SYNTHETIC_SPOT_USED mode=%s price=%.2f reason=no_live_tick",
+        "LIVE" if live_mode else "NON_LIVE",
+        _SYNTHETIC_FALLBACK_SPOT,
+        extra={
+            "event": "SYNTHETIC_SPOT_USED",
+            "mode": "LIVE" if live_mode else "NON_LIVE",
+            "price": _SYNTHETIC_FALLBACK_SPOT,
+        },
+    )
+    return _SYNTHETIC_FALLBACK_SPOT
+
+
 def _resolve_quote_capability(ctx: BotContext) -> dict[str, Any]:
     """Combine MDM and broker quote capability snapshots. Args: ctx. Returns: combined snapshot. Raises: none."""
     available = True
@@ -5637,6 +5800,50 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
         except Exception as _mdm_start_exc:
             LOGGER.error("MarketDataManager.start() failed: %s", _mdm_start_exc)
+
+    # ── Bring the WebSocket online with the NIFTY spot token FIRST ──
+    # The bot must observe a real exchange tick before selecting ATM
+    # options.  Starting the WS now (with the canonical NIFTY spot token
+    # already registered in MarketDataManager.__init__) lets us prove a
+    # fresh spot price before any option-universe selection runs and
+    # guarantees the readiness gate has a tick to evaluate.  Option
+    # tokens are added later via request_token_subscription once the
+    # ATM basket is known.
+    if (
+        ctx.market_data_manager is not None
+        and getattr(ctx, "websocket_enabled", True)
+        and hasattr(ctx.market_data_manager, "start_websocket")
+    ):
+        try:
+            register_fn = getattr(ctx.market_data_manager, "register_symbol", None)
+            if callable(register_fn):
+                try:
+                    register_fn("NSE:NIFTY", 256265)
+                except Exception:  # noqa: BLE001
+                    LOGGER.debug(
+                        "Spot symbol registration failed (will retry later)",
+                        exc_info=True,
+                    )
+            LOGGER.info(
+                "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED symbol=NSE:NIFTY token=%d",
+                256265,
+                extra={
+                    "event": "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED",
+                    "symbol": "NSE:NIFTY",
+                    "token": 256265,
+                },
+            )
+            ctx.market_data_manager.start_websocket()
+            LOGGER.info(
+                "STARTUP_WS_STARTED phase=spot_first",
+                extra={"event": "STARTUP_WS_STARTED", "phase": "spot_first"},
+            )
+        except Exception as _ws_spot_first_exc:  # noqa: BLE001
+            LOGGER.warning(
+                "WS spot-first start failed (will retry after token universe): %s",
+                _ws_spot_first_exc,
+                extra={"event": "STARTUP_WS_SPOT_FIRST_FAILED"},
+            )
 
     # =========================================================
     # Create Data Directory
@@ -5779,12 +5986,35 @@ async def startup_sequence(ctx: BotContext) -> None:
                 getattr(ctx.broker_client, "broker", ctx.broker_client),
             )
 
-            # Get approximate spot price (best-effort; fallback to a safe default)
-            _spot_for_hydration = 25600.0
-            if ctx.market_data_manager:
-                _last_nifty = ctx.market_data_manager.get_last_tick("NSE:NIFTY")
-                if _last_nifty:
-                    _spot_for_hydration = float(_last_nifty.get("ltp", _spot_for_hydration))
+            # Resolve NIFTY spot — in LIVE mode this requires fresh WS tick
+            # proof; in PAPER/SHADOW it gracefully falls back to cached/REST
+            # values or a logged synthetic reference for off-hours testing.
+            try:
+                _spot_for_hydration = await _wait_for_live_spot_or_raise(
+                    ctx,
+                    timeout=15.0,
+                    configured_mode=configured_mode,
+                )
+            except RuntimeError as _spot_exc:
+                LOGGER.error(
+                    "LIVE_STARTUP_SPOT_UNAVAILABLE reason=%s",
+                    _spot_exc,
+                    extra={
+                        "event": "LIVE_STARTUP_SPOT_UNAVAILABLE",
+                        "reason": str(_spot_exc),
+                        "phase": "pre_hydration",
+                    },
+                )
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.readiness_mode = "DATA_WARMUP"
+                ctx.live_block_reason = "fresh_spot_tick_unavailable"
+                # Skip the option pre-hydration in this iteration; the
+                # readiness gate will keep us in DATA_WARMUP and the
+                # supervisor will retry on the next loop.
+                _spot_for_hydration = None
+            if _spot_for_hydration is None:
+                raise RuntimeError("skip_pre_hydration_no_live_spot")
 
             # Select ATM option contracts purely by token — no string building
             _preloaded = (
@@ -5901,13 +6131,41 @@ async def startup_sequence(ctx: BotContext) -> None:
             targets = list(dict.fromkeys(targets))
 
             # Canonical live basket for trading path: spot + futures + ATM±3 CE/PE.
-            spot_ltp = 0.0
-            if ctx.market_data_manager is not None:
-                spot_ltp = float(
-                    ctx.market_data_manager.get_latest_price("NSE:NIFTY") or 0.0
+            # Resolve spot via the WS-first helper.  In LIVE mode this raises
+            # when no fresh WebSocket tick proof exists so we never select an
+            # ATM basket from a synthetic/stale price.
+            try:
+                spot_ltp = await _wait_for_live_spot_or_raise(
+                    ctx,
+                    timeout=15.0,
+                    configured_mode=configured_mode,
                 )
-            if spot_ltp <= 0:
-                spot_ltp = 25600.0
+            except RuntimeError as _basket_spot_exc:
+                LOGGER.error(
+                    "LIVE_STARTUP_SPOT_UNAVAILABLE reason=%s phase=basket",
+                    _basket_spot_exc,
+                    extra={
+                        "event": "LIVE_STARTUP_SPOT_UNAVAILABLE",
+                        "reason": str(_basket_spot_exc),
+                        "phase": "basket",
+                    },
+                )
+                LOGGER.error(
+                    "STARTUP_NO_FAKE_SPOT_LIVE_MODE reason=%s",
+                    "fresh_spot_tick_unavailable",
+                    extra={
+                        "event": "STARTUP_NO_FAKE_SPOT_LIVE_MODE",
+                        "reason": "fresh_spot_tick_unavailable",
+                    },
+                )
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.readiness_mode = "DATA_WARMUP"
+                ctx.live_block_reason = "fresh_spot_tick_unavailable"
+                # Bail out of basket selection entirely.  We re-raise so the
+                # outer handler logs and the supervisor can retry.  No fake
+                # ATM strikes are subscribed and no live arming happens.
+                raise
             try:
                 basket = _build_canonical_active_basket(
                     instrument_manager=ctx.instrument_manager,
@@ -5921,18 +6179,47 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 targets = list(dict.fromkeys(basket["symbols"]))
                 LOGGER.info(
-                    "ACTIVE_BASKET summary size=%d spot=%s fut=%s ce=%d pe=%d",
+                    "ACTIVE_BASKET_BUILT spot_ltp=%.2f size=%d spot=%s fut=%s ce=%d pe=%d",
+                    spot_ltp,
                     len(targets),
                     basket["spot_symbol"],
                     basket["futures_symbol"],
                     len(basket["ce_symbols"]),
                     len(basket["pe_symbols"]),
                     extra={
-                        "event": "active_basket_built",
+                        "event": "ACTIVE_BASKET_BUILT",
+                        "spot_ltp": spot_ltp,
                         "size": len(targets),
                         "atm": basket["atm_strike"],
+                        "symbols": list(targets),
                     },
                 )
+                # Record the authoritative live universe for downstream
+                # consumers so they reuse this rather than rebuild against a
+                # different (potentially fake) spot reference.
+                try:
+                    spot_token_int: int | None = None
+                    try:
+                        spot_token_int = int(
+                            ctx.broker_client.get_instrument_token("NSE:NIFTY")
+                        )
+                    except Exception:  # noqa: BLE001
+                        spot_token_int = 256265
+                    ctx.active_trading_universe = {
+                        "spot_symbol": basket["spot_symbol"],
+                        "spot_token": spot_token_int,
+                        "spot_ltp": float(spot_ltp),
+                        "symbols": list(targets),
+                        "futures_symbol": basket["futures_symbol"],
+                        "atm_strike": basket["atm_strike"],
+                        "selected_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "ws_spot_first_instrument_manager",
+                    }
+                except Exception:  # noqa: BLE001
+                    LOGGER.debug(
+                        "active_trading_universe record failed",
+                        exc_info=True,
+                    )
             except Exception as basket_exc:  # noqa: BLE001
                 LOGGER.error(
                     "Failed building canonical active basket: %s",
@@ -6358,24 +6645,50 @@ async def startup_sequence(ctx: BotContext) -> None:
                     if tok and tok not in tokens_to_poll:
                         tokens_to_poll.append(tok)
 
-                # Add ATM Options and Futures
+                # Add ATM Options and Futures.  Reuse the spot LTP that the
+                # WS-first basket selection already proved fresh; never let a
+                # synthetic 25600.0 leak into LIVE option universe selection.
+                _active_universe = getattr(ctx, "active_trading_universe", None)
                 spot_price = 0.0
-                if mdm:
-                    last_tick = mdm.get_last_tick("NSE:NIFTY")
-                    if last_tick:
-                        spot_price = last_tick.get("ltp", 0.0)
+                if isinstance(_active_universe, Mapping):
+                    try:
+                        spot_price = float(_active_universe.get("spot_ltp") or 0.0)
+                    except (TypeError, ValueError):
+                        spot_price = 0.0
                 if spot_price <= 0:
-                    spot_price = 25600.0
+                    try:
+                        spot_price = await _wait_for_live_spot_or_raise(
+                            ctx,
+                            timeout=5.0,
+                            configured_mode=configured_mode,
+                        )
+                    except RuntimeError as _spot_token_exc:
+                        LOGGER.error(
+                            "STARTUP_NO_FAKE_SPOT_LIVE_MODE reason=%s phase=token_select",
+                            _spot_token_exc,
+                            extra={
+                                "event": "STARTUP_NO_FAKE_SPOT_LIVE_MODE",
+                                "reason": str(_spot_token_exc),
+                                "phase": "token_select",
+                            },
+                        )
+                        spot_price = 0.0
 
-                extra_tokens = im.select_tokens_for_universe(
-                    base="NIFTY",
-                    spot_price=spot_price,
-                    strikes_around_atm=3,
-                    strike_step=ctx.settings.option_universe.strike_step
-                )
-                for t in extra_tokens:
-                    if t and t not in tokens_to_poll:
-                        tokens_to_poll.append(t)
+                if spot_price > 0:
+                    extra_tokens = im.select_tokens_for_universe(
+                        base="NIFTY",
+                        spot_price=spot_price,
+                        strikes_around_atm=3,
+                        strike_step=ctx.settings.option_universe.strike_step
+                    )
+                    for t in extra_tokens:
+                        if t and t not in tokens_to_poll:
+                            tokens_to_poll.append(t)
+                else:
+                    LOGGER.warning(
+                        "Skipping ATM token expansion — no trustworthy spot price",
+                        extra={"event": "atm_token_expansion_skipped"},
+                    )
 
                 # Ensure NIFTY spot is also covered by polling fallback.
                 try:
@@ -6764,9 +7077,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                     asyncio.create_task(_polling_failover_supervisor())
 
             # ── Bring the WebSocket online now that tokens are registered ──
-            # MDM.start() earlier ran with defer_ws=True so the initial
-            # handshake observes a populated _tokens set.  When WS mode is
-            # enabled this is where we actually open the socket.
+            # The WS was opened earlier with the spot token only so we could
+            # prove a fresh tick before selecting strikes.  Now that the
+            # full token universe is known, ensure WS is up (idempotent) and
+            # log the option subscription request so we can correlate which
+            # tokens just joined the live subscription.
             if (
                 ctx.market_data_manager is not None
                 and hasattr(ctx.market_data_manager, "start_websocket")
@@ -6775,9 +7090,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                 try:
                     ctx.market_data_manager.start_websocket()
                     LOGGER.info(
-                        "✅ MarketDataManager websocket brought online "
-                        "with %d pre-registered tokens",
+                        "OPTION_WS_SUBSCRIBE_REQUESTED count=%d total_tokens=%d",
+                        max(0, len(tokens_to_poll) - 1),
                         len(tokens_to_poll),
+                        extra={
+                            "event": "OPTION_WS_SUBSCRIBE_REQUESTED",
+                            "count": max(0, len(tokens_to_poll) - 1),
+                            "total_tokens": len(tokens_to_poll),
+                        },
                     )
                 except Exception as _ws_start_exc:  # noqa: BLE001
                     LOGGER.error(
@@ -6791,8 +7111,23 @@ async def startup_sequence(ctx: BotContext) -> None:
             if mdm and not ctx.streamer and not ctx.websocket_enabled:
                 # Only start MDM polling if there's no streamer
                 asyncio.create_task(asyncio.to_thread(mdm._rest_poll_loop))
+                LOGGER.info(
+                    "POLLING_FALLBACK_STANDBY owner=mdm_internal_rest_poller reason=no_streamer",
+                    extra={
+                        "event": "POLLING_FALLBACK_STANDBY",
+                        "owner": "mdm_internal_rest_poller",
+                        "reason": "no_streamer",
+                    },
+                )
             else:
-                LOGGER.info("📡 MDM REST polling disabled (PollingStreamer owns fallback)")
+                LOGGER.info(
+                    "POLLING_FALLBACK_STANDBY owner=PollingStreamer mdm_internal_rest_poller=false",
+                    extra={
+                        "event": "POLLING_FALLBACK_STANDBY",
+                        "owner": "PollingStreamer",
+                        "mdm_internal_rest_poller": False,
+                    },
+                )
 
             dynamic_option_symbols = {
                 sym
@@ -7413,49 +7748,74 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         ),
                                     },
                                 )
-                            data_warmup_reasons: list[str] = []
-                            if live_mode and hard_ready and quote_available and market_state == MarketState.OPEN:
+                            market_open_now = market_state == MarketState.OPEN
+                            armed, blocking_reasons = compute_live_readiness(
+                                live_mode=bool(live_mode),
+                                hard_ready=bool(hard_ready),
+                                quote_available=bool(quote_available),
+                                ws_quote_proof=bool(ws_quote_proof),
+                                market_open=bool(market_open_now),
+                            )
+                            data_warmup_reasons: list[str] = list(blocking_reasons)
+                            if live_mode and not quote_available and ws_quote_proof:
+                                LOGGER.info(
+                                    "BROKER_QUOTE_DEGRADED_CONTINUING_WITH_WS",
+                                    extra={
+                                        "event": "BROKER_QUOTE_DEGRADED_CONTINUING_WITH_WS",
+                                        "ws_quote_proof": True,
+                                        "quote_available": False,
+                                    },
+                                )
+                            if live_mode and armed:
                                 ctx.live_orders_armed = True
                                 ctx.trading_ready = True
                                 ctx.readiness_mode = "LIVE"
-                            if live_mode and not hard_ready:
-                                ctx.live_orders_armed = False
-                                ctx.trading_ready = False
-                                ctx.readiness_mode = "DATA_WARMUP"
-                                data_warmup_reasons.append("startup_pipeline_incomplete")
-                                LOGGER.error(
-                                    "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing=%s",
-                                    missing_hard,
+                                LOGGER.info(
+                                    "LIVE_TRADING_ARMED hard_ready=%s quote_available=%s ws_quote_proof=%s",
+                                    hard_ready,
+                                    quote_available,
+                                    ws_quote_proof,
                                     extra={
-                                        "event": "LIVE_TRADING_BLOCKED",
-                                        "reason": "startup_pipeline_incomplete",
-                                        "missing": missing_hard,
-                                        "hard_ready": hard_ready,
-                                        "spot_ready": spot_ready,
+                                        "event": "LIVE_TRADING_ARMED",
+                                        "hard_ready": bool(hard_ready),
+                                        "quote_available": bool(quote_available),
+                                        "ws_quote_proof": bool(ws_quote_proof),
                                     },
                                 )
-                            if (
-                                live_mode
-                                and not quote_available
-                                and not ws_quote_proof
-                            ):
+                            elif live_mode:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
                                 ctx.readiness_mode = "DATA_WARMUP"
-                                data_warmup_reasons.append("broker_quote_access_denied")
-                                LOGGER.error(
-                                    "LIVE_TRADING_BLOCKED reason=broker_quote_access_denied",
-                                    extra={
-                                        "event": "LIVE_TRADING_BLOCKED",
-                                        "reason": "broker_quote_access_denied",
-                                    },
-                                )
-                            if live_mode and market_state != MarketState.OPEN:
-                                ctx.live_orders_armed = False
-                                ctx.trading_ready = False
-                                ctx.readiness_mode = "DATA_WARMUP"
-                                if "market_closed" not in data_warmup_reasons:
-                                    data_warmup_reasons.append("market_closed")
+                                if "startup_pipeline_incomplete" in data_warmup_reasons:
+                                    LOGGER.error(
+                                        "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing=%s",
+                                        missing_hard,
+                                        extra={
+                                            "event": "LIVE_TRADING_BLOCKED",
+                                            "reason": "startup_pipeline_incomplete",
+                                            "missing": missing_hard,
+                                            "hard_ready": hard_ready,
+                                            "spot_ready": spot_ready,
+                                        },
+                                    )
+                                if "market_data_proof_unavailable" in data_warmup_reasons:
+                                    LOGGER.error(
+                                        "LIVE_TRADING_BLOCKED reason=market_data_proof_unavailable",
+                                        extra={
+                                            "event": "LIVE_TRADING_BLOCKED",
+                                            "reason": "market_data_proof_unavailable",
+                                            "quote_available": bool(quote_available),
+                                            "ws_quote_proof": bool(ws_quote_proof),
+                                        },
+                                    )
+                                if "market_closed" in data_warmup_reasons:
+                                    LOGGER.info(
+                                        "LIVE_TRADING_BLOCKED reason=market_closed",
+                                        extra={
+                                            "event": "LIVE_TRADING_BLOCKED",
+                                            "reason": "market_closed",
+                                        },
+                                    )
                             data_warmup_reason: str | None = (
                                 ",".join(data_warmup_reasons) if data_warmup_reasons else None
                             )
