@@ -5701,6 +5701,29 @@ async def _wait_for_live_spot_or_raise(
         and policy.block_live_if_no_ws_spot
         and not policy.allow_synthetic_spot_in_live
     ):
+        cached_probe_fn = getattr(mdm, "get_cached_ltp", None)
+        rest_probe = (
+            float(
+                cached_probe_fn(
+                    policy.nifty_internal_symbol,
+                    max_age_seconds=policy.startup_spot_max_age_seconds,
+                    require_ws=False,
+                )
+                or 0.0
+            )
+            if callable(cached_probe_fn)
+            else 0.0
+        )
+        if rest_probe > 0:
+            LOGGER.info(
+                "SPOT_REST_AVAILABLE_BUT_WS_REQUIRED rest_ltp=%.2f reason=live_requires_ws",
+                rest_probe,
+                extra={
+                    "event": "SPOT_REST_AVAILABLE_BUT_WS_REQUIRED",
+                    "rest_ltp": rest_probe,
+                    "reason": "live_requires_ws",
+                },
+            )
         raise RuntimeError(
             "fresh NIFTY WebSocket spot tick unavailable; "
             "cannot build live option universe"
@@ -5745,6 +5768,301 @@ async def _wait_for_live_spot_or_raise(
         },
     )
     return _SYNTHETIC_FALLBACK_SPOT
+
+
+async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> None:
+    """Start strategy runner idempotently. Args: ctx/reason. Returns: none. Raises: none."""
+
+    runner = getattr(ctx, "strategy_runner", None)
+    if runner is None:
+        LOGGER.warning("STRATEGY_RUNNER_START_SKIPPED reason=no_runner")
+        return
+    existing_task = getattr(ctx, "runner_task", None) or getattr(
+        ctx, "strategy_runner_task", None
+    )
+    if existing_task is not None and not existing_task.done():
+        return
+    if bool(getattr(runner, "is_running", False)):
+        return
+    if hasattr(runner, "start"):
+        result = runner.start()
+        if inspect.isawaitable(result):
+            await result
+        LOGGER.info(
+            "STRATEGY_RUNNER_STARTED reason=%s",
+            reason,
+            extra={"event": "STRATEGY_RUNNER_STARTED", "reason": reason},
+        )
+        return
+    if hasattr(runner, "run"):
+        task = asyncio.create_task(runner.run())
+        ctx.runner_task = task
+        LOGGER.info(
+            "STRATEGY_RUNNER_TASK_STARTED reason=%s",
+            reason,
+            extra={"event": "STRATEGY_RUNNER_TASK_STARTED", "reason": reason},
+        )
+        return
+    LOGGER.warning("STRATEGY_RUNNER_START_SKIPPED reason=no_start_or_run_method")
+
+
+async def _deferred_basket_hydration_retry(
+    ctx: BotContext,
+    *,
+    configured_mode: str,
+    max_attempts: int = 24,
+    delay_seconds: float = 5.0,
+) -> None:
+    """Retry startup basket hydration until fresh WS spot arrives. Args: ctx/mode. Returns: none. Raises: none."""
+
+    policy = MarketDataPolicy.from_env()
+    for attempt in range(1, max_attempts + 1):
+        await asyncio.sleep(delay_seconds)
+        if getattr(ctx, "trading_ready", False) and getattr(ctx, "live_orders_armed", False):
+            return
+        try:
+            spot_ltp = await _wait_for_live_spot_or_raise(
+                ctx,
+                timeout=min(10.0, float(policy.startup_wait_for_ws_spot_seconds or 60.0)),
+                configured_mode=configured_mode,
+            )
+        except RuntimeError:
+            LOGGER.info(
+                "DEFERRED_BASKET_RETRY_WAITING attempt=%d/%d reason=no_fresh_ws_spot",
+                attempt,
+                max_attempts,
+                extra={
+                    "event": "DEFERRED_BASKET_RETRY_WAITING",
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "reason": "no_fresh_ws_spot",
+                },
+            )
+            continue
+
+        try:
+            await _build_and_hydrate_live_basket_from_spot(
+                ctx,
+                spot_ltp=float(spot_ltp),
+                configured_mode=configured_mode,
+            )
+            await _ensure_strategy_runner_started(
+                ctx,
+                reason="deferred_basket_hydration_success",
+            )
+            LOGGER.info(
+                "DEFERRED_BASKET_RETRY_SUCCESS attempt=%d spot_ltp=%.2f",
+                attempt,
+                float(spot_ltp),
+                extra={
+                    "event": "DEFERRED_BASKET_RETRY_SUCCESS",
+                    "attempt": attempt,
+                    "spot_ltp": float(spot_ltp),
+                },
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "DEFERRED_BASKET_HYDRATION_FAILED attempt=%d/%d error=%s",
+                attempt,
+                max_attempts,
+                exc,
+                exc_info=True,
+                extra={
+                    "event": "DEFERRED_BASKET_HYDRATION_FAILED",
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "error": str(exc),
+                },
+            )
+    LOGGER.error(
+        "DEFERRED_BASKET_RETRY_EXHAUSTED attempts=%d",
+        max_attempts,
+        extra={"event": "DEFERRED_BASKET_RETRY_EXHAUSTED", "attempts": max_attempts},
+    )
+
+
+async def _build_and_hydrate_live_basket_from_spot(
+    ctx: BotContext,
+    *,
+    spot_ltp: float,
+    configured_mode: str,
+) -> dict[str, Any]:
+    """Build/register/hydrate live basket from a trusted spot. Args: ctx/spot/mode. Returns: none. Raises: RuntimeError."""
+
+    del configured_mode
+    if float(spot_ltp) <= 0:
+        raise RuntimeError("spot_ltp must be positive for live basket hydration")
+    if ctx.instrument_manager is None or not ctx.instrument_manager.is_loaded():
+        raise RuntimeError("instrument_manager_unavailable_for_live_basket")
+    if ctx.market_data_manager is None:
+        raise RuntimeError("market_data_manager_unavailable_for_live_basket")
+    if ctx.broker_client is None:
+        raise RuntimeError("broker_client_unavailable_for_live_basket")
+
+    import calendar
+
+    now = datetime.now()
+    year, month = now.year, now.month
+    last_day = calendar.monthrange(year, month)[1]
+    expiry_date = datetime(year, month, last_day)
+    while expiry_date.weekday() != 1:
+        expiry_date -= timedelta(days=1)
+    target_date = expiry_date + timedelta(days=7) if now.date() > expiry_date.date() else now
+    future_symbol = f"NFO:NIFTY{target_date.strftime('%y')}{target_date.strftime('%b').upper()}FUT"
+
+    basket = _build_canonical_active_basket(
+        instrument_manager=ctx.instrument_manager,
+        spot_token_resolver=lambda symbol: int(ctx.broker_client.get_instrument_token(symbol)),
+        spot_ltp=float(spot_ltp),
+        futures_symbol=future_symbol,
+        strike_step=int(ctx.settings.option_universe.strike_step or 50),
+        strikes_around_atm=2,
+    )
+    targets = list(dict.fromkeys(basket["symbols"]))
+    LOGGER.info(
+        "ACTIVE_BASKET_BUILT spot_ltp=%.2f size=%d spot=%s fut=%s ce=%d pe=%d",
+        float(spot_ltp),
+        len(targets),
+        basket["spot_symbol"],
+        basket["futures_symbol"],
+        len(basket["ce_symbols"]),
+        len(basket["pe_symbols"]),
+        extra={
+            "event": "ACTIVE_BASKET_BUILT",
+            "spot_ltp": float(spot_ltp),
+            "size": len(targets),
+            "atm": basket["atm_strike"],
+            "symbols": list(targets),
+        },
+    )
+    policy = MarketDataPolicy.from_env()
+    spot_token = int(policy.nifty_spot_token)
+    try:
+        spot_token = int(ctx.broker_client.get_instrument_token(policy.nifty_internal_symbol))
+    except Exception:  # noqa: BLE001
+        pass
+    ctx.active_trading_universe = {
+        "spot_symbol": policy.nifty_internal_symbol,
+        "spot_token": spot_token,
+        "spot_ltp": float(spot_ltp),
+        "symbols": list(targets),
+        "tokens": [],
+        "futures_symbol": basket["futures_symbol"],
+        "atm_strike": basket["atm_strike"],
+        "selected_at": datetime.now(timezone.utc).isoformat(),
+        "source": "ws_spot_first_marketdata_policy",
+    }
+
+    tokens: list[int] = []
+    for symbol in targets:
+        token: int | None = None
+        if symbol.startswith("NFO:"):
+            try:
+                token = int(ctx.instrument_manager.get_token(symbol))
+            except RuntimeError:
+                token = None
+        else:
+            try:
+                token = int(ctx.broker_client.get_instrument_token(symbol))
+            except Exception:  # noqa: BLE001
+                token = None
+        if token is None:
+            continue
+        ctx.market_data_manager.ensure_tracking(symbol, seed=False, subscribe=False)
+        ctx.market_data_manager.register_symbol(symbol, token)
+        ctx.market_data_manager.request_token_subscription(token, symbol=symbol)
+        tokens.append(token)
+    ctx.active_trading_universe["tokens"] = sorted(set(tokens))
+    LOGGER.info(
+        "OPTION_WS_SUBSCRIBE_REQUESTED symbols=%d tokens=%d",
+        len(targets),
+        len(set(tokens)),
+        extra={
+            "event": "OPTION_WS_SUBSCRIBE_REQUESTED",
+            "symbols": len(targets),
+            "tokens": len(set(tokens)),
+        },
+    )
+
+    # Reuse existing hydration/backfill path by ingesting historical bars
+    # through MarketDataManager + StrategyRunner.
+    hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
+    hydration_max_bars = max(1, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300))
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=hydration_lookback_days)
+    from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    for symbol in targets:
+        try:
+            records = await asyncio.to_thread(
+                ctx.broker_client.get_ohlc,
+                symbol,
+                "minute",
+                from_str,
+                to_str,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        for row in list(records or [])[-hydration_max_bars:]:
+            ts = row.get("date") or row.get("timestamp")
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if isinstance(ts, datetime) and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if not isinstance(ts, datetime):
+                continue
+            bar_data = {
+                "symbol": symbol,
+                "open": float(row.get("open") or 0.0),
+                "high": float(row.get("high") or 0.0),
+                "low": float(row.get("low") or 0.0),
+                "close": float(row.get("close") or 0.0),
+                "volume": int(row.get("volume") or 0),
+                "timestamp": ts,
+            }
+            ctx.market_data_manager.ingest_historical_bar(bar_data)
+            runner = getattr(ctx, "strategy_runner", None)
+            if runner is not None and hasattr(runner, "ingest_historical_bar"):
+                runner.ingest_historical_bar(bar_data)
+        ctx.market_data_manager.update_hydration_status(
+            symbol,
+            ctx.market_data_manager.get_ohlc_bars(symbol),
+        )
+    atm_ce = basket["ce_symbols"][len(basket["ce_symbols"]) // 2]
+    atm_pe = basket["pe_symbols"][len(basket["pe_symbols"]) // 2]
+    ctx.market_data_manager.set_readiness_requirements(
+        spot_symbol=basket["spot_symbol"],
+        futures_symbol=basket["futures_symbol"],
+        atm_ce_symbol=atm_ce,
+        atm_pe_symbol=atm_pe,
+        option_symbols=basket["option_symbols"],
+    )
+    return basket
+
+
+def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) -> None:
+    """Schedule one deferred basket retry task. Args: ctx/mode. Returns: none. Raises: none."""
+
+    ctx.live_orders_armed = False
+    ctx.trading_ready = False
+    ctx.readiness_mode = "DATA_WARMUP"
+    ctx.live_block_reason = "fresh_ws_spot_unavailable"
+    if not getattr(ctx, "_deferred_basket_retry_started", False):
+        ctx._deferred_basket_retry_started = True
+        ctx._deferred_basket_retry_task = asyncio.create_task(
+            _deferred_basket_hydration_retry(
+                ctx,
+                configured_mode=configured_mode,
+            )
+        )
+    LOGGER.info(
+        "STARTUP_BASKET_DEFERRED reason=fresh_ws_spot_unavailable",
+        extra={
+            "event": "STARTUP_BASKET_DEFERRED",
+            "reason": "fresh_ws_spot_unavailable",
+        },
+    )
 
 
 def _resolve_quote_capability(ctx: BotContext) -> dict[str, Any]:
@@ -6032,7 +6350,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             try:
                 _spot_for_hydration = await _wait_for_live_spot_or_raise(
                     ctx,
-                    timeout=15.0,
+                    timeout=float(policy.startup_wait_for_ws_spot_seconds or 60.0),
                     configured_mode=configured_mode,
                 )
             except RuntimeError as _spot_exc:
@@ -6177,7 +6495,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             try:
                 spot_ltp = await _wait_for_live_spot_or_raise(
                     ctx,
-                    timeout=15.0,
+                    timeout=float(policy.startup_wait_for_ws_spot_seconds or 60.0),
                     configured_mode=configured_mode,
                 )
             except RuntimeError as _basket_spot_exc:
@@ -6198,78 +6516,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "reason": "fresh_spot_tick_unavailable",
                     },
                 )
-                ctx.live_orders_armed = False
-                ctx.trading_ready = False
-                ctx.readiness_mode = "DATA_WARMUP"
-                ctx.live_block_reason = "fresh_spot_tick_unavailable"
-                # Bail out of basket selection entirely.  We re-raise so the
-                # outer handler logs and the supervisor can retry.  No fake
-                # ATM strikes are subscribed and no live arming happens.
-                raise
-            try:
-                basket = _build_canonical_active_basket(
-                    instrument_manager=ctx.instrument_manager,
-                    spot_token_resolver=lambda symbol: int(
-                        ctx.broker_client.get_instrument_token(symbol)
-                    ),
-                    spot_ltp=spot_ltp,
-                    futures_symbol=future_symbol,
-                    strike_step=int(ctx.settings.option_universe.strike_step or 50),
-                    strikes_around_atm=2,
+                _schedule_deferred_basket_retry(
+                    ctx,
+                    configured_mode=configured_mode,
                 )
-                targets = list(dict.fromkeys(basket["symbols"]))
-                LOGGER.info(
-                    "ACTIVE_BASKET_BUILT spot_ltp=%.2f size=%d spot=%s fut=%s ce=%d pe=%d",
-                    spot_ltp,
-                    len(targets),
-                    basket["spot_symbol"],
-                    basket["futures_symbol"],
-                    len(basket["ce_symbols"]),
-                    len(basket["pe_symbols"]),
-                    extra={
-                        "event": "ACTIVE_BASKET_BUILT",
-                        "spot_ltp": spot_ltp,
-                        "size": len(targets),
-                        "atm": basket["atm_strike"],
-                        "symbols": list(targets),
-                    },
-                )
-                # Record the authoritative live universe for downstream
-                # consumers so they reuse this rather than rebuild against a
-                # different (potentially fake) spot reference.
-                try:
-                    spot_token_int: int | None = None
-                    try:
-                        spot_token_int = int(
-                            ctx.broker_client.get_instrument_token(
-                                policy.nifty_internal_symbol
-                            )
-                        )
-                    except Exception:  # noqa: BLE001
-                        spot_token_int = int(policy.nifty_spot_token)
-                    ctx.active_trading_universe = {
-                        "spot_symbol": policy.nifty_internal_symbol,
-                        "spot_token": spot_token_int,
-                        "spot_ltp": float(spot_ltp),
-                        "symbols": list(targets),
-                        "tokens": [],
-                        "futures_symbol": basket["futures_symbol"],
-                        "atm_strike": basket["atm_strike"],
-                        "selected_at": datetime.now(timezone.utc).isoformat(),
-                        "source": "ws_spot_first_marketdata_policy",
-                    }
-                except Exception:  # noqa: BLE001
-                    LOGGER.debug(
-                        "active_trading_universe record failed",
-                        exc_info=True,
-                    )
-            except Exception as basket_exc:  # noqa: BLE001
-                LOGGER.error(
-                    "Failed building canonical active basket: %s",
-                    basket_exc,
-                    exc_info=True,
-                )
-                raise
+                raise RuntimeError("startup_basket_deferred")
+            basket = await _build_and_hydrate_live_basket_from_spot(
+                ctx,
+                spot_ltp=float(spot_ltp),
+                configured_mode=configured_mode,
+            )
+            await _ensure_strategy_runner_started(
+                ctx,
+                reason="startup_basket_hydration_success",
+            )
+            targets = list(dict.fromkeys(basket["symbols"]))
 
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
 
