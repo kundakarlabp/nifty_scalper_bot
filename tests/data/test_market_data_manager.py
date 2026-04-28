@@ -213,6 +213,34 @@ async def test_wait_until_ready_not_ready_log_is_throttled(
     assert len(messages) <= 1
 
 
+@pytest.mark.asyncio
+async def test_spot_ready_not_logged_for_huge_age(
+    broker: DummyBroker,
+    ws: DummyWebSocket,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.get_market_state",
+        lambda: MarketState.OPEN,
+    )
+    manager = MarketDataManager(broker, ws)
+    manager._active_subscribed_symbols = {"NSE:NIFTY"}  # noqa: SLF001
+    manager._min_required_bars = 1  # noqa: SLF001
+    manager._history["NSE:NIFTY"].append({"ltp": 25000.0})  # noqa: SLF001
+    manager.set_readiness_requirements(
+        spot_symbol="NSE:NIFTY",
+        futures_symbol="",
+        atm_ce_symbol="",
+        atm_pe_symbol="",
+        option_symbols=[],
+    )
+    monkeypatch.setattr(manager, "symbol_data_age_ms", lambda _symbol: 1_000_000_000)
+    caplog.set_level("INFO")
+    await manager.wait_until_ready(timeout=0.15)
+    assert not any("SPOT_READY" in rec.message for rec in caplog.records)
+
+
 def test_nifty_alias_subscription_collapses_to_canonical(
     broker: DummyBroker,
     ws: DummyWebSocket,
@@ -469,6 +497,26 @@ def test_store_tick_refreshes_quote_age_for_live_ticks(
     )
 
     assert manager.quote_age_ms(symbol) < 1_000_000_000
+
+
+def test_ws_tick_proof_storage(
+    broker: DummyBroker,
+    ws: DummyWebSocket,
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager.register_symbol("NSE:NIFTY", 256265)
+    manager.process_ticks(
+        [
+            {
+                "instrument_token": 256265,
+                "last_price": 25250.0,
+                "exchange_timestamp": datetime.now(timezone.utc),
+            }
+        ]
+    )
+    manager._drain_tick_queue_sync()  # noqa: SLF001
+    price = manager.get_cached_ltp("NSE:NIFTY", require_ws=True)
+    assert price == pytest.approx(25250.0)
 
 
 def test_quote_age_recovers_after_fresh_tick(

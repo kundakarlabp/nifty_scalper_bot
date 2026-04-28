@@ -278,6 +278,8 @@ class MarketDataManager:
         self._tick_warn_last: dict[str, float] = (
             {}
         )  # ✅ FIX: rate-limit cache-miss warnings
+        self._ws_raw_tick_log_at: dict[str, float] = {}
+        self._ws_stored_tick_log_at: dict[str, float] = {}
         self._seed_attempt_last: dict[str, float] = {}
         self._seed_completed = False
         self._seeded_symbols: set[str] = set()
@@ -3201,7 +3203,9 @@ class MarketDataManager:
             valid_symbols = [s for s, count in bars.items() if count >= min_bars]
             spot_symbol = str(requirements.get("spot") or "NSE:NIFTY")
             spot_age_ms = self.symbol_data_age_ms(spot_symbol) if spot_symbol else -1
-            if readiness_state["spot_ready"] and not self._spot_ready_logged:
+            threshold_ms = int(getattr(self, "_tick_stale_threshold_ms", 120000))
+            spot_fresh = spot_age_ms is not None and 0 <= int(spot_age_ms) <= threshold_ms
+            if readiness_state["spot_ready"] and spot_fresh and not self._spot_ready_logged:
                 spot_source = str(self._last_tick_source.get(spot_symbol, "unknown"))
                 source = "ws" if spot_source == "ws" else "rest_ltp"
                 token = self._token_by_symbol.get(spot_symbol)
@@ -3218,6 +3222,22 @@ class MarketDataManager:
                         "source": source,
                         "age_ms": max(0, int(spot_age_ms)),
                         "token": token,
+                    },
+                )
+            elif not (readiness_state["spot_ready"] and spot_fresh):
+                log_throttled(
+                    self._logger,
+                    "spot_not_ready_state",
+                    "SPOT_NOT_READY symbol=%s reason=stale_or_missing_tick age_ms=%s threshold_ms=%s"
+                    % (spot_symbol, spot_age_ms, threshold_ms),
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "SPOT_NOT_READY",
+                        "symbol": spot_symbol,
+                        "reason": "stale_or_missing_tick",
+                        "age_ms": spot_age_ms,
+                        "threshold_ms": threshold_ms,
                     },
                 )
             if readiness_state["hard_ready"]:
@@ -3340,10 +3360,22 @@ class MarketDataManager:
         """Classify readiness into hard-trading and soft-spot states."""
         if not requirements:
             any_ready = any(count >= min_bars for count in bars.values())
+            spot_fresh = False
+            try:
+                spot_fresh = bool(
+                    self._is_symbol_fresh("NSE:NIFTY", self._tick_stale_threshold_ms)
+                )
+            except Exception:
+                spot_fresh = False
+            missing: list[str] = []
+            if not any_ready:
+                missing.append("readiness_requirements_missing")
+            if not spot_fresh:
+                missing.append("fresh_spot_tick_missing")
             return {
-                "hard_ready": any_ready,
-                "spot_ready": True,
-                "missing_hard": [],
+                "hard_ready": bool(any_ready),
+                "spot_ready": bool(spot_fresh),
+                "missing_hard": missing,
             }
         spot = str(requirements.get("spot") or "")
         futures = str(requirements.get("futures") or "")
@@ -3934,6 +3966,32 @@ class MarketDataManager:
             if not isinstance(tick, dict):
                 continue
             try:
+                token_raw = tick.get("instrument_token")
+                token_int = int(token_raw) if token_raw is not None else None
+                symbol_resolved = None
+                if token_int is not None:
+                    with self._lock:
+                        symbol_resolved = self._symbol_by_token.get(token_int)
+                if symbol_resolved:
+                    now = time.monotonic()
+                    last_logged = float(self._ws_raw_tick_log_at.get(symbol_resolved, 0.0))
+                    if last_logged <= 0.0 or (now - last_logged) >= 60.0:
+                        self._ws_raw_tick_log_at[symbol_resolved] = now
+                        self._logger.info(
+                            "WS_RAW_TICK_RECEIVED token=%s symbol_resolved=%s ltp=%s",
+                            token_int,
+                            symbol_resolved,
+                            tick.get("last_price", tick.get("ltp")),
+                            extra={
+                                "event": "WS_RAW_TICK_RECEIVED",
+                                "token": token_int,
+                                "symbol_resolved": symbol_resolved,
+                                "ltp": tick.get("last_price", tick.get("ltp")),
+                            },
+                        )
+            except Exception:
+                pass
+            try:
                 self._enqueue_tick_threadsafe(tick)
             except Exception as exc:  # noqa: BLE001 — WS thread must not raise
                 self._logger.debug("process_ticks enqueue failed: %s", exc)
@@ -4206,6 +4264,32 @@ class MarketDataManager:
         if source == "ws":
             self._last_ws_tick_mono = time.monotonic()
         self._store_tick(symbol, tick)
+        if source == "ws":
+            try:
+                token_value = tick.get("instrument_token") or tick.get("token")
+                token_int = int(token_value) if token_value is not None else None
+                now = time.monotonic()
+                last_logged = float(self._ws_stored_tick_log_at.get(symbol, 0.0))
+                if last_logged <= 0.0 or (now - last_logged) >= 60.0:
+                    self._ws_stored_tick_log_at[symbol] = now
+                    self._logger.info(
+                        "WS_TICK_STORED symbol=%s token=%s ltp=%s source=ws age_ms=0",
+                        symbol,
+                        token_int,
+                        tick.get("ltp") or tick.get("last_price") or tick.get("price"),
+                        extra={
+                            "event": "WS_TICK_STORED",
+                            "symbol": symbol,
+                            "token": token_int,
+                            "ltp": tick.get("ltp")
+                            or tick.get("last_price")
+                            or tick.get("price"),
+                            "source": "ws",
+                            "age_ms": 0,
+                        },
+                    )
+            except Exception:
+                pass
         callbacks: list[TickCallback]
         tick_payload = dict(tick)
         with self._lock:

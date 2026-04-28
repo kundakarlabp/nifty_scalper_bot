@@ -82,3 +82,15 @@ def test_app_startup_uses_hard_ready_for_trading_indicators_gate() -> None:
     assert 'indicators_ready_for_trading = hard_ready' in source
     assert 'ctx.market_regime_manager.indicators_ready = (' in source
     assert 'ctx.data_hub.indicators_ready = (' in source
+
+
+def test_readiness_empty_requirements_not_spot_ready() -> None:
+    manager = MarketDataManager(DummyBroker(), DummyWebSocket())
+    readiness = manager._readiness_state(
+        bars={'NFO:NIFTY26MAY25000CE': 60},
+        min_bars=50,
+        requirements={},
+    )
+    assert readiness['hard_ready'] is True
+    assert readiness['spot_ready'] is False
+    assert 'fresh_spot_tick_missing' in readiness['missing_hard']
