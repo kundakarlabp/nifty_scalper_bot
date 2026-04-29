@@ -7284,10 +7284,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     # last quote crossed the open-market threshold.
                                     log_throttled(
                                         LOGGER,
-                                        "polling_fallback_skipped_market_closed",
+                                        f"polling_fallback_skipped:{spot_symbol}:market_closed",
                                         "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s"
                                         % spot_age_ms,
-                                        interval_sec=300.0,
+                                        interval_sec=60.0,
                                         level=logging.DEBUG,
                                         extra={
                                             "event": "POLLING_FALLBACK_SKIPPED",
@@ -7318,7 +7318,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                                 f"polling_fallback_skipped:{spot_symbol}:within_spot_stale_threshold",
                                                 "POLLING_FALLBACK_SKIPPED reason=within_spot_stale_threshold age_ms=%s threshold_ms=%s ws_ok=%s"
                                                 % (spot_age_ms, quote_stale_ms, ws_ok),
-                                                interval_sec=30.0,
+                                                interval_sec=60.0,
                                                 level=logging.INFO,
                                                 extra={
                                                     "event": "POLLING_FALLBACK_SKIPPED",

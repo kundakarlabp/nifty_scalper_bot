@@ -7878,17 +7878,7 @@ class StrategyRunner:
 
     def _stale_tick_threshold_for_symbol(self, symbol: str) -> float:
         """Return configured stale threshold for symbol type."""
-        upper_symbol = (symbol or "").upper()
-        is_option = upper_symbol.endswith("CE") or upper_symbol.endswith("PE")
-        is_future = upper_symbol.endswith("FUT")
-        is_index = upper_symbol in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY 50", "NIFTY 50"}
-        if is_option:
-            return self._option_stale_tick_seconds
-        if is_future:
-            return self._future_stale_tick_seconds
-        if is_index:
-            return self._index_stale_tick_seconds
-        return self._generic_stale_tick_seconds
+        return float(stale_threshold_for_symbol(symbol, is_market_open_now()))
 
     def _handle_exit_signal(
         self,

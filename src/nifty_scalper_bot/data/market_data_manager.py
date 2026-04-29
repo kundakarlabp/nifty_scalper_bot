@@ -38,7 +38,11 @@ from nifty_scalper_bot.streaming.websocket_manager import (
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_throttled
-from nifty_scalper_bot.utils.market_hours import MarketState, get_market_state
+from nifty_scalper_bot.utils.market_hours import (
+    MarketState,
+    get_market_state,
+    stale_threshold_for_symbol,
+)
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
 
@@ -5944,40 +5948,8 @@ class MarketDataManager:
 
     def _ltp_stale_threshold_for_symbol(self, symbol: str) -> float:
         """Return per-symbol stale threshold. Args: symbol. Returns: seconds. Raises: none."""
-        upper = (symbol or "").upper()
         market_open = get_market_state() == MarketState.OPEN
-        if upper in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY 50", "NIFTY 50"}:
-            if not market_open:
-                return float(self._offmarket_index_ltp_stale_seconds)
-            return float(self._index_ltp_stale_seconds)
-        if upper.endswith(("CE", "PE")):
-            if not market_open:
-                offmarket_option = self._parse_float_env(
-                    "MDM_OFFMARKET_OPTION_LTP_STALE_SECONDS",
-                    default=3600.0,
-                    minimum=60.0,
-                )
-                return float(offmarket_option)
-            return float(self._option_ltp_stale_seconds)
-        if upper.endswith("FUT"):
-            if not market_open:
-                offmarket_future = self._parse_float_env(
-                    "MDM_OFFMARKET_FUTURE_LTP_STALE_SECONDS",
-                    default=3600.0,
-                    minimum=60.0,
-                )
-                return float(offmarket_future)
-            return float(self._future_ltp_stale_seconds)
-        if not market_open:
-            offmarket_generic = self._parse_float_env(
-                "MDM_OFFMARKET_GENERIC_LTP_STALE_SECONDS",
-                default=3600.0,
-                minimum=60.0,
-            )
-            return float(offmarket_generic)
-        if self._generic_ltp_stale_seconds > 0:
-            return float(self._generic_ltp_stale_seconds)
-        return float(self._ltp_stale_seconds)
+        return float(stale_threshold_for_symbol(symbol, market_open))
 
     def _monitor_spot_ws_health(self) -> None:
         """Monitor NSE spot tick freshness and trigger throttled resubscribe. Args: none. Returns: none. Raises: none."""
