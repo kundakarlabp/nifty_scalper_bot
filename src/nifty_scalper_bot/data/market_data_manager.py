@@ -1325,19 +1325,32 @@ class MarketDataManager:
         """Apply desired token set to websocket transport. Args: none. Returns: none. Raises: none."""
 
         ws = self._ws
-        if ws is None:
+        if ws is None or not hasattr(ws, "set_tokens"):
             return
-        if not hasattr(ws, "set_tokens"):
-            return
+
+        try:
+            changed = ws.set_tokens(sorted(self._desired_tokens))
+            self._dispatched_subscriptions.update(self._desired_tokens)
+            connected = self._is_ws_connected()
+            self._logger.debug(
+                "ws_tokens_reconciled desired=%d changed=%s connected=%s",
+                len(self._desired_tokens),
+                changed,
+                connected,
+                extra={
+                    "event": "ws_tokens_reconciled",
+                    "desired_tokens": len(self._desired_tokens),
+                    "changed": changed,
+                    "connected": connected,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("ws token reconcile deferred: %s", exc)
+
         if hasattr(ws, "is_connected") and not self._is_ws_connected():
             self._pending_subscription_tokens.update(self._desired_tokens)
             self._pending_subscriptions.update(self._desired_tokens)
             return
-        try:
-            ws.set_tokens(sorted(self._desired_tokens))
-            self._dispatched_subscriptions.update(self._desired_tokens)
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug("ws token reconcile deferred: %s", exc)
 
     def request_token_subscription(
         self,
@@ -4088,7 +4101,30 @@ class MarketDataManager:
     def symbol_has_tick(self, symbol: str | int) -> bool:
         """Return whether at least one tick exists for symbol/token. Args: symbol/token. Returns: bool. Raises: none."""
 
-        return self.symbol_data_age_ms_or_none(symbol) is not None
+        resolved_symbol: str | None = None
+        try:
+            if isinstance(symbol, int):
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(symbol))
+            elif str(symbol).strip().isdigit():
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
+            else:
+                resolved_symbol = self._canonical_symbol(str(symbol))
+        except Exception:
+            resolved_symbol = None
+
+        if not resolved_symbol:
+            return False
+
+        with self._lock:
+            if resolved_symbol in self._latest_ticks:
+                return True
+            if float(self._last_tick_wallclock.get(resolved_symbol, 0.0) or 0.0) > 0.0:
+                return True
+            if float(self._last_tick_time.get(resolved_symbol, 0.0) or 0.0) > 0.0:
+                return True
+        return False
 
 
     # ------------------------------------------------------------------

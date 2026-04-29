@@ -829,12 +829,10 @@ class StrategyRunner:
             if signal:
                 from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
-                prepared_signal, prepare_reason = asyncio.run(
-                    self._prepare_signal_for_handling(
-                        signal,
-                        price,
-                        trace_id,
-                    )
+                prepared_signal, prepare_reason = await self._prepare_signal_for_handling(
+                    signal,
+                    price,
+                    trace_id,
                 )
                 if prepared_signal is None:
                     self._emit_runner_eval_decision(
@@ -1649,6 +1647,21 @@ class StrategyRunner:
         except Exception as exc:
             self._logger.error("CANDIDATE_SNAPSHOT_BUILD_FAILED reason=%s", exc)
             return [], True
+
+    def _prepare_signal_for_handling_sync(
+        self,
+        signal: Signal,
+        price: float,
+        trace_id: str,
+    ) -> tuple[Signal | None, str | None]:
+        """Prepare a signal from sync paths. Args: signal/price/trace_id. Returns: prepared signal and reason. Raises: none."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self._prepare_signal_for_handling(signal, price, trace_id)
+            )
+        return None, "candidate_refresh_pending"
 
     async def _prepare_signal_for_handling(
         self,
@@ -6572,12 +6585,10 @@ class StrategyRunner:
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
-                prepared_signal, prepare_reason = asyncio.run(
-                    self._prepare_signal_for_handling(
-                        signal,
-                        price,
-                        trace_id,
-                    )
+                prepared_signal, prepare_reason = self._prepare_signal_for_handling_sync(
+                    signal,
+                    price,
+                    trace_id,
                 )
                 if prepared_signal is None:
                     self._emit_runner_eval_decision(

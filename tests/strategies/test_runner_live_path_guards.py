@@ -809,6 +809,51 @@ async def test_build_candidate_snapshots_all_pending_returns_refresh_pending() -
     assert refresh_pending is True
 
 
+
+
+def test_prepare_signal_for_handling_sync_uses_asyncio_run_without_loop(monkeypatch) -> None:
+    runner = _build_runner()
+
+    async def _fake_prepare(signal, price, trace_id):
+        return signal, None
+
+    runner._prepare_signal_for_handling = _fake_prepare
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800CE',
+        quantity=1,
+        confidence=0.9,
+        reason='unit_test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={},
+    )
+
+    prepared, reason = runner._prepare_signal_for_handling_sync(signal, 101.0, 'trace-sync')
+
+    assert prepared is signal
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_signal_for_handling_sync_returns_pending_when_loop_running() -> None:
+    runner = _build_runner()
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800CE',
+        quantity=1,
+        confidence=0.9,
+        reason='unit_test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={},
+    )
+
+    prepared, reason = runner._prepare_signal_for_handling_sync(signal, 101.0, 'trace-loop')
+
+    assert prepared is None
+    assert reason == 'candidate_refresh_pending'
+
 def test_runner_no_async_event_loop_fallback_in_runner_source() -> None:
     """Regression guard: async paths must not skip prep just because event loop exists."""
     from pathlib import Path

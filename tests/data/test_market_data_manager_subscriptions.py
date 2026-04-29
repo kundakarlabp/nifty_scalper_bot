@@ -275,6 +275,27 @@ def test_ensure_fresh_tick_uses_polling_fallback_owner(monkeypatch) -> None:
     assert fallback.subscribed
 
 
+
+
+def test_request_token_subscription_sets_ws_tokens_before_connect() -> None:
+    ws = DummyWebSocket()
+    ws.connected = False
+    ws._tokens: set[int] = set()
+
+    def _set_tokens(tokens) -> bool:  # noqa: ANN001
+        ws.calls.append(list(tokens))
+        ws._tokens = set(tokens)
+        return True
+
+    ws.set_tokens = _set_tokens  # type: ignore[method-assign]
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+
+    changed = mdm.request_token_subscription(256265, symbol='NSE:NIFTY')
+
+    assert changed is True
+    assert ws.calls[-1] == [256265]
+    assert 256265 in ws._tokens
+
 def test_start_websocket_reconciles_tokens_before_connect() -> None:
     class WsWithStart(DummyWebSocket):
         def __init__(self) -> None:
