@@ -8,7 +8,7 @@ import threading
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
-from nifty_scalper_bot.strategies.runner import StrategyRunner
+from nifty_scalper_bot.strategies.runner import SignalExecutionResult, StrategyRunner
 from nifty_scalper_bot.strategies.signal_generator import Signal
 
 
@@ -811,7 +811,7 @@ async def test_build_candidate_snapshots_all_pending_returns_refresh_pending() -
 
 
 
-def test_prepare_signal_for_handling_sync_uses_asyncio_run_without_loop(monkeypatch) -> None:
+def test_schedule_signal_preparation_uses_asyncio_run_without_loop() -> None:
     runner = _build_runner()
 
     async def _fake_prepare(signal, price, trace_id):
@@ -829,14 +829,17 @@ def test_prepare_signal_for_handling_sync_uses_asyncio_run_without_loop(monkeypa
         metadata={},
     )
 
-    prepared, reason = runner._prepare_signal_for_handling_sync(signal, 101.0, 'trace-sync')
+    now = datetime.now(timezone.utc)
+    runner._handle_signal = MagicMock(return_value=SignalExecutionResult(True, 'accepted'))  # type: ignore[method-assign]
+    scheduled, reason = runner._schedule_signal_preparation(signal, 101.0, now, 'trace-sync')
 
-    assert prepared is signal
+    assert scheduled is True
     assert reason is None
+    runner._handle_signal.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_prepare_signal_for_handling_sync_returns_pending_when_loop_running() -> None:
+async def test_schedule_signal_preparation_schedules_when_loop_running() -> None:
     runner = _build_runner()
     signal = Signal(
         action='BUY',
@@ -849,10 +852,18 @@ async def test_prepare_signal_for_handling_sync_returns_pending_when_loop_runnin
         metadata={},
     )
 
-    prepared, reason = runner._prepare_signal_for_handling_sync(signal, 101.0, 'trace-loop')
+    async def _fake_prepare(prepared_signal, _price, _trace_id):
+        return prepared_signal, None
 
-    assert prepared is None
-    assert reason == 'candidate_refresh_pending'
+    runner._prepare_signal_for_handling = _fake_prepare  # type: ignore[method-assign]
+    runner._handle_signal = MagicMock(return_value=SignalExecutionResult(True, 'accepted'))  # type: ignore[method-assign]
+    now = datetime.now(timezone.utc)
+    scheduled, reason = runner._schedule_signal_preparation(signal, 101.0, now, 'trace-loop')
+    await asyncio.sleep(0)
+
+    assert scheduled is True
+    assert reason == 'signal_preparation_scheduled'
+    runner._handle_signal.assert_called_once()
 
 def test_runner_no_async_event_loop_fallback_in_runner_source() -> None:
     """Regression guard: async paths must not skip prep just because event loop exists."""

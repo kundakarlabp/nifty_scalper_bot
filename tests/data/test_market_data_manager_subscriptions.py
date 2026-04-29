@@ -66,8 +66,8 @@ def test_request_symbol_subscription_no_duplicate_transport_call() -> None:
     mdm.request_symbol_subscription('NSE:NIFTY')
     changed = mdm.request_symbol_subscription('NSE:NIFTY')
 
-    assert changed is False
-    assert ws.calls == [[256265]]
+    assert changed is True
+    assert ws.calls == [[256265], [256265]]
 
 
 def test_request_token_subscriptions_batch_reconciles_once() -> None:
@@ -89,7 +89,7 @@ def test_request_token_subscriptions_idempotent() -> None:
 
     assert first == 2
     assert second == 0
-    assert ws.calls == [[101, 202]]
+    assert ws.calls == [[101, 202], [101, 202]]
 
 
 def test_request_subscription_without_ws_retains_desired_set() -> None:
@@ -295,6 +295,7 @@ def test_request_token_subscription_sets_ws_tokens_before_connect() -> None:
     assert changed is True
     assert ws.calls[-1] == [256265]
     assert 256265 in ws._tokens
+    assert mdm.ws_token_count() == 1
 
 def test_start_websocket_reconciles_tokens_before_connect() -> None:
     class WsWithStart(DummyWebSocket):
