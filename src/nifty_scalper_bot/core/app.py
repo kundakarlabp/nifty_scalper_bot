@@ -6199,18 +6199,25 @@ async def startup_sequence(ctx: BotContext) -> None:
             desired_tokens = (
                 int(desired_count_fn()) if callable(desired_count_fn) else None
             )
+            ws_token_count_fn = getattr(ctx.market_data_manager, "ws_token_count", None)
+            ws_tokens = None
+            if callable(ws_token_count_fn):
+                ws_count = ws_token_count_fn()
+                ws_tokens = int(ws_count) if ws_count is not None else None
             LOGGER.info(
-                "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED symbol=%s token=%d subscribed=%s desired_tokens=%s",
+                "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED symbol=%s token=%d subscribed=%s desired_tokens=%s ws_tokens=%s",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 subscribed,
                 desired_tokens,
+                ws_tokens,
                 extra={
                     "event": "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED",
                     "symbol": policy.nifty_internal_symbol,
                     "token": policy.nifty_spot_token,
                     "subscribed": subscribed,
                     "desired_tokens": desired_tokens,
+                    "ws_tokens": ws_tokens,
                 },
             )
             ctx.market_data_manager.start_websocket()

@@ -1357,9 +1357,11 @@ class MarketDataManager:
         token: int,
         symbol: str | None = None,
     ) -> bool:
-        """Record token subscription intent. Args: token/symbol. Returns: changed flag. Raises: none."""
-
-        token_int = int(token)
+        """Ensure token subscription intent is recorded and reconciled. Args: token/symbol. Returns: success flag. Raises: none."""
+        try:
+            token_int = int(token)
+        except Exception:
+            return False
         if token_int <= 0:
             return False
         normalized_symbol: str | None = None
@@ -1367,21 +1369,14 @@ class MarketDataManager:
             normalized_symbol = self._canonical_symbol(symbol)
             self.register_symbol(normalized_symbol, token_int)
 
-        changed = False
         with self._lock:
-            if token_int not in self._desired_tokens:
-                self._desired_tokens.add(token_int)
-                changed = True
+            self._desired_tokens.add(token_int)
             if normalized_symbol:
-                if self._symbol_to_token.get(normalized_symbol) != token_int:
-                    self._symbol_to_token[normalized_symbol] = token_int
-                    changed = True
-                if self._token_to_symbol.get(token_int) != normalized_symbol:
-                    self._token_to_symbol[token_int] = normalized_symbol
-                    changed = True
-        if changed:
-            self._reconcile_ws_subscriptions()
-        return changed
+                self._symbol_to_token[normalized_symbol] = token_int
+                self._token_to_symbol[token_int] = normalized_symbol
+                self._symbol_by_token[token_int] = normalized_symbol
+        self._reconcile_ws_subscriptions()
+        return True
 
     def request_token_subscriptions(self, tokens: Iterable[int]) -> int:
         """Record token subscription intents. Args: tokens. Returns: number of newly added tokens. Raises: none."""
@@ -1393,8 +1388,7 @@ class MarketDataManager:
             before = len(self._desired_tokens)
             self._desired_tokens.update(normalized)
             added_count = len(self._desired_tokens) - before
-        if added_count > 0:
-            self._reconcile_ws_subscriptions()
+        self._reconcile_ws_subscriptions()
         return added_count
 
     def request_token_unsubscriptions(self, tokens: Iterable[int]) -> int:
@@ -1462,6 +1456,19 @@ class MarketDataManager:
 
         with self._lock:
             return sorted(self._desired_tokens)
+
+    def ws_token_count(self) -> int | None:
+        """Return websocket token count if websocket exists. Args: none. Returns: token count or None. Raises: none."""
+        ws = self._ws
+        if ws is None:
+            return None
+        tokens = getattr(ws, "_tokens", None)
+        if tokens is None:
+            return None
+        try:
+            return len(tokens)
+        except Exception:
+            return None
 
     def request_symbol_unsubscription(self, symbol: str) -> bool:
         """Record symbol removal intent. Args: symbol. Returns: changed flag. Raises: none."""
@@ -6029,10 +6036,18 @@ class MarketDataManager:
         self._last_spot_resubscribe_attempt = now
         token = int(self._symbol_to_token.get(symbol) or self._token_by_symbol.get(symbol) or 0)
         if token <= 0:
-            self._logger.info(
-                "SPOT_RESUBSCRIBE_SKIPPED symbol=%s reason=token_missing",
-                symbol,
-                extra={"event": "SPOT_RESUBSCRIBE_SKIPPED", "symbol": symbol, "reason": "token_missing"},
+            log_throttled(
+                self._logger,
+                key=f"spot_resubscribe_token_missing:{symbol}",
+                msg="SPOT_RESUBSCRIBE_SKIPPED symbol=%s reason=token_missing",
+                args=(symbol,),
+                interval_sec=60.0,
+                level=logging.WARNING,
+                extra={
+                    "event": "SPOT_RESUBSCRIBE_SKIPPED",
+                    "symbol": symbol,
+                    "reason": "token_missing",
+                },
             )
             return
         self._logger.info(

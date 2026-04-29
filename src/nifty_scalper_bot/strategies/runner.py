@@ -1645,23 +1645,64 @@ class StrategyRunner:
             )
             return candidates, bool(any_refresh_pending and no_valid_candidates)
         except Exception as exc:
-            self._logger.error("CANDIDATE_SNAPSHOT_BUILD_FAILED reason=%s", exc)
+            self._logger.error(
+                "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=%s underlying=%s direction_bias=%s atm_strike=%s",
+                exc,
+                underlying,
+                direction_bias,
+                atm_strike,
+                extra={
+                    "event": "CANDIDATE_SNAPSHOT_BUILD_FAILED",
+                    "reason": str(exc),
+                    "error_type": type(exc).__name__,
+                    "underlying": underlying,
+                    "direction_bias": direction_bias,
+                    "atm_strike": atm_strike,
+                },
+                exc_info=True,
+            )
             return [], True
 
-    def _prepare_signal_for_handling_sync(
+    def _schedule_signal_preparation(
         self,
         signal: Signal,
         price: float,
+        now: datetime,
         trace_id: str,
-    ) -> tuple[Signal | None, str | None]:
-        """Prepare a signal from sync paths. Args: signal/price/trace_id. Returns: prepared signal and reason. Raises: none."""
+    ) -> tuple[bool, str | None]:
+        """Schedule signal preparation from sync paths. Args: signal/price/now/trace_id. Returns: scheduled state and reason. Raises: none."""
+        async def _job() -> None:
+            prepared_signal, prepare_reason = await self._prepare_signal_for_handling(
+                signal, price, trace_id
+            )
+            if prepared_signal is None:
+                self._emit_runner_eval_decision(
+                    symbol=signal.symbol,
+                    stage="phase10_execute",
+                    reason=str(prepare_reason or "signal_prepare_failed"),
+                    allowed=False,
+                    trace_id=trace_id,
+                )
+                self._logger.info(
+                    "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
+                    signal.symbol, False, prepare_reason, None, trace_id,
+                    extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": signal.symbol, "accepted": False, "reason": prepare_reason, "order_id": None, "trace_id": trace_id},
+                )
+                return
+            self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
+
         try:
-            asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(
+            prepared_signal, prepare_reason = asyncio.run(
                 self._prepare_signal_for_handling(signal, price, trace_id)
             )
-        return None, "candidate_refresh_pending"
+            if prepared_signal is None:
+                return False, prepare_reason
+            self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
+            return True, None
+        loop.create_task(_job())
+        return True, "signal_preparation_scheduled"
 
     async def _prepare_signal_for_handling(
         self,
@@ -6585,12 +6626,10 @@ class StrategyRunner:
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
-                prepared_signal, prepare_reason = self._prepare_signal_for_handling_sync(
-                    signal,
-                    price,
-                    trace_id,
+                scheduled, prepare_reason = self._schedule_signal_preparation(
+                    signal, price, now, trace_id
                 )
-                if prepared_signal is None:
+                if not scheduled:
                     self._emit_runner_eval_decision(
                         symbol=symbol,
                         stage="phase10_execute",
@@ -6603,17 +6642,7 @@ class StrategyRunner:
                         symbol, False, prepare_reason, None, trace_id,
                         extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": symbol, "accepted": False, "reason": prepare_reason, "order_id": None, "trace_id": trace_id},
                     )
-                    return
-                result = self._handle_signal(
-                    prepared_signal, price, now, trace_id=trace_id
-                )
-                if result.accepted:
-                    self._symbol_last_signal_ts[symbol] = time.time()
-                self._logger.info(
-                    "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                    symbol, result.accepted, result.reason, result.order_id, trace_id,
-                    extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": symbol, "accepted": result.accepted, "reason": result.reason, "order_id": result.order_id, "trace_id": trace_id},
-                )
+                return
         except Exception as e:
             self._logger.error(
                 "RUNNER_ON_TICK_ERROR",
