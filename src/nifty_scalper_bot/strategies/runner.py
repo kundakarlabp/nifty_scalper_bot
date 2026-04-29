@@ -829,10 +829,12 @@ class StrategyRunner:
             if signal:
                 from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
-                prepared_signal, prepare_reason = await self._prepare_signal_for_handling(
-                    signal,
-                    price,
-                    trace_id,
+                prepared_signal, prepare_reason = asyncio.run(
+                    self._prepare_signal_for_handling(
+                        signal,
+                        price,
+                        trace_id,
+                    )
                 )
                 if prepared_signal is None:
                     self._emit_runner_eval_decision(
@@ -6570,15 +6572,13 @@ class StrategyRunner:
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
-                prepared_signal: Signal | None = signal
-                prepare_reason: str | None = None
-                if isinstance(signal.metadata, dict) and isinstance(
-                    signal.metadata.get("candidate_snapshots"), list
-                ):
-                    pass
-                else:
-                    prepared_signal = None
-                    prepare_reason = "candidate_refresh_pending"
+                prepared_signal, prepare_reason = asyncio.run(
+                    self._prepare_signal_for_handling(
+                        signal,
+                        price,
+                        trace_id,
+                    )
+                )
                 if prepared_signal is None:
                     self._emit_runner_eval_decision(
                         symbol=symbol,

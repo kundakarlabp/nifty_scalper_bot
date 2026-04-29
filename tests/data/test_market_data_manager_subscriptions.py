@@ -273,3 +273,58 @@ def test_ensure_fresh_tick_uses_polling_fallback_owner(monkeypatch) -> None:
     asyncio.run(mdm.ensure_fresh_tick('NSE:NIFTY'))
 
     assert fallback.subscribed
+
+
+def test_start_websocket_reconciles_tokens_before_connect() -> None:
+    class WsWithStart(DummyWebSocket):
+        def __init__(self) -> None:
+            super().__init__()
+            self.start_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    ws = WsWithStart()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+    mdm.request_token_subscription(256265, symbol='NSE:NIFTY')
+    ws.calls.clear()
+
+    mdm.start_websocket()
+
+    assert ws.start_calls == 1
+    assert ws.calls == [[256265]]
+
+
+def test_spot_ws_health_logs_first_tick_missing_not_stale(monkeypatch, caplog) -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    mdm.register_symbol('NSE:NIFTY', 256265)
+    monkeypatch.setattr(
+        'nifty_scalper_bot.data.market_data_manager.get_market_state',
+        lambda: MarketState.OPEN,
+    )
+
+    with caplog.at_level('WARNING'):
+        mdm._monitor_spot_ws_health()  # noqa: SLF001
+
+    assert 'MDM_WS_FIRST_TICK_MISSING' in caplog.text
+    assert 'MDM_WS_TICK_STALE' not in caplog.text
+
+
+def test_spot_ws_health_logs_stale_only_after_first_tick(monkeypatch, caplog) -> None:
+    mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
+    mdm.register_symbol('NSE:NIFTY', 256265)
+    mdm._last_tick_wallclock['NSE:NIFTY'] = 1.0  # noqa: SLF001
+    mdm._last_tick_time['NSE:NIFTY'] = 1.0  # noqa: SLF001
+    monkeypatch.setattr(
+        'nifty_scalper_bot.data.market_data_manager.get_market_state',
+        lambda: MarketState.OPEN,
+    )
+    monkeypatch.setattr(
+        'nifty_scalper_bot.data.market_data_manager.time.time',
+        lambda: 1000.0,
+    )
+
+    with caplog.at_level('WARNING'):
+        mdm._monitor_spot_ws_health()  # noqa: SLF001
+
+    assert 'MDM_WS_TICK_STALE' in caplog.text
