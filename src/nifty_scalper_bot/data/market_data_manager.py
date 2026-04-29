@@ -885,6 +885,7 @@ class MarketDataManager:
             return
         self._ws_started = True
         try:
+            self._reconcile_ws_subscriptions()
             self._ws.start()
         except Exception:
             self._ws_started = False
@@ -4058,6 +4059,38 @@ class MarketDataManager:
             return 1_000_000_000
         return int(max(0.0, (now - freshest) * 1000.0))
 
+    def symbol_data_age_ms_or_none(self, symbol: str | int) -> int | None:
+        """Return age in milliseconds or None when no tick exists. Args: symbol/token. Returns: age ms or none. Raises: none."""
+
+        resolved_symbol: str | None = None
+        try:
+            if isinstance(symbol, int):
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(symbol))
+            elif str(symbol).strip().isdigit():
+                with self._lock:
+                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
+            else:
+                resolved_symbol = self._canonical_symbol(str(symbol))
+        except Exception:
+            resolved_symbol = None
+        if not resolved_symbol:
+            return None
+        now = time.time()
+        with self._lock:
+            wallclock = float(self._last_tick_wallclock.get(resolved_symbol, 0.0) or 0.0)
+            arrival = float(self._last_tick_time.get(resolved_symbol, 0.0) or 0.0)
+        freshest = max(wallclock, arrival)
+        if freshest <= 0.0:
+            return None
+        return int(max(0.0, (now - freshest) * 1000.0))
+
+    def symbol_has_tick(self, symbol: str | int) -> bool:
+        """Return whether at least one tick exists for symbol/token. Args: symbol/token. Returns: bool. Raises: none."""
+
+        return self.symbol_data_age_ms_or_none(symbol) is not None
+
+
     # ------------------------------------------------------------------
     # Internal plumbing
 
@@ -5951,24 +5984,55 @@ class MarketDataManager:
         market_open = get_market_state() == MarketState.OPEN
         return float(stale_threshold_for_symbol(symbol, market_open))
 
+    def _request_spot_resubscribe_if_due(self, symbol: str, reason: str) -> None:
+        """Request throttled spot resubscription when a token is available. Args: symbol/reason. Returns: none. Raises: none."""
+
+        now = time.time()
+        if now - self._last_spot_resubscribe_attempt < 120.0:
+            return
+        self._last_spot_resubscribe_attempt = now
+        token = int(self._symbol_to_token.get(symbol) or self._token_by_symbol.get(symbol) or 0)
+        if token <= 0:
+            self._logger.info(
+                "SPOT_RESUBSCRIBE_SKIPPED symbol=%s reason=token_missing",
+                symbol,
+                extra={"event": "SPOT_RESUBSCRIBE_SKIPPED", "symbol": symbol, "reason": "token_missing"},
+            )
+            return
+        self._logger.info(
+            "WS_RESUBSCRIBE_REQUESTED symbol=%s reason=%s",
+            symbol,
+            reason,
+            extra={"event": "WS_RESUBSCRIBE_REQUESTED", "symbol": symbol, "reason": reason},
+        )
+        self.request_token_subscription(token, symbol=symbol)
+
     def _monitor_spot_ws_health(self) -> None:
         """Monitor NSE spot tick freshness and trigger throttled resubscribe. Args: none. Returns: none. Raises: none."""
         if get_market_state() != MarketState.OPEN:
             return
         symbol = "NSE:NIFTY"
-        age_ms = self.symbol_data_age_ms(symbol)
+        if not self.symbol_has_tick(symbol):
+            log_throttled(
+                self._logger,
+                key="spot_ws_first_tick_missing",
+                msg="MDM_WS_FIRST_TICK_MISSING symbol=NSE:NIFTY reason=no_tick_received",
+                interval_sec=60.0,
+                level=logging.WARNING,
+                extra={"event": "MDM_WS_FIRST_TICK_MISSING", "symbol": symbol, "reason": "no_tick_received"},
+            )
+            self._request_spot_resubscribe_if_due(symbol, reason="first_tick_missing")
+            return
+        age_ms = self.symbol_data_age_ms_or_none(symbol)
+        if age_ms is None:
+            return
         threshold_ms = self._ltp_stale_threshold_for_symbol(symbol) * 1000.0
         self._logger.debug(
             "SPOT_WS_HEALTH_CHECK symbol=%s age=%.2fs threshold=%.2fs",
             symbol,
             age_ms / 1000.0,
             threshold_ms / 1000.0,
-            extra={
-                "event": "SPOT_WS_HEALTH_CHECK",
-                "symbol": symbol,
-                "age_s": round(age_ms / 1000.0, 3),
-                "threshold_s": round(threshold_ms / 1000.0, 3),
-            },
+            extra={"event": "SPOT_WS_HEALTH_CHECK", "symbol": symbol, "age_s": round(age_ms / 1000.0, 3), "threshold_s": round(threshold_ms / 1000.0, 3)},
         )
         if age_ms <= threshold_ms:
             return
@@ -5979,54 +6043,10 @@ class MarketDataManager:
                 "MDM_WS_TICK_STALE symbol=%s age=%.2fs",
                 symbol,
                 age_ms / 1000.0,
-                extra={
-                    "event": "MDM_WS_TICK_STALE",
-                    "symbol": symbol,
-                    "age_s": round(age_ms / 1000.0, 3),
-                },
+                extra={"event": "MDM_WS_TICK_STALE", "symbol": symbol, "age_s": round(age_ms / 1000.0, 3)},
             )
-        if now - self._last_spot_resubscribe_attempt < 120.0:
-            return
-        self._last_spot_resubscribe_attempt = now
-        try:
-            token = int(
-                self._symbol_to_token.get(symbol)
-                or self._token_by_symbol.get(symbol)
-                or 0
-            )
-            if token <= 0:
-                return
-            self._logger.info(
-                "WS_RESUBSCRIBE_REQUESTED symbol=%s reason=stale_index_tick",
-                symbol,
-                extra={
-                    "event": "WS_RESUBSCRIBE_REQUESTED",
-                    "symbol": symbol,
-                    "reason": "stale_index_tick",
-                },
-            )
-            self.request_token_subscription(token, symbol=symbol)
-            self._logger.info(
-                "WS_RESUBSCRIBE_SUCCESS symbol=%s token=%s",
-                symbol,
-                token,
-                extra={
-                    "event": "WS_RESUBSCRIBE_SUCCESS",
-                    "symbol": symbol,
-                    "token": token,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.warning(
-                "WS_RESUBSCRIBE_FAILED symbol=%s error=%s",
-                symbol,
-                exc,
-                extra={
-                    "event": "WS_RESUBSCRIBE_FAILED",
-                    "symbol": symbol,
-                    "error": str(exc),
-                },
-            )
+        self._request_spot_resubscribe_if_due(symbol, reason="stale_index_tick")
+
 
     def _has_recent_rest_ticks(self) -> bool:
         cutoff = time.time() - max(self._rest_poll_interval * 2.0, 5.0)

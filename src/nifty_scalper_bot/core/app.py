@@ -6181,14 +6181,36 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "Spot symbol registration failed (will retry later)",
                         exc_info=True,
                     )
+            subscribe_fn = getattr(
+                ctx.market_data_manager, "request_token_subscription", None
+            )
+            if callable(subscribe_fn):
+                subscribed = bool(
+                    subscribe_fn(
+                        policy.nifty_spot_token,
+                        symbol=policy.nifty_internal_symbol,
+                    )
+                )
+            else:
+                subscribed = False
+            desired_count_fn = getattr(
+                ctx.market_data_manager, "desired_token_count", None
+            )
+            desired_tokens = (
+                int(desired_count_fn()) if callable(desired_count_fn) else None
+            )
             LOGGER.info(
-                "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED symbol=%s token=%d",
+                "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED symbol=%s token=%d subscribed=%s desired_tokens=%s",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
+                subscribed,
+                desired_tokens,
                 extra={
                     "event": "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED",
                     "symbol": policy.nifty_internal_symbol,
                     "token": policy.nifty_spot_token,
+                    "subscribed": subscribed,
+                    "desired_tokens": desired_tokens,
                 },
             )
             ctx.market_data_manager.start_websocket()
@@ -8769,18 +8791,30 @@ def _health_check(ctx: BotContext) -> None:
     status: Mapping[str, Any] = strategy_runner.get_status()
     if not bool(status.get("running")):
         state = get_market_state()
+        startup_age_s = max(0.0, time.monotonic() - float(ctx.started_mono or 0.0))
         expected_active = bool(
-            ctx.settings.enable_live and state == MarketState.OPEN and not ctx.shadow_mode_enabled
+            ctx.settings.enable_live
+            and state == MarketState.OPEN
+            and ctx.effective_mode == "LIVE"
+            and ctx.trading_ready
+            and ctx.live_orders_armed
+            and not ctx.shadow_mode_enabled
         )
         inactive_reason = "runner_task_not_started"
         if not ctx.settings.enable_live:
             inactive_reason = "live_disabled"
         elif state != MarketState.OPEN:
             inactive_reason = "market_closed"
+        elif ctx.effective_mode == "DATA_WARMUP":
+            inactive_reason = "data_warmup"
+        elif ctx.effective_mode != "LIVE":
+            inactive_reason = "live_blocked"
+        elif startup_age_s < 120.0:
+            inactive_reason = "startup_grace"
+        elif status.get("readiness_unmet") or not ctx.trading_ready or not ctx.live_orders_armed:
+            inactive_reason = "readiness_unmet"
         elif status.get("startup_degraded"):
             inactive_reason = "degraded_startup"
-        elif status.get("readiness_unmet"):
-            inactive_reason = "readiness_unmet"
         elif status.get("basket_build_failed"):
             inactive_reason = "basket_build_failure"
         elif status.get("loop_error"):
@@ -8796,6 +8830,10 @@ def _health_check(ctx: BotContext) -> None:
                 "expected_active": expected_active,
                 "market_state": state.value if hasattr(state, "value") else str(state),
                 "reason": inactive_reason,
+                "startup_age_s": round(startup_age_s, 2),
+                "effective_mode": ctx.effective_mode,
+                "trading_ready": ctx.trading_ready,
+                "live_orders_armed": ctx.live_orders_armed,
             },
         )
 
