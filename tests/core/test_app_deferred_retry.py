@@ -32,9 +32,9 @@ async def test_deferred_basket_retry_scheduled_on_spot_unavailable(
     assert ctx.trading_ready is False
     assert ctx.readiness_mode == "DATA_WARMUP"
     assert ctx.live_block_reason == "fresh_ws_spot_unavailable"
-    assert ctx._deferred_basket_retry_started is True  # noqa: SLF001
-    assert isinstance(ctx._deferred_basket_retry_task, asyncio.Task)  # noqa: SLF001
-    await ctx._deferred_basket_retry_task  # noqa: SLF001
+    assert ctx.deferred_basket_retry_started is True  # noqa: SLF001
+    assert isinstance(ctx.deferred_basket_retry_task, asyncio.Task)  # noqa: SLF001
+    await ctx.deferred_basket_retry_task  # noqa: SLF001
 
 
 @pytest.mark.asyncio

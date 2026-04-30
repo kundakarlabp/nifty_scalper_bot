@@ -3241,8 +3241,8 @@ class MarketDataManager:
             self._last_readiness_state = dict(readiness_state)
             valid_symbols = [s for s, count in bars.items() if count >= min_bars]
             spot_symbol = str(requirements.get("spot") or "NSE:NIFTY")
-            spot_age_ms = self.symbol_data_age_ms(spot_symbol) if spot_symbol else -1
-            threshold_ms = int(getattr(self, "_tick_stale_threshold_ms", 120000))
+            spot_age_ms = self.symbol_data_age_ms_or_none(spot_symbol)
+            threshold_ms = 120000
             spot_fresh = spot_age_ms is not None and 0 <= int(spot_age_ms) <= threshold_ms
             if readiness_state["spot_ready"] and spot_fresh and not self._spot_ready_logged:
                 spot_source = str(self._last_tick_source.get(spot_symbol, "unknown"))
@@ -3264,17 +3264,18 @@ class MarketDataManager:
                     },
                 )
             elif not (readiness_state["spot_ready"] and spot_fresh):
+                reason = "no_tick_received" if spot_age_ms is None else "stale_tick"
                 log_throttled(
                     self._logger,
                     "spot_not_ready_state",
-                    "SPOT_NOT_READY symbol=%s reason=stale_or_missing_tick age_ms=%s threshold_ms=%s"
-                    % (spot_symbol, spot_age_ms, threshold_ms),
+                    "SPOT_NOT_READY symbol=%s reason=%s age_ms=%s threshold_ms=%s"
+                    % (spot_symbol, reason, spot_age_ms, threshold_ms),
                     interval_sec=30.0,
                     level=logging.INFO,
                     extra={
                         "event": "SPOT_NOT_READY",
                         "symbol": spot_symbol,
-                        "reason": "stale_or_missing_tick",
+                        "reason": reason,
                         "age_ms": spot_age_ms,
                         "threshold_ms": threshold_ms,
                     },
@@ -4067,21 +4068,30 @@ class MarketDataManager:
         freshest = max(candidates)
         return int(max(0.0, (now - freshest) * 1000.0))
 
-    def symbol_data_age_ms(self, symbol: str | int) -> int:
-        """Return age in milliseconds for one symbol/token. Args: symbol/token. Returns: age ms. Raises: none."""
 
-        resolved_symbol: str | None = None
+    def _resolve_symbol_key_safe(self, symbol: str | int) -> str | None:
+        """Resolve symbol/token aliases to canonical symbol. Args: symbol. Returns: canonical or None. Raises: none."""
+
         try:
             if isinstance(symbol, int):
                 with self._lock:
-                    resolved_symbol = self._symbol_by_token.get(int(symbol))
-            elif str(symbol).strip().isdigit():
+                    resolved = self._symbol_by_token.get(int(symbol))
+                return self._canonical_symbol(resolved) if resolved else None
+            raw = str(symbol).strip()
+            if not raw:
+                return None
+            if raw.isdigit():
                 with self._lock:
-                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
-            else:
-                resolved_symbol = self._canonical_symbol(str(symbol))
+                    resolved = self._symbol_by_token.get(int(raw))
+                return self._canonical_symbol(resolved) if resolved else None
+            return self._canonical_symbol(raw)
         except Exception:
-            resolved_symbol = None
+            return None
+
+    def symbol_data_age_ms(self, symbol: str | int) -> int:
+        """Return age in milliseconds for one symbol/token. Args: symbol/token. Returns: age ms. Raises: none."""
+
+        resolved_symbol = self._resolve_symbol_key_safe(symbol)
         if not resolved_symbol:
             return 1_000_000_000
         now = time.time()
@@ -4096,18 +4106,7 @@ class MarketDataManager:
     def symbol_data_age_ms_or_none(self, symbol: str | int) -> int | None:
         """Return age in milliseconds or None when no tick exists. Args: symbol/token. Returns: age ms or none. Raises: none."""
 
-        resolved_symbol: str | None = None
-        try:
-            if isinstance(symbol, int):
-                with self._lock:
-                    resolved_symbol = self._symbol_by_token.get(int(symbol))
-            elif str(symbol).strip().isdigit():
-                with self._lock:
-                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
-            else:
-                resolved_symbol = self._canonical_symbol(str(symbol))
-        except Exception:
-            resolved_symbol = None
+        resolved_symbol = self._resolve_symbol_key_safe(symbol)
         if not resolved_symbol:
             return None
         now = time.time()
@@ -4122,18 +4121,7 @@ class MarketDataManager:
     def symbol_has_tick(self, symbol: str | int) -> bool:
         """Return whether at least one tick exists for symbol/token. Args: symbol/token. Returns: bool. Raises: none."""
 
-        resolved_symbol: str | None = None
-        try:
-            if isinstance(symbol, int):
-                with self._lock:
-                    resolved_symbol = self._symbol_by_token.get(int(symbol))
-            elif str(symbol).strip().isdigit():
-                with self._lock:
-                    resolved_symbol = self._symbol_by_token.get(int(str(symbol).strip()))
-            else:
-                resolved_symbol = self._canonical_symbol(str(symbol))
-        except Exception:
-            resolved_symbol = None
+        resolved_symbol = self._resolve_symbol_key_safe(symbol)
 
         if not resolved_symbol:
             return False
@@ -4317,10 +4305,19 @@ class MarketDataManager:
         symbol = self._canonical_symbol(symbol)
 
         cached_tick = dict(tick)
+        token_value = cached_tick.get("instrument_token") or cached_tick.get("token")
+        token_int = int(token_value) if token_value is not None else None
+        now_wall = time.time()
+        exchange_ts = self._tick_wallclock(cached_tick) or now_wall
         with self._lock:
+            if token_int is not None:
+                self._symbol_by_token[token_int] = symbol
+                self._token_to_symbol[token_int] = symbol
+                self._symbol_to_token[symbol] = token_int
+                self._token_by_symbol[symbol] = token_int
             self._latest_ticks[symbol] = cached_tick
             self._tick_cache[symbol] = cached_tick
-            self._last_tick_time[symbol] = float(wallclock)
+            self._last_tick_time[symbol] = float(exchange_ts)
             if "ltp" not in cached_tick or cached_tick.get("timestamp") is None:
                 self._logger.debug(
                     "Condition met: mdm_history_append_rejected",
@@ -4330,7 +4327,7 @@ class MarketDataManager:
             self._history[symbol].append(cached_tick)
             self._ticks_received_per_symbol[symbol] += 1
             self._symbols_with_tick.add(symbol)
-            self._last_tick_wallclock[symbol] = float(wallclock)
+            self._last_tick_wallclock[symbol] = float(now_wall)
             self._last_quote_ts_ms[symbol] = self._now_ms()
         staleness_seconds = 0.0
         try:
@@ -4366,6 +4363,12 @@ class MarketDataManager:
                 last_logged = float(self._ws_stored_tick_log_at.get(symbol, 0.0))
                 if last_logged <= 0.0 or (now - last_logged) >= 60.0:
                     self._ws_stored_tick_log_at[symbol] = now
+                    self._logger.info(
+                        "MDM_TICK_CACHE_UPDATED symbol=%s token=%s source=ws",
+                        symbol,
+                        token_int,
+                        extra={"event": "MDM_TICK_CACHE_UPDATED", "symbol": symbol, "token": token_int, "source": "ws"},
+                    )
                     self._logger.info(
                         "WS_TICK_STORED symbol=%s token=%s ltp=%s source=ws age_ms=0",
                         symbol,
