@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -50,3 +51,56 @@ async def test_stop_handles_failed_health_task() -> None:
         app_module.shutdown_sequence = original
 
     assert app._health_task is None
+
+
+def test_bot_context_declares_effective_mode_and_started_mono() -> None:
+    source = Path('src/nifty_scalper_bot/core/app.py').read_text(encoding='utf-8')
+    assert 'effective_mode: str = "SHADOW"' in source
+    assert 'started_mono: float = field(default_factory=time_module.monotonic)' in source
+
+
+def test_health_check_uses_time_module_monotonic_not_datetime_time(monkeypatch, caplog) -> None:
+    calls: list[str] = []
+
+    def _mono() -> float:
+        calls.append('mono')
+        return 1000.0
+
+    ctx = SimpleNamespace(
+        strategy_runner=_Runner(),
+        settings=SimpleNamespace(enable_live=True),
+        shadow_mode_enabled=False,
+        readiness_mode='DATA_WARMUP',
+        effective_mode='DATA_WARMUP',
+        trading_ready=False,
+        live_orders_armed=False,
+        started_mono=999.0,
+    )
+    monkeypatch.setattr(app_module, 'get_market_state', lambda: app_module.MarketState.OPEN)
+    monkeypatch.setattr(app_module.time_module, 'monotonic', _mono)
+
+    caplog.set_level('INFO')
+    app_module._health_check(ctx)
+
+    assert calls == ['mono']
+    assert any('data_warmup' in rec.message for rec in caplog.records)
+
+
+def test_health_check_market_closed_reason(monkeypatch, caplog) -> None:
+    ctx = SimpleNamespace(
+        strategy_runner=_Runner(),
+        settings=SimpleNamespace(enable_live=True),
+        shadow_mode_enabled=False,
+        readiness_mode='LIVE',
+        effective_mode='LIVE',
+        trading_ready=True,
+        live_orders_armed=True,
+        started_mono=10.0,
+    )
+    monkeypatch.setattr(app_module, 'get_market_state', lambda: app_module.MarketState.CLOSED)
+    monkeypatch.setattr(app_module.time_module, 'monotonic', lambda: 200.0)
+
+    caplog.set_level('INFO')
+    app_module._health_check(ctx)
+
+    assert any('market_closed' in rec.message for rec in caplog.records)

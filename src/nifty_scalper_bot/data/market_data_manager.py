@@ -1381,7 +1381,14 @@ class MarketDataManager:
     def request_token_subscriptions(self, tokens: Iterable[int]) -> int:
         """Record token subscription intents. Args: tokens. Returns: number of newly added tokens. Raises: none."""
 
-        normalized = {int(token) for token in tokens if int(token) > 0}
+        normalized: set[int] = set()
+        for token in tokens:
+            try:
+                token_int = int(token)
+            except Exception:
+                continue
+            if token_int > 0:
+                normalized.add(token_int)
         if not normalized:
             return 0
         with self._lock:
@@ -1394,7 +1401,14 @@ class MarketDataManager:
     def request_token_unsubscriptions(self, tokens: Iterable[int]) -> int:
         """Record token removal intents. Args: tokens. Returns: number of removed tokens. Raises: none."""
 
-        normalized = {int(token) for token in tokens if int(token) > 0}
+        normalized: set[int] = set()
+        for token in tokens:
+            try:
+                token_int = int(token)
+            except Exception:
+                continue
+            if token_int > 0:
+                normalized.add(token_int)
         if not normalized:
             return 0
         with self._lock:
