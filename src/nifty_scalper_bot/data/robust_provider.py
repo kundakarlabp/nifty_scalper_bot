@@ -105,12 +105,27 @@ class RobustDataProvider:
         # We store the real client as 'client' AND '_broker' to be safe
         self.client = broker_client
         self._broker = broker_client 
-        self.circuit = circuit_config 
+        if isinstance(circuit_config, CircuitBreaker):
+            self.circuit = circuit_config
+        else:
+            self.circuit = CircuitBreaker(circuit_config or CircuitBreakerConfig())
         self.notifier = notifier
         self._logger = logging.getLogger(__name__)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.client, name)
+
+    def _notify_failure(self, event: str, payload: dict[str, Any]) -> None:
+        """Emit provider failure notification safely. Args: event/payload. Returns: None. Raises: none."""
+        if self.notifier is None:
+            return
+        try:
+            result = self.notifier(event, payload)
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+        except Exception:
+            LOGGER.exception("DATA_PROVIDER_NOTIFY_FAILED event=%s", event)
+
     
     def get_profile(self) -> dict:
         """
@@ -226,15 +241,13 @@ class RobustDataProvider:
             
             # Notify if critical
             if self.circuit.state == CircuitState.OPEN and self.notifier:
-                asyncio.create_task(
-                    self.notifier(
-                        "DATA_PROVIDER_FAILURE",
-                        {
-                            "operation": operation_name,
-                            "error": str(exc),
-                            "circuit_state": self.circuit.state.value
-                        }
-                    )
+                self._notify_failure(
+                    "DATA_PROVIDER_FAILURE",
+                    {
+                        "operation": operation_name,
+                        "error": str(exc),
+                        "circuit_state": self.circuit.state.value,
+                    },
                 )
                 
             # Re-raise for retry logic
@@ -288,7 +301,7 @@ class RobustDataProvider:
         """Fetch quotes with full validation."""
         
         def _fetch() -> Any:
-            return self.broker.quote(symbols)
+            return self._broker.quote(symbols)
             
         try:
             quotes = await self.fetch_with_validation(

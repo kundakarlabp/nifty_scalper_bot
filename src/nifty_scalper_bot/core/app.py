@@ -199,6 +199,7 @@ def _gate_runner_symbol_add(
             source=source,
             reason="gate_add",
         )
+        ctx._deferred_basket_retry_task = ctx.deferred_basket_retry_task
     except Exception:  # pragma: no cover - observability must never raise
         pass
     return True
@@ -3274,12 +3275,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         access_token=config.broker.access_token,
     )
 
+    async def _provider_notify(event: str, data: dict[str, Any]) -> None:
+        """Forward provider notifications to telegram notifier. Args: event/data. Returns: None. Raises: none."""
+        if notifier is not None:
+            await notifier.send_event(event, data)
+
     robust_provider = RobustDataProvider(
         broker_client=broker_client,
         circuit_config=CircuitBreakerConfig(failure_threshold=5, timeout_seconds=60.0),
-        notifier=lambda event, data: asyncio.create_task(
-            notifier.send_event(event, data) if notifier else asyncio.sleep(0)
-        ),
+        notifier=_provider_notify,
     )
 
     broker_client.preload_instruments()
@@ -6048,6 +6052,17 @@ async def _build_and_hydrate_live_basket_from_spot(
 def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) -> None:
     """Schedule one deferred basket retry task. Args: ctx/mode. Returns: none. Raises: none."""
 
+    if not hasattr(ctx, "deferred_basket_retry_started"):
+        ctx.deferred_basket_retry_started = False
+    if not hasattr(ctx, "deferred_basket_retry_task"):
+        ctx.deferred_basket_retry_task = None
+    if not hasattr(ctx, "_deferred_basket_retry_started"):
+        ctx._deferred_basket_retry_started = False
+    if not hasattr(ctx, "_deferred_basket_retry_task"):
+        ctx._deferred_basket_retry_task = None
+    if not hasattr(ctx, "_last_deferred_basket_retry_ts"):
+        ctx._last_deferred_basket_retry_ts = 0.0
+
     ctx.live_orders_armed = False
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP"
@@ -6055,6 +6070,8 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) ->
     ctx.live_block_reason = "fresh_ws_spot_unavailable"
     if not getattr(ctx, "deferred_basket_retry_started", False):
         ctx.deferred_basket_retry_started = True
+        ctx._deferred_basket_retry_started = True
+        ctx._last_deferred_basket_retry_ts = time_module.time()
         ctx.deferred_basket_retry_task = asyncio.create_task(
             _deferred_basket_hydration_retry(
                 ctx,
