@@ -118,3 +118,13 @@ class TestWaitForFreshSpotTick:
 
         tick = asyncio.run(runner())
         assert tick is None
+
+
+def test_process_ticks_marks_nifty_spot_ready_immediately() -> None:
+    mdm = _build_mdm()
+    with mdm._lock:
+        mdm._symbol_by_token[256265] = "NSE:NIFTY"
+    mdm.process_ticks([{"instrument_token": 256265, "last_price": 24078.45}])
+    assert mdm.symbol_has_tick("NSE:NIFTY") is True
+    assert mdm.get_cached_ltp("NSE:NIFTY", require_ws=True) == pytest.approx(24078.45)
+    assert mdm.get_fresh_spot_tick("NSE:NIFTY", require_ws=True) is not None
