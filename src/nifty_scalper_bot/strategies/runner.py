@@ -871,7 +871,18 @@ class StrategyRunner:
                 self._runner_state = RunnerState.STARTING
                 self._running = False
                 return
-            self._runner_state = RunnerState.HISTORICAL_READY
+            if self._runner_state != RunnerState.EXECUTION_ENABLED:
+                self._runner_state = RunnerState.HISTORICAL_READY
+            else:
+                self._logger.info(
+                    "STRATEGY_RUNNER_STATE_PRESERVED state=%s reason=start_after_mark_ready",
+                    self._runner_state,
+                    extra={
+                        "event": "STRATEGY_RUNNER_STATE_PRESERVED",
+                        "state": str(self._runner_state),
+                        "reason": "start_after_mark_ready",
+                    },
+                )
             if self._order_manager and hasattr(self._order_manager, "get_kill_switch_status"):
                 try:
                     ks = self._order_manager.get_kill_switch_status()
@@ -896,11 +907,21 @@ class StrategyRunner:
             # _set_symbol_hydration_state() saves symbol states from regressing,
             # but _history_ready_by_symbol is wiped here explicitly and only
             # recovered on the first tick — making the debug log misleading.
-            if self._runner_state != RunnerState.EXECUTION_ENABLED:
+            preserve_execution_state = self._runner_state == RunnerState.EXECUTION_ENABLED
+            if not preserve_execution_state:
                 self._vwap_state = {}
                 self._symbol_bar_count = {}
                 self._hydration_ready_streak = {}
                 self._history_ready_by_symbol = {symbol: False for symbol in symbols}
+            else:
+                self._logger.info(
+                    "STRATEGY_WARMUP_STATE_PRESERVED symbols=%d",
+                    len(symbols),
+                    extra={
+                        "event": "STRATEGY_WARMUP_STATE_PRESERVED",
+                        "symbol_count": len(symbols),
+                    },
+                )
             # Always reset per-session rate limits (independent of warmup state).
 
         # Capture the loop if called from async context (optional safety)

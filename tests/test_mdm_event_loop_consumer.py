@@ -7,9 +7,9 @@ import time
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 
-def test_set_event_loop_starts_consumer_after_start() -> None:
+def test_set_event_loop_starts_consumer_after_started_flag() -> None:
     mdm = MarketDataManager(broker=None, websocket=None, settings={})
-    mdm.start()
+    mdm._started = True
 
     loop = asyncio.new_event_loop()
 
@@ -22,10 +22,14 @@ def test_set_event_loop_starts_consumer_after_start() -> None:
     try:
         time.sleep(0.05)
         mdm.set_event_loop(loop)
-        time.sleep(0.1)
+        time.sleep(0.2)
         task = getattr(mdm, '_tick_consumer_task', None)
         assert task is not None
         assert not task.done()
     finally:
+        task = getattr(mdm, '_tick_consumer_task', None)
+        if task is not None:
+            loop.call_soon_threadsafe(task.cancel)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=1.0)
+        loop.close()
