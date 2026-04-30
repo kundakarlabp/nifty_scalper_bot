@@ -115,6 +115,8 @@ def canonical_symbol(symbol: str) -> str:
     return normalized
 
 
+NIFTY_SPOT_TOKEN = 256265
+
 class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
 
@@ -3849,14 +3851,34 @@ class MarketDataManager:
             self._logger.error("Failure in MarketDataManager.attach_tick_bus: %s", e)
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Args: loop; Returns: none; Raises: none."""
+        """Wire asyncio loop and ensure the tick consumer is running."""
         try:
-            if self._main_loop is not None:
+            if self._main_loop is not None and self._main_loop is not loop:
                 self._logger.warning("Event loop already wired — ignoring rewire")
                 return
+
             self._main_loop = loop
+
+            def _ensure_consumer() -> None:
+                task = getattr(self, "_tick_consumer_task", None)
+                if task is None or task.done():
+                    self._tick_consumer_task = loop.create_task(self._consume_ticks())
+                    self._logger.info(
+                        "MDM_TICK_CONSUMER_STARTED reason=event_loop_wired",
+                        extra={"event": "MDM_TICK_CONSUMER_STARTED", "reason": "event_loop_wired"},
+                    )
+
+            if loop.is_running():
+                if threading.current_thread() is threading.main_thread():
+                    _ensure_consumer()
+                else:
+                    loop.call_soon_threadsafe(_ensure_consumer)
         except Exception as e:
-            self._logger.error("Failure in MarketDataManager.set_event_loop: %s", e)
+            self._logger.error(
+                "Failure in MarketDataManager.set_event_loop: %s",
+                e,
+                exc_info=True,
+            )
 
     async def push_tick(self, raw_tick: dict[str, Any]) -> None:
         """Queue one raw websocket tick for deterministic consumption."""
@@ -3948,6 +3970,63 @@ class MarketDataManager:
         """Legacy tick-bus hook routed to queue ingestion."""
         self._enqueue_tick_threadsafe(tick)
 
+    def _is_nifty_spot_tick(self, symbol: str | None = None, token: int | None = None) -> bool:
+        """Return whether tick belongs to NIFTY spot aliases/token."""
+        s = (symbol or "").upper().replace(" ", "")
+        return token == NIFTY_SPOT_TOKEN or s in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}
+
+    def _record_ws_arrival_fast(
+        self,
+        *,
+        symbol: str,
+        token: int | None,
+        ltp: Any,
+        raw_tick: dict[str, Any],
+    ) -> None:
+        """Fast freshness cache update from WS thread without candle building."""
+        try:
+            canonical = self._canonical_symbol(symbol)
+            price = float(ltp)
+            if price <= 0:
+                return
+            now = time.time()
+            payload = dict(raw_tick)
+            payload["symbol"] = canonical
+            payload["ltp"] = price
+            payload.setdefault("last_price", price)
+            payload["source"] = "ws"
+            payload["received_at"] = now
+            payload.setdefault("timestamp", now)
+            if token is not None:
+                payload["instrument_token"] = int(token)
+
+            with self._lock:
+                if token is not None:
+                    token_int = int(token)
+                    self._symbol_by_token[token_int] = canonical
+                    self._token_to_symbol[token_int] = canonical
+                    self._symbol_to_token[canonical] = token_int
+                    self._token_by_symbol[canonical] = token_int
+
+                self._latest_ticks[canonical] = payload
+                self._tick_cache[canonical] = payload
+                self._last_tick_time[canonical] = now
+                self._last_tick_wallclock[canonical] = now
+                self._last_tick_source[canonical] = "ws"
+                self._symbols_with_tick.add(canonical)
+                self._ticks_received_per_symbol[canonical] += 1
+
+                if self._is_nifty_spot_tick(canonical, token):
+                    self._spot_ws_first_tick_seen = True
+                    self._latest_ticks["NSE:NIFTY"] = payload
+                    self._tick_cache["NSE:NIFTY"] = payload
+                    self._last_tick_time["NSE:NIFTY"] = now
+                    self._last_tick_wallclock["NSE:NIFTY"] = now
+                    self._last_tick_source["NSE:NIFTY"] = "ws"
+                    self._symbols_with_tick.add("NSE:NIFTY")
+        except Exception as e:
+            self._logger.error("Failure in MarketDataManager._record_ws_arrival_fast: %s", e)
+
     def process_ticks(self, ticks: list[dict[str, Any]]) -> None:
         """Batch-enqueue WS ticks from KiteTicker callback.
 
@@ -3964,40 +4043,6 @@ class MarketDataManager:
         if not ticks:
             return
 
-        # Publish to MessageBus (thread-safe: schedule onto the async loop)
-        bus = getattr(self, "bus", None)
-        if bus is not None:
-            loop = self._main_loop
-            if loop is not None and loop.is_running():
-                try:
-                    now_dt = datetime.now(timezone.utc)
-                    for t in ticks:
-                        token = t.get("instrument_token")
-                        token_int = int(token) if isinstance(token, (int, float, str)) and str(token).isdigit() else None
-                        price = float(t.get("last_price", t.get("ltp", 0.0)))
-                        symbol = None
-                        if token_int is not None:
-                            with self._lock:
-                                symbol = self._symbol_by_token.get(token_int)
-                        trace_id = f"{symbol or token_int or 'tick'}-{time.monotonic_ns()}"
-                        msg = Message(
-                            type=MessageType.TICK,
-                            timestamp=now_dt,
-                            data={
-                                "token": token_int if token_int is not None else token,
-                                "instrument_token": token_int if token_int is not None else token,
-                                "symbol": symbol,
-                                "ltp": price,
-                                "timestamp": t.get("exchange_timestamp", now_dt),
-                                "source": "ws",
-                                "trace_id": trace_id,
-                            },
-                            source="market_data_manager",
-                        )
-                        asyncio.run_coroutine_threadsafe(bus.publish(msg), loop)
-                except Exception:  # noqa: BLE001 — WS thread must not raise
-                    pass
-
         try:
             iterator = iter(ticks)
         except TypeError:
@@ -4013,6 +4058,12 @@ class MarketDataManager:
                     with self._lock:
                         symbol_resolved = self._symbol_by_token.get(token_int)
                 if symbol_resolved:
+                    self._record_ws_arrival_fast(
+                        symbol=symbol_resolved,
+                        token=token_int,
+                        ltp=tick.get("last_price", tick.get("ltp")),
+                        raw_tick=tick,
+                    )
                     now = time.monotonic()
                     last_logged = float(self._ws_raw_tick_log_at.get(symbol_resolved, 0.0))
                     if last_logged <= 0.0 or (now - last_logged) >= 60.0:
@@ -4107,13 +4158,26 @@ class MarketDataManager:
         """Return age in milliseconds or None when no tick exists. Args: symbol/token. Returns: age ms or none. Raises: none."""
 
         resolved_symbol = self._resolve_symbol_key_safe(symbol)
-        if not resolved_symbol:
-            return None
         now = time.time()
+        candidates: list[str] = []
+        if str(symbol).strip().upper() in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}:
+            candidates.append("NSE:NIFTY")
+            with self._lock:
+                token = self._token_by_symbol.get("NSE:NIFTY") or NIFTY_SPOT_TOKEN
+                if token:
+                    mapped = self._symbol_by_token.get(int(token))
+                    if mapped:
+                        candidates.append(mapped)
+        elif resolved_symbol:
+            candidates.append(resolved_symbol)
+        if not candidates:
+            return None
         with self._lock:
-            wallclock = float(self._last_tick_wallclock.get(resolved_symbol, 0.0) or 0.0)
-            arrival = float(self._last_tick_time.get(resolved_symbol, 0.0) or 0.0)
-        freshest = max(wallclock, arrival)
+            freshest = 0.0
+            for candidate in set(candidates):
+                wallclock = float(self._last_tick_wallclock.get(candidate, 0.0) or 0.0)
+                arrival = float(self._last_tick_time.get(candidate, 0.0) or 0.0)
+                freshest = max(freshest, wallclock, arrival)
         if freshest <= 0.0:
             return None
         return int(max(0.0, (now - freshest) * 1000.0))
@@ -4123,8 +4187,33 @@ class MarketDataManager:
 
         resolved_symbol = self._resolve_symbol_key_safe(symbol)
 
+        if str(symbol).strip().upper() in {"NIFTY", "NSE:NIFTY", "NIFTY50", "NSE:NIFTY50"}:
+            candidates = ["NSE:NIFTY"]
+            with self._lock:
+                token = self._token_by_symbol.get("NSE:NIFTY") or NIFTY_SPOT_TOKEN
+                if token:
+                    mapped = self._symbol_by_token.get(int(token))
+                    if mapped:
+                        candidates.append(mapped)
+                for candidate in set(candidates):
+                    if candidate in self._latest_ticks:
+                        return True
+                    if float(self._last_tick_wallclock.get(candidate, 0.0) or 0.0) > 0:
+                        return True
+                    if float(self._last_tick_time.get(candidate, 0.0) or 0.0) > 0:
+                        return True
+
         if not resolved_symbol:
             return False
+
+        with self._lock:
+            if resolved_symbol in self._latest_ticks:
+                return True
+            if float(self._last_tick_wallclock.get(resolved_symbol, 0.0) or 0.0) > 0.0:
+                return True
+            if float(self._last_tick_time.get(resolved_symbol, 0.0) or 0.0) > 0.0:
+                return True
+        return False
 
         with self._lock:
             if resolved_symbol in self._latest_ticks:
@@ -4147,7 +4236,18 @@ class MarketDataManager:
         """Consume websocket ticks serially and build finalized candles."""
         while True:
             raw = await self._tick_queue.get()
-            self._process_queued_tick(raw)
+            try:
+                self._process_queued_tick(raw)
+            except Exception as exc:
+                self._logger.exception(
+                    "MDM_TICK_CONSUMER_ERROR",
+                    extra={"event": "MDM_TICK_CONSUMER_ERROR", "error": str(exc)},
+                )
+            finally:
+                try:
+                    self._tick_queue.task_done()
+                except Exception:
+                    pass
 
     def _drain_tick_queue_sync(self) -> None:
         """Drain queued ticks serially when async loop is unavailable."""
@@ -4393,6 +4493,27 @@ class MarketDataManager:
             self._last_tick_source[symbol] = source
             callbacks = list(self._subscribers.get(symbol, ()))
             self._tick_counter += 1
+        bus = getattr(self, "bus", None)
+        loop = self._main_loop
+        if bus is not None and loop is not None and loop.is_running():
+            try:
+                msg = Message(
+                    type=MessageType.TICK,
+                    timestamp=datetime.now(timezone.utc),
+                    data={
+                        **dict(tick_payload),
+                        "symbol": symbol,
+                        "source": source,
+                        "trace_id": tick_payload.get("trace_id") or f"{symbol}-{time.monotonic_ns()}",
+                    },
+                    source="market_data_manager",
+                )
+                fut = asyncio.run_coroutine_threadsafe(bus.publish(msg), loop)
+                fut.add_done_callback(
+                    lambda f: self._logger.debug("MDM_BUS_PUBLISH_FAILED: %s", f.exception()) if f.exception() else None
+                )
+            except Exception as exc:
+                self._logger.debug("MDM bus publish skipped: %s", exc)
         subscriber_count = len(callbacks)
         _price_val = tick.get("ltp") or tick.get("last_price") or tick.get("price")
         _token_val = tick.get("instrument_token") or tick.get("token")

@@ -2790,40 +2790,51 @@ class StrategyRunner:
 
         if self._has_session_candle_gaps(symbol):
             gap_count = int(self._session_gap_count.get(symbol, 0))
+            is_option = symbol.startswith("NFO:") and symbol.endswith(("CE", "PE"))
+            last_tick_ts = float(self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0)
+            recent_tick = last_tick_ts > 0 and (time.time() - last_tick_ts) <= 120.0
+            tick_age_s = round(time.time() - last_tick_ts, 2) if recent_tick else None
             if gap_count > 1:
-                self._logger.warning(
+                reason = "repeated_missing_candles" if recent_tick else "no_recent_tick_for_gap_assessment"
+                log_level = logging.INFO if is_option and recent_tick else logging.WARNING
+                self._logger.log(
+                    log_level,
                     "SOFT_DATA_ISSUE symbol=%s reason=%s source=%s age_s=%s",
                     symbol,
-                    "repeated_missing_candles",
+                    reason,
                     "candle_gap_detector",
-                    None,
+                    tick_age_s,
                     extra={
                         "event": "SOFT_DATA_ISSUE",
                         "symbol": symbol,
-                        "reason": "repeated_missing_candles",
+                        "reason": reason,
                         "source": "candle_gap_detector",
-                        "age_s": None,
+                        "age_s": tick_age_s,
                         "details": {"gaps": gap_count},
                         "gaps": gap_count,
                     },
                 )
-                return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
-            self._logger.warning(
-                "SOFT_DATA_ISSUE symbol=%s reason=%s source=%s age_s=%s",
-                symbol,
-                "single_missing_candle",
-                "candle_gap_detector",
-                None,
-                extra={
-                    "event": "SOFT_DATA_ISSUE",
-                    "symbol": symbol,
-                    "reason": "single_missing_candle",
-                    "source": "candle_gap_detector",
-                    "age_s": None,
-                    "details": {"gaps": gap_count},
-                },
-            )
-            return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
+                if not (is_option and recent_tick):
+                    return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
+            else:
+                reason = "single_missing_candle" if recent_tick else "no_recent_tick_for_gap_assessment"
+                self._logger.info(
+                    "SOFT_DATA_ISSUE symbol=%s reason=%s source=%s age_s=%s",
+                    symbol,
+                    reason,
+                    "candle_gap_detector",
+                    tick_age_s,
+                    extra={
+                        "event": "SOFT_DATA_ISSUE",
+                        "symbol": symbol,
+                        "reason": reason,
+                        "source": "candle_gap_detector",
+                        "age_s": tick_age_s,
+                        "details": {"gaps": gap_count},
+                    },
+                )
+                if not (is_option and recent_tick):
+                    return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
 
         if valid_vwap and valid_volume:
             streak = int(self._hydration_ready_streak.get(symbol, 0)) + 1
@@ -4401,18 +4412,24 @@ class StrategyRunner:
 
         for symbol, engine in self._candle_engines.items():
             if symbol not in self._active_symbols:
-                if self._should_log_throttled(
-                    f"backfill_skipped_removed:{symbol}",
-                    180.0,
-                ):
+                last_tick_ts = float(self._last_tick_time_by_symbol.get(symbol, 0.0) or 0.0)
+                has_recent_tick = last_tick_ts > 0 and (now_wall - last_tick_ts) <= 120.0
+
+                if has_recent_tick and symbol in self._tracked_symbols:
+                    self._active_symbols.add(symbol)
                     self._logger.info(
-                        "BACKFILL_SKIPPED_REMOVED_SYMBOL",
-                        extra={
-                            "event": "BACKFILL_SKIPPED_REMOVED_SYMBOL",
-                            "symbol": symbol,
-                        },
+                        "SYMBOL_REACTIVATED_FROM_LIVE_TICK symbol=%s",
+                        symbol,
+                        extra={"event": "SYMBOL_REACTIVATED_FROM_LIVE_TICK", "symbol": symbol},
                     )
-                continue
+                else:
+                    if self._should_log_throttled(f"backfill_skipped_removed:{symbol}", 300.0):
+                        self._logger.debug(
+                            "BACKFILL_SKIPPED_REMOVED_SYMBOL symbol=%s",
+                            symbol,
+                            extra={"event": "BACKFILL_SKIPPED_REMOVED_SYMBOL", "symbol": symbol},
+                        )
+                    continue
             # 1. Use .get() to prevent KeyError on newly subscribed symbols
             stale_for = now_wall - self._last_tick_time_by_symbol.get(symbol, now_wall)
 

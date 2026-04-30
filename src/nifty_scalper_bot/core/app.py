@@ -6936,9 +6936,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
             if runner is not None:
                 if hasattr(runner, "mark_ready"):
-                    runner.mark_ready(ready_symbols)
+                    runner.mark_ready(readiness_symbols)
                     LOGGER.info(
-                        "RUNNER_READY_MARKED symbol_count=%d ready_symbols=%s skipped_symbols=%s skipped_reasons=%s min_required_bars=%d",
+                        "RUNNER_READY_MARKED symbol_count=%d initial_ready_symbols=%s skipped_symbols=%s skipped_reasons=%s min_required_bars=%d",
                         len(readiness_symbols),
                         ready_symbols,
                         skipped_symbols,
@@ -6947,7 +6947,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         extra={
                             "event": "RUNNER_READY_MARKED",
                             "symbol_count": len(readiness_symbols),
-                            "ready_symbols": ready_symbols,
+                            "initial_ready_symbols": ready_symbols,
                             "min_required_bars": min_required_bars,
                             "skipped_symbols": skipped_symbols,
                             "skipped_reasons": skipped_reasons,
@@ -6962,6 +6962,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                             "reason": "method_missing",
                         },
                     )
+            if ctx.data_hub is not None and hasattr(ctx.data_hub, "flush_pending_live_subscriptions"):
+                flushed = ctx.data_hub.flush_pending_live_subscriptions()
+                LOGGER.info(
+                    "DATAHUB_DEFERRED_SUBSCRIPTIONS_FLUSHED count=%s",
+                    flushed,
+                    extra={"event": "DATAHUB_DEFERRED_SUBSCRIPTIONS_FLUSHED", "count": flushed},
+                )
             if (
                 ctx.market_data_manager is not None
                 and "basket" in locals()
@@ -8838,24 +8845,32 @@ def _health_check(ctx: BotContext) -> None:
         now_mono = time_module.monotonic()
         started_mono = float(getattr(ctx, "started_mono", now_mono) or now_mono)
         startup_age_s = max(0.0, now_mono - started_mono)
+        configured_mode = str(
+            os.getenv("EXECUTION_MODE", getattr(ctx, "effective_mode", "PAPER"))
+        ).upper()
         effective_mode = str(
             getattr(ctx, "effective_mode", "")
             or getattr(ctx, "readiness_mode", "")
-            or ""
+            or configured_mode
         ).upper()
         trading_ready = bool(getattr(ctx, "trading_ready", False))
         live_orders_armed = bool(getattr(ctx, "live_orders_armed", False))
+        evaluation_expected = configured_mode in {"PAPER", "SHADOW", "LIVE"}
+        live_orders_expected = configured_mode == "LIVE" and bool(ctx.settings.enable_live)
         expected_active = bool(
-            ctx.settings.enable_live
+            evaluation_expected
             and state == MarketState.OPEN
-            and effective_mode == "LIVE"
             and trading_ready
-            and live_orders_armed
+            and (configured_mode in {"PAPER", "SHADOW"} or (live_orders_armed and live_orders_expected))
             and not ctx.shadow_mode_enabled
         )
         inactive_reason = "runner_task_not_started"
-        if not ctx.settings.enable_live:
-            inactive_reason = "live_disabled"
+        if configured_mode in {"PAPER", "SHADOW"}:
+            inactive_reason = "paper_runner_not_started"
+            expected_active = bool(evaluation_expected and trading_ready)
+        elif not ctx.settings.enable_live:
+            inactive_reason = "live_orders_disabled"
+            expected_active = False
         elif state != MarketState.OPEN:
             inactive_reason = "market_closed"
         elif effective_mode == "DATA_WARMUP":
