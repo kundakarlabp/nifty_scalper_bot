@@ -9,10 +9,21 @@ description = "Typed scaffolding for a Nifty intraday scalper bot"
 authors = [{ name = "Refactor Assistant" }]
 requires-python = ">=3.10"
 dependencies = [
+    "scipy>=1.13,<2",
+    "numpy>=1.26,<3",
+    "pandas>=2.0,<3",
+    "pytz>=2024.1",
+    "PyYAML>=6.0,<7",
+    "prometheus-client>=0.20,<1",
+    "tenacity>=8.2,<10",
+    "uvicorn>=0.29,<1",
+    "fastapi>=0.111,<1",
+    "python-dotenv>=1.0",
+    "pydantic-settings>=2.2,<3",
     "pydantic>=2.7,<3",
     "requests>=2.31",
     "python-telegram-bot>=21.4",
-    "kiteconnect>=4.2,<5",
+    "kiteconnect>=5.0.1,<6",
     "httpx>=0.27,<1",
 ]
 

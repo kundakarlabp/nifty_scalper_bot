@@ -2045,7 +2045,7 @@ class OrderManager:
                     _log_order_decision(
                         allowed=False,
                         block_reason="time_guard",
-                        detail=detail,
+                        details={"detail": detail},
                     )
                     return None
             except Exception as e:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from nifty_scalper_bot.brokers.instrument_lookup import (
+    Instrument,
+    InstrumentLookup as InstrumentResolver,
+)
 from nifty_scalper_bot.data.instrument_loader import (
     InstrumentUniverseStatus,
     ensure_sqlite,
@@ -14,6 +18,8 @@ from nifty_scalper_bot.data.instrument_loader import (
 )
 
 __all__ = [
+    "Instrument",
+    "InstrumentResolver",
     "InstrumentUniverseStatus",
     "ensure_sqlite",
     "load_rows_for_resolver",
