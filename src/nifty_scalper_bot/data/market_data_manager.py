@@ -274,6 +274,7 @@ class MarketDataManager:
         )
         self._ltp_stale_warn_last: dict[str, float] = {}
         self._spot_ws_first_tick_seen = False
+        self._spot_ws_first_tick_seen_logged = False
         self._last_spot_resubscribe_attempt = 0.0
         self._last_spot_stale_log = 0.0
         self._pending_subscription_tokens: set[int] = set()
@@ -865,8 +866,7 @@ class MarketDataManager:
         self._initialize_instruments()
         if not defer_ws:
             self.start_websocket()
-        if self._main_loop is not None and self._tick_consumer_task is None:
-            self._tick_consumer_task = self._main_loop.create_task(self._consume_ticks())
+        self._ensure_tick_consumer(reason="mdm_start")
         self._start_health_monitor()
         if self._rest_poll_enabled:
             self._start_rest_poll()
@@ -3858,27 +3858,45 @@ class MarketDataManager:
                 return
 
             self._main_loop = loop
-
-            def _ensure_consumer() -> None:
-                task = getattr(self, "_tick_consumer_task", None)
-                if task is None or task.done():
-                    self._tick_consumer_task = loop.create_task(self._consume_ticks())
-                    self._logger.info(
-                        "MDM_TICK_CONSUMER_STARTED reason=event_loop_wired",
-                        extra={"event": "MDM_TICK_CONSUMER_STARTED", "reason": "event_loop_wired"},
-                    )
-
-            if loop.is_running():
-                if threading.current_thread() is threading.main_thread():
-                    _ensure_consumer()
-                else:
-                    loop.call_soon_threadsafe(_ensure_consumer)
+            self._ensure_tick_consumer(reason="event_loop_wired")
         except Exception as e:
             self._logger.error(
                 "Failure in MarketDataManager.set_event_loop: %s",
                 e,
                 exc_info=True,
             )
+
+    def _ensure_tick_consumer(self, reason: str) -> None:
+        """Start the async tick consumer exactly once on the owning loop thread."""
+        loop = self._main_loop
+        if loop is None:
+            return
+
+        def _start() -> None:
+            task = getattr(self, "_tick_consumer_task", None)
+            if task is None or task.done():
+                self._tick_consumer_task = loop.create_task(self._consume_ticks())
+                self._logger.info(
+                    "MDM_TICK_CONSUMER_STARTED reason=%s",
+                    reason,
+                    extra={
+                        "event": "MDM_TICK_CONSUMER_STARTED",
+                        "reason": reason,
+                    },
+                )
+
+        if not loop.is_running():
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            _start()
+        else:
+            loop.call_soon_threadsafe(_start)
 
     async def push_tick(self, raw_tick: dict[str, Any]) -> None:
         """Queue one raw websocket tick for deterministic consumption."""
@@ -4024,6 +4042,20 @@ class MarketDataManager:
                     self._last_tick_wallclock["NSE:NIFTY"] = now
                     self._last_tick_source["NSE:NIFTY"] = "ws"
                     self._symbols_with_tick.add("NSE:NIFTY")
+                    if not getattr(self, "_spot_ws_first_tick_seen_logged", False):
+                        self._spot_ws_first_tick_seen_logged = True
+                        self._logger.info(
+                            "MDM_WS_FIRST_TICK symbol=NSE:NIFTY token=%s ltp=%s",
+                            token,
+                            price,
+                            extra={
+                                "event": "MDM_WS_FIRST_TICK",
+                                "symbol": "NSE:NIFTY",
+                                "token": token,
+                                "ltp": price,
+                                "source": "ws_fast_cache",
+                            },
+                        )
         except Exception as e:
             self._logger.error("Failure in MarketDataManager._record_ws_arrival_fast: %s", e)
 
@@ -4308,9 +4340,22 @@ class MarketDataManager:
         # but NEVER called from the WS path — _store_tick only cached the tick.
         # _emit_tick is the correct call; it was defined but never invoked.
         tick_dict = tick.to_dict()
-        # ensure ltp field is present so downstream DataHub/Runner can read price
-        if "ltp" not in tick_dict:
-            tick_dict["ltp"] = tick.ltp
+        token_value = raw.get("instrument_token") or raw.get("token")
+        if token_value is not None:
+            tick_dict["instrument_token"] = token_value
+        price_value = raw.get("last_price") or raw.get("ltp") or tick.ltp
+        tick_dict["last_price"] = price_value
+        tick_dict["ltp"] = tick.ltp
+        tick_dict["source"] = "ws"
+        tick_dict["received_at"] = raw.get("received_at", time.time())
+        if raw.get("exchange_timestamp") is not None:
+            tick_dict["exchange_timestamp"] = raw.get("exchange_timestamp")
+        if raw.get("volume_traded") is not None:
+            tick_dict["volume_traded"] = raw.get("volume_traded")
+        if raw.get("volume_traded_today") is not None:
+            tick_dict["volume_traded_today"] = raw.get("volume_traded_today")
+        if raw.get("oi") is not None:
+            tick_dict["oi"] = raw.get("oi")
 
         # Structured Logging for tick received (Objective 6)
         self._logger.debug(
