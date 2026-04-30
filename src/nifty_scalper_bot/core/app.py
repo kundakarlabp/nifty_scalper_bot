@@ -1701,6 +1701,8 @@ class BotContext:
     live_orders_armed: bool = False
     trading_ready: bool = False
     readiness_mode: str = "SHADOW"
+    effective_mode: str = "SHADOW"
+    started_mono: float = field(default_factory=time_module.monotonic)
     live_block_reason: str | None = None
     market_session_state: str | None = None
     quote_api_available: bool = True
@@ -2352,8 +2354,8 @@ def _get_symbols(
         if market_data_manager is None:
             return None
 
-        start = time.monotonic()
-        while time.monotonic() - start < timeout:
+        start = time_module.monotonic()
+        while time_module.monotonic() - start < timeout:
             tick = market_data_manager.get_latest_tick(symbol)
             if tick:
                 return tick
@@ -6047,6 +6049,7 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) ->
     ctx.live_orders_armed = False
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP"
+    ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = "fresh_ws_spot_unavailable"
     if not getattr(ctx, "_deferred_basket_retry_started", False):
         ctx._deferred_basket_retry_started = True
@@ -6104,6 +6107,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     ctx.live_orders_armed = False
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP" if configured_mode == "LIVE" else configured_mode
+    ctx.effective_mode = ctx.readiness_mode
     LOGGER.info(
         "Startup | configured_mode=%s | effective_mode=%s | live_orders_armed=%s | trading_ready=%s | data_dir=%s | port=%s",
         configured_mode,
@@ -6395,6 +6399,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.live_orders_armed = False
                 ctx.trading_ready = False
                 ctx.readiness_mode = "DATA_WARMUP"
+                ctx.effective_mode = ctx.readiness_mode
                 ctx.live_block_reason = "fresh_spot_tick_unavailable"
                 # Skip the option pre-hydration in this iteration; the
                 # readiness gate will keep us in DATA_WARMUP and the
@@ -8123,6 +8128,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.live_orders_armed = True
                                 ctx.trading_ready = True
                                 ctx.readiness_mode = "LIVE"
+                                ctx.effective_mode = ctx.readiness_mode
                                 LOGGER.info(
                                     "LIVE_TRADING_ARMED hard_ready=%s quote_available=%s ws_quote_proof=%s",
                                     hard_ready,
@@ -8139,6 +8145,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
                                 ctx.readiness_mode = "DATA_WARMUP"
+                                ctx.effective_mode = ctx.readiness_mode
                                 if "startup_pipeline_incomplete" in data_warmup_reasons:
                                     LOGGER.error(
                                         "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing=%s",
@@ -8798,13 +8805,22 @@ def _health_check(ctx: BotContext) -> None:
     status: Mapping[str, Any] = strategy_runner.get_status()
     if not bool(status.get("running")):
         state = get_market_state()
-        startup_age_s = max(0.0, time.monotonic() - float(ctx.started_mono or 0.0))
+        now_mono = time_module.monotonic()
+        started_mono = float(getattr(ctx, "started_mono", now_mono) or now_mono)
+        startup_age_s = max(0.0, now_mono - started_mono)
+        effective_mode = str(
+            getattr(ctx, "effective_mode", "")
+            or getattr(ctx, "readiness_mode", "")
+            or ""
+        ).upper()
+        trading_ready = bool(getattr(ctx, "trading_ready", False))
+        live_orders_armed = bool(getattr(ctx, "live_orders_armed", False))
         expected_active = bool(
             ctx.settings.enable_live
             and state == MarketState.OPEN
-            and ctx.effective_mode == "LIVE"
-            and ctx.trading_ready
-            and ctx.live_orders_armed
+            and effective_mode == "LIVE"
+            and trading_ready
+            and live_orders_armed
             and not ctx.shadow_mode_enabled
         )
         inactive_reason = "runner_task_not_started"
@@ -8812,13 +8828,13 @@ def _health_check(ctx: BotContext) -> None:
             inactive_reason = "live_disabled"
         elif state != MarketState.OPEN:
             inactive_reason = "market_closed"
-        elif ctx.effective_mode == "DATA_WARMUP":
+        elif effective_mode == "DATA_WARMUP":
             inactive_reason = "data_warmup"
-        elif ctx.effective_mode != "LIVE":
+        elif effective_mode != "LIVE":
             inactive_reason = "live_blocked"
         elif startup_age_s < 120.0:
             inactive_reason = "startup_grace"
-        elif status.get("readiness_unmet") or not ctx.trading_ready or not ctx.live_orders_armed:
+        elif status.get("readiness_unmet") or not trading_ready or not live_orders_armed:
             inactive_reason = "readiness_unmet"
         elif status.get("startup_degraded"):
             inactive_reason = "degraded_startup"
@@ -8838,9 +8854,9 @@ def _health_check(ctx: BotContext) -> None:
                 "market_state": state.value if hasattr(state, "value") else str(state),
                 "reason": inactive_reason,
                 "startup_age_s": round(startup_age_s, 2),
-                "effective_mode": ctx.effective_mode,
-                "trading_ready": ctx.trading_ready,
-                "live_orders_armed": ctx.live_orders_armed,
+                "effective_mode": effective_mode,
+                "trading_ready": trading_ready,
+                "live_orders_armed": live_orders_armed,
             },
         )
 

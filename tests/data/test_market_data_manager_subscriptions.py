@@ -350,3 +350,13 @@ def test_spot_ws_health_logs_stale_only_after_first_tick(monkeypatch, caplog) ->
         mdm._monitor_spot_ws_health()  # noqa: SLF001
 
     assert 'MDM_WS_TICK_STALE' in caplog.text
+
+
+def test_request_token_subscriptions_ignores_invalid_tokens() -> None:
+    ws = DummyWebSocket()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+
+    added = mdm.request_token_subscriptions([101, 'bad', None, -1, 0, 202])  # type: ignore[list-item]
+
+    assert added == 2
+    assert ws.calls == [[101, 202]]
