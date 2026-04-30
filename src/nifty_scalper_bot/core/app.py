@@ -1712,6 +1712,8 @@ class BotContext:
     # must reuse this rather than rebuild with their own (potentially
     # synthetic) spot price.
     active_trading_universe: dict[str, Any] | None = None
+    deferred_basket_retry_started: bool = False
+    deferred_basket_retry_task: asyncio.Task[Any] | None = None
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -6051,19 +6053,19 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) ->
     ctx.readiness_mode = "DATA_WARMUP"
     ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = "fresh_ws_spot_unavailable"
-    if not getattr(ctx, "_deferred_basket_retry_started", False):
-        ctx._deferred_basket_retry_started = True
-        ctx._deferred_basket_retry_task = asyncio.create_task(
+    if not getattr(ctx, "deferred_basket_retry_started", False):
+        ctx.deferred_basket_retry_started = True
+        ctx.deferred_basket_retry_task = asyncio.create_task(
             _deferred_basket_hydration_retry(
                 ctx,
                 configured_mode=configured_mode,
             )
         )
     LOGGER.info(
-        "STARTUP_BASKET_DEFERRED reason=fresh_ws_spot_unavailable",
+        "BASKET_BUILD_DEFERRED reason=market_closed_or_spot_not_ready",
         extra={
-            "event": "STARTUP_BASKET_DEFERRED",
-            "reason": "fresh_ws_spot_unavailable",
+            "event": "BASKET_BUILD_DEFERRED",
+            "reason": "market_closed_or_spot_not_ready",
         },
     )
 
@@ -6533,23 +6535,34 @@ async def startup_sequence(ctx: BotContext) -> None:
                     configured_mode=configured_mode,
                 )
             except RuntimeError as _basket_spot_exc:
-                LOGGER.error(
-                    "LIVE_STARTUP_SPOT_UNAVAILABLE reason=%s phase=basket",
-                    _basket_spot_exc,
-                    extra={
-                        "event": "LIVE_STARTUP_SPOT_UNAVAILABLE",
-                        "reason": str(_basket_spot_exc),
-                        "phase": "basket",
-                    },
-                )
-                LOGGER.error(
-                    "STARTUP_NO_FAKE_SPOT_LIVE_MODE reason=%s",
-                    "fresh_spot_tick_unavailable",
-                    extra={
-                        "event": "STARTUP_NO_FAKE_SPOT_LIVE_MODE",
-                        "reason": "fresh_spot_tick_unavailable",
-                    },
-                )
+                market_state = get_market_state()
+                if market_state == MarketState.OPEN:
+                    LOGGER.error(
+                        "LIVE_STARTUP_SPOT_UNAVAILABLE reason=%s phase=basket",
+                        _basket_spot_exc,
+                        extra={
+                            "event": "LIVE_STARTUP_SPOT_UNAVAILABLE",
+                            "reason": str(_basket_spot_exc),
+                            "phase": "basket",
+                        },
+                    )
+                    LOGGER.error(
+                        "STARTUP_NO_FAKE_SPOT_LIVE_MODE reason=%s",
+                        "fresh_spot_tick_unavailable",
+                        extra={
+                            "event": "STARTUP_NO_FAKE_SPOT_LIVE_MODE",
+                            "reason": "fresh_spot_tick_unavailable",
+                        },
+                    )
+                else:
+                    LOGGER.info(
+                        "BASKET_BUILD_DEFERRED reason=market_closed_or_spot_not_ready",
+                        extra={
+                            "event": "BASKET_BUILD_DEFERRED",
+                            "reason": "market_closed_or_spot_not_ready",
+                            "market_state": market_state.value,
+                        },
+                    )
                 _schedule_deferred_basket_retry(
                     ctx,
                     configured_mode=configured_mode,
