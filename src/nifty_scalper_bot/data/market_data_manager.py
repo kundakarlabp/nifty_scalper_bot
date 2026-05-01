@@ -3954,6 +3954,10 @@ class MarketDataManager:
 
     def _ensure_tick_worker(self) -> None:
         """Start the fallback drain thread once, on first need."""
+        # TODO: fallback worker currently uses asyncio.Queue from a worker thread.
+        # Runtime path normally uses run_coroutine_threadsafe() onto _main_loop.
+        # If fallback becomes production-critical, replace with queue.Queue for
+        # cross-thread safety.
         t = self._tick_worker_thread
         if t is not None and t.is_alive():
             return
@@ -4247,15 +4251,6 @@ class MarketDataManager:
                 return True
         return False
 
-        with self._lock:
-            if resolved_symbol in self._latest_ticks:
-                return True
-            if float(self._last_tick_wallclock.get(resolved_symbol, 0.0) or 0.0) > 0.0:
-                return True
-            if float(self._last_tick_time.get(resolved_symbol, 0.0) or 0.0) > 0.0:
-                return True
-        return False
-
 
     # ------------------------------------------------------------------
     # Internal plumbing
@@ -4358,16 +4353,19 @@ class MarketDataManager:
             tick_dict["oi"] = raw.get("oi")
 
         # Structured Logging for tick received (Objective 6)
-        self._logger.debug(
-            "TICK_RECEIVED",
-            extra={
-                "event": "tick_received",
-                "symbol": symbol,
-                "price": tick.ltp,
-                "source": "ws",
-                "token": tick.instrument_token,
-            },
-        )
+        try:
+            self._logger.debug(
+                "TICK_RECEIVED",
+                extra={
+                    "event": "tick_received",
+                    "symbol": symbol,
+                    "price": tick.ltp,
+                    "source": "ws",
+                    "token": token_value,
+                },
+            )
+        except Exception:
+            pass
 
         self._emit_tick(symbol, tick_dict, source="ws")
         if candle:
