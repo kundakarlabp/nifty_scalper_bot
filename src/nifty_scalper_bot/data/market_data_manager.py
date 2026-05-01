@@ -4541,41 +4541,15 @@ class MarketDataManager:
             self._last_tick_source[symbol] = source
             callbacks = list(self._subscribers.get(symbol, ()))
             self._tick_counter += 1
-        bus = getattr(self, "bus", None)
-        loop = self._main_loop
-        if (
-            bus is not None
-            and getattr(bus, "running", False)
-            and loop is not None
-            and loop.is_running()
-        ):
-            try:
-                msg = Message(
-                    type=MessageType.TICK,
-                    timestamp=datetime.now(timezone.utc),
-                    data={
-                        **dict(tick_payload),
-                        "symbol": symbol,
-                        "source": source,
-                        "trace_id": tick_payload.get("trace_id") or f"{symbol}-{time.monotonic_ns()}",
-                    },
-                    source="market_data_manager",
-                )
-                fut = asyncio.run_coroutine_threadsafe(bus.publish(msg), loop)
-                fut.add_done_callback(
-                    lambda f: self._logger.debug("MDM_BUS_PUBLISH_FAILED: %s", f.exception()) if f.exception() else None
-                )
-            except Exception as exc:
-                self._logger.debug("MDM bus publish skipped: %s", exc)
-        else:
-            now = time.monotonic()
-            last_log = float(getattr(self, "_last_bus_publish_skip_log_ts", 0.0) or 0.0)
-            if now - last_log >= 30.0:
-                self._logger.debug(
-                    "MDM_BUS_PUBLISH_SKIPPED reason=bus_not_running symbol=%s",
-                    symbol,
-                )
-                self._last_bus_publish_skip_log_ts = now
+        self._publish_tick_to_bus_safe(
+            {
+                **dict(tick_payload),
+                "symbol": symbol,
+                "source": source,
+                "trace_id": tick_payload.get("trace_id")
+                or f"{symbol}-{time.monotonic_ns()}",
+            }
+        )
         subscriber_count = len(callbacks)
         _price_val = tick.get("ltp") or tick.get("last_price") or tick.get("price")
         _token_val = tick.get("instrument_token") or tick.get("token")
