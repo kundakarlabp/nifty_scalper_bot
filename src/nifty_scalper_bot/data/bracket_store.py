@@ -5,6 +5,7 @@ from uuid import uuid4
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.serialization import to_json_safe
 
 LOGGER = get_logger(__name__)
 
@@ -51,7 +52,7 @@ class BracketStore:
                 bracket_data["order_id"] = order_id
             symbol = str(bracket_data.get("symbol") or "UNKNOWN")
             # We serialize the full data object to JSON to store in one flexible column
-            json_dump = json.dumps(bracket_data)
+            json_dump = json.dumps(to_json_safe(bracket_data), ensure_ascii=False, default=str)
             now = time.time()
 
             with self._get_connection() as conn:

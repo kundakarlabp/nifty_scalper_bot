@@ -4,6 +4,7 @@ from __future__ import annotations
 from nifty_scalper_bot.core.message_bus import Message, MessageType
 
 import asyncio
+import inspect
 from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass
@@ -4358,15 +4359,16 @@ class MarketDataManager:
             ts = pd.Timestamp.utcnow()
 
         return {
-            **raw,
+            **to_json_safe(dict(raw)),
             "symbol": str(symbol),
             "instrument_token": token,
             "token": token,
             "ltp": price,
             "last_price": price,
             "timestamp": ts.isoformat(),
+            "timestamp_ms": float(pd.Timestamp(ts).timestamp() * 1000.0),
             "source": raw.get("source") or "ws",
-            "received_at": raw.get("received_at") or time.time(),
+            "received_at": float(raw.get("received_at") or time.time()),
         }
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
@@ -4628,6 +4630,12 @@ class MarketDataManager:
             )
             return
         payload = to_json_safe(dict(tick))
+        ts = pd.to_datetime(payload.get("timestamp"), utc=True, errors="coerce")
+        if pd.isna(ts) or getattr(ts, "year", 1970) < 2020:
+            ts = pd.Timestamp.utcnow()
+        payload["timestamp"] = pd.Timestamp(ts).isoformat()
+        payload["timestamp_ms"] = float(pd.Timestamp(ts).timestamp() * 1000.0)
+        payload["received_at"] = float(payload.get("received_at") or time.time())
         try:
             msg = Message(
                 type=MessageType.TICK,
@@ -4704,6 +4712,7 @@ class MarketDataManager:
         if pd.isna(ts_payload) or ts_payload.year < 2020:
             ts_payload = pd.Timestamp.utcnow()
         tick_payload["timestamp"] = ts_payload.isoformat()
+        tick_payload["timestamp_ms"] = float(pd.Timestamp(ts_payload).timestamp() * 1000.0)
         tick_payload["received_at"] = float(tick_payload.get("received_at") or time.time())
         with self._lock:
             self._last_tick_source[symbol] = source
@@ -4853,7 +4862,10 @@ class MarketDataManager:
                             },
                         )
                 else:
-                    callback(dict(tick_payload))
+                    result = callback(dict(tick_payload))
+                    if inspect.isawaitable(result):
+                        task = asyncio.create_task(result)
+                        task.add_done_callback(lambda t: t.exception())
             except Exception as exc:
                 log_throttled(
                     self._logger,
@@ -5664,14 +5676,15 @@ class MarketDataManager:
             bid = _coerce_positive_float(payload.get("bid"))
             ask = _coerce_positive_float(payload.get("ask"))
 
-            now_ts = pd.Timestamp.utcnow().isoformat()
+            now_ts = pd.Timestamp.utcnow()
             tick = {
                 "symbol": symbol,
                 "ltp": ltp,
                 "last_price": ltp,
                 "bid": bid,
                 "ask": ask,
-                "timestamp": now_ts,
+                "timestamp": now_ts.isoformat(),
+                "timestamp_ms": float(now_ts.timestamp() * 1000.0),
                 "received_at": time.time(),
                 "source": "rest",
             }
