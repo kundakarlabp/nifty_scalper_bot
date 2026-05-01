@@ -3445,7 +3445,12 @@ class MarketDataManager:
             if not pe_ready:
                 missing_hard.append("options_pe")
 
-        spot_ready = True if not spot else bars.get(spot, 0) >= min_bars
+        spot_ready = True
+        if spot:
+            try:
+                spot_ready = bool(self._is_symbol_fresh(spot, self._tick_stale_threshold_ms))
+            except Exception:
+                spot_ready = False
         return {
             "hard_ready": len(missing_hard) == 0,
             "spot_ready": spot_ready,
