@@ -222,6 +222,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         self._last_log_balance = 0.0
         self._last_balance_snapshot: dict[str, float] | None = None
         self._last_balance_snapshot_at: float = 0.0
+        self._last_balance_success_log_ts = 0.0
+        self._last_balance_success_snapshot = None
         self._last_log_instrument_load = 0.0
         self._rest_cache_ttl = max(
             1.0, get_float("BROKER_REST_CACHE_TTL_SEC", default=15.0)
@@ -1645,10 +1647,18 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 or "60"
             ),
         )
-        should_info_log = self._last_balance_snapshot != snapshot
-        if not should_info_log:
-            should_info_log = (now - self._last_log_balance) >= refresh_interval
-        if should_info_log:
+        snapshot_tuple = (
+            round(float(snapshot["available_cash"]), 2),
+            round(float(snapshot["live_balance"]), 2),
+            round(float(snapshot["net"]), 2),
+        )
+        should_log = (
+            now - getattr(self, "_last_balance_success_log_ts", 0.0) >= max(60.0, refresh_interval)
+            or snapshot_tuple != getattr(self, "_last_balance_success_snapshot", None)
+        )
+        if should_log:
+            self._last_balance_success_log_ts = now
+            self._last_balance_success_snapshot = snapshot_tuple
             LOGGER.info(
                 (
                     "ZERODHA_BALANCE_REFRESH_SUCCESS available_cash=%.2f "
@@ -1672,9 +1682,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
             self._last_balance_snapshot_at = now
         else:
             LOGGER.debug(
-                "ZERODHA_BALANCE_REFRESH_UNCHANGED available_cash=%0.2f net=%0.2f",
-                snapshot["available_cash"],
-                snapshot["net"],
+                "ZERODHA_BALANCE_REFRESH_SUPPRESSED available_cash=%0.2f live_balance=%0.2f net=%0.2f",
+                snapshot["available_cash"], snapshot["live_balance"], snapshot["net"],
                 extra={
                     "event": "ZERODHA_BALANCE_REFRESH_UNCHANGED",
                     "segment": normalized_segment,

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from math import sqrt
 
 import pandas as pd
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Optional
 
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.options_math import black_scholes_greeks, implied_volatility
@@ -414,6 +414,52 @@ class DataHub:
         except Exception:
             return self._now() * 1000.0
 
+    def _coerce_tick_timestamp(self, raw_ts: Any) -> tuple[str, float]:
+        """Args: raw_ts. Returns: (timestamp_iso_utc, timestamp_ms). Raises: None."""
+        try:
+            ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+            if pd.isna(ts) or getattr(ts, "year", 1970) < 2020:
+                ts = pd.Timestamp.utcnow()
+        except Exception:
+            ts = pd.Timestamp.utcnow()
+        ts = pd.Timestamp(ts)
+        return ts.isoformat(), float(ts.timestamp() * 1000.0)
+
+    def _canonicalize_tick_payload(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Args: payload. Returns: canonicalized tick or None. Raises: None."""
+        tick = dict(payload)
+        symbol = str(tick.get("symbol") or "").strip()
+        token_raw = tick.get("instrument_token") or tick.get("token")
+        price_raw = tick.get("ltp") or tick.get("last_price") or tick.get("price")
+        if not symbol or token_raw is None or price_raw is None:
+            return None
+        try:
+            token = int(token_raw)
+            price = float(price_raw)
+        except Exception:
+            return None
+        if price <= 0:
+            return None
+        raw_ts = tick.get("timestamp") or tick.get("exchange_timestamp") or tick.get("received_at")
+        ts_iso, ts_ms = self._coerce_tick_timestamp(raw_ts)
+        try:
+            received_at = float(tick.get("received_at") or time.time())
+        except Exception:
+            received_at = time.time()
+        tick.update(
+            {
+                "symbol": symbol,
+                "instrument_token": token,
+                "token": token,
+                "ltp": price,
+                "last_price": price,
+                "timestamp": ts_iso,
+                "timestamp_ms": ts_ms,
+                "received_at": received_at,
+            }
+        )
+        return to_json_safe(tick)
+
     def _tick_price(self, tick: dict[str, Any]) -> float | None:
         for key in ("ltp", "last_price", "price", "close"):
             value = tick.get(key)
@@ -566,8 +612,8 @@ class DataHub:
         )
 
     def _ingest_tick_impl(self, tick: Tick) -> None:
-        tick = to_json_safe(dict(tick))
-        if not tick:
+        tick = self._canonicalize_tick_payload(tick) if isinstance(tick, Mapping) else None
+        if tick is None:
             return
         symbol = self._normalize_tick_symbol(tick)
         if not symbol:
@@ -580,7 +626,7 @@ class DataHub:
         source = str(tick.get("source", "ws") or "ws").lower()
         if source == "rest":
             source = "poll"
-        ts_ms = self._timestamp_ms(tick.get("timestamp", self._now()))
+        ts_iso, ts_ms = self._coerce_tick_timestamp(tick.get("timestamp"))
         now_ms = self._now() * 1000.0
         mono_now = self._monotonic()
 
@@ -601,7 +647,8 @@ class DataHub:
             canonical_tick = to_json_safe(dict(tick))
             canonical_tick["symbol"] = symbol
             canonical_tick["source"] = source
-            canonical_tick["timestamp"] = ts_ms
+            canonical_tick["timestamp"] = ts_iso
+            canonical_tick["timestamp_ms"] = ts_ms
             canonical_tick["arrival_time"] = now_ms
             if token is not None:
                 canonical_tick["instrument_token"] = token
@@ -651,70 +698,15 @@ class DataHub:
     async def ingest_tick_from_bus(self, message: "Message") -> None:
         try:
             payload = getattr(message, "data", message)
-            if not isinstance(payload, dict):
-                LOGGER.warning("DATAHUB_TICK_DROPPED reason=payload_not_dict")
+            if not isinstance(payload, Mapping):
+                LOGGER.debug("DATAHUB_TICK_DROPPED reason=payload_not_mapping")
                 return
-            payload = to_json_safe(dict(payload))
-
-            symbol = str(payload.get("symbol") or "").strip()
-            token = payload.get("instrument_token") or payload.get("token")
-            price = payload.get("ltp") or payload.get("last_price")
-
-            if not symbol or token is None:
-                LOGGER.warning("DATAHUB_TICK_DROPPED reason=missing_symbol_or_token")
+            tick = self._canonicalize_tick_payload(payload)
+            if tick is None:
                 return
-
-            if price is None:
-                LOGGER.warning("DATAHUB_TICK_DROPPED reason=missing_price symbol=%s", symbol)
-                return
-
-            token = int(token)
-            price = float(price)
-
-            raw_ts = (
-                payload.get("timestamp")
-                or payload.get("exchange_timestamp")
-                or payload.get("received_at")
-            )
-
-            tick_ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
-            if pd.isna(tick_ts) or tick_ts.year < 2020:
-                tick_ts = pd.Timestamp.utcnow()
-
-            now = pd.Timestamp.utcnow()
-            age_s = max(0.0, (now - tick_ts).total_seconds())
-
-            normalized = to_json_safe(dict(payload))
-            normalized["symbol"] = symbol
-            normalized["instrument_token"] = token
-            normalized["token"] = token
-            normalized["ltp"] = price
-            normalized["last_price"] = price
-            normalized["timestamp"] = tick_ts.isoformat()
-            normalized["tick_age_s"] = age_s
-
-            self._ingest_tick_impl(normalized)
-
-            LOGGER.debug(
-                "DATAHUB_TICK_INGESTED symbol=%s token=%s",
-                symbol,
-                token,
-                extra=to_json_safe(
-                    {
-                        "event": "DATAHUB_TICK_INGESTED",
-                        "symbol": symbol,
-                        "token": token,
-                        "timestamp": normalized["timestamp"],
-                        "tick_age_s": age_s,
-                    }
-                ),
-            )
-
+            self._ingest_tick_impl(tick)
         except Exception as exc:
-            LOGGER.exception(
-                "DATAHUB_TICK_INGEST_FAILED error=%s",
-                repr(exc),
-            )
+            LOGGER.exception("DATAHUB_TICK_INGEST_FAILED error=%r", exc, extra=to_json_safe({"event": "DATAHUB_TICK_INGEST_FAILED", "error": repr(exc)}))
 
 
     def ingest_tick(self, tick: Tick):

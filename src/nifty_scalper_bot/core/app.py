@@ -8607,17 +8607,56 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
     """Execute graceful shutdown."""
 
     LOGGER.info("Shutting down bot...")
-    bus = getattr(ctx, "message_bus", None)
-    if proc is not None:
-        with suppress(Exception):
-            await proc.stop()
-    if bus is not None:
-        with suppress(Exception):
-            await bus.stop()
+    proc = getattr(ctx, "proc", None) or getattr(ctx, "process", None)
+    hub = getattr(ctx, "data_hub", None)
+    mdm = getattr(ctx, "market_data_manager", None) or getattr(ctx, "mdm", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    telegram = getattr(ctx, "telegram_controller", None) or getattr(ctx, "telegram", None)
+    message_bus = getattr(ctx, "message_bus", None)
 
-    if hub is not None:
-        with suppress(Exception):
-            await hub.shutdown()
+    async def _maybe_await(result: Any) -> Any:
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    try:
+        if runner is not None and hasattr(runner, "stop"):
+            await _maybe_await(runner.stop())
+    except Exception as exc:
+        LOGGER.warning("SHUTDOWN_RUNNER_FAILED error=%r", exc)
+    try:
+        if mdm is not None and hasattr(mdm, "stop"):
+            await _maybe_await(mdm.stop())
+    except Exception as exc:
+        LOGGER.warning("SHUTDOWN_MDM_FAILED error=%r", exc)
+    try:
+        if message_bus is not None and hasattr(message_bus, "stop"):
+            await _maybe_await(message_bus.stop())
+    except Exception as exc:
+        LOGGER.warning("SHUTDOWN_MESSAGE_BUS_FAILED error=%r", exc)
+    try:
+        if hub is not None:
+            if hasattr(hub, "checkpoint"):
+                await _maybe_await(hub.checkpoint())
+            if hasattr(hub, "shutdown"):
+                await _maybe_await(hub.shutdown())
+    except Exception as exc:
+        LOGGER.warning("SHUTDOWN_HUB_FAILED error=%r", exc)
+    try:
+        if telegram is not None and hasattr(telegram, "stop"):
+            await _maybe_await(telegram.stop())
+    except Exception as exc:
+        LOGGER.warning("SHUTDOWN_TELEGRAM_FAILED error=%r", exc)
+    try:
+        if proc is not None:
+            if hasattr(proc, "terminate"):
+                proc.terminate()
+            if hasattr(proc, "wait"):
+                result = proc.wait()
+                if inspect.isawaitable(result):
+                    await result
+    except Exception as exc:
+        LOGGER.warning("SHUTDOWN_PROC_FAILED error=%r", exc)
 
     refresh_task = getattr(ctx, "instrument_refresh_task", None)
     if refresh_task is not None:
@@ -8625,18 +8664,18 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
             refresh_task.cancel()
         ctx.instrument_refresh_task = None
 
-    strategy_runner = _require_component(ctx.strategy_runner, "strategy_runner")
-    order_manager_component = _require_component(ctx.order_manager, "order_manager")
+    strategy_runner = _require_component(getattr(ctx, "strategy_runner", None), "strategy_runner")
+    order_manager_component = _require_component(getattr(ctx, "order_manager", None), "order_manager")
     market_data_manager_component = _require_component(
-        ctx.market_data_manager,
+        getattr(ctx, "market_data_manager", None),
         "market_data_manager",
     )
     position_manager_component = _require_component(
-        ctx.position_manager,
+        getattr(ctx, "position_manager", None),
         "position_manager",
     )
     persistent_state_component = _require_component(
-        ctx.persistent_state,
+        getattr(ctx, "persistent_state", None),
         "persistent_state",
     )
 

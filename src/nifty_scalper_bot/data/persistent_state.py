@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - fallback when sqlite unavailable
 
 from nifty_scalper_bot.infra.structured_logger import emit_diag
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.serialization import to_json_safe
 
 TradeDict = dict[str, object]
 FillDict = dict[str, object]
@@ -224,7 +225,7 @@ class PersistentStateDB:
             "Entered PersistentStateDB.save_trade",
             extra={"event": "persistent_db_save_trade"},
         )
-        payload = json.dumps(dict(trade), ensure_ascii=False)
+        payload = json.dumps(to_json_safe(dict(trade)), ensure_ascii=False, default=str)
         ts = str(trade.get("timestamp") or datetime.now(timezone.utc).isoformat())
         try:
             with self._lock:
@@ -254,7 +255,7 @@ class PersistentStateDB:
             "Entered PersistentStateDB.save_fill",
             extra={"event": "persistent_db_save_fill"},
         )
-        payload = json.dumps(dict(fill), ensure_ascii=False)
+        payload = json.dumps(to_json_safe(dict(fill)), ensure_ascii=False, default=str)
         ts = str(fill.get("timestamp") or datetime.now(timezone.utc).isoformat())
         order_id_raw = fill.get("order_id")
         order_id = str(order_id_raw).strip() if order_id_raw is not None else None
@@ -384,7 +385,7 @@ class PersistentStateDB:
                             (symbol,),
                         )
                     else:
-                        encoded = json.dumps(dict(position), ensure_ascii=False)
+                        encoded = json.dumps(to_json_safe(dict(position)), ensure_ascii=False, default=str)
                         ts = datetime.now(timezone.utc).isoformat()
                         self._conn.execute(
                             """
@@ -438,7 +439,7 @@ class PersistentStateDB:
                         """,
                         (
                             float(equity),
-                            json.dumps(snapshot["payload"], ensure_ascii=False),
+                            json.dumps(to_json_safe(snapshot["payload"]), ensure_ascii=False, default=str),
                             datetime.now(timezone.utc).isoformat(),
                         ),
                     )

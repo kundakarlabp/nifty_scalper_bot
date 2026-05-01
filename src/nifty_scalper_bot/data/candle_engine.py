@@ -12,6 +12,7 @@ import pandas as pd
 
 from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.data.validator import Tick, validate_tick
+from nifty_scalper_bot.utils.logging import log_throttled
 
 LOGGER = logging.getLogger(__name__)
 FetchHistoricalFn = Callable[[str], pd.DataFrame | None]
@@ -56,21 +57,21 @@ class CandleEngine:
         if self.interval != '1min':
             raise ValueError(f'Unsupported interval: {self.interval}')
 
+        raw_ts = tick.get('timestamp') if isinstance(tick, dict) else getattr(tick, 'timestamp', None)
+        timestamp = pd.to_datetime(raw_ts, utc=True, errors='coerce')
+        if pd.isna(timestamp) or getattr(timestamp, 'year', 1970) < 2020:
+            log_throttled(LOGGER, 'candle_tick_bad_timestamp', 'CANDLE_TICK_DROPPED reason=bad_timestamp', interval_sec=10.0, level=logging.WARNING)
+            return None
         validated = tick if isinstance(tick, Tick) else validate_tick(dict(tick))
         payload = validated.to_dict()
-        timestamp = pd.Timestamp(validated.timestamp)
+        timestamp = pd.Timestamp(timestamp)
         minute = timestamp.floor('1min')
 
-        if self._last_tick_ts is not None and timestamp < self._last_tick_ts:
-            LOGGER.debug(
-                'tick_out_of_order',
-                extra={
-                    'event': 'tick_out_of_order',
-                    'tick_ts': timestamp.isoformat(),
-                    'last_ts': self._last_tick_ts.isoformat(),
-                },
-            )
-            return None
+        if self._last_tick_ts is not None:
+            last_ts = pd.to_datetime(self._last_tick_ts, utc=True, errors='coerce')
+            if not pd.isna(last_ts) and timestamp < last_ts:
+                log_throttled(LOGGER, f"tick_out_of_order_{getattr(self, 'symbol', 'unknown')}", "tick_out_of_order symbol=%s tick_ts=%s last_ts=%s" % (getattr(self, 'symbol', 'unknown'), timestamp.isoformat(), last_ts.isoformat()), interval_sec=10.0, level=logging.DEBUG)
+                return None
 
         finalized: dict[str, Any] | None = None
         if self.current_candle is None:
@@ -79,14 +80,7 @@ class CandleEngine:
         else:
             current_minute = pd.Timestamp(self.current_candle['timestamp'])
             if minute < current_minute:
-                LOGGER.debug(
-                    'tick_out_of_order',
-                    extra={
-                        'event': 'tick_out_of_order',
-                        'tick_minute': minute.isoformat(),
-                        'current_minute': current_minute.isoformat(),
-                    },
-                )
+                log_throttled(LOGGER, f"tick_out_of_order_minute_{getattr(self, 'symbol', 'unknown')}", "tick_out_of_order symbol=%s tick_minute=%s current_minute=%s" % (getattr(self, 'symbol', 'unknown'), minute.isoformat(), current_minute.isoformat()), interval_sec=10.0, level=logging.DEBUG)
                 return None
             if minute > current_minute:
                 finalized = self._finalize_current_candle()
@@ -129,10 +123,14 @@ class CandleEngine:
         new_row = pd.DataFrame([candle]).dropna(how='all')
         if new_row.empty:
             return None
-        if self.df.empty:
-            frame = new_row
+        if self.df is None or self.df.empty:
+            frame = new_row.reset_index(drop=True)
         else:
-            frame = pd.concat([self.df, new_row], ignore_index=True)
+            existing = self.df.dropna(how='all')
+            if existing.empty:
+                frame = new_row.reset_index(drop=True)
+            else:
+                frame = pd.concat([existing, new_row], ignore_index=True)
         frame = sanitize(frame).tail(self.max_bars).reset_index(drop=True)
         if frame['timestamp'].duplicated().any():
             raise DataIntegrityError('duplicate candle timestamps')
