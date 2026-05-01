@@ -746,11 +746,11 @@ class DataHub:
             if token_int is not None:
                 self._register_symbol_alias(symbol, token_int)
             callbacks: set[TickListener] = set()
+            if token_int is not None:
+                callbacks.update(self._tick_subscribers_by_token.get(token_int, set()))
             callbacks.update(self._tick_subscribers.get(symbol, set()))
             for alias in self._symbol_aliases.get(symbol, set()):
                 callbacks.update(self._tick_subscribers.get(alias, set()))
-            if token_int is not None:
-                callbacks.update(self._tick_subscribers_by_token.get(token_int, set()))
             subscribers = list(callbacks)
         trace_id = str(tick.get("trace_id") or self._make_trace_id(symbol))
         canonical_tick["trace_id"] = trace_id
@@ -1002,9 +1002,24 @@ class DataHub:
             self._tick_subscribers[normalized].add(callback)
             for alias in self._symbol_aliases.get(normalized, set()):
                 self._tick_subscribers[alias].add(callback)
-            token_int = int(token) if token is not None else self._token_from_symbol(normalized)
+            token_int = None
+            if token is not None:
+                try:
+                    token_int = int(token)
+                except Exception:
+                    token_int = None
+            if token_int is None:
+                token_int = self._token_from_symbol(normalized)
             if token_int is not None:
-                self._tick_subscribers_by_token[int(token_int)].add(callback)
+                self._tick_subscribers_by_token[token_int].add(callback)
+                self._token_by_symbol[normalized] = token_int
+                self._symbol_by_token[token_int] = normalized
+            LOGGER.info(
+                "DATAHUB_TICK_CALLBACK_REGISTERED symbol=%s token=%s callback=%s",
+                normalized,
+                token_int,
+                getattr(callback, "__qualname__", repr(callback)),
+            )
         if self._defer_live_symbol_subscriptions:
             self._pending_live_symbols.add(normalized)
             LOGGER.info(
@@ -1062,8 +1077,28 @@ class DataHub:
 
     def unsubscribe_ticks(self, symbol: str, callback: Optional[TickListener] = None):
         normalized = self._canonical_quote_symbol(symbol)
-        if callback is not None and callback in self._tick_subscribers.get(normalized, set()):
-            self._tick_subscribers[normalized].remove(callback)
+        token_int = self._token_from_symbol(normalized)
+        aliases = set(self._symbol_aliases.get(normalized, set()))
+        aliases.add(normalized)
+
+        if callback is not None:
+            for alias in aliases:
+                callbacks = self._tick_subscribers.get(alias)
+                if callbacks:
+                    callbacks.discard(callback)
+                    if not callbacks:
+                        self._tick_subscribers.pop(alias, None)
+            if token_int is not None:
+                token_callbacks = self._tick_subscribers_by_token.get(token_int)
+                if token_callbacks:
+                    token_callbacks.discard(callback)
+                    if not token_callbacks:
+                        self._tick_subscribers_by_token.pop(token_int, None)
+        else:
+            for alias in aliases:
+                self._tick_subscribers.pop(alias, None)
+            if token_int is not None:
+                self._tick_subscribers_by_token.pop(token_int, None)
         if not self._tick_subscribers.get(normalized):
             self._pending_live_symbols.discard(normalized)
             self._mdm_subscribed_symbols.discard(normalized)
@@ -1073,6 +1108,39 @@ class DataHub:
                     mdm_unsub(normalized, self.ingest_tick_sync)
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.debug("MDM unsubscribe failed for %s: %s", normalized, exc)
+
+    def debug_subscription_status(
+        self, symbol: str, token: int | None = None
+    ) -> dict[str, Any]:
+        """Return callback and quote diagnostics for symbol/token routing."""
+        canonical = self._canonical_quote_symbol(symbol)
+        token_int = None
+        if token is not None:
+            try:
+                token_int = int(token)
+            except Exception:
+                token_int = None
+        if token_int is None:
+            token_int = self._token_from_symbol(canonical)
+
+        return {
+            "symbol": symbol,
+            "canonical": canonical,
+            "token": token_int,
+            "symbol_callbacks": len(self._tick_subscribers.get(canonical, set())),
+            "token_callbacks": (
+                len(self._tick_subscribers_by_token.get(token_int, set()))
+                if token_int is not None
+                else 0
+            ),
+            "aliases": sorted(self._symbol_aliases.get(canonical, set())),
+            "quote_present": self.get_quote(canonical, allow_pull=False) is not None,
+            "token_quote_present": (
+                self.get_tick_by_token(token_int) is not None
+                if token_int is not None
+                else False
+            ),
+        }
 
     def subscribe_orders(self, callback) -> None:
         if callback is None:

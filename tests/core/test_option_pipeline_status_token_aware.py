@@ -21,6 +21,18 @@ class StubDataHub:
     def get_tick_by_token(self, token: int):
         return {'instrument_token': token}
 
+    def debug_subscription_status(self, symbol: str, token: int | None = None):
+        return {
+            'symbol': symbol,
+            'canonical': symbol,
+            'token': token,
+            'symbol_callbacks': 0,
+            'token_callbacks': 1,
+            'aliases': [],
+            'quote_present': False,
+            'token_quote_present': True,
+        }
+
 
 class StubMdm:
     _tracked_symbols: set[str] = set()
@@ -58,3 +70,4 @@ def test_pipeline_status_uses_token_callbacks(caplog) -> None:
     assert rec.datahub_callback_registered is True
     assert rec.datahub_quote_present is True
     assert rec.datahub_runner_subscription_registered is True
+    assert rec.datahub_debug_status is not None

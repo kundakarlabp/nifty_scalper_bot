@@ -4781,6 +4781,34 @@ class MarketDataManager:
             }
         )
         subscriber_count = len(callbacks)
+        if subscriber_count == 0 and source == "ws":
+            selected_or_active = (
+                symbol in self._active_subscribed_symbols
+                or symbol in self._tracked_symbols
+            )
+            first_seen_map = getattr(self, "_first_seen_at_by_symbol", None)
+            if first_seen_map is None:
+                first_seen_map = {}
+                self._first_seen_at_by_symbol = first_seen_map
+            first_seen_at = first_seen_map.get(symbol)
+            if first_seen_at is None:
+                first_seen_map[symbol] = time.monotonic()
+            else:
+                age = time.monotonic() - first_seen_at
+                if selected_or_active and age > 30:
+                    log_throttled(
+                        self._logger,
+                        f"mdm_tick_no_direct_subscriber_{symbol}",
+                        "MDM_TICK_NO_DIRECT_SUBSCRIBER symbol=%s age_s=%.1f note=bus_path_may_still_be_active"
+                        % (symbol, age),
+                        interval_sec=60,
+                        level=logging.WARNING,
+                        extra={
+                            "event": "MDM_TICK_NO_DIRECT_SUBSCRIBER",
+                            "symbol": symbol,
+                            "age_s": age,
+                        },
+                    )
         _price_val = tick.get("ltp") or tick.get("last_price") or tick.get("price")
         _token_val = tick.get("instrument_token") or tick.get("token")
         try:

@@ -192,20 +192,44 @@ class MessageBus:
         return True
 
     async def stop(self) -> None:
-        """Stop all dispatch loops."""
-        if not self._running:
+        """Stop dispatchers and drain queues. Safe to call repeatedly."""
+        if not getattr(self, "_running", False):
             return
+
         self._running = False
 
-        for task in self._tasks:
-            task.cancel()
+        tasks = list(getattr(self, "_tasks", []) or [])
+        try:
+            self._tasks.clear()
+        except Exception:
+            pass
 
-        with asyncio.TaskGroup() as tg:
-            for task in self._tasks:
-                tg.create_task(self._await_cancellation(task))
+        for task in tasks:
+            if task is not None and not task.done():
+                task.cancel()
 
-        self._tasks.clear()
-        LOGGER.info("Message bus stopped.")
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    continue
+                if isinstance(result, Exception):
+                    LOGGER.warning(
+                        "MESSAGE_BUS_TASK_STOP_FAILED error=%r",
+                        result,
+                    )
+
+        queues = getattr(self, "queues", None)
+        if isinstance(queues, dict):
+            for queue in queues.values():
+                try:
+                    while not queue.empty():
+                        queue.get_nowait()
+                        queue.task_done()
+                except Exception:
+                    pass
+
+        LOGGER.info("MESSAGE_BUS_STOPPED")
 
     async def _await_cancellation(self, task: asyncio.Task) -> None:
         """Safely await a task during cancellation, suppressing CancelledError."""

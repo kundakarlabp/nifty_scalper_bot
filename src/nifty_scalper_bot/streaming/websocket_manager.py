@@ -149,6 +149,8 @@ class WebSocketManager:
         self._fallback_active = False
         self._first_tick_logged = False
         self._subscription_log_tokens: set[int] = set()
+        self._stream_health = "healthy"
+        self._last_disconnect_at = 0.0
 
     @property
     def on_tick(self) -> TickCallback | None:
@@ -692,6 +694,7 @@ class WebSocketManager:
                 )
             self._connected.set()
             self._state = ConnectionState.CONNECTED
+            self._stream_health = "healthy"
             if self._on_connect_callback is not None:
                 self._on_connect_callback()
         except Exception as e:
@@ -808,10 +811,13 @@ class WebSocketManager:
             )
             self._connected.clear()
             self._state = ConnectionState.DISCONNECTED
+            self._last_disconnect_at = time.time()
+            self._stream_health = "degraded"
             # 1006 = old connection handshake timeout during normal teardown.
             # Don't count as failure and don't trigger redundant reconnect
             # if one is already in progress — this breaks the 1006 cascade.
             if code == 1006:
+                self._logger.warning("Connection closed: 1006")
                 if self._reconnect_task is not None and not self._reconnect_task.done():
                     self._logger.debug(
                         "Suppressed 1006 reconnect — reconnect already in progress"
