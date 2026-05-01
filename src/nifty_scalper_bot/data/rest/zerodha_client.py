@@ -1652,11 +1652,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
             round(float(snapshot["live_balance"]), 2),
             round(float(snapshot["net"]), 2),
         )
+        heartbeat_interval = float(os.getenv("BALANCE_SUCCESS_LOG_INTERVAL_SECONDS", "900"))
         should_log = (
-            now - getattr(self, "_last_balance_success_log_ts", 0.0) >= max(60.0, refresh_interval)
+            not getattr(self, "_balance_success_logged_once", False)
             or snapshot_tuple != getattr(self, "_last_balance_success_snapshot", None)
+            or now - getattr(self, "_last_balance_success_log_ts", 0.0) >= heartbeat_interval
         )
         if should_log:
+            self._balance_success_logged_once = True
             self._last_balance_success_log_ts = now
             self._last_balance_success_snapshot = snapshot_tuple
             LOGGER.info(
