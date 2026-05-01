@@ -4669,6 +4669,59 @@ class MarketDataManager:
                 level=logging.ERROR,
             )
 
+
+    def _dispatch_awaitable_callback_result(
+        self,
+        result: Any,
+        *,
+        symbol: str,
+        callback: Any,
+    ) -> None:
+        """Schedule awaitable callback results. Args: result/symbol/callback. Returns: none. Raises: none."""
+        if result is None or not inspect.isawaitable(result):
+            return
+
+        async def _await_result(awaitable: Any) -> None:
+            try:
+                await awaitable
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_throttled(
+                    self._logger,
+                    f"tick_async_callback_failed_{symbol}",
+                    "Async tick callback failed symbol=%s callback=%s error=%r"
+                    % (symbol, getattr(callback, "__qualname__", repr(callback)), exc),
+                    interval_sec=10.0,
+                    level=logging.ERROR,
+                    exc_info=True,
+                )
+
+        loop = getattr(self, "_main_loop", None) or getattr(self, "_event_loop", None)
+        if loop is not None and loop.is_running():
+            try:
+                if loop is asyncio.get_running_loop():
+                    loop.create_task(_await_result(result))
+                else:
+                    asyncio.run_coroutine_threadsafe(_await_result(result), loop)
+                return
+            except RuntimeError:
+                pass
+
+        try:
+            running_loop = asyncio.get_running_loop()
+            running_loop.create_task(_await_result(result))
+            return
+        except RuntimeError:
+            log_throttled(
+                self._logger,
+                f"tick_async_callback_dropped_{symbol}",
+                "Async tick callback dropped symbol=%s reason=no_running_loop callback=%s"
+                % (symbol, getattr(callback, "__qualname__", repr(callback))),
+                interval_sec=10.0,
+                level=logging.WARNING,
+            )
+
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
         if source == "ws":
@@ -4863,9 +4916,11 @@ class MarketDataManager:
                         )
                 else:
                     result = callback(dict(tick_payload))
-                    if inspect.isawaitable(result):
-                        task = asyncio.create_task(result)
-                        task.add_done_callback(lambda t: t.exception())
+                    self._dispatch_awaitable_callback_result(
+                        result,
+                        symbol=symbol,
+                        callback=callback,
+                    )
             except Exception as exc:
                 log_throttled(
                     self._logger,

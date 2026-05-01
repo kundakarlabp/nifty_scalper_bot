@@ -30,15 +30,6 @@ TickListener = Callable[[Tick], None]
 OrderListener = Callable[[dict[str, Any]], None]
 
 
-class _CompletedAwaitable:
-    """Provide await-compatibility for sync-first ingestion APIs."""
-
-    def __await__(self):
-        if False:
-            yield None
-        return None
-
-
 class _EventBus:
     def __init__(self) -> None:
         self._handlers: dict[str, list[Callable[[dict[str, Any]], None]]] = defaultdict(list)
@@ -131,6 +122,8 @@ class DataHub:
         self._token_by_symbol: Dict[str, int] = {}
         self._symbol_by_token: Dict[int, str] = {}
         self._tick_subscribers: Dict[str, set[TickListener]] = defaultdict(set)
+        self._tick_subscribers_by_token: dict[int, set[TickListener]] = defaultdict(set)
+        self._symbol_aliases: dict[str, set[str]] = defaultdict(set)
         self._order_subscribers: list[OrderListener] = []
         self._mdm_subscribed_symbols: set[str] = set()
         self._defer_live_symbol_subscriptions = bool(
@@ -239,6 +232,72 @@ class DataHub:
                 except Exception:
                     continue
         return canonical(s)
+
+
+    def _token_from_symbol(self, symbol: str) -> int | None:
+        """Resolve instrument token from symbol aliases. Args: symbol. Returns: token. Raises: none."""
+        normalized = self._canonical_quote_symbol(symbol)
+        token = self._token_by_symbol.get(normalized)
+        if token is not None:
+            try:
+                return int(token)
+            except Exception:
+                return None
+
+        mdm = getattr(self, "_mdm", None)
+        for attr in ("_token_by_symbol", "_symbol_to_token"):
+            mapping = getattr(mdm, attr, None)
+            if isinstance(mapping, dict):
+                token = mapping.get(normalized) or mapping.get(symbol)
+                if token is not None:
+                    try:
+                        return int(token)
+                    except Exception:
+                        return None
+
+        resolver = getattr(self, "_resolver", None)
+        for method_name in ("token_for_symbol", "resolve_token", "get_token", "instrument_token"):
+            method = getattr(resolver, method_name, None)
+            if callable(method):
+                try:
+                    token = method(normalized)
+                    if token is not None:
+                        return int(token)
+                except Exception:
+                    pass
+
+        return None
+
+    def _register_symbol_alias(self, symbol: str, token: int | None = None) -> str:
+        """Register symbol aliases and optional token mapping. Args: symbol/token. Returns: canonical symbol. Raises: none."""
+        normalized = self._canonical_quote_symbol(symbol)
+        if not normalized:
+            return ""
+
+        aliases = {normalized, str(symbol).strip().upper().replace(" ", "")}
+        token_int: int | None = None
+        if token is not None:
+            try:
+                token_int = int(token)
+                self._token_by_symbol[normalized] = token_int
+                self._symbol_by_token[token_int] = normalized
+                aliases.add(str(token_int))
+            except Exception:
+                token_int = None
+        else:
+            token_int = self._token_from_symbol(normalized)
+
+        if token_int is not None:
+            broker_symbol = self._symbol_by_token.get(token_int)
+            if broker_symbol:
+                aliases.add(self._canonical_quote_symbol(broker_symbol))
+
+        for alias in aliases:
+            if alias:
+                self._symbol_aliases[normalized].add(alias)
+                self._symbol_aliases[alias].add(normalized)
+
+        return normalized
 
     def _position_symbol(self, symbol: str) -> str:
         raw = str(symbol or "").strip().upper()
@@ -678,7 +737,21 @@ class DataHub:
             elif source in {"poll", "rest"}:
                 self._last_poll_arrival[symbol] = now_ms
             self._stale_candidates[symbol] = 0
-            subscribers = list(self._tick_subscribers.get(symbol, ()))
+            token_value = canonical_tick.get("instrument_token") or canonical_tick.get("token")
+            token_int = None
+            try:
+                token_int = int(token_value) if token_value is not None else None
+            except Exception:
+                token_int = None
+            if token_int is not None:
+                self._register_symbol_alias(symbol, token_int)
+            callbacks: set[TickListener] = set()
+            callbacks.update(self._tick_subscribers.get(symbol, set()))
+            for alias in self._symbol_aliases.get(symbol, set()):
+                callbacks.update(self._tick_subscribers.get(alias, set()))
+            if token_int is not None:
+                callbacks.update(self._tick_subscribers_by_token.get(token_int, set()))
+            subscribers = list(callbacks)
         trace_id = str(tick.get("trace_id") or self._make_trace_id(symbol))
         canonical_tick["trace_id"] = trace_id
         LOGGER.debug(
@@ -704,9 +777,9 @@ class DataHub:
                 self._log_listener_failure(exc)
         self.checkpoint()
 
-    def ingest_tick_sync(self, tick: Tick):
+    def ingest_tick_sync(self, tick: Tick) -> None:
         self._ingest_tick_impl(tick)
-        return _CompletedAwaitable()
+        return None
 
     async def ingest_tick_from_bus(self, message: "Message") -> None:
         try:
@@ -722,9 +795,9 @@ class DataHub:
             LOGGER.exception("DATAHUB_TICK_INGEST_FAILED error=%r", exc, extra=to_json_safe({"event": "DATAHUB_TICK_INGEST_FAILED", "error": repr(exc)}))
 
 
-    def ingest_tick(self, tick: Tick):
+    def ingest_tick(self, tick: Tick) -> None:
         self._ingest_tick_impl(tick)
-        return _CompletedAwaitable()
+        return None
 
     def get_quote(self, symbol: str, allow_pull: bool = True) -> Optional[Tick]:
         lookup = self._canonical_quote_symbol(symbol)
@@ -899,8 +972,14 @@ class DataHub:
         self._pending_live_symbols.clear()
         return len(pending_symbols)
 
-    def subscribe_ticks(self, symbol: str, callback: Optional[TickListener] = None):
-        normalized = self._canonical_quote_symbol(symbol)
+    def subscribe_ticks(
+        self,
+        symbol: str,
+        callback: Optional[TickListener] = None,
+        *,
+        token: int | None = None,
+    ):
+        normalized = self._register_symbol_alias(symbol, token)
         if not normalized or normalized.isdigit():
             LOGGER.info(
                 "DATAHUB_SYMBOL_STATUS symbol=%s state=rejected_invalid",
@@ -921,6 +1000,11 @@ class DataHub:
         trace_id = self._make_trace_id(normalized)
         if callback is not None:
             self._tick_subscribers[normalized].add(callback)
+            for alias in self._symbol_aliases.get(normalized, set()):
+                self._tick_subscribers[alias].add(callback)
+            token_int = int(token) if token is not None else self._token_from_symbol(normalized)
+            if token_int is not None:
+                self._tick_subscribers_by_token[int(token_int)].add(callback)
         if self._defer_live_symbol_subscriptions:
             self._pending_live_symbols.add(normalized)
             LOGGER.info(
@@ -1419,9 +1503,9 @@ class DataHub:
         return self._mdm_call("ingest_rest_quote", *args, **kwargs)
 
     def register_symbol(self, symbol: str, token: Optional[int] = None) -> Any:
+        normalized = self._register_symbol_alias(symbol, token)
         if token is not None:
             try:
-                normalized = self._canonical_quote_symbol(symbol)
                 token_int = int(token)
                 self._token_by_symbol[normalized] = token_int
                 self._symbol_by_token[token_int] = normalized
