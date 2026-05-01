@@ -1637,9 +1637,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
             "net": round(net, 2),
         }
         now = time.time()
+        refresh_interval = max(
+            60.0,
+            float(
+                os.getenv("RISK_EQUITY_REFRESH_SECONDS")
+                or os.getenv("EQUITY_REFRESH_SECONDS")
+                or "60"
+            ),
+        )
         should_info_log = self._last_balance_snapshot != snapshot
         if not should_info_log:
-            should_info_log = (now - self._last_log_balance) >= 900.0
+            should_info_log = (now - self._last_log_balance) >= refresh_interval
         if should_info_log:
             LOGGER.info(
                 (

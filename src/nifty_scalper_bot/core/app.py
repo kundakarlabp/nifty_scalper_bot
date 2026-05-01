@@ -199,7 +199,6 @@ def _gate_runner_symbol_add(
             source=source,
             reason="gate_add",
         )
-        ctx._deferred_basket_retry_task = ctx.deferred_basket_retry_task
     except Exception:  # pragma: no cover - observability must never raise
         pass
     return True
@@ -1713,8 +1712,11 @@ class BotContext:
     # must reuse this rather than rebuild with their own (potentially
     # synthetic) spot price.
     active_trading_universe: dict[str, Any] | None = None
+    message_bus_tick_subscribed: bool = False
+    message_bus_running: bool = False
     deferred_basket_retry_started: bool = False
     deferred_basket_retry_task: asyncio.Task[Any] | None = None
+    last_deferred_basket_retry_ts: float = 0.0
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -5856,14 +5858,25 @@ def _wire_and_start_message_bus(ctx: BotContext) -> bool:
         data_hub.bus = bus
     if mdm is not None:
         mdm.bus = bus
-    if not bool(getattr(ctx, "_message_bus_tick_subscribed", False)):
+    if not ctx.message_bus_tick_subscribed:
         if data_hub is not None:
-            bus.subscribe(MessageType.TICK, data_hub.ingest_tick_from_bus)
-            LOGGER.info("MESSAGE_BUS_SUBSCRIPTION component=data_hub message_type=tick callback_name=ingest_tick_from_bus", extra={"event":"MESSAGE_BUS_SUBSCRIPTION","component":"data_hub","message_type":"tick","callback_name":"ingest_tick_from_bus"})
-        if runner is not None:
-            bus.subscribe(MessageType.TICK, runner.on_data)
-            LOGGER.info("MESSAGE_BUS_SUBSCRIPTION component=strategy_runner message_type=tick callback_name=on_data", extra={"event":"MESSAGE_BUS_SUBSCRIPTION","component":"strategy_runner","message_type":"tick","callback_name":"on_data"})
-        ctx._message_bus_tick_subscribed = True
+            bus.subscribe_once(
+                MessageType.TICK,
+                data_hub.ingest_tick_from_bus,
+                subscriber_id="data_hub.ingest_tick_from_bus",
+            )
+            LOGGER.info("MESSAGE_BUS_SUBSCRIPTION component=data_hub message_type=tick callback_name=ingest_tick_from_bus")
+        elif runner is not None:
+            bus.subscribe_once(
+                MessageType.TICK,
+                runner.on_data,
+                subscriber_id="strategy_runner.on_data",
+            )
+            LOGGER.warning("MESSAGE_BUS_SUBSCRIPTION_FALLBACK component=strategy_runner reason=no_data_hub")
+        else:
+            LOGGER.warning("MESSAGE_BUS_TICK_SUBSCRIPTION_SKIPPED reason=no_data_hub_no_runner")
+
+        ctx.message_bus_tick_subscribed = True
     if not bool(getattr(bus, "running", False)):
         LOGGER.info("Starting MessageBus Dispatchers before WebSocket")
         bus.start()
@@ -6165,32 +6178,23 @@ async def _build_and_hydrate_live_basket_from_spot(
 def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) -> None:
     """Schedule one deferred basket retry task. Args: ctx/mode. Returns: none. Raises: none."""
 
-    if not hasattr(ctx, "deferred_basket_retry_started"):
-        ctx.deferred_basket_retry_started = False
-    if not hasattr(ctx, "deferred_basket_retry_task"):
-        ctx.deferred_basket_retry_task = None
-    if not hasattr(ctx, "_deferred_basket_retry_started"):
-        ctx._deferred_basket_retry_started = False
-    if not hasattr(ctx, "_deferred_basket_retry_task"):
-        ctx._deferred_basket_retry_task = None
-    if not hasattr(ctx, "_last_deferred_basket_retry_ts"):
-        ctx._last_deferred_basket_retry_ts = 0.0
-
     ctx.live_orders_armed = False
     ctx.trading_ready = False
     ctx.readiness_mode = "DATA_WARMUP"
     ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = "fresh_ws_spot_unavailable"
-    if not getattr(ctx, "deferred_basket_retry_started", False):
-        ctx.deferred_basket_retry_started = True
-        ctx._deferred_basket_retry_started = True
-        ctx._last_deferred_basket_retry_ts = time_module.time()
-        ctx.deferred_basket_retry_task = asyncio.create_task(
-            _deferred_basket_hydration_retry(
-                ctx,
-                configured_mode=configured_mode,
-            )
+    if ctx.deferred_basket_retry_started:
+        LOGGER.info("BASKET_BUILD_DEFERRED_ALREADY_SCHEDULED")
+        return
+
+    ctx.deferred_basket_retry_started = True
+    ctx.last_deferred_basket_retry_ts = time_module.time()
+    ctx.deferred_basket_retry_task = asyncio.create_task(
+        _deferred_basket_hydration_retry(
+            ctx,
+            configured_mode=configured_mode,
         )
+    )
     LOGGER.info(
         "BASKET_BUILD_DEFERRED reason=market_closed_or_spot_not_ready",
         extra={
@@ -8024,8 +8028,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # "started with 0 active dispatchers" — signals never execute.
                 
 
-                if not getattr(ctx, "_message_bus_tick_subscribed", False):
-                    _wire_and_start_message_bus(ctx)
+                _wire_and_start_message_bus(ctx)
 
                 # MDM internals are started once near startup entry with
                 # defer_ws=True; websocket bring-up is handled explicitly.
