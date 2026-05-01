@@ -907,10 +907,12 @@ def _sync_data_hub_positions(
         ]
         data_hub.replace_positions(rows)
     except Exception as exc:  # noqa: BLE001
-        logger.error(
+        log_throttled(
+            logger,
             "data_hub_position_sync_failed",
-            extra={"event": "data_hub_position_sync_failed", "error": str(exc)},
-            exc_info=exc,
+            "data_hub_position_sync_failed error=%r" % exc,
+            interval_sec=30.0,
+            level=logging.WARNING,
         )
 
 
@@ -8595,7 +8597,10 @@ async def startup_sequence(ctx: BotContext) -> None:
     elif live_ready:
         LOGGER.info("STARTUP_COMPLETE_LIVE_READY mode=%s runner_running=%s", mode, runner_running, extra={"event":"STARTUP_COMPLETE_LIVE_READY","mode":mode,"runner_running":runner_running})
     else:
-        LOGGER.warning("STARTUP_DEGRADED runner_running=%s data_observation_ready=%s trading_ready=%s live_orders_armed=%s", runner_running, bool(getattr(ctx, "data_observation_ready", False)), bool(getattr(ctx, "trading_ready", False)), bool(getattr(ctx, "live_orders_armed", False)), extra={"event":"STARTUP_DEGRADED","runner_running":runner_running,"data_observation_ready":bool(getattr(ctx, "data_observation_ready", False)),"trading_ready":bool(getattr(ctx, "trading_ready", False)),"live_orders_armed":bool(getattr(ctx, "live_orders_armed", False))})
+        if mode == "LIVE":
+            LOGGER.warning("STARTUP_DEGRADED runner_running=%s data_observation_ready=%s trading_ready=%s live_orders_armed=%s", runner_running, bool(getattr(ctx, "data_observation_ready", False)), bool(getattr(ctx, "trading_ready", False)), bool(getattr(ctx, "live_orders_armed", False)), extra={"event":"STARTUP_DEGRADED","runner_running":runner_running,"data_observation_ready":bool(getattr(ctx, "data_observation_ready", False)),"trading_ready":bool(getattr(ctx, "trading_ready", False)),"live_orders_armed":bool(getattr(ctx, "live_orders_armed", False))})
+        elif bool(getattr(ctx, "data_observation_ready", False)):
+            LOGGER.info("DATA_PIPELINE_OBSERVATION_READY mode=%s runner_running=%s", mode, runner_running, extra={"event":"DATA_PIPELINE_OBSERVATION_READY","mode":mode,"runner_running":runner_running})
 
 
 async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> None:

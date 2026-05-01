@@ -44,6 +44,7 @@ from nifty_scalper_bot.utils.market_hours import (
     stale_threshold_for_symbol,
 )
 from nifty_scalper_bot.utils.metrics import Counter
+from nifty_scalper_bot.utils.serialization import to_json_safe
 from nifty_scalper_bot.utils.symbols import enforce_canonical, normalize_symbol
 
 # NOTE: resolver is attached at runtime by app.py (ctx.market_data_manager._resolver).
@@ -638,7 +639,7 @@ class MarketDataManager:
                 "low": float(bar.get("low", 0.0) or 0.0),
                 "close": float(bar.get("close", 0.0) or 0.0),
                 "volume": int(float(bar.get("volume", 0) or 0)),
-                "timestamp": ts,
+                "timestamp": ts.isoformat(),
                 "source": "historical",
             }
             self._history[symbol].append(dict(payload))
@@ -4351,9 +4352,9 @@ class MarketDataManager:
         if price <= 0:
             return None
 
-        ts_raw = raw.get("timestamp") or raw.get("exchange_timestamp") or raw.get("received_at")
+        ts_raw = raw.get("exchange_timestamp") or raw.get("timestamp") or raw.get("received_at")
         ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
-        if pd.isna(ts):
+        if pd.isna(ts) or ts.year < 2020:
             ts = pd.Timestamp.utcnow()
 
         return {
@@ -4363,7 +4364,7 @@ class MarketDataManager:
             "token": token,
             "ltp": price,
             "last_price": price,
-            "timestamp": ts,
+            "timestamp": ts.isoformat(),
             "source": raw.get("source") or "ws",
             "received_at": raw.get("received_at") or time.time(),
         }
@@ -4587,6 +4588,77 @@ class MarketDataManager:
                     "event": "market_data_staleness_metric_error",
                     "symbol": symbol,
                 },
+            )
+
+    def _publish_tick_to_bus_safe(self, tick: dict[str, Any]) -> None:
+        """Publish a normalized tick to MessageBus without ever crashing MDM."""
+        bus = getattr(self, "bus", None) or getattr(self, "_tick_bus", None)
+        if bus is None:
+            log_throttled(
+                self._logger,
+                "mdm_bus_publish_skipped_no_bus",
+                "MDM_BUS_PUBLISH_SKIPPED reason=no_bus symbol=%s" % tick.get("symbol"),
+                interval_sec=30.0,
+                level=logging.DEBUG,
+            )
+            return
+        if not getattr(bus, "running", False):
+            log_throttled(
+                self._logger,
+                "mdm_bus_publish_skipped_bus_not_running",
+                "MDM_BUS_PUBLISH_SKIPPED reason=bus_not_running symbol=%s"
+                % tick.get("symbol"),
+                interval_sec=30.0,
+                level=logging.DEBUG,
+            )
+            return
+        loop = (
+            getattr(self, "_main_loop", None)
+            or getattr(self, "_event_loop", None)
+            or getattr(self, "event_loop", None)
+        )
+        if loop is None or loop.is_closed():
+            log_throttled(
+                self._logger,
+                "mdm_bus_publish_skipped_loop_unavailable",
+                "MDM_BUS_PUBLISH_SKIPPED reason=loop_unavailable symbol=%s"
+                % tick.get("symbol"),
+                interval_sec=30.0,
+                level=logging.WARNING,
+            )
+            return
+        payload = to_json_safe(dict(tick))
+        try:
+            msg = Message(
+                type=MessageType.TICK,
+                data=payload,
+                source="market_data_manager",
+                timestamp=time.time(),
+            )
+            future = asyncio.run_coroutine_threadsafe(bus.publish(msg), loop)
+
+            def _done(fut: Any) -> None:
+                try:
+                    fut.result()
+                except Exception as exc:
+                    log_throttled(
+                        self._logger,
+                        "mdm_bus_publish_failed",
+                        "MDM_BUS_PUBLISH_FAILED symbol=%s error=%r"
+                        % (tick.get("symbol"), exc),
+                        interval_sec=10.0,
+                        level=logging.ERROR,
+                    )
+
+            future.add_done_callback(_done)
+        except Exception as exc:
+            log_throttled(
+                self._logger,
+                "mdm_bus_publish_submit_failed",
+                "MDM_BUS_PUBLISH_SUBMIT_FAILED symbol=%s error=%r"
+                % (tick.get("symbol"), exc),
+                interval_sec=10.0,
+                level=logging.ERROR,
             )
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
@@ -5582,14 +5654,21 @@ class MarketDataManager:
             bid = _coerce_positive_float(payload.get("bid"))
             ask = _coerce_positive_float(payload.get("ask"))
 
-            ts = float(time.time())
+            now_ts = pd.Timestamp.utcnow().isoformat()
             tick = {
                 "symbol": symbol,
                 "ltp": ltp,
+                "last_price": ltp,
                 "bid": bid,
                 "ask": ask,
-                "timestamp": ts,
+                "timestamp": now_ts,
+                "received_at": time.time(),
+                "source": "rest",
             }
+            token = payload.get("instrument_token") or payload.get("token")
+            if token is not None:
+                tick["instrument_token"] = int(token)
+                tick["token"] = int(token)
 
             if ltp is not None:
                 self._emit_tick(symbol, tick, source="rest")
