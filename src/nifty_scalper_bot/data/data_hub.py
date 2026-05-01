@@ -199,12 +199,15 @@ class DataHub:
         if self._store is None:
             return
         with self._lock:
-            quotes = {k: dict(v) for k, v in self._quotes.items()}
-            orders = {k: dict(v) for k, v in self._orders.items()}
-            positions = {str(k): dict(v) for k, v in self._positions.items()}
-        self._store.save_snapshot("quotes", quotes)
-        self._store.save_snapshot("orders", orders)
-        self._store.save_snapshot("positions", positions)
+            quotes = to_json_safe({k: dict(v) for k, v in self._quotes.items()})
+            orders = to_json_safe({k: dict(v) for k, v in self._orders.items()})
+            positions = to_json_safe({str(k): dict(v) for k, v in self._positions.items()})
+        try:
+            self._store.save_snapshot("quotes", quotes)
+            self._store.save_snapshot("orders", orders)
+            self._store.save_snapshot("positions", positions)
+        except Exception as exc:
+            LOGGER.warning("DATAHUB_CHECKPOINT_FAILED error=%r", exc)
 
     def reset_warmup(self) -> None:
         self._start_mono = self._monotonic()
@@ -383,7 +386,7 @@ class DataHub:
         if seed:
             payload["seed"] = True
         if "timestamp" not in payload:
-            payload["timestamp"] = self._now()
+            payload["timestamp"] = pd.Timestamp.utcnow().isoformat()
         self._ingest_tick_impl(payload)
 
     def _normalize_tick_symbol(self, tick: Tick) -> str:
@@ -393,12 +396,23 @@ class DataHub:
         return self._canonical_quote_symbol(raw_symbol)
 
     def _timestamp_ms(self, timestamp: Any) -> float:
-        if isinstance(timestamp, datetime):
-            return timestamp.timestamp() * 1000.0
-        if isinstance(timestamp, (int, float)):
-            value = float(timestamp)
-            return value * 1000.0 if value < 1e11 else value
-        return self._now() * 1000.0
+        if timestamp is None or timestamp == "":
+            return self._now() * 1000.0
+        try:
+            if isinstance(timestamp, datetime):
+                ts = pd.Timestamp(timestamp)
+            elif isinstance(timestamp, (int, float)):
+                value = float(timestamp)
+                if value <= 0:
+                    return self._now() * 1000.0
+                return value * 1000.0 if value < 1e11 else value
+            else:
+                ts = pd.to_datetime(timestamp, utc=True, errors="coerce")
+            if pd.isna(ts) or ts.year < 2020:
+                return self._now() * 1000.0
+            return float(pd.Timestamp(ts).timestamp() * 1000.0)
+        except Exception:
+            return self._now() * 1000.0
 
     def _tick_price(self, tick: dict[str, Any]) -> float | None:
         for key in ("ltp", "last_price", "price", "close"):
@@ -552,6 +566,7 @@ class DataHub:
         )
 
     def _ingest_tick_impl(self, tick: Tick) -> None:
+        tick = to_json_safe(dict(tick))
         if not tick:
             return
         symbol = self._normalize_tick_symbol(tick)
@@ -583,7 +598,7 @@ class DataHub:
             if source == "poll" and (now_ms - last_ws) < self._poll_block_ms:
                 return
 
-            canonical_tick = dict(tick)
+            canonical_tick = to_json_safe(dict(tick))
             canonical_tick["symbol"] = symbol
             canonical_tick["source"] = source
             canonical_tick["timestamp"] = ts_ms
@@ -639,6 +654,7 @@ class DataHub:
             if not isinstance(payload, dict):
                 LOGGER.warning("DATAHUB_TICK_DROPPED reason=payload_not_dict")
                 return
+            payload = to_json_safe(dict(payload))
 
             symbol = str(payload.get("symbol") or "").strip()
             token = payload.get("instrument_token") or payload.get("token")
@@ -668,7 +684,7 @@ class DataHub:
             now = pd.Timestamp.utcnow()
             age_s = max(0.0, (now - tick_ts).total_seconds())
 
-            normalized = dict(payload)
+            normalized = to_json_safe(dict(payload))
             normalized["symbol"] = symbol
             normalized["instrument_token"] = token
             normalized["token"] = token

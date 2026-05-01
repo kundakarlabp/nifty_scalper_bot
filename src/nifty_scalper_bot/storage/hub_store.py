@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.serialization import to_json_safe
 
 log = get_logger(__name__)
 
@@ -71,7 +72,7 @@ class HubStore:
     def append_wal(self, kind: str, entry_key: str, payload: MappingPayload) -> None:
         """Append an entry to the write-ahead log."""
 
-        encoded = json.dumps(payload)
+        encoded = json.dumps(to_json_safe(payload), ensure_ascii=False, default=str)
         with self._lock:
             self._conn.execute(
                 "INSERT INTO wal(ts, kind, entry_key, payload) VALUES(?,?,?,?)",
@@ -107,7 +108,7 @@ class HubStore:
     def save_snapshot(self, kind: str, payload: MappingPayload) -> None:
         """Persist the latest snapshot for *kind*."""
 
-        encoded = json.dumps(payload)
+        encoded = json.dumps(to_json_safe(payload), ensure_ascii=False, default=str)
         with self._lock:
             self._conn.execute(
                 """
