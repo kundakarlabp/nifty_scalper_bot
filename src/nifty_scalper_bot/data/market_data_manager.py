@@ -4699,7 +4699,12 @@ class MarketDataManager:
             except Exception:
                 pass
         callbacks: list[TickCallback]
-        tick_payload = dict(tick)
+        tick_payload = to_json_safe(dict(tick))
+        ts_payload = pd.to_datetime(tick_payload.get("timestamp"), utc=True, errors="coerce")
+        if pd.isna(ts_payload) or ts_payload.year < 2020:
+            ts_payload = pd.Timestamp.utcnow()
+        tick_payload["timestamp"] = ts_payload.isoformat()
+        tick_payload["received_at"] = float(tick_payload.get("received_at") or time.time())
         with self._lock:
             self._last_tick_source[symbol] = source
             callbacks = list(self._subscribers.get(symbol, ()))
@@ -4850,8 +4855,13 @@ class MarketDataManager:
                 else:
                     callback(dict(tick_payload))
             except Exception as exc:
-                self._logger.error(
-                    "Tick callback failed", extra={"symbol": symbol, "error": str(exc)}
+                log_throttled(
+                    self._logger,
+                    f"tick_callback_failed_{symbol}",
+                    "Tick callback failed symbol=%s error=%r" % (symbol, exc),
+                    interval_sec=10.0,
+                    level=logging.ERROR,
+                    exc_info=True,
                 )
         try:
             delivered = subscriber_count > 0

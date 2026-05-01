@@ -62,7 +62,15 @@ class CandleEngine:
         minute = timestamp.floor('1min')
 
         if self._last_tick_ts is not None and timestamp < self._last_tick_ts:
-            raise DataIntegrityError('timestamps must be monotonic')
+            LOGGER.debug(
+                'tick_out_of_order',
+                extra={
+                    'event': 'tick_out_of_order',
+                    'tick_ts': timestamp.isoformat(),
+                    'last_ts': self._last_tick_ts.isoformat(),
+                },
+            )
+            return None
 
         finalized: dict[str, Any] | None = None
         if self.current_candle is None:
@@ -71,7 +79,15 @@ class CandleEngine:
         else:
             current_minute = pd.Timestamp(self.current_candle['timestamp'])
             if minute < current_minute:
-                raise DataIntegrityError('out-of-order minute bucket')
+                LOGGER.debug(
+                    'tick_out_of_order',
+                    extra={
+                        'event': 'tick_out_of_order',
+                        'tick_minute': minute.isoformat(),
+                        'current_minute': current_minute.isoformat(),
+                    },
+                )
+                return None
             if minute > current_minute:
                 finalized = self._finalize_current_candle()
                 self.current_candle = self._start_candle(payload, minute)
@@ -110,7 +126,13 @@ class CandleEngine:
             return None
         candle = dict(self.current_candle)
         _validate_ohlc_row(candle)
-        frame = pd.concat([self.df, pd.DataFrame([candle])], ignore_index=True)
+        new_row = pd.DataFrame([candle]).dropna(how='all')
+        if new_row.empty:
+            return None
+        if self.df.empty:
+            frame = new_row
+        else:
+            frame = pd.concat([self.df, new_row], ignore_index=True)
         frame = sanitize(frame).tail(self.max_bars).reset_index(drop=True)
         if frame['timestamp'].duplicated().any():
             raise DataIntegrityError('duplicate candle timestamps')
