@@ -276,12 +276,47 @@ def _emit_option_symbol_pipeline_status(
         try:
             canonical = dh._canonical_quote_symbol(symbol)
             token_key = int(token) if token is not None else None
+            debug_status = None
+            if hasattr(dh, "debug_subscription_status"):
+                try:
+                    debug_status = dh.debug_subscription_status(symbol, token)
+                except Exception:
+                    debug_status = None
             symbol_callbacks = bool(getattr(dh, "_tick_subscribers", {}).get(canonical))
-            token_callbacks = (
-                token_key is not None
-                and bool(getattr(dh, "_tick_subscribers_by_token", {}).get(token_key))
+            token_callbacks = token_key is not None and bool(
+                getattr(dh, "_tick_subscribers_by_token", {}).get(token_key)
             )
-            datahub_callback_registered = symbol_callbacks or token_callbacks
+            if debug_status:
+                datahub_callback_registered = bool(
+                    debug_status["symbol_callbacks"] > 0
+                    or debug_status["token_callbacks"] > 0
+                )
+                datahub_token_callback_registered = bool(
+                    debug_status["token_callbacks"] > 0
+                )
+                datahub_quote_present = bool(
+                    debug_status["quote_present"]
+                    or debug_status["token_quote_present"]
+                )
+                datahub_token_quote_present = bool(
+                    debug_status["token_quote_present"]
+                )
+            else:
+                datahub_callback_registered = symbol_callbacks or token_callbacks
+                datahub_quote_present = (
+                    dh.get_quote(symbol, allow_pull=False) is not None
+                    or (
+                        token_key is not None
+                        and getattr(dh, "get_tick_by_token", lambda _t: None)(token_key)
+                        is not None
+                    )
+                )
+                datahub_token_callback_registered = token_callbacks
+                datahub_token_quote_present = (
+                    token_key is not None
+                    and getattr(dh, "get_tick_by_token", lambda _t: None)(token_key)
+                    is not None
+                )
             datahub_mdm_delegate_subscribed = canonical in getattr(
                 dh, "_mdm_subscribed_symbols", set()
             )
@@ -294,20 +329,6 @@ def _emit_option_symbol_pipeline_status(
                     and f"TOKEN:{int(token)}"
                     in getattr(ctx, "datahub_runner_subscriptions", set())
                 )
-            )
-            datahub_quote_present = (
-                dh.get_quote(symbol, allow_pull=False) is not None
-                or (
-                    token_key is not None
-                    and getattr(dh, "get_tick_by_token", lambda _t: None)(token_key)
-                    is not None
-                )
-            )
-            datahub_token_callback_registered = token_callbacks
-            datahub_token_quote_present = (
-                token_key is not None
-                and getattr(dh, "get_tick_by_token", lambda _t: None)(token_key)
-                is not None
             )
         except Exception:
             pass
@@ -376,6 +397,7 @@ def _emit_option_symbol_pipeline_status(
             "datahub_runner_subscription_registered": datahub_runner_subscription_registered,
             "datahub_token_callback_registered": datahub_token_callback_registered,
             "datahub_token_quote_present": datahub_token_quote_present,
+            "datahub_debug_status": debug_status if "debug_status" in locals() else None,
             "message_bus_tick_owner": getattr(ctx, "message_bus_tick_owner", "data_hub"),
             "mdm_tracked": mdm_tracked,
             "mdm_has_subscriber": mdm_has_subscriber,
