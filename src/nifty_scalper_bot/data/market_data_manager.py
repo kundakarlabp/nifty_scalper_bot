@@ -4543,7 +4543,12 @@ class MarketDataManager:
             self._tick_counter += 1
         bus = getattr(self, "bus", None)
         loop = self._main_loop
-        if bus is not None and loop is not None and loop.is_running():
+        if (
+            bus is not None
+            and getattr(bus, "running", False)
+            and loop is not None
+            and loop.is_running()
+        ):
             try:
                 msg = Message(
                     type=MessageType.TICK,
@@ -4562,6 +4567,15 @@ class MarketDataManager:
                 )
             except Exception as exc:
                 self._logger.debug("MDM bus publish skipped: %s", exc)
+        else:
+            now = time.monotonic()
+            last_log = float(getattr(self, "_last_bus_publish_skip_log_ts", 0.0) or 0.0)
+            if now - last_log >= 30.0:
+                self._logger.debug(
+                    "MDM_BUS_PUBLISH_SKIPPED reason=bus_not_running symbol=%s",
+                    symbol,
+                )
+                self._last_bus_publish_skip_log_ts = now
         subscriber_count = len(callbacks)
         _price_val = tick.get("ltp") or tick.get("last_price") or tick.get("price")
         _token_val = tick.get("instrument_token") or tick.get("token")

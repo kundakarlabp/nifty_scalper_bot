@@ -64,6 +64,9 @@ class MessageBus:
         ] = {msg_type: [] for msg_type in MessageType}
         self._running = False
         self._tasks: list[asyncio.Task] = []
+        self._subscriber_ids: dict[MessageType, set[str]] = {
+            msg_type: set() for msg_type in MessageType
+        }
         self._dropped_counts: dict[MessageType, int] = defaultdict(int)
         LOGGER.info(
             "MessageBus initialized with max_queue_size=%s", self._max_queue_size
@@ -80,16 +83,44 @@ class MessageBus:
         except asyncio.QueueFull:
             self._dropped_counts[message.type] += 1
             raise RuntimeError(f"Queue full for {message.type}")
+    def subscribe_once(
+        self,
+        message_type: MessageType,
+        handler: Callable[[Message], Awaitable[None]],
+        *,
+        subscriber_id: str | None = None,
+    ) -> bool:
+        """Subscribe async handler once. Args: message_type/handler/subscriber_id. Returns: bool. Raises: TypeError."""
+        if not asyncio.iscoroutinefunction(handler):
+            raise TypeError(f"Handler for {message_type.value} must be an async function.")
+
+        sid = subscriber_id or (
+            f"{getattr(handler, '__module__', '')}."
+            f"{getattr(handler, '__qualname__', repr(handler))}"
+        )
+        if sid in self._subscriber_ids[message_type]:
+            LOGGER.info(
+                "MESSAGE_BUS_SUBSCRIPTION_ALREADY_EXISTS message_type=%s subscriber_id=%s",
+                message_type.value,
+                sid,
+            )
+            return False
+
+        self.subscribers[message_type].append(handler)
+        self._subscriber_ids[message_type].add(sid)
+        LOGGER.info("MESSAGE_BUS_SUBSCRIBED message_type=%s subscriber_id=%s", message_type.value, sid)
+        return True
+
     def subscribe(
         self, message_type: MessageType, handler: Callable[[Message], Awaitable[None]]
     ) -> None:
         """Subscribe an async handler function to a message type."""
-        if not asyncio.iscoroutinefunction(handler):
-            raise TypeError(
-                f"Handler for {message_type.value} must be an async function."
-            )
-        self.subscribers[message_type].append(handler)
-        LOGGER.info("Component subscribed to %s", message_type.value)
+        self.subscribe_once(message_type, handler)
+
+    @property
+    def running(self) -> bool:
+        """Args: none. Returns: running flag. Raises: none."""
+        return self._running
 
     def queue_diagnostics(self) -> dict[str, dict[str, int]]:
         """Return queue depth and drop counters per message type."""
@@ -143,12 +174,13 @@ class MessageBus:
                     exc_info=exc,
                 )
 
-    def start(self) -> None:
-        """Start all dispatch loops."""
-        if not any(self.subscribers.values()):
-            raise RuntimeError("MessageBus started without subscribers")
+    def start(self) -> bool:
+        """Start all dispatch loops. Args: none. Returns: started. Raises: none."""
         if self._running:
-            return
+            return True
+        if not any(self.subscribers.values()):
+            LOGGER.warning("MESSAGE_BUS_START_SKIPPED reason=no_subscribers")
+            return False
         self._running = True
 
         for msg_type in MessageType:
@@ -157,6 +189,7 @@ class MessageBus:
                 self._tasks.append(task)
 
         LOGGER.info("Message bus started with %d active dispatchers.", len(self._tasks))
+        return True
 
     async def stop(self) -> None:
         """Stop all dispatch loops."""

@@ -794,20 +794,6 @@ class StrategyRunner:
 
 
 
-    async def on_data(self, message):
-        token = message.data.get("token")
-        if not token:
-            return
-
-        if not self._data_hub or not self._data_hub.is_ready(token):
-            return
-
-        candles, indicators = self._data_hub.get_data(token)
-        if candles is None:
-            return
-
-        await self._process_token(token, candles, indicators)
-
     async def _process_token(self, token, candles, indicators):
         """Process token candles into signals. Args: token, candles, indicators. Returns: None. Raises: none."""
         del indicators
