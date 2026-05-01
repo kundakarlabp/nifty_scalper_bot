@@ -662,7 +662,7 @@ class DataHub:
             )
 
             tick_ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
-            if pd.isna(tick_ts):
+            if pd.isna(tick_ts) or tick_ts.year < 2020:
                 tick_ts = pd.Timestamp.utcnow()
 
             now = pd.Timestamp.utcnow()
