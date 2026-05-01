@@ -5778,6 +5778,123 @@ async def _wait_for_live_spot_or_raise(
     return _SYNTHETIC_FALLBACK_SPOT
 
 
+
+
+def _runner_is_running(runner: Any) -> bool:
+    """Inspect runner state robustly. Args: runner. Returns: running flag. Raises: none."""
+
+    try:
+        is_running_attr = getattr(runner, "is_running", None)
+        if callable(is_running_attr):
+            return bool(is_running_attr())
+        if is_running_attr is not None:
+            return bool(is_running_attr)
+    except Exception:
+        pass
+
+    try:
+        status = runner.get_status()
+        if isinstance(status, Mapping):
+            return bool(status.get("running"))
+    except Exception:
+        pass
+
+    return bool(getattr(runner, "_running", False))
+
+
+def _coerce_ohlc_row(row: Any) -> dict[str, Any] | None:
+    """Normalize OHLC row payload. Args: row. Returns: normalized dict or None. Raises: none."""
+
+    if row is None:
+        return None
+    if isinstance(row, Mapping):
+        ts = row.get("date") or row.get("timestamp") or row.get("time")
+        o = row.get("open")
+        h = row.get("high")
+        l = row.get("low")
+        c = row.get("close")
+        v = row.get("volume", 0)
+    elif isinstance(row, (list, tuple)) and len(row) >= 5:
+        ts, o, h, l, c = row[0], row[1], row[2], row[3], row[4]
+        v = row[5] if len(row) >= 6 else 0
+    else:
+        return None
+    if ts is None or o is None or h is None or l is None or c is None:
+        return None
+    try:
+        if isinstance(ts, str):
+            parsed_ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        elif isinstance(ts, datetime):
+            parsed_ts = ts
+        else:
+            parsed_ts = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        if parsed_ts.tzinfo is None:
+            parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
+        return {
+            "timestamp": parsed_ts,
+            "open": float(o),
+            "high": float(h),
+            "low": float(l),
+            "close": float(c),
+            "volume": int(float(v or 0)),
+        }
+    except Exception:
+        return None
+
+
+def _wire_and_start_message_bus(ctx: BotContext) -> bool:
+    """Wire tick subscriptions and start bus idempotently. Args: ctx. Returns: success. Raises: none."""
+
+    bus = getattr(ctx, "message_bus", None)
+    data_hub = getattr(ctx, "data_hub", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    mdm = getattr(ctx, "market_data_manager", None)
+    if bus is None:
+        LOGGER.warning("MESSAGE_BUS_START_SKIPPED reason=no_bus")
+        return False
+    if data_hub is not None:
+        data_hub.bus = bus
+    if mdm is not None:
+        mdm.bus = bus
+    if not bool(getattr(ctx, "_message_bus_tick_subscribed", False)):
+        if data_hub is not None:
+            bus.subscribe(MessageType.TICK, data_hub.ingest_tick_from_bus)
+            LOGGER.info("MESSAGE_BUS_SUBSCRIPTION component=data_hub message_type=tick callback_name=ingest_tick_from_bus", extra={"event":"MESSAGE_BUS_SUBSCRIPTION","component":"data_hub","message_type":"tick","callback_name":"ingest_tick_from_bus"})
+        if runner is not None:
+            bus.subscribe(MessageType.TICK, runner.on_data)
+            LOGGER.info("MESSAGE_BUS_SUBSCRIPTION component=strategy_runner message_type=tick callback_name=on_data", extra={"event":"MESSAGE_BUS_SUBSCRIPTION","component":"strategy_runner","message_type":"tick","callback_name":"on_data"})
+        ctx._message_bus_tick_subscribed = True
+    if not bool(getattr(bus, "running", False)):
+        LOGGER.info("Starting MessageBus Dispatchers before WebSocket")
+        bus.start()
+        LOGGER.info("MESSAGE_BUS_STARTED active_dispatchers=%s", len(getattr(bus, "_tasks", []) or []), extra={"event":"MESSAGE_BUS_STARTED","active_dispatchers":len(getattr(bus, "_tasks", []) or [])})
+    ctx.message_bus_running = True
+    return True
+
+
+async def _replay_latest_mdm_ticks_to_bus(ctx: BotContext, *, reason: str) -> int:
+    """Replay latest cached MDM ticks into bus. Args: ctx/reason. Returns: replay count. Raises: none."""
+
+    mdm = getattr(ctx, "market_data_manager", None)
+    bus = getattr(ctx, "message_bus", None)
+    if mdm is None or bus is None:
+        return 0
+    latest_ticks = getattr(mdm, "_latest_ticks", {}) or {}
+    replayed = 0
+    for symbol, tick in list(latest_ticks.items()):
+        if not isinstance(tick, Mapping):
+            continue
+        try:
+            msg = Message(type=MessageType.TICK,timestamp=datetime.now(timezone.utc),data={**dict(tick),"symbol":symbol,"source":"mdm_replay","trace_id":f"replay-{symbol}-{time_module.monotonic_ns()}"},source="market_data_manager_replay")
+            result = bus.publish(msg)
+            if inspect.isawaitable(result):
+                await result
+            replayed += 1
+        except Exception:
+            LOGGER.exception("MDM_CACHED_TICK_REPLAY_FAILED symbol=%s", symbol)
+    LOGGER.info("MDM_CACHED_TICKS_REPLAYED count=%d reason=%s", replayed, reason, extra={"event":"MDM_CACHED_TICKS_REPLAYED","count":replayed,"reason":reason})
+    return replayed
+
 async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> None:
     """Start strategy runner idempotently. Args: ctx/reason. Returns: none. Raises: none."""
 
@@ -5790,17 +5907,25 @@ async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> No
     )
     if existing_task is not None and not existing_task.done():
         return
-    if bool(getattr(runner, "is_running", False)):
+    if _runner_is_running(runner):
+        LOGGER.info("STRATEGY_RUNNER_START_SKIPPED reason=already_running")
         return
+    LOGGER.info(
+        "STRATEGY_RUNNER_START_DIAG reason=%s active_symbols=%d ready=%s runner_state=%s running=%s",
+        reason,
+        len(getattr(runner, "_active_symbols", set()) or []),
+        getattr(runner, "ready", None),
+        getattr(runner, "_runner_state", None),
+        _runner_is_running(runner),
+        extra={"event":"STRATEGY_RUNNER_START_DIAG","reason":reason,"active_symbols":len(getattr(runner, "_active_symbols", set()) or []),"ready":getattr(runner, "ready", None),"runner_state":str(getattr(runner, "_runner_state", None)),"running":_runner_is_running(runner)},
+    )
     if hasattr(runner, "start"):
         result = runner.start()
         if inspect.isawaitable(result):
             await result
-        LOGGER.info(
-            "STRATEGY_RUNNER_STARTED reason=%s",
-            reason,
-            extra={"event": "STRATEGY_RUNNER_STARTED", "reason": reason},
-        )
+        LOGGER.info("STRATEGY_RUNNER_STARTED reason=%s", reason, extra={"event": "STRATEGY_RUNNER_STARTED", "reason": reason})
+        if not _runner_is_running(runner):
+            LOGGER.warning("STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING reason=%s active_symbols=%d runner_state=%s", reason, len(getattr(runner, "_active_symbols", set()) or []), getattr(runner, "_runner_state", None), extra={"event":"STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING","reason":reason,"active_symbols":len(getattr(runner, "_active_symbols", set()) or []),"runner_state":str(getattr(runner, "_runner_state", None))})
         return
     if hasattr(runner, "run"):
         task = asyncio.create_task(runner.run())
@@ -6013,22 +6138,10 @@ async def _build_and_hydrate_live_basket_from_spot(
         except Exception:  # noqa: BLE001
             continue
         for row in list(records or [])[-hydration_max_bars:]:
-            ts = row.get("date") or row.get("timestamp")
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            if isinstance(ts, datetime) and ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if not isinstance(ts, datetime):
+            coerced = _coerce_ohlc_row(row)
+            if coerced is None:
                 continue
-            bar_data = {
-                "symbol": symbol,
-                "open": float(row.get("open") or 0.0),
-                "high": float(row.get("high") or 0.0),
-                "low": float(row.get("low") or 0.0),
-                "close": float(row.get("close") or 0.0),
-                "volume": int(row.get("volume") or 0),
-                "timestamp": ts,
-            }
+            bar_data = {"symbol": symbol, **coerced}
             ctx.market_data_manager.ingest_historical_bar(bar_data)
             runner = getattr(ctx, "strategy_runner", None)
             if runner is not None and hasattr(runner, "ingest_historical_bar"):
@@ -6145,6 +6258,8 @@ async def startup_sequence(ctx: BotContext) -> None:
         ctx.market_data_manager, "set_event_loop"
     ):
         ctx.market_data_manager.set_event_loop(loop)
+
+    _wire_and_start_message_bus(ctx)
 
     # ── START MDM (CRITICAL) ─────────────────────────────────────────────────
     # MDM.start(defer_ws=True) launches the tick consumer, health monitor,
@@ -6590,10 +6705,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                 spot_ltp=float(spot_ltp),
                 configured_mode=configured_mode,
             )
-            await _ensure_strategy_runner_started(
-                ctx,
-                reason="startup_basket_hydration_success",
-            )
             targets = list(dict.fromkeys(basket["symbols"]))
 
             LOGGER.info(f"⏳ Hydrating {len(targets)} symbols: {targets}")
@@ -6751,44 +6862,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                 runner_ingested = 0
                 for row in records:
                     try:
-                        if isinstance(row, dict):
-                            ts = row.get("date") or row.get("timestamp")
-                            o = row.get("open")
-                            h = row.get("high")
-                            l = row.get("low")
-                            c_p = row.get("close")
-                            v = row.get("volume", 0)
-                        elif isinstance(row, (list, tuple)) and len(row) >= 6:
-                            ts, o, h, l, c_p, v = (
-                                row[0],
-                                row[1],
-                                row[2],
-                                row[3],
-                                row[4],
-                                row[5],
-                            )
-                        else:
+                        coerced = _coerce_ohlc_row(row)
+                        if coerced is None:
                             continue
-
-                        if isinstance(ts, str):
-                            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        elif not isinstance(ts, datetime):
-                            ts = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-
-                        if ts.tzinfo is None:
-                            ts = ts.replace(tzinfo=timezone.utc)
-                        if not all(x is not None for x in (o, h, l, c_p)):
-                            continue
-
-                        bar_data = {
-                            "symbol": sym,
-                            "open": float(o),
-                            "high": float(h),
-                            "low": float(l),
-                            "close": float(c_p),
-                            "volume": int(v or 0),
-                            "timestamp": ts,
-                        }
+                        bar_data = {"symbol": sym, **coerced}
                         if ctx.market_data_manager is not None:
                             ctx.market_data_manager.ingest_historical_bar(bar_data)
                         if (
@@ -6937,6 +7014,22 @@ async def startup_sequence(ctx: BotContext) -> None:
             if runner is not None:
                 if hasattr(runner, "mark_ready"):
                     runner.mark_ready(readiness_symbols)
+            mode = str(
+                getattr(ctx, "effective_mode", None)
+                or getattr(ctx.settings, "execution_mode", None)
+                or os.getenv("EXECUTION_MODE", "PAPER")
+            ).upper()
+            evaluation_allowed = mode in {"PAPER", "SHADOW", "LIVE"}
+            if evaluation_allowed and readiness_symbols:
+                _wire_and_start_message_bus(ctx)
+                await _ensure_strategy_runner_started(ctx, reason="startup_mark_ready_complete")
+                await _replay_latest_mdm_ticks_to_bus(ctx, reason="post_runner_start")
+                ctx.data_observation_ready = True
+                if mode in {"PAPER", "SHADOW"}:
+                    ctx.live_orders_armed = False
+                    ctx.trading_ready = False
+                    ctx.live_block_reason = "paper_mode"
+                    LOGGER.info("PAPER_RUNNER_STARTED symbol_count=%d live_orders_armed=%s", len(readiness_symbols), False, extra={"event":"PAPER_RUNNER_STARTED","symbol_count":len(readiness_symbols),"live_orders_armed":False,"mode":mode})
                     LOGGER.info(
                         "RUNNER_READY_MARKED symbol_count=%d initial_ready_symbols=%s skipped_symbols=%s skipped_reasons=%s min_required_bars=%d",
                         len(readiness_symbols),
@@ -7931,48 +8024,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                 # "started with 0 active dispatchers" — signals never execute.
                 
 
-                # 🚨 CRITICAL: Start MessageBus AFTER subscribers are registered 🚨
-                if ctx.message_bus and ctx.data_hub and ctx.strategy_runner:
-                    ctx.data_hub.bus = ctx.message_bus
-                    if getattr(ctx, "market_data_manager", None):
-                        ctx.market_data_manager.bus = ctx.message_bus
-                    ctx.message_bus.subscribe(
-                        MessageType.TICK, ctx.data_hub.ingest_tick_from_bus
-                    )
-                    LOGGER.info(
-                        "MESSAGE_BUS_SUBSCRIPTION component=%s message_type=%s callback_name=%s",
-                        "data_hub",
-                        MessageType.TICK.value,
-                        "ingest_tick_from_bus",
-                        extra={
-                            "event": "MESSAGE_BUS_SUBSCRIPTION",
-                            "component": "data_hub",
-                            "message_type": MessageType.TICK.value,
-                            "callback_name": "ingest_tick_from_bus",
-                        },
-                    )
-                    # Runner must consume live tick events, not DATA_READY.
-                    ctx.message_bus.subscribe(MessageType.TICK, ctx.strategy_runner.on_data)
-                    LOGGER.info(
-                        "MESSAGE_BUS_SUBSCRIPTION component=%s message_type=%s callback_name=%s",
-                        "strategy_runner",
-                        MessageType.TICK.value,
-                        "on_data",
-                        extra={
-                            "event": "MESSAGE_BUS_SUBSCRIPTION",
-                            "component": "strategy_runner",
-                            "message_type": MessageType.TICK.value,
-                            "callback_name": "on_data",
-                        },
-                    )
-
-                if ctx.message_bus:
-                    LOGGER.info("🚀 Starting MessageBus Dispatchers...")
-                    ctx.message_bus.start()
-                    LOGGER.info(
-                        "✅ MessageBus running with %d active dispatchers",
-                        len(ctx.message_bus._tasks),
-                    )
+                if not getattr(ctx, "_message_bus_tick_subscribed", False):
+                    _wire_and_start_message_bus(ctx)
 
                 # MDM internals are started once near startup entry with
                 # defer_ws=True; websocket bring-up is handled explicitly.
@@ -8128,6 +8181,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "reason": quote_error or "unknown",
                                     },
                                 )
+                            if mode in {"PAPER", "SHADOW"}:
+                                ctx.live_orders_armed = False
+                                ctx.data_observation_ready = True
+                                if ctx.strategy_runner is not None:
+                                    status = ctx.strategy_runner.get_status()
+                                    if (not bool(status.get("running"))) and readiness_symbols:
+                                        await _ensure_strategy_runner_started(ctx, reason="paper_readiness_recovery")
+                                LOGGER.info("PAPER_EVALUATION_READY hard_ready=%s spot_ready=%s runner_running=%s", hard_ready, spot_ready, bool(ctx.strategy_runner.get_status().get("running")) if ctx.strategy_runner else False, extra={"event":"PAPER_EVALUATION_READY","hard_ready":bool(hard_ready),"spot_ready":bool(spot_ready),"live_orders_armed":False})
                             if hard_ready:
                                 LOGGER.info(
                                     "DATA_PIPELINE_READY hard_ready=%s spot_ready=%s symbols_ready=%s",
@@ -8474,12 +8535,21 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error("Failed to schedule EOD flatten: %s", e)
 
-    if startup_trade_ready:
-        LOGGER.info("✅ Startup sequence fully complete.")
+    runner_running = False
+    try:
+        runner_status = ctx.strategy_runner.get_status() if ctx.strategy_runner else {}
+        runner_running = bool(runner_status.get("running"))
+    except Exception:
+        runner_running = bool(getattr(ctx.strategy_runner, "_running", False)) if ctx.strategy_runner else False
+    mode = str(getattr(ctx, "effective_mode", None) or getattr(ctx.settings, "execution_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
+    paper_eval_ready = mode in {"PAPER", "SHADOW"} and bool(getattr(ctx, "data_observation_ready", False)) and runner_running
+    live_ready = mode == "LIVE" and bool(getattr(ctx, "trading_ready", False)) and bool(getattr(ctx, "live_orders_armed", False)) and runner_running
+    if paper_eval_ready:
+        LOGGER.info("STARTUP_COMPLETE_OBSERVATION_READY mode=%s runner_running=%s live_orders_armed=%s", mode, runner_running, bool(getattr(ctx, "live_orders_armed", False)), extra={"event":"STARTUP_COMPLETE_OBSERVATION_READY","mode":mode,"runner_running":runner_running,"live_orders_armed":bool(getattr(ctx, "live_orders_armed", False))})
+    elif live_ready:
+        LOGGER.info("STARTUP_COMPLETE_LIVE_READY mode=%s runner_running=%s", mode, runner_running, extra={"event":"STARTUP_COMPLETE_LIVE_READY","mode":mode,"runner_running":runner_running})
     else:
-        LOGGER.warning(
-            "Startup completed in degraded mode; trading remains inactive until basket/data readiness recovers"
-        )
+        LOGGER.warning("STARTUP_DEGRADED runner_running=%s data_observation_ready=%s trading_ready=%s live_orders_armed=%s", runner_running, bool(getattr(ctx, "data_observation_ready", False)), bool(getattr(ctx, "trading_ready", False)), bool(getattr(ctx, "live_orders_armed", False)), extra={"event":"STARTUP_DEGRADED","runner_running":runner_running,"data_observation_ready":bool(getattr(ctx, "data_observation_ready", False)),"trading_ready":bool(getattr(ctx, "trading_ready", False)),"live_orders_armed":bool(getattr(ctx, "live_orders_armed", False))})
 
 
 async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> None:
