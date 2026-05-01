@@ -652,10 +652,21 @@ class DataHub:
             normalized["token"] = int(token)
             normalized["ltp"] = float(price)
             normalized["last_price"] = float(price)
-            normalized.setdefault("timestamp", time.time())
+            raw_ts = normalized.get("timestamp")
+            tick_ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+            if pd.isna(tick_ts):
+                LOGGER.warning("DATAHUB_TICK_DROPPED reason=invalid_timestamp symbol=%s", symbol)
+                return
+            now = pd.Timestamp.utcnow()
+            age_s = max(0.0, (now - tick_ts).total_seconds())
+            normalized["timestamp"] = tick_ts.isoformat()
+            normalized["tick_age_s"] = age_s
             self._ingest_tick_impl(normalized)
             LOGGER.debug(
-                "DATAHUB_TICK_INGESTED symbol=%s token=%s", symbol, normalized["token"]
+                "DATAHUB_TICK_INGESTED symbol=%s token=%s",
+                symbol,
+                normalized["token"],
+                extra=to_json_safe({"event": "DATAHUB_TICK_INGESTED", "symbol": symbol, "token": normalized["token"], "timestamp": normalized["timestamp"], "tick_age_s": age_s}),
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("Failure in ingest_tick_from_bus: %s", exc)

@@ -54,3 +54,32 @@ class RiskManager:
             logger.warning('{"event":"RISK_BLOCKED_TRADE","reason":"%s"}', reason)
             return False, reason
         return True, None
+
+
+@dataclass(slots=True)
+class PositionSizingResult:
+    allowed: bool
+    qty: int
+    reason: str
+
+
+class PositionSizer:
+    """Risk-based lot sizing."""
+
+    def size(self, *, equity: float, risk_per_trade_pct: float, entry: float, stop_loss: float, lot_size: int, confidence: float, regime_multiplier: float, max_lots: int, available_margin: float, margin_per_lot: float) -> PositionSizingResult:
+        if entry <= stop_loss:
+            return PositionSizingResult(False, 0, 'invalid_stop_loss')
+        per_unit_risk = entry - stop_loss
+        if per_unit_risk <= 0:
+            return PositionSizingResult(False, 0, 'invalid_per_unit_risk')
+        risk_amount = equity * risk_per_trade_pct * max(0.5, min(1.2, confidence)) * max(0.5, regime_multiplier)
+        raw_qty = int(risk_amount // per_unit_risk)
+        qty = (raw_qty // lot_size) * lot_size
+        cap_lots = 1 if equity <= 30000 and confidence < 0.9 else max_lots
+        qty = min(qty, cap_lots * lot_size)
+        max_margin_qty = int(available_margin // max(margin_per_lot, 1.0)) * lot_size
+        qty = min(qty, max_margin_qty)
+        if qty < lot_size:
+            return PositionSizingResult(False, 0, 'insufficient_qty_or_margin')
+        logger.info('POSITION_SIZE_DECISION equity=%s risk_amount=%s entry=%s sl=%s qty=%s', equity, risk_amount, entry, stop_loss, qty)
+        return PositionSizingResult(True, qty, 'ok')
