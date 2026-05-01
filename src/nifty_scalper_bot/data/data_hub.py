@@ -11,11 +11,14 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from math import sqrt
+
+import pandas as pd
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Optional
 
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.options_math import black_scholes_greeks, implied_volatility
 from nifty_scalper_bot.utils.symbols import canonical
+from nifty_scalper_bot.utils.serialization import to_json_safe
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.core.message_bus import Message
@@ -632,44 +635,71 @@ class DataHub:
 
     async def ingest_tick_from_bus(self, message: "Message") -> None:
         try:
-            from nifty_scalper_bot.core.message_bus import MessageType
-
-            if message.type != MessageType.TICK:
+            payload = getattr(message, "data", message)
+            if not isinstance(payload, dict):
+                LOGGER.warning("DATAHUB_TICK_DROPPED reason=payload_not_dict")
                 return
-            payload = dict(message.data or {})
+
             symbol = str(payload.get("symbol") or "").strip()
             token = payload.get("instrument_token") or payload.get("token")
             price = payload.get("ltp") or payload.get("last_price")
+
             if not symbol or token is None:
                 LOGGER.warning("DATAHUB_TICK_DROPPED reason=missing_symbol_or_token")
                 return
-            if not isinstance(price, (int, float)):
-                LOGGER.warning("DATAHUB_TICK_DROPPED reason=missing_price")
+
+            if price is None:
+                LOGGER.warning("DATAHUB_TICK_DROPPED reason=missing_price symbol=%s", symbol)
                 return
-            normalized = dict(payload)
-            normalized["symbol"] = symbol
-            normalized["instrument_token"] = int(token)
-            normalized["token"] = int(token)
-            normalized["ltp"] = float(price)
-            normalized["last_price"] = float(price)
-            raw_ts = normalized.get("timestamp")
+
+            token = int(token)
+            price = float(price)
+
+            raw_ts = (
+                payload.get("timestamp")
+                or payload.get("exchange_timestamp")
+                or payload.get("received_at")
+            )
+
             tick_ts = pd.to_datetime(raw_ts, utc=True, errors="coerce")
             if pd.isna(tick_ts):
-                LOGGER.warning("DATAHUB_TICK_DROPPED reason=invalid_timestamp symbol=%s", symbol)
-                return
+                tick_ts = pd.Timestamp.utcnow()
+
             now = pd.Timestamp.utcnow()
             age_s = max(0.0, (now - tick_ts).total_seconds())
+
+            normalized = dict(payload)
+            normalized["symbol"] = symbol
+            normalized["instrument_token"] = token
+            normalized["token"] = token
+            normalized["ltp"] = price
+            normalized["last_price"] = price
             normalized["timestamp"] = tick_ts.isoformat()
             normalized["tick_age_s"] = age_s
+
             self._ingest_tick_impl(normalized)
+
             LOGGER.debug(
                 "DATAHUB_TICK_INGESTED symbol=%s token=%s",
                 symbol,
-                normalized["token"],
-                extra=to_json_safe({"event": "DATAHUB_TICK_INGESTED", "symbol": symbol, "token": normalized["token"], "timestamp": normalized["timestamp"], "tick_age_s": age_s}),
+                token,
+                extra=to_json_safe(
+                    {
+                        "event": "DATAHUB_TICK_INGESTED",
+                        "symbol": symbol,
+                        "token": token,
+                        "timestamp": normalized["timestamp"],
+                        "tick_age_s": age_s,
+                    }
+                ),
             )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error("Failure in ingest_tick_from_bus: %s", exc)
+
+        except Exception as exc:
+            LOGGER.exception(
+                "DATAHUB_TICK_INGEST_FAILED error=%s",
+                repr(exc),
+            )
+
 
     def ingest_tick(self, tick: Tick):
         self._ingest_tick_impl(tick)

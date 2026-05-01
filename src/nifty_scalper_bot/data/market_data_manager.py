@@ -4271,9 +4271,27 @@ class MarketDataManager:
             try:
                 self._process_queued_tick(raw)
             except Exception as exc:
-                self._logger.exception(
-                    "MDM_TICK_CONSUMER_ERROR",
-                    extra={"event": "MDM_TICK_CONSUMER_ERROR", "error": str(exc)},
+                preview = {}
+                if isinstance(raw, dict):
+                    preview = {
+                        "keys": sorted(list(raw.keys()))[:30],
+                        "instrument_token": raw.get("instrument_token"),
+                        "token": raw.get("token"),
+                        "symbol": raw.get("symbol"),
+                        "last_price": raw.get("last_price"),
+                        "ltp": raw.get("ltp"),
+                        "timestamp": str(raw.get("timestamp")),
+                        "exchange_timestamp": str(raw.get("exchange_timestamp")),
+                    }
+
+                log_throttled(
+                    self._logger,
+                    "mdm_tick_consumer_error",
+                    "MDM_TICK_CONSUMER_ERROR error=%s raw_preview=%s"
+                    % (repr(exc), preview),
+                    interval_sec=5.0,
+                    level=logging.ERROR,
+                    exc_info=True,
                 )
             finally:
                 try:
@@ -4290,7 +4308,70 @@ class MarketDataManager:
                 break
             self._process_queued_tick(raw)
 
+    def _normalize_ws_tick(self, raw: dict[str, Any]) -> dict[str, Any] | None:
+        """Normalize websocket tick payload. Args: raw. Returns: canonical tick or None. Raises: none."""
+        if not isinstance(raw, dict):
+            return None
+
+        token_raw = raw.get("instrument_token") or raw.get("token")
+        if token_raw is None:
+            return None
+
+        try:
+            token = int(token_raw)
+        except Exception:
+            return None
+
+        with self._lock:
+            symbol = (
+                raw.get("symbol")
+                or self._symbol_by_token.get(token)
+                or self._token_to_symbol.get(token)
+            )
+
+        if not symbol:
+            log_throttled(
+                self._logger,
+                f"mdm_unmapped_token_{token}",
+                "MDM_TICK_DROPPED reason=unmapped_token token=%s" % token,
+                interval_sec=30.0,
+                level=logging.WARNING,
+            )
+            return None
+
+        price_raw = raw.get("last_price") or raw.get("ltp") or raw.get("price")
+        if price_raw is None:
+            return None
+
+        try:
+            price = float(price_raw)
+        except Exception:
+            return None
+
+        if price <= 0:
+            return None
+
+        ts_raw = raw.get("timestamp") or raw.get("exchange_timestamp") or raw.get("received_at")
+        ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
+        if pd.isna(ts):
+            ts = pd.Timestamp.utcnow()
+
+        return {
+            **raw,
+            "symbol": str(symbol),
+            "instrument_token": token,
+            "token": token,
+            "ltp": price,
+            "last_price": price,
+            "timestamp": ts,
+            "source": raw.get("source") or "ws",
+            "received_at": raw.get("received_at") or time.time(),
+        }
+
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
+        raw = self._normalize_ws_tick(raw)
+        if raw is None:
+            return
         enqueued_mono = raw.get("_enqueued_monotonic")
         if isinstance(enqueued_mono, (int, float)):
             self._event_loop_lag_seconds = max(0.0, time.monotonic() - float(enqueued_mono))
@@ -4321,16 +4402,23 @@ class MarketDataManager:
             return
 
         symbol = tick.symbol
-        last_ts = self._last_tick_ts.get(symbol)
-        if last_ts is not None and tick.timestamp <= last_ts:
-            # Non-monotonic tick — skip silently (common during reconnects /
-            # duplicate delivery) rather than crashing the consumer loop.
-            self._logger.debug(
-                "Non-monotonic tick dropped for %s ts=%s last=%s",
-                symbol, tick.timestamp, last_ts,
-            )
+        tick_ts = pd.to_datetime(tick.timestamp, utc=True, errors="coerce")
+        if pd.isna(tick_ts):
             return
-        self._last_tick_ts[symbol] = tick.timestamp
+
+        last_ts = self._last_tick_ts.get(symbol)
+        if last_ts is not None:
+            last_ts = pd.to_datetime(last_ts, utc=True, errors="coerce")
+            if not pd.isna(last_ts) and tick_ts <= last_ts:
+                self._logger.debug(
+                    "MDM_TICK_DROPPED reason=non_monotonic symbol=%s ts=%s last=%s",
+                    symbol,
+                    tick_ts,
+                    last_ts,
+                )
+                return
+
+        self._last_tick_ts[symbol] = tick_ts
         engine = self._get_engine(symbol)
         candle = engine.on_tick(tick)
         # ── EMIT TICK: replaces bare _store_tick call ─────────────────────────
@@ -4340,6 +4428,9 @@ class MarketDataManager:
         # but NEVER called from the WS path — _store_tick only cached the tick.
         # _emit_tick is the correct call; it was defined but never invoked.
         tick_dict = tick.to_dict()
+        tick_dict["timestamp"] = pd.to_datetime(
+            tick_dict["timestamp"], utc=True, errors="coerce"
+        ).isoformat()
         token_value = raw.get("instrument_token") or raw.get("token")
         if token_value is not None:
             tick_dict["instrument_token"] = token_value

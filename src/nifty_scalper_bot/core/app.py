@@ -1700,6 +1700,10 @@ class BotContext:
     data_hub_listeners_registered: bool = False
     live_orders_armed: bool = False
     trading_ready: bool = False
+    data_observation_ready: bool = False
+    data_pipeline_ready: bool = False
+    data_hard_ready: bool = False
+    spot_ready: bool = False
     readiness_mode: str = "SHADOW"
     effective_mode: str = "SHADOW"
     started_mono: float = field(default_factory=time_module.monotonic)
@@ -3618,9 +3622,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             _resolve_ws_api_key(),
             _resolve_ws_token(),
             on_error=lambda err: LOGGER.error("WebSocket manager error: %s", err),
-            backoff_min_sec=1.0,
+            backoff_min_sec=2.0,
             backoff_max_sec=30.0,
             stale_threshold_seconds=30.0,
+            heartbeat_interval_seconds=20.0,
+            heartbeat_timeout_seconds=10.0,
         )
 
         # WebSocketManager is the primary streamer in WS mode.
@@ -8213,15 +8219,23 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "reason": quote_error or "unknown",
                                     },
                                 )
+                            option_ticks_ready = bool(not {"atm_ce", "atm_pe"}.intersection(set(missing_hard)))
+                            futures_ready = "futures" not in set(missing_hard)
+                            atm_ce_ready = "atm_ce" not in set(missing_hard)
+                            atm_pe_ready = "atm_pe" not in set(missing_hard)
+                            ctx.spot_ready = bool(spot_ready)
+                            ctx.data_observation_ready = bool(spot_ready and option_ticks_ready)
+                            ctx.data_hard_ready = bool(spot_ready and futures_ready and atm_ce_ready and atm_pe_ready)
+                            ctx.data_pipeline_ready = bool(hard_ready)
+                            ctx.trading_ready = bool(ctx.data_hard_ready and mode == "LIVE")
                             if mode in {"PAPER", "SHADOW"}:
                                 ctx.live_orders_armed = False
-                                ctx.data_observation_ready = True
                                 if ctx.strategy_runner is not None:
                                     status = ctx.strategy_runner.get_status()
                                     if (not bool(status.get("running"))) and readiness_symbols:
                                         await _ensure_strategy_runner_started(ctx, reason="paper_readiness_recovery")
                                 LOGGER.info("PAPER_EVALUATION_READY hard_ready=%s spot_ready=%s runner_running=%s", hard_ready, spot_ready, bool(ctx.strategy_runner.get_status().get("running")) if ctx.strategy_runner else False, extra={"event":"PAPER_EVALUATION_READY","hard_ready":bool(hard_ready),"spot_ready":bool(spot_ready),"live_orders_armed":False})
-                            if hard_ready:
+                            if ctx.data_hard_ready:
                                 LOGGER.info(
                                     "DATA_PIPELINE_READY hard_ready=%s spot_ready=%s symbols_ready=%s",
                                     hard_ready,
@@ -8239,7 +8253,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             market_open_now = market_state == MarketState.OPEN
                             armed, blocking_reasons = compute_live_readiness(
                                 live_mode=bool(live_mode),
-                                hard_ready=bool(hard_ready),
+                                hard_ready=bool(ctx.data_hard_ready),
                                 quote_available=bool(quote_available),
                                 ws_quote_proof=bool(ws_quote_for_gate),
                                 market_open=bool(market_open_now),
@@ -8256,7 +8270,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 )
                             if live_mode and armed:
                                 ctx.live_orders_armed = True
-                                ctx.trading_ready = True
+                                ctx.trading_ready = bool(ctx.data_hard_ready)
                                 ctx.readiness_mode = "LIVE"
                                 ctx.effective_mode = ctx.readiness_mode
                                 LOGGER.info(

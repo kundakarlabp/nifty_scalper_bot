@@ -53,9 +53,9 @@ class WebSocketManager:
         loop: asyncio.AbstractEventLoop | None = None,
         max_backoff_seconds: float = 60.0,
         base_backoff_seconds: float = 1.0,
-        heartbeat_interval_seconds: float = 10.0,
+        heartbeat_interval_seconds: float = 20.0,
         stale_threshold_seconds: float = 10.0,
-        heartbeat_timeout_seconds: float = 25.0,
+        heartbeat_timeout_seconds: float = 10.0,
         handshake_timeout_seconds: float = 30.0,
         circuit_breaker_threshold: int = 5,
         circuit_breaker_cooldown_seconds: float = 60.0,
@@ -92,10 +92,8 @@ class WebSocketManager:
             raise ValueError("heartbeat_interval_seconds must be > 0")
         if stale_threshold_seconds <= 0:
             raise ValueError("stale_threshold_seconds must be > 0")
-        if heartbeat_timeout_seconds <= heartbeat_interval_seconds:
-            raise ValueError(
-                "heartbeat_timeout_seconds must be > heartbeat_interval_seconds"
-            )
+        if heartbeat_timeout_seconds <= 0:
+            raise ValueError("heartbeat_timeout_seconds must be > 0")
         if handshake_timeout_seconds < 15.0 or handshake_timeout_seconds > 45.0:
             raise ValueError("handshake_timeout_seconds must be within 15-45 seconds")
         if circuit_breaker_threshold <= 0:
@@ -426,7 +424,15 @@ class WebSocketManager:
 
                 # --- PRODUCTION SAFETY BLOCK: Always rebuild ticker on reconnect. ---
                 await self._replace_ticker()
-                await asyncio.to_thread(self.ticker.connect, True)
+                try:
+                    await asyncio.to_thread(
+                        self.ticker.connect,
+                        True,
+                        ping_interval=20,
+                        ping_timeout=10,
+                    )
+                except TypeError:
+                    await asyncio.to_thread(self.ticker.connect, True)
                 await asyncio.wait_for(
                     self._connected.wait(), timeout=self._handshake_timeout
                 )
@@ -670,8 +676,7 @@ class WebSocketManager:
         try:
             del response
             self._last_pong_mono = time.monotonic()
-            self._connected.set()
-            self._state = ConnectionState.CONNECTED
+            self._state = ConnectionState.CONNECTING
             self._logger.info(
                 "WebSocket CONNECTED successfully | tokens=%d",
                 len(self._tokens),
@@ -685,6 +690,8 @@ class WebSocketManager:
                     "ws_replay_subscriptions total=%d",
                     len(token_list),
                 )
+            self._connected.set()
+            self._state = ConnectionState.CONNECTED
             if self._on_connect_callback is not None:
                 self._on_connect_callback()
         except Exception as e:
@@ -919,11 +926,12 @@ class WebSocketManager:
         return sleep
 
     def _next_backoff(self, attempt: int) -> float:
-        """Args: attempt; Returns: full-jitter backoff; Raises: none."""
+        """Args: attempt; Returns: bounded reconnect backoff; Raises: none."""
 
-        base = self._base_backoff
-        cap = self._max_backoff
-        return random.uniform(0.0, min(cap, base * 2**attempt))
+        schedule = [2.0, 5.0, 10.0]
+        base_delay = schedule[min(max(attempt, 0), len(schedule) - 1)]
+        capped = min(30.0, max(self._base_backoff, base_delay), self._max_backoff)
+        return random.uniform(base_delay * 0.8, capped)
 
     def _record_failure(self) -> None:
         """Args: none; Returns: none; Raises: none."""
