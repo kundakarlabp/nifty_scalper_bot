@@ -1717,6 +1717,10 @@ class BotContext:
     deferred_basket_retry_started: bool = False
     deferred_basket_retry_task: asyncio.Task[Any] | None = None
     last_deferred_basket_retry_ts: float = 0.0
+    startup_phase: str = "created"
+    startup_failed: bool = False
+    startup_failure_reason: str | None = None
+    startup_failure_exception: str | None = None
 
     def update_spot_price(
         self, underlying: str, price: float, max_size: int = 100
@@ -5865,24 +5869,43 @@ def _wire_and_start_message_bus(ctx: BotContext) -> bool:
                 data_hub.ingest_tick_from_bus,
                 subscriber_id="data_hub.ingest_tick_from_bus",
             )
-            LOGGER.info("MESSAGE_BUS_SUBSCRIPTION component=data_hub message_type=tick callback_name=ingest_tick_from_bus")
+            LOGGER.info("MESSAGE_BUS_TICK_OWNER owner=data_hub")
         elif runner is not None:
             bus.subscribe_once(
                 MessageType.TICK,
                 runner.on_data,
-                subscriber_id="strategy_runner.on_data",
+                subscriber_id="strategy_runner.on_data.fallback",
             )
-            LOGGER.warning("MESSAGE_BUS_SUBSCRIPTION_FALLBACK component=strategy_runner reason=no_data_hub")
+            LOGGER.warning("MESSAGE_BUS_TICK_OWNER owner=strategy_runner_fallback reason=no_data_hub")
         else:
             LOGGER.warning("MESSAGE_BUS_TICK_SUBSCRIPTION_SKIPPED reason=no_data_hub_no_runner")
 
         ctx.message_bus_tick_subscribed = True
-    if not bool(getattr(bus, "running", False)):
-        LOGGER.info("Starting MessageBus Dispatchers before WebSocket")
-        bus.start()
-        LOGGER.info("MESSAGE_BUS_STARTED active_dispatchers=%s", len(getattr(bus, "_tasks", []) or []), extra={"event":"MESSAGE_BUS_STARTED","active_dispatchers":len(getattr(bus, "_tasks", []) or [])})
-    ctx.message_bus_running = True
-    return True
+    started = bus.start()
+    ctx.message_bus_running = bool(started or getattr(bus, "running", False))
+    if ctx.message_bus_running:
+        LOGGER.info("MESSAGE_BUS_STARTED")
+    return ctx.message_bus_running
+
+
+def _set_startup_phase(ctx: BotContext, phase: str) -> None:
+    """Set startup phase marker. Args: ctx, phase. Returns: none. Raises: none."""
+    ctx.startup_phase = phase
+    LOGGER.info("STARTUP_PHASE phase=%s", phase)
+
+
+def _mark_startup_failed(ctx: BotContext, phase: str, exc: BaseException) -> None:
+    """Record startup failure diagnostics. Args: ctx, phase, exc. Returns: none. Raises: none."""
+    ctx.startup_failed = True
+    ctx.startup_phase = phase
+    ctx.startup_failure_reason = str(exc)
+    ctx.startup_failure_exception = exc.__class__.__name__
+    LOGGER.exception(
+        "STARTUP_PHASE_FAILED phase=%s exception=%s reason=%s",
+        phase,
+        exc.__class__.__name__,
+        str(exc),
+    )
 
 
 async def _replay_latest_mdm_ticks_to_bus(ctx: BotContext, *, reason: str) -> int:
@@ -6237,6 +6260,7 @@ def _resolve_quote_capability(ctx: BotContext) -> dict[str, Any]:
 async def startup_sequence(ctx: BotContext) -> None:
     """Execute startup sequence with Smart Hydration and Option-Only Trading."""
     policy = MarketDataPolicy.from_env()
+    _set_startup_phase(ctx, "create_context")
     configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
     if configured_mode not in {"LIVE", "PAPER", "SHADOW"}:
         configured_mode = "SHADOW"
@@ -6255,6 +6279,7 @@ async def startup_sequence(ctx: BotContext) -> None:
     )
 
     loop = asyncio.get_running_loop()
+    _set_startup_phase(ctx, "create_data_layer")
     # DataHub forwards to MDM internally; keep MDM call as fallback when DH absent.
     if ctx.data_hub is not None:
         ctx.data_hub.set_event_loop(loop)
@@ -6263,7 +6288,11 @@ async def startup_sequence(ctx: BotContext) -> None:
     ):
         ctx.market_data_manager.set_event_loop(loop)
 
+    _set_startup_phase(ctx, "create_strategy_layer")
+    _set_startup_phase(ctx, "wire_message_bus")
     _wire_and_start_message_bus(ctx)
+    _set_startup_phase(ctx, "wire_datahub_to_runner")
+    _set_startup_phase(ctx, "start_market_data")
 
     # ── START MDM (CRITICAL) ─────────────────────────────────────────────────
     # MDM.start(defer_ws=True) launches the tick consumer, health monitor,

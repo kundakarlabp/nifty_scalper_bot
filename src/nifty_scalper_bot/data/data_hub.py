@@ -631,7 +631,34 @@ class DataHub:
         return _CompletedAwaitable()
 
     async def ingest_tick_from_bus(self, message: "Message") -> None:
-        self._ingest_tick_impl(message.data)
+        try:
+            from nifty_scalper_bot.core.message_bus import MessageType
+
+            if message.type != MessageType.TICK:
+                return
+            payload = dict(message.data or {})
+            symbol = str(payload.get("symbol") or "").strip()
+            token = payload.get("instrument_token") or payload.get("token")
+            price = payload.get("ltp") or payload.get("last_price")
+            if not symbol or token is None:
+                LOGGER.warning("DATAHUB_TICK_DROPPED reason=missing_symbol_or_token")
+                return
+            if not isinstance(price, (int, float)):
+                LOGGER.warning("DATAHUB_TICK_DROPPED reason=missing_price")
+                return
+            normalized = dict(payload)
+            normalized["symbol"] = symbol
+            normalized["instrument_token"] = int(token)
+            normalized["token"] = int(token)
+            normalized["ltp"] = float(price)
+            normalized["last_price"] = float(price)
+            normalized.setdefault("timestamp", time.time())
+            self._ingest_tick_impl(normalized)
+            LOGGER.debug(
+                "DATAHUB_TICK_INGESTED symbol=%s token=%s", symbol, normalized["token"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("Failure in ingest_tick_from_bus: %s", exc)
 
     def ingest_tick(self, tick: Tick):
         self._ingest_tick_impl(tick)
