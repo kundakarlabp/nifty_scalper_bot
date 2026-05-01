@@ -162,10 +162,26 @@ def _gate_runner_symbol_add(
     ctx.strategy_runner.add_symbol(symbol)
     if ctx.data_hub is not None and ctx.strategy_runner is not None:
         canonical_symbol = ctx.data_hub._canonical_quote_symbol(symbol)
-        if canonical_symbol not in ctx.datahub_runner_subscriptions:
-            ctx.data_hub.subscribe_ticks(canonical_symbol, ctx.strategy_runner.on_datahub_tick)
-            ctx.datahub_runner_subscriptions.add(canonical_symbol)
-            LOGGER.info("DATAHUB_RUNNER_CALLBACK_REGISTERED symbol=%s", canonical_symbol, extra={"event":"DATAHUB_RUNNER_CALLBACK_REGISTERED","symbol":canonical_symbol})
+        subscription_key = f"{canonical_symbol}|{token or ''}"
+        if subscription_key not in ctx.datahub_runner_subscriptions:
+            ctx.data_hub.subscribe_ticks(
+                canonical_symbol,
+                ctx.strategy_runner.on_datahub_tick,
+                token=token,
+            )
+            ctx.datahub_runner_subscriptions.add(subscription_key)
+            if token is not None:
+                ctx.datahub_runner_subscriptions.add(f"TOKEN:{int(token)}")
+            LOGGER.info(
+                "DATAHUB_RUNNER_CALLBACK_REGISTERED symbol=%s token=%s",
+                canonical_symbol,
+                token,
+                extra={
+                    "event": "DATAHUB_RUNNER_CALLBACK_REGISTERED",
+                    "symbol": canonical_symbol,
+                    "token": token,
+                },
+            )
     if history_ready:
         pending_runner_symbols.discard(symbol)
     else:
@@ -236,6 +252,8 @@ def _emit_option_symbol_pipeline_status(
     datahub_callback_registered = False
     datahub_quote_present = False
     datahub_runner_subscription_registered = False
+    datahub_token_callback_registered = False
+    datahub_token_quote_present = False
     datahub_mdm_delegate_subscribed = False
     mdm_tracked = False
     mdm_has_subscriber = False
@@ -257,14 +275,40 @@ def _emit_option_symbol_pipeline_status(
     if dh is not None:
         try:
             canonical = dh._canonical_quote_symbol(symbol)
-            datahub_callback_registered = bool(
-                getattr(dh, "_tick_subscribers", {}).get(canonical)
+            token_key = int(token) if token is not None else None
+            symbol_callbacks = bool(getattr(dh, "_tick_subscribers", {}).get(canonical))
+            token_callbacks = (
+                token_key is not None
+                and bool(getattr(dh, "_tick_subscribers_by_token", {}).get(token_key))
             )
+            datahub_callback_registered = symbol_callbacks or token_callbacks
             datahub_mdm_delegate_subscribed = canonical in getattr(
                 dh, "_mdm_subscribed_symbols", set()
             )
-            datahub_quote_present = dh.get_quote(symbol, allow_pull=False) is not None
-            datahub_runner_subscription_registered = canonical in getattr(ctx, "datahub_runner_subscriptions", set())
+            datahub_runner_subscription_registered = (
+                canonical in getattr(ctx, "datahub_runner_subscriptions", set())
+                or f"{canonical}|{token or ''}"
+                in getattr(ctx, "datahub_runner_subscriptions", set())
+                or (
+                    token is not None
+                    and f"TOKEN:{int(token)}"
+                    in getattr(ctx, "datahub_runner_subscriptions", set())
+                )
+            )
+            datahub_quote_present = (
+                dh.get_quote(symbol, allow_pull=False) is not None
+                or (
+                    token_key is not None
+                    and getattr(dh, "get_tick_by_token", lambda _t: None)(token_key)
+                    is not None
+                )
+            )
+            datahub_token_callback_registered = token_callbacks
+            datahub_token_quote_present = (
+                token_key is not None
+                and getattr(dh, "get_tick_by_token", lambda _t: None)(token_key)
+                is not None
+            )
         except Exception:
             pass
     if mdm is not None:
@@ -297,7 +341,7 @@ def _emit_option_symbol_pipeline_status(
         except Exception:
             pass
     LOGGER.info(
-        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s hydrated_bars=%s runner_added=%s runner_history_count=%s datahub_callback_registered=%s datahub_mdm_delegate_subscribed=%s datahub_quote_present=%s datahub_runner_subscription_registered=%s mdm_tracked=%s mdm_has_subscriber=%s mdm_active_subscribed=%s broker_ws_token_requested=%s broker_ws_token_active=%s live_tick_seen=%s last_tick_age_s=%s",
+        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s hydrated_bars=%s runner_added=%s runner_history_count=%s datahub_callback_registered=%s datahub_mdm_delegate_subscribed=%s datahub_quote_present=%s datahub_runner_subscription_registered=%s datahub_token_callback_registered=%s datahub_token_quote_present=%s mdm_tracked=%s mdm_has_subscriber=%s mdm_active_subscribed=%s broker_ws_token_requested=%s broker_ws_token_active=%s live_tick_seen=%s last_tick_age_s=%s",
         symbol,
         token,
         selected,
@@ -308,6 +352,8 @@ def _emit_option_symbol_pipeline_status(
         datahub_mdm_delegate_subscribed,
         datahub_quote_present,
         datahub_runner_subscription_registered,
+        datahub_token_callback_registered,
+        datahub_token_quote_present,
         mdm_tracked,
         mdm_has_subscriber,
         mdm_active_subscribed,
@@ -328,6 +374,8 @@ def _emit_option_symbol_pipeline_status(
             "datahub_mdm_delegate_subscribed": datahub_mdm_delegate_subscribed,
             "datahub_quote_present": datahub_quote_present,
             "datahub_runner_subscription_registered": datahub_runner_subscription_registered,
+            "datahub_token_callback_registered": datahub_token_callback_registered,
+            "datahub_token_quote_present": datahub_token_quote_present,
             "message_bus_tick_owner": getattr(ctx, "message_bus_tick_owner", "data_hub"),
             "mdm_tracked": mdm_tracked,
             "mdm_has_subscriber": mdm_has_subscriber,
