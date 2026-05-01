@@ -224,8 +224,21 @@ class DataHub:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.error("DataHub.set_event_loop -> MDM failed: %s", exc)
 
-    def _canonical_quote_symbol(self, symbol: str) -> str:
-        return canonical(str(symbol or ""))
+    def _canonical_quote_symbol(self, symbol: Any) -> str:
+        s = str(symbol or "").strip().upper().replace(" ", "")
+        if not s:
+            return ""
+        resolver = getattr(self, "_resolver", None)
+        for method_name in ("canonicalize_symbol", "normalize_symbol", "resolve_symbol"):
+            method = getattr(resolver, method_name, None)
+            if callable(method):
+                try:
+                    out = method(s)
+                    if out:
+                        return str(out).strip().upper().replace(" ", "")
+                except Exception:
+                    continue
+        return canonical(s)
 
     def _position_symbol(self, symbol: str) -> str:
         raw = str(symbol or "").strip().upper()
@@ -732,9 +745,7 @@ class DataHub:
             return dict(tick) if tick else None
 
     def subscribe(self, symbol: str, callback: Optional[TickListener] = None):
-        self.subscribe_ticks(symbol, callback)
-
-    subscribe_ticks = subscribe
+        return self.subscribe_ticks(symbol, callback)
 
     def _make_trace_id(self, symbol: str) -> str:
         """Produce a lightweight per-symbol trace id for lifecycle logs."""
@@ -963,9 +974,7 @@ class DataHub:
                     self._log_listener_failure(exc)
 
     def unsubscribe(self, symbol: str, callback: Optional[TickListener] = None):
-        self.unsubscribe_ticks(symbol, callback)
-
-    unsubscribe_ticks = unsubscribe
+        return self.unsubscribe_ticks(symbol, callback)
 
     def unsubscribe_ticks(self, symbol: str, callback: Optional[TickListener] = None):
         normalized = self._canonical_quote_symbol(symbol)

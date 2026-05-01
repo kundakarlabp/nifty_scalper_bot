@@ -4169,6 +4169,10 @@ class StrategyRunner:
         except Exception as e:
             self._logger.error("Failure in StrategyRunner.on_tick_event: %s", e)
 
+    def on_datahub_tick(self, tick: dict[str, Any]) -> None:
+        """Args: tick; Returns: none; Raises: none."""
+        self.on_tick_event(tick)
+
     def _on_tick_safe(self, tick: Mapping[str, Any]) -> None:
         """Safe wrapper for _on_tick to handle exceptions."""
         symbol = tick.get("symbol")

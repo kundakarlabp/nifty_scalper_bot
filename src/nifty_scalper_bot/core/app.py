@@ -160,6 +160,12 @@ def _gate_runner_symbol_add(
     required = _symbol_history_requirement(ctx)
     history_ready = runner_bars >= required
     ctx.strategy_runner.add_symbol(symbol)
+    if ctx.data_hub is not None and ctx.strategy_runner is not None:
+        canonical_symbol = ctx.data_hub._canonical_quote_symbol(symbol)
+        if canonical_symbol not in ctx.datahub_runner_subscriptions:
+            ctx.data_hub.subscribe_ticks(canonical_symbol, ctx.strategy_runner.on_datahub_tick)
+            ctx.datahub_runner_subscriptions.add(canonical_symbol)
+            LOGGER.info("DATAHUB_RUNNER_CALLBACK_REGISTERED symbol=%s", canonical_symbol, extra={"event":"DATAHUB_RUNNER_CALLBACK_REGISTERED","symbol":canonical_symbol})
     if history_ready:
         pending_runner_symbols.discard(symbol)
     else:
@@ -228,6 +234,8 @@ def _emit_option_symbol_pipeline_status(
     computed_runner_added = bool(runner_added)
     runner_history_count = 0
     datahub_callback_registered = False
+    datahub_quote_present = False
+    datahub_runner_subscription_registered = False
     datahub_mdm_delegate_subscribed = False
     mdm_tracked = False
     mdm_has_subscriber = False
@@ -248,12 +256,15 @@ def _emit_option_symbol_pipeline_status(
             pass
     if dh is not None:
         try:
+            canonical = dh._canonical_quote_symbol(symbol)
             datahub_callback_registered = bool(
-                getattr(dh, "_tick_subscribers", {}).get(symbol)
+                getattr(dh, "_tick_subscribers", {}).get(canonical)
             )
-            datahub_mdm_delegate_subscribed = symbol in getattr(
+            datahub_mdm_delegate_subscribed = canonical in getattr(
                 dh, "_mdm_subscribed_symbols", set()
             )
+            datahub_quote_present = dh.get_quote(symbol, allow_pull=False) is not None
+            datahub_runner_subscription_registered = canonical in getattr(ctx, "datahub_runner_subscriptions", set())
         except Exception:
             pass
     if mdm is not None:
@@ -286,7 +297,7 @@ def _emit_option_symbol_pipeline_status(
         except Exception:
             pass
     LOGGER.info(
-        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s hydrated_bars=%s runner_added=%s runner_history_count=%s datahub_callback_registered=%s datahub_mdm_delegate_subscribed=%s mdm_tracked=%s mdm_has_subscriber=%s mdm_active_subscribed=%s broker_ws_token_requested=%s broker_ws_token_active=%s live_tick_seen=%s last_tick_age_s=%s",
+        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s hydrated_bars=%s runner_added=%s runner_history_count=%s datahub_callback_registered=%s datahub_mdm_delegate_subscribed=%s datahub_quote_present=%s datahub_runner_subscription_registered=%s mdm_tracked=%s mdm_has_subscriber=%s mdm_active_subscribed=%s broker_ws_token_requested=%s broker_ws_token_active=%s live_tick_seen=%s last_tick_age_s=%s",
         symbol,
         token,
         selected,
@@ -295,6 +306,8 @@ def _emit_option_symbol_pipeline_status(
         runner_history_count,
         datahub_callback_registered,
         datahub_mdm_delegate_subscribed,
+        datahub_quote_present,
+        datahub_runner_subscription_registered,
         mdm_tracked,
         mdm_has_subscriber,
         mdm_active_subscribed,
@@ -313,6 +326,9 @@ def _emit_option_symbol_pipeline_status(
             "runner_history_count": runner_history_count,
             "datahub_callback_registered": datahub_callback_registered,
             "datahub_mdm_delegate_subscribed": datahub_mdm_delegate_subscribed,
+            "datahub_quote_present": datahub_quote_present,
+            "datahub_runner_subscription_registered": datahub_runner_subscription_registered,
+            "message_bus_tick_owner": getattr(ctx, "message_bus_tick_owner", "data_hub"),
             "mdm_tracked": mdm_tracked,
             "mdm_has_subscriber": mdm_has_subscriber,
             "mdm_active_subscribed": mdm_active_subscribed,
@@ -1719,6 +1735,7 @@ class BotContext:
     # synthetic) spot price.
     active_trading_universe: dict[str, Any] | None = None
     message_bus_tick_subscribed: bool = False
+    datahub_runner_subscriptions: set[str] = field(default_factory=set)
     message_bus_running: bool = False
     deferred_basket_retry_started: bool = False
     deferred_basket_retry_task: asyncio.Task[Any] | None = None
@@ -8604,49 +8621,90 @@ async def startup_sequence(ctx: BotContext) -> None:
 
 
 async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> None:
-    """Execute graceful shutdown."""
-
-    LOGGER.info("Shutting down bot...")
-    proc = getattr(ctx, "proc", None) or getattr(ctx, "process", None)
-    hub = getattr(ctx, "data_hub", None)
-    mdm = getattr(ctx, "market_data_manager", None) or getattr(ctx, "mdm", None)
-    runner = getattr(ctx, "strategy_runner", None)
-    telegram = getattr(ctx, "telegram_controller", None) or getattr(ctx, "telegram", None)
-    message_bus = getattr(ctx, "message_bus", None)
-
+    """Best-effort, idempotent shutdown. Must never raise during FastAPI lifespan."""
+    LOGGER.info("Shutting down bot... reason=%s", reason)
     async def _maybe_await(result: Any) -> Any:
         if inspect.isawaitable(result):
             return await result
         return result
-
+    async def _call_component(name: str, obj: Any, method_names: tuple[str, ...]) -> None:
+        if obj is None:
+            return
+        for method_name in method_names:
+            method = getattr(obj, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                await _maybe_await(method())
+                LOGGER.debug("SHUTDOWN_COMPONENT_OK component=%s method=%s", name, method_name)
+                return
+            except Exception as exc:
+                LOGGER.warning("SHUTDOWN_COMPONENT_FAILED component=%s method=%s error=%r", name, method_name, exc)
+                return
+    with suppress(Exception):
+        ctx.trading_ready = False
+    with suppress(Exception):
+        ctx.live_orders_armed = False
+    with suppress(Exception):
+        ctx.effective_mode = "SHUTDOWN"
+    for task_name in ("instrument_refresh_task","deferred_basket_retry_task","monitor_task","heartbeat_task","reconcile_task","maintenance_task"):
+        task = getattr(ctx, task_name, None)
+        if task is not None:
+            try:
+                task.cancel()
+                await _maybe_await(task)
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                LOGGER.warning("SHUTDOWN_TASK_FAILED task=%s error=%r", task_name, exc)
+            with suppress(Exception):
+                setattr(ctx, task_name, None)
+    runner = getattr(ctx, "strategy_runner", None)
+    order_manager = getattr(ctx, "order_manager", None)
+    bracket_manager = getattr(ctx, "bracket_manager", None)
+    position_manager = getattr(ctx, "position_manager", None)
+    market_data_manager = getattr(ctx, "market_data_manager", None) or getattr(ctx, "mdm", None)
+    stream_supervisor = getattr(ctx, "stream_supervisor", None)
+    streamer = getattr(ctx, "streamer", None)
+    message_bus = getattr(ctx, "message_bus", None)
+    data_hub = getattr(ctx, "data_hub", None)
+    persistent_state = getattr(ctx, "persistent_state", None)
+    instrument_db = getattr(ctx, "instrument_db", None)
+    state_tracker = getattr(ctx, "state_tracker", None)
+    trade_journal = getattr(ctx, "trade_journal", None)
+    telegram = getattr(ctx, "telegram_controller", None) or getattr(ctx, "telegram", None)
+    proc = getattr(ctx, "proc", None) or getattr(ctx, "process", None)
+    if runner is not None:
+        with suppress(Exception):
+            runner.pause_trading()
     try:
-        if runner is not None and hasattr(runner, "stop"):
-            await _maybe_await(runner.stop())
+        if getattr(getattr(ctx, "config", None), "close_positions_on_shutdown", False):
+            _close_all_positions(ctx, reason=reason)
     except Exception as exc:
-        LOGGER.warning("SHUTDOWN_RUNNER_FAILED error=%r", exc)
+        LOGGER.warning("SHUTDOWN_CLOSE_POSITIONS_FAILED error=%r", exc)
+    await _call_component("strategy_runner", runner, ("stop", "shutdown", "close"))
+    await _call_component("bracket_manager", bracket_manager, ("stop", "shutdown", "close"))
+    await _call_component("order_manager", order_manager, ("stop_monitoring", "stop", "shutdown", "close"))
+    await _call_component("stream_supervisor", stream_supervisor, ("stop", "shutdown", "close"))
+    await _call_component("streamer", streamer, ("stop", "shutdown", "close"))
+    await _call_component("market_data_manager", market_data_manager, ("stop", "shutdown", "close"))
+    await _call_component("message_bus", message_bus, ("stop", "shutdown", "close"))
     try:
-        if mdm is not None and hasattr(mdm, "stop"):
-            await _maybe_await(mdm.stop())
+        if data_hub is not None and hasattr(data_hub, "checkpoint"):
+            await _maybe_await(data_hub.checkpoint())
     except Exception as exc:
-        LOGGER.warning("SHUTDOWN_MDM_FAILED error=%r", exc)
+        LOGGER.warning("SHUTDOWN_DATAHUB_CHECKPOINT_FAILED error=%r", exc)
+    await _call_component("data_hub", data_hub, ("shutdown", "close"))
     try:
-        if message_bus is not None and hasattr(message_bus, "stop"):
-            await _maybe_await(message_bus.stop())
+        if persistent_state is not None and hasattr(persistent_state, "flush"):
+            await _maybe_await(persistent_state.flush())
     except Exception as exc:
-        LOGGER.warning("SHUTDOWN_MESSAGE_BUS_FAILED error=%r", exc)
-    try:
-        if hub is not None:
-            if hasattr(hub, "checkpoint"):
-                await _maybe_await(hub.checkpoint())
-            if hasattr(hub, "shutdown"):
-                await _maybe_await(hub.shutdown())
-    except Exception as exc:
-        LOGGER.warning("SHUTDOWN_HUB_FAILED error=%r", exc)
-    try:
-        if telegram is not None and hasattr(telegram, "stop"):
-            await _maybe_await(telegram.stop())
-    except Exception as exc:
-        LOGGER.warning("SHUTDOWN_TELEGRAM_FAILED error=%r", exc)
+        LOGGER.warning("SHUTDOWN_PERSISTENT_FLUSH_FAILED error=%r", exc)
+    await _call_component("persistent_state", persistent_state, ("close",))
+    await _call_component("instrument_db", instrument_db, ("close",))
+    await _call_component("state_tracker", state_tracker, ("close",))
+    await _call_component("trade_journal", trade_journal, ("stop", "close"))
+    await _call_component("telegram", telegram, ("stop", "shutdown", "close"))
     try:
         if proc is not None:
             if hasattr(proc, "terminate"):
@@ -8657,82 +8715,6 @@ async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> Non
                     await result
     except Exception as exc:
         LOGGER.warning("SHUTDOWN_PROC_FAILED error=%r", exc)
-
-    refresh_task = getattr(ctx, "instrument_refresh_task", None)
-    if refresh_task is not None:
-        with suppress(Exception):
-            refresh_task.cancel()
-        ctx.instrument_refresh_task = None
-
-    strategy_runner = _require_component(getattr(ctx, "strategy_runner", None), "strategy_runner")
-    order_manager_component = _require_component(getattr(ctx, "order_manager", None), "order_manager")
-    market_data_manager_component = _require_component(
-        getattr(ctx, "market_data_manager", None),
-        "market_data_manager",
-    )
-    position_manager_component = _require_component(
-        getattr(ctx, "position_manager", None),
-        "position_manager",
-    )
-    persistent_state_component = _require_component(
-        getattr(ctx, "persistent_state", None),
-        "persistent_state",
-    )
-
-    if hub is not None:
-        with suppress(Exception):
-            await hub.shutdown()
-
-    with suppress(Exception):
-        strategy_runner.pause_trading()
-
-    if getattr(ctx.config, "close_positions_on_shutdown", False):
-        with suppress(Exception):
-            _close_all_positions(ctx, reason=reason)
-
-    pending = []
-    with suppress(Exception):
-        pending = list(position_manager_component.get_pending_orders())
-    for order in pending:
-        with suppress(Exception):
-            order_manager_component.cancel_order(order.order_id)
-
-    with suppress(Exception):
-        strategy_runner.stop()
-    with suppress(Exception):
-        order_manager_component.stop_monitoring()
-    with suppress(Exception):
-        market_data_manager_component.stop()
-    with suppress(Exception):
-        supervisor = getattr(ctx, "stream_supervisor", None)
-        if supervisor is not None:
-            supervisor.stop()
-        else:
-            stop_callable = getattr(ctx.streamer, "stop", None)
-            if callable(stop_callable):
-                result = stop_callable()
-                if inspect.isawaitable(result):
-                    await result
-    with suppress(Exception):
-        position_manager_component.save_state()
-    with suppress(Exception):
-        persistent_state_component.flush()
-    with suppress(Exception):
-        persistent_state_component.close()
-    instrument_db = getattr(ctx, "instrument_db", None)
-    if instrument_db is not None:
-        with suppress(Exception):
-            instrument_db.close()
-        ctx.instrument_db = None
-    tracker = getattr(ctx, "state_tracker", None)
-    if tracker is not None:
-        with suppress(Exception):
-            tracker.close()
-    trade_journal = getattr(ctx, "trade_journal", None)
-    if trade_journal is not None:
-        with suppress(Exception):
-            trade_journal.stop()
-
     LOGGER.info("Bot shutdown complete")
 
 
