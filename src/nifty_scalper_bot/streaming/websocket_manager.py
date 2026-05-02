@@ -495,11 +495,10 @@ class WebSocketManager:
                     continue
 
                 delay = self._next_backoff_delay()
-                # Enforce minimum floor — sub-second reconnects overwhelm
-                # Zerodha and cause cascading 1006 errors.
-                delay = max(delay, 5.0)
+                # Production reconnect ladder baseline for transient closes.
+                delay = min(max(delay, 2.0), 30.0)
                 self._logger.info(
-                    "Condition met: reconnect_scheduled reason=%s delay=%.2fs",
+                    "RECONNECT_SCHEDULED reason=%s delay=%.2fs",
                     reason,
                     delay,
                 )
@@ -680,7 +679,7 @@ class WebSocketManager:
             self._last_pong_mono = time.monotonic()
             self._state = ConnectionState.CONNECTING
             self._logger.info(
-                "WebSocket CONNECTED successfully | tokens=%d",
+                "WEBSOCKET_RECONNECTED tokens=%d",
                 len(self._tokens),
             )
             if self._tokens:
@@ -689,7 +688,7 @@ class WebSocketManager:
                 ws.set_mode(ws.MODE_FULL, token_list)
                 self._log_ws_subscriptions(token_list)
                 self._logger.info(
-                    "ws_replay_subscriptions total=%d",
+                    "WS_REPLAY_SUBSCRIPTIONS total=%d",
                     len(token_list),
                 )
             self._connected.set()
@@ -786,7 +785,10 @@ class WebSocketManager:
             self._logger.error("Failure in websocket: code=%s reason=%s", code, reason)
             self._connected.clear()
             self._state = ConnectionState.DISCONNECTED
-            self._record_failure()
+            self._stream_health = "degraded"
+            self._last_disconnect_at = time.time()
+            if code != 1006:
+                self._record_failure()
             if self._on_error_callback is not None:
                 self._on_error_callback(RuntimeError(f"code={code} reason={reason}"))
             # Don't schedule another reconnect if one is already running —
@@ -813,11 +815,11 @@ class WebSocketManager:
             self._state = ConnectionState.DISCONNECTED
             self._last_disconnect_at = time.time()
             self._stream_health = "degraded"
-            # 1006 = old connection handshake timeout during normal teardown.
-            # Don't count as failure and don't trigger redundant reconnect
-            # if one is already in progress — this breaks the 1006 cascade.
+            # 1006 is stream degradation, not fatal startup failure.
             if code == 1006:
-                self._logger.warning("Connection closed: 1006")
+                self._logger.warning(
+                    "WEBSOCKET_DEGRADED code=1006 reason=closing_handshake_timeout"
+                )
                 if self._reconnect_task is not None and not self._reconnect_task.done():
                     self._logger.debug(
                         "Suppressed 1006 reconnect — reconnect already in progress"

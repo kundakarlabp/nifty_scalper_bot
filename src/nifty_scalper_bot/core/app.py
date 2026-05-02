@@ -361,8 +361,17 @@ def _emit_option_symbol_pipeline_status(
                 )
         except Exception:
             pass
+    effective_datahub_delivery = (
+        datahub_callback_registered
+        or datahub_token_callback_registered
+        or datahub_runner_subscription_registered
+    )
+    effective_quote_present = (
+        datahub_quote_present
+        or datahub_token_quote_present
+    )
     LOGGER.info(
-        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s hydrated_bars=%s runner_added=%s runner_history_count=%s datahub_callback_registered=%s datahub_mdm_delegate_subscribed=%s datahub_quote_present=%s datahub_runner_subscription_registered=%s datahub_token_callback_registered=%s datahub_token_quote_present=%s mdm_tracked=%s mdm_has_subscriber=%s mdm_active_subscribed=%s broker_ws_token_requested=%s broker_ws_token_active=%s live_tick_seen=%s last_tick_age_s=%s",
+        "OPTION_SYMBOL_PIPELINE_STATUS symbol=%s token=%s selected=%s hydrated_bars=%s runner_added=%s runner_history_count=%s datahub_callback_registered=%s datahub_mdm_delegate_subscribed=%s datahub_quote_present=%s datahub_runner_subscription_registered=%s datahub_token_callback_registered=%s datahub_token_quote_present=%s mdm_tracked=%s mdm_has_subscriber=%s mdm_active_subscribed=%s broker_ws_token_requested=%s broker_ws_token_active=%s live_tick_seen=%s last_tick_age_s=%s effective_datahub_delivery=%s effective_quote_present=%s",
         symbol,
         token,
         selected,
@@ -382,6 +391,8 @@ def _emit_option_symbol_pipeline_status(
         broker_ws_token_active,
         live_tick_seen,
         last_tick_age_s,
+        effective_datahub_delivery,
+        effective_quote_present,
         extra={
             "event": "OPTION_SYMBOL_PIPELINE_STATUS",
             "symbol": symbol,
@@ -397,6 +408,8 @@ def _emit_option_symbol_pipeline_status(
             "datahub_runner_subscription_registered": datahub_runner_subscription_registered,
             "datahub_token_callback_registered": datahub_token_callback_registered,
             "datahub_token_quote_present": datahub_token_quote_present,
+            "effective_datahub_delivery": effective_datahub_delivery,
+            "effective_quote_present": effective_quote_present,
             "datahub_debug_status": debug_status if "debug_status" in locals() else None,
             "message_bus_tick_owner": getattr(ctx, "message_bus_tick_owner", "data_hub"),
             "mdm_tracked": mdm_tracked,

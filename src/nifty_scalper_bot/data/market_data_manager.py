@@ -205,6 +205,7 @@ class MarketDataManager:
         self._engines: dict[str, CandleEngine] = {}
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
+        self._last_tick_snapshot: dict[str, dict[str, Any]] = {}
         self._readiness_requirements: dict[str, Any] = {}
         self._last_readiness_state: dict[str, Any] = {
             "hard_ready": False,
@@ -4412,15 +4413,32 @@ class MarketDataManager:
         last_ts = self._last_tick_ts.get(symbol)
         if last_ts is not None:
             last_ts = pd.to_datetime(last_ts, utc=True, errors="coerce")
-            if not pd.isna(last_ts) and tick_ts <= last_ts:
+            if not pd.isna(last_ts) and tick_ts < last_ts:
                 self._logger.debug(
-                    "MDM_TICK_DROPPED reason=non_monotonic symbol=%s ts=%s last=%s",
+                    "MDM_TICK_DROPPED reason=older_timestamp symbol=%s ts=%s last=%s",
                     symbol,
                     tick_ts,
                     last_ts,
                 )
                 return
 
+            if not pd.isna(last_ts) and tick_ts == last_ts:
+                last_snapshot = self._last_tick_snapshot.get(symbol, {})
+                same_price = float(last_snapshot.get("ltp", -1)) == float(tick.ltp)
+                same_volume = last_snapshot.get("volume") == raw.get("volume_traded_today")
+
+                if same_price and same_volume:
+                    self._logger.debug(
+                        "MDM_TICK_DROPPED reason=duplicate_tick symbol=%s ts=%s",
+                        symbol,
+                        tick_ts,
+                    )
+                    return
+
+        self._last_tick_snapshot[symbol] = {
+            "ltp": tick.ltp,
+            "volume": raw.get("volume_traded_today") or raw.get("volume_traded"),
+        }
         self._last_tick_ts[symbol] = tick_ts
         engine = self._get_engine(symbol)
         candle = engine.on_tick(tick)
@@ -4960,6 +4978,9 @@ class MarketDataManager:
                 )
         try:
             delivered = subscriber_count > 0
+            direct_subscribers = subscriber_count
+            bus_publish_attempted = bool(getattr(self, "bus", None))
+            bus_running = bool(getattr(getattr(self, "bus", None), "running", False))
             self._logger.debug(
                 "MDM_TICK_EMITTED symbol=%s delivered=%s subscribers=%d source=%s",
                 symbol,
@@ -4989,17 +5010,20 @@ class MarketDataManager:
             if emit_key not in first_emit_log_tracker:
                 first_emit_log_tracker.add(emit_key)
                 self._logger.info(
-                    "MDM_TICK_EMITTED_FIRST symbol=%s delivered=%s subscribers=%d source=%s",
+                    "MDM_TICK_EMITTED_FIRST symbol=%s direct_delivered=%s direct_subscribers=%d bus_running=%s source=%s",
                     symbol,
                     delivered,
-                    subscriber_count,
+                    direct_subscribers,
+                    bus_running,
                     source,
                     extra={
                         "event": "MDM_TICK_EMITTED",
                         "symbol": symbol,
                         "token": _token_val,
-                        "delivered_to_subscribers": delivered,
-                        "subscriber_count": subscriber_count,
+                        "direct_delivered_to_subscribers": delivered,
+                        "direct_subscriber_count": direct_subscribers,
+                        "bus_publish_attempted": bus_publish_attempted,
+                        "bus_running": bus_running,
                         "source": source,
                         "first_emit": True,
                     },
