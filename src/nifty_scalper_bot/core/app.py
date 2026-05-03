@@ -628,6 +628,24 @@ LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 _ComponentT = TypeVar("_ComponentT")
 
 
+def _safe_ws_token_count(ctx: BotContext) -> int | str:
+    """Resolve WS token diagnostics safely. Args: ctx. Returns: count or unknown. Raises: none."""
+    for obj_name, attr_name in [
+        ("market_data_manager", "_subscribed_tokens"),
+        ("market_data_manager", "subscribed_tokens"),
+        ("market_data_manager", "_token_to_symbol"),
+        ("broker_client", "ws_tokens"),
+    ]:
+        obj = getattr(ctx, obj_name, None)
+        value = getattr(obj, attr_name, None) if obj is not None else None
+        if value is not None:
+            try:
+                return len(value)
+            except Exception:
+                continue
+    return "unknown"
+
+
 def _get_current_nifty_futures_symbol() -> str:
     """
     Compute the current month's NIFTY futures symbol.
@@ -7487,7 +7505,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     and float(last_tick_map.get(_sym, 0.0)) > 0
                 )
                 LOGGER.info(
-                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d broker_ws_token_count=%d live_tick_seen_count=%d",
+                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d broker_ws_token_count=%s live_tick_seen_count=%d",
                     len(targets),
                     len(active_symbol_tokens),
                     len(getattr(ctx.market_data_manager, "_tracked_symbols", set())),
@@ -7499,10 +7517,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
                     if ctx.data_hub is not None
                     else 0,
-                    len(
-                        getattr(ctx.market_data_manager, "_requested_tokens", set())
-                        or getattr(ctx.market_data_manager, "_subscribed_tokens", set())
-                    ),
+                    _safe_ws_token_count(ctx),
                     live_tick_seen_count,
                     extra={
                         "event": "LIVE_WIRING_FINAL_STATUS",
@@ -7523,10 +7538,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if ctx.data_hub is not None
                             else 0
                         ),
-                        "broker_ws_token_count": len(
-                            getattr(ctx.market_data_manager, "_requested_tokens", set())
-                            or getattr(ctx.market_data_manager, "_subscribed_tokens", set())
-                        ),
+                        "broker_ws_token_count": _safe_ws_token_count(ctx),
                         "live_tick_seen_count": live_tick_seen_count,
                     },
                 )
@@ -8113,10 +8125,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     mdm_subscriber_count = len(
                                         getattr(ctx.market_data_manager, "_subscribers", {})
                                     )
-                                    broker_ws_token_count = len(
-                                        getattr(ctx.market_data_manager, "_requested_tokens", set())
-                                        or getattr(ctx.market_data_manager, "_subscribed_tokens", set())
-                                    )
+                                    broker_ws_token_count = _safe_ws_token_count(ctx)
                                     last_tick_map = getattr(ctx.market_data_manager, "_last_tick_time", {}) or {}
                                     live_tick_seen_count = sum(
                                         1
@@ -8131,7 +8140,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         if bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(_s))
                                     )
                                 LOGGER.info(
-                                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d broker_ws_token_count=%d live_tick_seen_count=%d",
+                                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d broker_ws_token_count=%s live_tick_seen_count=%d",
                                     len(latest_symbols),
                                     len(active_symbol_tokens),
                                     mdm_tracked_count,
