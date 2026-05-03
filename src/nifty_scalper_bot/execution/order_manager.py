@@ -2647,6 +2647,7 @@ class OrderManager:
         return details
 
     def submit_trade_plan(self, plan: TradePlan) -> str | None:
+        """Validate TradePlan and delegate to place_managed_order/place_order."""
         symbol = normalize_symbol(plan.symbol)
         validation = self._validate_trade_plan(plan)
         if not validation.allowed:
@@ -2672,10 +2673,7 @@ class OrderManager:
         trace_id: str | None = None,
         allow_market_entry: bool = False,
     ) -> str | None:
-        """
-        Atomic wrapper that guarantees: Entry Order + Virtual Bracket OR Nothing.
-        Use THIS method from StrategyRunner, not place_order directly.
-        """
+        """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY changed to 75 on 31 Jan 2025.
         # Use dynamic resolution with a safe fallback to reject mismatched quantities.
         try:
@@ -2712,11 +2710,7 @@ class OrderManager:
             product=product,
         )
 
-        # 3. Immediate Bracket Registration (The "Virtual" Part)
-        # Note: place_order ALREADY calls register_virtual_bracket internally
-        # in the success block, so we don't strictly need to duplicate it here
-        # IF your place_order logic remains as seen in previous logs.
-        # However, checking it here adds a layer of debug certainty.
+        # Bracket registration is owned by place_order success path; failures are handled there.
 
         if order_id:
             self._logger.info(
