@@ -6296,26 +6296,17 @@ async def _build_and_hydrate_live_basket_from_spot(
     # through MarketDataManager + StrategyRunner.
     hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
     hydration_max_bars = max(1, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300))
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=hydration_lookback_days)
-    from_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    to_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
     for symbol in targets:
         try:
-            records = await asyncio.to_thread(
-                ctx.broker_client.get_ohlc,
+            records = await ctx.market_data_manager.fetch_history(
                 symbol,
                 "minute",
-                from_str,
-                to_str,
+                hydration_lookback_days,
             )
         except Exception:  # noqa: BLE001
             continue
         for row in list(records or [])[-hydration_max_bars:]:
-            coerced = _coerce_ohlc_row(row)
-            if coerced is None:
-                continue
-            bar_data = {"symbol": symbol, **coerced}
+            bar_data = dict(row)
             ctx.market_data_manager.ingest_historical_bar(bar_data)
             runner = getattr(ctx, "strategy_runner", None)
             if runner is not None and hasattr(runner, "ingest_historical_bar"):
@@ -6966,11 +6957,12 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             async def _fetch_symbol(symbol: str) -> tuple[str, list[Any]]:
                 """Fetch historical records for one symbol. Args: symbol. Returns: symbol and raw records. Raises: Exception."""
-                records = await asyncio.to_thread(
-                    ctx.market_data_manager.fetch_history,
-                    symbol,
-                    "minute",
-                    2,
+                records = await _maybe_await(
+                    ctx.market_data_manager.fetch_history(
+                        symbol,
+                        "minute",
+                        2,
+                    )
                 )
                 if records and len(records) > hydration_max_bars:
                     records = list(records)[-hydration_max_bars:]
@@ -7923,35 +7915,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 try:
                                     required_bars = _symbol_history_requirement(ctx)
                                     lookback_minutes = _history_lookback_minutes(required_bars)
-                                    end_dt = datetime.now()
-                                    start_dt = end_dt - timedelta(minutes=lookback_minutes)
-                                    records = await asyncio.to_thread(
-                                        ctx.broker_client.get_ohlc,
+                                    records = await ctx.market_data_manager.fetch_history(
                                         sym,
                                         "minute",
-                                        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                                        end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                        _history_lookback_days(required_bars),
                                     )
                                     runner_ingested = 0
                                     for row in list(records or []):
-                                        ts = row.get("date") or row.get("timestamp")
-                                        if isinstance(ts, str):
-                                            ts = datetime.fromisoformat(
-                                                ts.replace("Z", "+00:00")
-                                            )
-                                        if isinstance(ts, datetime) and ts.tzinfo is None:
-                                            ts = ts.replace(tzinfo=timezone.utc)
-                                        if not isinstance(ts, datetime):
-                                            continue
-                                        bar_data = {
-                                            "symbol": sym,
-                                            "open": float(row.get("open") or 0.0),
-                                            "high": float(row.get("high") or 0.0),
-                                            "low": float(row.get("low") or 0.0),
-                                            "close": float(row.get("close") or 0.0),
-                                            "volume": int(row.get("volume") or 0),
-                                            "timestamp": ts,
-                                        }
+                                        bar_data = dict(row)
                                         ctx.market_data_manager.ingest_historical_bar(bar_data)
                                         if (
                                             getattr(ctx, "strategy_runner", None) is not None

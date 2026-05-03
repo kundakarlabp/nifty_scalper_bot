@@ -1434,7 +1434,7 @@ class DataHub:
         if not callable(mdm_fn):
             return [dict(row) for row in self._history_cache.get(key, [])]
         try:
-            rows = await mdm_fn(normalized.replace("NSE:", "").replace("NFO:", ""), interval, days)
+            rows = await mdm_fn(normalized, interval, days)
         except Exception:  # noqa: BLE001
             return [dict(row) for row in self._history_cache.get(key, [])]
         normalized_rows = self._normalize_history_rows(normalized, rows)

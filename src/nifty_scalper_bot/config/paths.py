@@ -10,11 +10,30 @@ from pathlib import Path
 
 
 def get_data_dir() -> Path:
-    """Return canonical data directory. Args: none. Returns: Path. Raises: OSError."""
-    path = os.getenv("DATA_DIR", "/app/data")
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    """Return writable data directory with safe fallback."""
+    candidates = [
+        os.getenv("DATA_DIR"),
+        "/app/data",
+        str(Path.cwd() / "data"),
+        "/tmp/nifty_scalper_bot_data",
+    ]
+
+    last_error: Exception | None = None
+    for raw in candidates:
+        if not raw:
+            continue
+        p = Path(raw)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            test_file = p / ".write_test"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink(missing_ok=True)
+            return p
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    raise RuntimeError(f"No writable data directory found: {last_error}")
 
 
 def get_data_path(filename: str) -> Path:

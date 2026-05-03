@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from nifty_scalper_bot.data.data_hub import DataHub
 
 
@@ -26,3 +28,9 @@ def test_datahub_normalizes_dict_and_list_history_rows() -> None:
     for bar in normalized:
         assert set(['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'source']).issubset(bar.keys())
         assert bar['source'] == 'historical'
+
+
+def test_datahub_fetch_history_does_not_strip_exchange_prefix() -> None:
+    text = Path('src/nifty_scalper_bot/data/data_hub.py').read_text(encoding='utf-8')
+    assert '.replace("NSE:", "")' not in text
+    assert '.replace("NFO:", "")' not in text
