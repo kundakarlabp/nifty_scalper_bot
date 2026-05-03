@@ -14,15 +14,15 @@
 
 4. Signal generation:
    src/nifty_scalper_bot/strategies/runner.py
-   StrategyRunner receives market data, evaluates strategy, creates TradePlan.
+   StrategyRunner receives market data, evaluates strategy, creates TradePlan only.
 
 5. Entry execution:
    src/nifty_scalper_bot/execution/order_manager.py
-   OrderManager submits entry order through broker/paper executor.
+   OrderManager submits entry order through broker/paper executor and registers brackets after entry success.
 
 6. Exit execution:
    src/nifty_scalper_bot/execution/bracket_manager.py
-   BracketManager owns SL/TP/trailing/EOD virtual bracket exits.
+   BracketManager owns SL/TP/trailing/partial TP/EOD virtual bracket exits.
 
 7. Notifications/logs:
    src/nifty_scalper_bot/notifications/telegram_controller.py
@@ -30,7 +30,7 @@
 
 ## Forbidden removed layers
 
-These must not exist in runtime imports:
+These forbidden removed layers are not runtime components and must not exist in runtime imports:
 - order_execution_hub.py
 - execution_router.py
 - preflight_validator.py

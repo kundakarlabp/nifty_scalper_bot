@@ -1258,11 +1258,15 @@ class BracketManager:
                         self._exit_cooldowns.pop(bracket.entry_order_id, None)
 
                 if exit_result.confirmed:
-                    LOGGER.info('EXIT_ORDER_FILLED order_id=%s filled_qty=%s', exit_result.order_id, exit_result.filled_qty)
+                    LOGGER.info(
+                        "EXIT_ORDER_FILLED order_id=%s filled_qty=%s",
+                        exit_result.order_id,
+                        exit_result.filled_qty,
+                    )
+                    fully_closed = bracket.remaining_quantity <= 0
+
                     self._log_bracket_event(
-                        "POSITION_CLOSED"
-                        if bracket.remaining_quantity <= 0
-                        else "ORDER_FILL_CONFIRMED",
+                        "POSITION_CLOSED" if fully_closed else "ORDER_FILL_CONFIRMED",
                         bracket,
                         meta={
                             "reason": reason,
@@ -1270,14 +1274,17 @@ class BracketManager:
                             "remaining_quantity": bracket.remaining_quantity,
                         },
                     )
-                    # FIX S10-2: notify runner so orchestrator direction lock clears immediately
-                    hook = self._on_exit_complete_hook
-                    if hook is not None:
-                        try:
-                            hook(symbol)
-                        except Exception as e:
-                            LOGGER.exception("Unhandled exception", exc_info=True)
-                            raise
+
+                    if fully_closed:
+                        hook = self._on_exit_complete_hook
+                        if hook is not None:
+                            try:
+                                hook(symbol)
+                            except Exception:
+                                LOGGER.exception(
+                                    "BRACKET_EXIT_COMPLETE_HOOK_FAILED symbol=%s",
+                                    symbol,
+                                )
                 else:
                     LOGGER.error('BRACKET_EXIT_FAILED symbol=%s reason=%s', symbol, exit_result.reason)
             except Exception as e:

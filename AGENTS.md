@@ -22,11 +22,5 @@ They are intended to keep the bot runnable today and easy to maintain in the fut
 - Ensure `./run_checks.sh` succeeds and include the command output in the PR description.
 - Summarize the problem, the approach, and testing performed.
 
-## Order Execution Hub Architecture
-- `StateTracker` persists order and position lifecycle data in SQLite and must be the source of truth for execution state.
-- `PreFlightValidator` owns all gating checks before an order is released to brokers; wire new checks through this module.
-- `LifecycleManager` automates stop-loss, take-profit, and trailing logic and records lifecycle events through `StateTracker`.
-- `OrderQueue` prioritises intake, enforces deduplication, and should be the only entry point for new `OrderRequest` objects.
-- `ExecutionRouter` dispatches requests based on mode (LIVE/SHADOW/PAPER) and tracks drift metrics in shadow mode.
-- `PostFillMonitor` reconciles broker and local state and must run on startup to align open positions.
-
+## Runtime Execution Architecture
+- Runtime execution is direct: StrategyRunner builds TradePlan, OrderManager places entry orders, and BracketManager manages exits.

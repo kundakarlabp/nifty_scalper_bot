@@ -54,3 +54,41 @@ def test_architecture_doc_mentions_core_path_and_forbidden_layers() -> None:
     assert "OrderManager" in doc
     assert "BracketManager" in doc
     assert "Forbidden removed layers" in doc
+
+
+def test_runner_has_single_execute_order_definition() -> None:
+    runner_path = SRC_ROOT / "strategies" / "runner.py"
+    tree = ast.parse(runner_path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "StrategyRunner":
+            names = [
+                n.name
+                for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            assert names.count("_execute_order") == 1
+            return
+    raise AssertionError("StrategyRunner class not found")
+
+
+def test_market_data_manager_has_single_depth_coercer() -> None:
+    mdm_path = SRC_ROOT / "data" / "market_data_manager.py"
+    tree = ast.parse(mdm_path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "MarketDataManager":
+            names = [
+                n.name
+                for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            assert names.count("_coerce_from_depth") == 1
+            return
+    raise AssertionError("MarketDataManager class not found")
+
+
+def test_bracket_exit_callback_is_full_close_only() -> None:
+    bracket_path = SRC_ROOT / "execution" / "bracket_manager.py"
+    text = bracket_path.read_text(encoding="utf-8")
+    assert "fully_closed = bracket.remaining_quantity <= 0" in text
+    assert "if fully_closed:" in text
+    assert "BRACKET_EXIT_COMPLETE_HOOK_FAILED" in text
