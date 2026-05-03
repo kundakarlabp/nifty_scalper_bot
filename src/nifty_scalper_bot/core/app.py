@@ -529,7 +529,6 @@ from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.execution.position_manager import ActiveContract, PositionManager
 from nifty_scalper_bot.execution.post_fill_monitor import PostFillMonitor
-from nifty_scalper_bot.execution.preflight_validator import PreFlightValidator
 from nifty_scalper_bot.execution.readiness import compute_live_readiness
 from nifty_scalper_bot.execution.safe_order_manager import SafeOrderManager
 from nifty_scalper_bot.execution.state_tracker import StateTracker
@@ -1766,7 +1765,6 @@ class BotContext:
     paper_engine: PaperFillEngine | None = None
     safe_order_manager: SafeOrderManager | None = None
     state_tracker: StateTracker | None = None
-    preflight_validator: PreFlightValidator | None = None
     lifecycle_manager: LifecycleManager | None = None
     post_fill_monitor: PostFillMonitor | None = None
     strategy_manager: StrategyManager | None = None
@@ -4181,7 +4179,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 # Pass DataHub (SSOT) as the market-data facade; bracket manager
                 # only needs subscribe/unsubscribe + quote access, which DataHub
                 # exposes and transparently delegates to MDM.
-                market_data=data_hub if 'data_hub' in locals() and data_hub else market_data_manager,
+                market_data_manager=data_hub if 'data_hub' in locals() and data_hub else market_data_manager,
                 trade_journal=trade_journal,
             )
 
@@ -4547,12 +4545,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     state_tracker = StateTracker()
     lifecycle_tracker_adapter = _LifecycleTrackerAdapter(state_tracker)
 
-    preflight_validator = PreFlightValidator(
-        risk_manager=risk_manager,
-        regime_manager=market_regime_manager,
-        datahub=data_hub,
-        session_guard=session_guard,
-    )
     lifecycle_manager = LifecycleManager(
         data_hub=data_hub,
         state_tracker=lifecycle_tracker_adapter,
@@ -4927,7 +4919,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         paper_engine=paper_engine,
         safe_order_manager=safe_order_manager,
         state_tracker=state_tracker,
-        preflight_validator=preflight_validator,
         lifecycle_manager=lifecycle_manager,
         post_fill_monitor=post_fill_monitor,
         strategy_manager=strategy_manager,
@@ -5590,7 +5581,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                         services_bundle = TelegramCommandServices(
                             order_manager=ctx.order_manager,
                             risk_manager=ctx.risk_manager,
-                            market_data=ctx.market_data_manager,
+                            market_data_manager=ctx.market_data_manager,
+                            data_hub=ctx.data_hub,
+                            bracket_manager=ctx.bracket_manager,
                             strategy_runner=ctx.strategy_runner,
                             config=config,
                             broker=ctx.broker_client,
@@ -5598,7 +5591,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                             metrics=None,
                             market_regime=ctx.market_regime,
                             state_tracker=ctx.state_tracker,
-                            preflight_validator=ctx.preflight_validator,
                             version_info=version_info,
                             allowed_chat_id=telegram_chat_id,
                         )

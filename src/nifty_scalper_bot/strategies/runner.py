@@ -65,7 +65,7 @@ from nifty_scalper_bot.data.source import (
 )
 # ExecutionEngine removed — signals now route directly through order_manager.place_order()
 # from nifty_scalper_bot.execution.order_execution_hub import ExecutionEngine
-from nifty_scalper_bot.execution.order_manager import OrderType
+from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
     OrderStateMachine,
@@ -178,7 +178,7 @@ class DeterministicExecutionPipeline:
 
     trade_manager: TradeManager
     risk_manager: DeterministicRiskManager
-    order_executor: OrderExecutionHub
+    order_executor: Any
     log_throttle: LogThrottle
 
     def on_new_candle(
@@ -3704,15 +3704,8 @@ class StrategyRunner:
             max_attempts = 3
             for attempt in range(max_attempts):
                 try:
-                    order_id = self._order_manager.place_order(
-                        symbol=symbol,
-                        side=side,
-                        quantity=normalized_qty,
-                        order_type=OrderType.LIMIT,
-                        price=order_price,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                    )
+                    plan = TradePlan(symbol=symbol, side=side, quantity=normalized_qty, entry_price=order_price, stop_loss=stop_loss, take_profit=take_profit, strategy_name="runner", tag=f"runner_{side.lower()}", allow_market_entry=False)
+                    order_id = self._order_manager.submit_trade_plan(plan)
                     break
                 except Exception as exc:
                     if attempt >= (max_attempts - 1):
@@ -7765,19 +7758,8 @@ class StrategyRunner:
             )
 
             self._order_attempt_window.append(now_epoch)
-            order_id = self._order_manager.place_order(
-                symbol=base_symbol,
-                side=signal.action,  # "BUY" or "SELL"
-                quantity=qty,
-                order_type=OrderType.MARKET,
-                price=price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                signal_id=signal.deterministic_id,
-                strategy_name=strategy_name,
-                tag=f"runner_{signal.action.lower()}",
-                trace_id=trace_id,
-            )
+            plan = TradePlan(symbol=base_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=5000, max_spread_pct=5.0, min_depth_qty=150, allow_market_entry=False)
+            order_id = self._order_manager.submit_trade_plan(plan)
 
             if order_id:
                 self._logger.info(
