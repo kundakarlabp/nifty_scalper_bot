@@ -4980,6 +4980,23 @@ class StrategyRunner:
                 )
                 return False
             if not self._indicator_engine.has_min_bars(symbol, self._required_candles):
+                history_count = len(self._indicator_engine.get_history(symbol) or [])
+                if history_count < self._required_candles:
+                    if self._should_log_throttled(
+                        f"eval_block_cold_history:{symbol}", 120.0
+                    ):
+                        self._logger.warning(
+                            "EVALUATION_BLOCKED_COLD_HISTORY symbol=%s bars=%d required=%d",
+                            symbol,
+                            history_count,
+                            self._required_candles,
+                            extra={
+                                "event": "EVALUATION_BLOCKED_COLD_HISTORY",
+                                "symbol": symbol,
+                                "bars": history_count,
+                                "required": self._required_candles,
+                            },
+                        )
                 self._emit_runner_eval_decision(
                     symbol=symbol,
                     stage='phase9',
