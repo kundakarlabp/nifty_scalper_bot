@@ -58,6 +58,7 @@ from nifty_scalper_bot.data.pipeline import (
 
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.data.source import (
     DataIntegrityError,
     ensure_ltp,
@@ -4673,29 +4674,14 @@ class StrategyRunner:
         normalized: list[dict[str, Any]] = []
         seen_ts: set[datetime] = set()
         for row in rows or []:
-            try:
-                ts = row.get("timestamp") or row.get("date")
-                if isinstance(ts, str):
-                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                if not isinstance(ts, datetime):
-                    continue
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if ts in seen_ts:
-                    continue
-                seen_ts.add(ts)
-                normalized.append(
-                    {
-                        "open": float(row.get("open", 0.0) or 0.0),
-                        "high": float(row.get("high", 0.0) or 0.0),
-                        "low": float(row.get("low", 0.0) or 0.0),
-                        "close": float(row.get("close", 0.0) or 0.0),
-                        "volume": int(row.get("volume", 0) or 0),
-                        "timestamp": ts,
-                    }
-                )
-            except Exception:
+            bar = normalize_history_row(symbol, row, source="historical")
+            if bar is None:
                 continue
+            ts = bar["timestamp"]
+            if ts in seen_ts:
+                continue
+            seen_ts.add(ts)
+            normalized.append(bar)
         normalized.sort(key=lambda row: cast(datetime, row["timestamp"]))
         if normalized:
             self._hydrate_failures[symbol] = 0
@@ -4965,6 +4951,16 @@ class StrategyRunner:
             except Exception:  # pragma: no cover - defensive
                 pass
 
+    def _is_tradable_symbol(self, symbol: str) -> bool:
+        """Return True when symbol is a tradable NIFTY option. Args: symbol. Returns: bool. Raises: none."""
+        value = str(symbol or "").upper()
+        return value.startswith("NFO:NIFTY") and (value.endswith("CE") or value.endswith("PE"))
+
+    def _is_context_symbol(self, symbol: str) -> bool:
+        """Return True when symbol is a context-only spot/futures instrument. Args: symbol. Returns: bool. Raises: none."""
+        value = str(symbol or "").upper()
+        return value == "NSE:NIFTY" or (value.startswith("NFO:NIFTY") and value.endswith("FUT"))
+
     def _strategy_evaluation_allowed(
         self, symbol: str, trace_id: str | None = None
     ) -> bool:
@@ -4982,6 +4978,19 @@ class StrategyRunner:
             if not self._indicator_engine.has_min_bars(symbol, self._required_candles):
                 history_count = len(self._indicator_engine.get_history(symbol) or [])
                 if history_count < self._required_candles:
+                    if self._is_context_symbol(symbol):
+                        if symbol == "NSE:NIFTY" and self._should_log_throttled(f"spot_cold:{symbol}", 120.0):
+                            self._logger.warning("CONTEXT_SPOT_HISTORY_COLD symbol=NSE:NIFTY bars=%d required=%d", history_count, self._required_candles)
+                        elif self._should_log_throttled(f"fut_cold:{symbol}", 120.0):
+                            self._logger.warning("CONTEXT_FUTURES_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, self._required_candles)
+                    elif self._is_tradable_symbol(symbol):
+                        if self._should_log_throttled(f"opt_cold:{symbol}", 120.0):
+                            self._logger.warning("OPTION_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, self._required_candles)
+                        spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
+                        fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY"), "")
+                        fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
+                        if (spot_bars < self._required_candles or fut_bars < self._required_candles) and self._should_log_throttled(f"opt_ctx_cold:{symbol}", 120.0):
+                            self._logger.warning("OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d", symbol, spot_bars, fut_bars, self._required_candles)
                     if self._should_log_throttled(
                         f"eval_block_cold_history:{symbol}", 120.0
                     ):

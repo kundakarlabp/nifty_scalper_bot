@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Option
 
 from nifty_scalper_bot.storage.hub_store import HubStore
 from nifty_scalper_bot.utils.options_math import black_scholes_greeks, implied_volatility
+from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.utils.symbols import canonical
 from nifty_scalper_bot.utils.serialization import to_json_safe
 
@@ -1436,29 +1437,17 @@ class DataHub:
             rows = await mdm_fn(normalized.replace("NSE:", "").replace("NFO:", ""), interval, days)
         except Exception:  # noqa: BLE001
             return [dict(row) for row in self._history_cache.get(key, [])]
-        normalized_rows = self._normalize_history_rows(rows)
+        normalized_rows = self._normalize_history_rows(normalized, rows)
         if normalized_rows:
             self._history_cache[key] = normalized_rows
         return [dict(row) for row in self._history_cache.get(key, [])]
 
-    def _normalize_history_rows(self, rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _normalize_history_rows(self, symbol: str, rows: Iterable[Any]) -> list[dict[str, Any]]:
         normalized_rows: list[dict[str, Any]] = []
-        now_utc = datetime.now(timezone.utc)
-        current_minute = now_utc.replace(second=0, microsecond=0)
-        for row in rows:
-            timestamp = row.get("timestamp")
-            if isinstance(timestamp, datetime):
-                ts = timestamp.astimezone(timezone.utc).replace(second=0, microsecond=0)
-            else:
-                ts = datetime.fromtimestamp(self._timestamp_ms(timestamp) / 1000.0, tz=timezone.utc).replace(
-                    second=0,
-                    microsecond=0,
-                )
-            if ts == current_minute:
-                continue
-            normalized = dict(row)
-            normalized["timestamp"] = ts
-            normalized_rows.append(normalized)
+        for row in rows or []:
+            bar = normalize_history_row(symbol, row, source="historical")
+            if bar is not None:
+                normalized_rows.append(bar)
         return normalized_rows
 
     def get_indicator(self, symbol: str, name: str) -> Optional[float]:
