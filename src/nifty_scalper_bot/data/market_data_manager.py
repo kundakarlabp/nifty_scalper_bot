@@ -6979,6 +6979,63 @@ class MarketDataManager:
         self._last_signature[symbol] = (signature, current)
         return False
 
+
+    @staticmethod
+    def normalize_history_row(symbol: str, row: Any, source: str = "historical") -> dict[str, Any] | None:
+        """Normalize broker/DataHub OHLC row. Args: symbol/row/source. Returns: canonical bar or None. Raises: None."""
+        try:
+            if isinstance(row, Mapping):
+                ts = row.get("timestamp") or row.get("date") or row.get("time")
+                open_ = row.get("open")
+                high = row.get("high")
+                low = row.get("low")
+                close = row.get("close")
+                volume = row.get("volume", 0)
+            elif isinstance(row, (list, tuple)) and len(row) >= 5:
+                ts = row[0]
+                open_ = row[1]
+                high = row[2]
+                low = row[3]
+                close = row[4]
+                volume = row[5] if len(row) > 5 else 0
+            else:
+                return None
+
+            if ts is None:
+                return None
+
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            elif not isinstance(ts, datetime):
+                ts = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            else:
+                ts = ts.astimezone(timezone.utc)
+
+            o = float(open_)
+            h = float(high)
+            l = float(low)
+            c = float(close)
+            v = int(float(volume or 0))
+
+            if min(o, h, l, c) <= 0:
+                return None
+
+            return {
+                "symbol": str(symbol),
+                "timestamp": ts,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v,
+                "source": source,
+            }
+        except Exception:
+            return None
+
     # -------------------------------------------------------------------------
     # ✅ "HUNTER-KILLER" FIX: Robust History Fetching
     # -------------------------------------------------------------------------
@@ -7081,13 +7138,42 @@ class MarketDataManager:
                 data = await asyncio.to_thread(
                     fetcher, token, from_date, to_date, interval
                 )
-                if data:
-                    self._logger.info(f"✅ Received {len(data)} candles for {symbol}")
+                raw_rows = data or []
+                normalized = [
+                    bar
+                    for bar in (
+                        self.normalize_history_row(symbol, row, source="historical")
+                        for row in raw_rows
+                    )
+                    if bar is not None
+                ]
+
+                if normalized:
+                    self._logger.info(
+                        "HISTORY_FETCH_NORMALIZED symbol=%s raw=%d normalized=%d",
+                        symbol,
+                        len(raw_rows),
+                        len(normalized),
+                        extra={
+                            "event": "HISTORY_FETCH_NORMALIZED",
+                            "symbol": symbol,
+                            "raw": len(raw_rows),
+                            "normalized": len(normalized),
+                        },
+                    )
                 else:
                     self._logger.warning(
-                        f"⚠️ History fetch returned 0 candles for {symbol} (Token: {token})"
+                        "HISTORY_FETCH_ZERO_NORMALIZED symbol=%s raw=%d",
+                        symbol,
+                        len(raw_rows),
+                        extra={
+                            "event": "HISTORY_FETCH_ZERO_NORMALIZED",
+                            "symbol": symbol,
+                            "raw": len(raw_rows),
+                        },
                     )
-                return data
+
+                return normalized
 
             # Debugging Dump if failure persists
             self._logger.error(

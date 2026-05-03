@@ -137,6 +137,26 @@ def _history_lookback_minutes(required_bars: int) -> int:
     return max(180, required + buffer_bars)
 
 
+def _prioritize_startup_hydration_symbols(symbols: Sequence[str], max_symbols: int = 4) -> list[str]:
+    """Prioritize startup hydration symbols. Args: symbols/max_symbols. Returns: ordered symbols. Raises: none."""
+    spot = [s for s in symbols if s == "NSE:NIFTY" or s.endswith(":NIFTY")]
+    futures = [s for s in symbols if s.startswith("NFO:NIFTY") and s.endswith("FUT")]
+    options = [
+        s
+        for s in symbols
+        if s.startswith("NFO:NIFTY") and (s.endswith("CE") or s.endswith("PE"))
+    ]
+
+    selected: list[str] = []
+    for bucket in (spot, futures, options):
+        for sym in bucket:
+            if sym not in selected:
+                selected.append(sym)
+            if len(selected) >= max_symbols:
+                return selected
+    return selected
+
+
 def _gate_runner_symbol_add(
     ctx: Any,
     symbol: str,
@@ -6903,7 +6923,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
                     continue
                 symbols_to_hydrate.append(_sym)
-            symbols_to_hydrate = symbols_to_hydrate[:hydration_max_contracts]
+            symbols_to_hydrate = _prioritize_startup_hydration_symbols(
+                symbols_to_hydrate,
+                max_symbols=min(4, hydration_max_contracts),
+            )
             LOGGER.info(
                 "HYDRATION_PLAN symbols=%d bars_target=%d lookback_days=%d",
                 len(symbols_to_hydrate),
@@ -6926,11 +6949,10 @@ async def startup_sequence(ctx: BotContext) -> None:
             async def _fetch_symbol(symbol: str) -> tuple[str, list[Any]]:
                 """Fetch historical records for one symbol. Args: symbol. Returns: symbol and raw records. Raises: Exception."""
                 records = await asyncio.to_thread(
-                    ctx.broker_client.get_ohlc,
+                    ctx.market_data_manager.fetch_history,
                     symbol,
                     "minute",
-                    from_str,
-                    to_str,
+                    2,
                 )
                 if records and len(records) > hydration_max_bars:
                     records = list(records)[-hydration_max_bars:]
@@ -6972,7 +6994,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     fetch_results.append(await _fetch_symbol(target_symbol))
                 except Exception as exc:  # noqa: BLE001
                     fetch_results.append(exc)
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(1.15)
 
             LOGGER.info(
                 "hydration_commit_start",
@@ -6995,10 +7017,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                 runner_ingested = 0
                 for row in records:
                     try:
-                        coerced = _coerce_ohlc_row(row)
-                        if coerced is None:
+                        bar_data = row if isinstance(row, dict) else None
+                        if bar_data is None:
                             continue
-                        bar_data = {"symbol": sym, **coerced}
                         if ctx.market_data_manager is not None:
                             ctx.market_data_manager.ingest_historical_bar(bar_data)
                         if (
