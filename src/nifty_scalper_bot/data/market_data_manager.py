@@ -6715,35 +6715,6 @@ class MarketDataManager:
     # ------------------------------------------------------------------
     # Helpers
 
-    def _coerce_from_depth(self, depth: Mapping[str, Any], side: str) -> float | None:
-        """Safely extract best price from depth list without crashing."""
-        try:
-            if not depth:
-                return None
-
-            levels = depth.get(side)
-            # Must be a list/tuple/iterable, but NOT a string or dict
-            if not levels or not isinstance(levels, (list, tuple)):
-                return None
-
-            for entry in levels:
-                if not isinstance(entry, Mapping):
-                    continue
-
-                # Check multiple common keys for price
-                price = entry.get("price") or entry.get("p")
-                if price:
-                    try:
-                        val = float(price)
-                        if val > 0:
-                            return val
-                    except (ValueError, TypeError):
-                        continue
-        except Exception:
-            # Swallow deep extraction errors to prevent tick stream crash
-            return None
-        return None
-
     @staticmethod
     def _extract_symbol(tick: dict[str, Any]) -> str | None:
         for key in ("symbol", "tradingsymbol", "instrument"):
@@ -6890,21 +6861,26 @@ class MarketDataManager:
 
     @staticmethod
     def _coerce_from_depth(depth: Any, side: str) -> float | None:
-        if not isinstance(depth, dict):
+        """Return best depth price for side='buy' or side='sell' without fabricating prices."""
+        if not isinstance(depth, Mapping):
             return None
         entries = depth.get(side)
-        if not isinstance(entries, Iterable):
+        if not isinstance(entries, Iterable) or isinstance(
+            entries, (str, bytes, dict)
+        ):
             return None
         for entry in entries:
-            if not isinstance(entry, dict):
+            if not isinstance(entry, Mapping):
                 continue
             price = entry.get("price")
             if price is None:
                 continue
             try:
-                return float(price)
+                value = float(price)
             except (TypeError, ValueError):
                 continue
+            if value > 0:
+                return value
         return None
 
     @staticmethod

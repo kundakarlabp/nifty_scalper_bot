@@ -3631,9 +3631,6 @@ class StrategyRunner:
                     pass
         return 0.0
 
-    def _execute_order(self, *, symbol: str, base_symbol: str, side: Literal["BUY", "SELL"], quantity: int, price: float, stop_loss: float | None, take_profit: float | None, timestamp: datetime, reference_price: float | None = None, metadata: Mapping[str, Any] | None = None, ) -> tuple[str, int]:
-        """Execute an order request with quantity normalization and metrics."""
-
     def _execute_order(
         self,
         *,

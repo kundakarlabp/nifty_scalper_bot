@@ -242,10 +242,10 @@ The bot is built on a **layered architecture** with clear separation of concerns
         |                     |                     |
 +-------v--------+   +-------v--------+   +-------v--------+
 |  Data Layer    |   | Strategy Layer |   | Execution Layer|
-|  - WebSocket   |   | - Elite Strat  |   | - Order Queue  |
-|  - Polling     |   | - ORB          |   | - Pre-flight   |
-|  - Instruments |   | - Regime Adapt |   | - Lifecycle Mgr|
-|  - Cache       |   | - Signal Gen   |   | - Position Mgr |
+|  - WebSocket   |   | - Elite Strat  |   | - OrderManager |
+|  - Polling     |   | - ORB          |   | - BracketManager|
+|  - Instruments |   | - Regime Adapt |   | - Entry/Exit   |
+|  - Cache       |   | - Signal Gen   |   | - Reconcile    |
 +----------------+   +----------------+   +----------------+
         |                     |                     |
         +---------------------+---------------------+

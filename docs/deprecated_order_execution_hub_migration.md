@@ -1,4 +1,4 @@
-# DEPRECATED
+# DEPRECATED — Do not use for current runtime architecture
 
 This document is obsolete. The runtime trading path does not use OrderExecutionHub, ExecutionRouter, or PreflightValidator.
 

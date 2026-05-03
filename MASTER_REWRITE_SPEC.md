@@ -7,6 +7,8 @@
 
 ---
 
+> **DEPRECATED SPEC:** Do not implement OrderExecutionHub, ExecutionRouter, or PreflightValidator. Current runtime path is StrategyRunner → OrderManager → BracketManager.
+
 > **Reading Guide for AI Implementers:** Read this document top to bottom before writing a single line of code. Every section builds on the previous. Section 7 (per-file specs) is the implementation contract. Section 8 (strategy specs) contains the exact trading logic. If any detail seems ambiguous, the intent is always: capital preservation first, consistent alpha second, clean code third.
 
 ---
@@ -974,7 +976,7 @@ async def _run_loop(self) -> None:
 
             # 9. Route to execution
             for signal in validated:
-                await self.execution_router.route(signal)
+                [DEPRECATED] do not add execution_router.route(signal) in current runtime architecture
 
             # 10. Update lifecycle (SL/TP/trail evaluation)
             await self.lifecycle_manager.evaluate_all()
@@ -1129,7 +1131,7 @@ Strategies check `indicators.is_valid` (set False during warmup) before generati
 
 ```python
 # execution/router.py
-class ExecutionRouter:
+class ExecutionRouter:  # DEPRECATED - not part of current runtime architecture
     async def route(self, signal: Signal) -> None:
         if self.mode == ExecutionMode.LIVE:
             await self._live_execute(signal)
