@@ -29,6 +29,7 @@ import pandas as pd
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.data.candle_engine import CandleEngine
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
+from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.data.source import DataIntegrityError
 from nifty_scalper_bot.infra.metrics import METRICS
@@ -6983,58 +6984,7 @@ class MarketDataManager:
     @staticmethod
     def normalize_history_row(symbol: str, row: Any, source: str = "historical") -> dict[str, Any] | None:
         """Normalize broker/DataHub OHLC row. Args: symbol/row/source. Returns: canonical bar or None. Raises: None."""
-        try:
-            if isinstance(row, Mapping):
-                ts = row.get("timestamp") or row.get("date") or row.get("time")
-                open_ = row.get("open")
-                high = row.get("high")
-                low = row.get("low")
-                close = row.get("close")
-                volume = row.get("volume", 0)
-            elif isinstance(row, (list, tuple)) and len(row) >= 5:
-                ts = row[0]
-                open_ = row[1]
-                high = row[2]
-                low = row[3]
-                close = row[4]
-                volume = row[5] if len(row) > 5 else 0
-            else:
-                return None
-
-            if ts is None:
-                return None
-
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            elif not isinstance(ts, datetime):
-                ts = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            else:
-                ts = ts.astimezone(timezone.utc)
-
-            o = float(open_)
-            h = float(high)
-            l = float(low)
-            c = float(close)
-            v = int(float(volume or 0))
-
-            if min(o, h, l, c) <= 0:
-                return None
-
-            return {
-                "symbol": str(symbol),
-                "timestamp": ts,
-                "open": o,
-                "high": h,
-                "low": l,
-                "close": c,
-                "volume": v,
-                "source": source,
-            }
-        except Exception:
-            return None
+        return normalize_history_row(symbol, row, source=source)
 
     # -------------------------------------------------------------------------
     # ✅ "HUNTER-KILLER" FIX: Robust History Fetching
