@@ -343,7 +343,6 @@ src/nifty_scalper_bot/
 ├── execution/
 │   ├── lifecycle_manager.py    # TP/SL/trailing logic
 │   ├── order_manager.py        # Order creation & modification
-│   ├── preflight_validator.py  # Pre-trade risk gates
 │   ├── position_manager.py     # Active position tracking
 │   ├── bracket_manager.py      # Bracket order orchestration
 │   └── shadow_paper.py         # Paper trading simulator
@@ -579,3 +578,12 @@ MIT License - See LICENSE file for details.
 ---
 
 **Built for systematic traders** - [Documentation](docs/) - [Production Playbook](docs/production_playbook.md)
+
+
+## Current execution architecture
+
+StrategyRunner → OrderManager → BracketManager
+
+- StrategyRunner builds and submits TradePlan objects.
+- OrderManager owns entry order placement to broker/paper execution.
+- BracketManager owns SL/TP/trailing/EOD virtual bracket exits.

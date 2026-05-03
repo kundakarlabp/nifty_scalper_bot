@@ -63,8 +63,7 @@ from nifty_scalper_bot.data.source import (
     ensure_ltp,
     is_symbol_valid,
 )
-# ExecutionEngine removed — signals now route directly through order_manager.place_order()
-# from nifty_scalper_bot.execution.order_execution_hub import ExecutionEngine
+# Signals route directly through OrderManager submit/place APIs; no execution hub layer.
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
@@ -783,12 +782,41 @@ class StrategyRunner:
             )
 
     def _on_bracket_exit_complete(self, symbol: str, *args: Any, **kwargs: Any) -> None:
-        """Clear state when a bracket exit completes to free up direction lock."""
+        """Callback from BracketManager after virtual bracket exit completes; clears runner state only."""
+        del args, kwargs
         try:
-            self._logger.info("Bracket exit completed for %s, clearing lock.", symbol)
-            # Handled internally; bracket manager cleans its own state natively.
-        except Exception as e:
-            self._logger.error("Error in bracket exit callback: %s", e)
+            if not symbol:
+                return
+
+            logger = getattr(self, "_logger", LOGGER)
+            logger.info("BRACKET_EXIT_COMPLETE symbol=%s", symbol)
+
+            for attr in ("active_trades", "_active_trades", "open_trades", "_open_trades"):
+                store = getattr(self, attr, None)
+                if isinstance(store, dict):
+                    store.pop(symbol, None)
+
+            for attr in ("_execution_locks", "execution_locks", "_inflight_orders", "inflight_orders"):
+                store = getattr(self, attr, None)
+                if isinstance(store, dict):
+                    store.pop(symbol, None)
+                elif isinstance(store, set):
+                    store.discard(symbol)
+
+            if getattr(self, "current_symbol", None) == symbol:
+                self.current_symbol = None
+
+            try:
+                base = self._normalize_symbol(symbol)
+            except Exception:
+                base = symbol
+            self._notify_orchestrator_exit(base)
+            self._clear_order_in_flight(symbol)
+            self._reset_execution_state(base)
+
+        except Exception:
+            logger = getattr(self, "_logger", LOGGER)
+            logger.exception("BRACKET_EXIT_CALLBACK_FAILED symbol=%s", symbol)
 
     # ==================== LIFECYCLE MANAGEMENT ====================
 
@@ -3853,16 +3881,6 @@ class StrategyRunner:
                 "orchestrator_notify_exit_failed",
                 extra={"event": "orchestrator_notify_exit_failed", "error": str(exc)},
             )
-
-    def _on_bracket_exit_complete(self, symbol: str) -> None:
-        """Clear orchestrator lock and in-flight guard after bracket exit completion."""
-        try:
-            base = self._normalize_symbol(symbol)
-        except Exception:
-            base = symbol
-        self._notify_orchestrator_exit(base)
-        self._clear_order_in_flight(symbol)
-        self._reset_execution_state(base)
 
     def _is_order_in_flight(self, trade_symbol: str, base_symbol: str) -> bool:
         """Return whether a fresh order is currently in flight for the symbol group."""
