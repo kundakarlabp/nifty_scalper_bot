@@ -258,6 +258,13 @@ class MarketDataManager:
         self._stale_threshold_seconds = self._parse_float_env(
             "MDM_STALE_THRESHOLD_SECONDS", default=10.0, minimum=1.0
         )
+        self._critical_symbol_stale_seconds = self._parse_float_env(
+            "MDM_CRITICAL_SYMBOL_STALE_SECONDS", default=30.0, minimum=1.0
+        )
+        self._option_stale_seconds = self._parse_float_env(
+            "MDM_OPTION_STALE_SECONDS", default=60.0, minimum=1.0
+        )
+        self._poll_fallback_count = 0
         self._ltp_stale_seconds = self._parse_float_env(
             "MDM_LTP_STALE_SECONDS", default=5.0, minimum=1.0
         )
@@ -4485,7 +4492,10 @@ class MarketDataManager:
         except Exception:
             pass
 
-        self._emit_tick(symbol, tick_dict, source="ws")
+        normalized_live = self.normalize_live_tick(tick_dict, source="ws")
+        if normalized_live is None:
+            return
+        self._ingest_normalized_tick(normalized_live)
         if candle:
             self._ohlc[symbol].append(candle)
 
@@ -4741,6 +4751,13 @@ class MarketDataManager:
                 level=logging.WARNING,
             )
 
+    def _ingest_normalized_tick(self, tick: Mapping[str, Any]) -> None:
+        """Ingest one canonical live tick. Args: tick; Returns: none; Raises: none."""
+        symbol = str(tick["symbol"])
+        source = str(tick.get("source") or "unknown").lower()
+        tick_payload = dict(tick)
+        self._emit_tick(symbol, tick_payload, source=source)
+
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
         if source == "ws":
@@ -4754,13 +4771,13 @@ class MarketDataManager:
                 last_logged = float(self._ws_stored_tick_log_at.get(symbol, 0.0))
                 if last_logged <= 0.0 or (now - last_logged) >= 60.0:
                     self._ws_stored_tick_log_at[symbol] = now
-                    self._logger.info(
+                    self._logger.debug(
                         "MDM_TICK_CACHE_UPDATED symbol=%s token=%s source=ws",
                         symbol,
                         token_int,
                         extra={"event": "MDM_TICK_CACHE_UPDATED", "symbol": symbol, "token": token_int, "source": "ws"},
                     )
-                    self._logger.info(
+                    self._logger.debug(
                         "WS_TICK_STORED symbol=%s token=%s ltp=%s source=ws age_ms=0",
                         symbol,
                         token_int,
@@ -4920,13 +4937,33 @@ class MarketDataManager:
                 cached_count,
                 tick_count,
             )
-            self._logger.info(
+            self._logger.debug(
                 "Condition met: mdm_tick_health",
                 extra={
                     "event": "mdm_tick_health",
                     "ticks_per_second_by_symbol": rates,
                     "history_length_by_symbol": history_lengths,
                 },
+            )
+        if now_mono - self._last_tick_stats_log >= 120.0:
+            self._last_tick_stats_log = now_mono
+            with self._lock:
+                live_symbols = len(self._symbols_with_tick)
+                subscribed = len(self._active_subscribed_symbols)
+                stale_symbols = sum(
+                    1
+                    for sym in self._active_subscribed_symbols
+                    if (time.time() - float(self._last_tick_time.get(sym, 0.0) or 0.0))
+                    >= self._option_stale_seconds
+                )
+            self._logger.info(
+                "MARKET_DATA_HEALTH_SUMMARY ws_connected=%s subscribed=%d live_symbols=%d stale_symbols=%d poll_fallbacks=%d bus_running=%s",
+                self._is_ws_connected(),
+                subscribed,
+                live_symbols,
+                stale_symbols,
+                int(getattr(self, "_poll_fallback_count", 0)),
+                bool(getattr(getattr(self, "bus", None), "running", False)),
             )
         try:
             self._m_ticks.inc()
@@ -5516,6 +5553,8 @@ class MarketDataManager:
                     candidates.update(self._latest_ticks.keys())
                 candidates.update(self._tracked_symbols)
             ordered = sorted(symbol for symbol in candidates if symbol)
+            now_dt = datetime.now(timezone.utc)
+            ordered = [sym for sym in ordered if self._should_poll_symbol(sym, now_dt)]
             limit = self._rest_poll_max_symbols
             if limit > 0 and len(ordered) > limit:
                 self._logger.debug(
@@ -6491,11 +6530,76 @@ class MarketDataManager:
         normalized = self._normalize_tick(symbol, quote, previous)
         if normalized is None:
             return
-        if self._is_duplicate(symbol, normalized):
-            self._store_tick(symbol, normalized)
-        else:
-            self._emit_tick(symbol, normalized, source="rest")
+        normalized_live = self.normalize_live_tick(normalized, source="poll")
+        if normalized_live is None:
+            return
+        self._poll_fallback_count = int(getattr(self, "_poll_fallback_count", 0)) + 1
+        self._ingest_normalized_tick(normalized_live)
         self._process_poll_quote(symbol, normalized)
+
+    def _is_context_symbol(self, symbol: str) -> bool:
+        """Return whether symbol is context feed. Args: symbol; Returns: bool; Raises: none."""
+        sym = self._canonical_symbol(symbol)
+        return sym == "NSE:NIFTY" or "FUT" in sym
+
+    def _should_poll_symbol(self, symbol: str, now: datetime) -> bool:
+        """Decide REST poll fallback need. Args: symbol, now; Returns: bool; Raises: none."""
+        sym = self._canonical_symbol(symbol)
+        with self._lock:
+            active = set(self._active_subscribed_symbols) or set(self._tracked_symbols)
+            if active and sym not in active:
+                return False
+            if not self._is_ws_connected():
+                return True
+            last_ts_raw = self._last_tick_time.get(sym)
+        if last_ts_raw is None:
+            return True
+        last_ts = datetime.fromtimestamp(float(last_ts_raw), tz=timezone.utc)
+        age = (now - last_ts).total_seconds()
+        threshold = (
+            self._critical_symbol_stale_seconds
+            if self._is_context_symbol(sym)
+            else self._option_stale_seconds
+        )
+        return age >= threshold
+
+    def normalize_live_tick(
+        self, raw: Mapping[str, Any], source: str = "ws"
+    ) -> dict[str, Any] | None:
+        """Normalize live tick. Args: raw/source. Returns: canonical tick or none. Raises: none."""
+        token_raw = raw.get("token") or raw.get("instrument_token")
+        token: int | None = None
+        if token_raw is not None:
+            with suppress(Exception):
+                token = int(token_raw)
+        symbol_raw = raw.get("symbol")
+        symbol = str(symbol_raw) if symbol_raw else ""
+        if not symbol and token is not None:
+            with self._lock:
+                symbol = str(self._symbol_by_token.get(token) or self._token_to_symbol.get(token) or "")
+        if not symbol:
+            return None
+        ltp_raw = raw.get("ltp") or raw.get("last_price") or raw.get("price")
+        with suppress(Exception):
+            ltp = float(ltp_raw)
+            if ltp <= 0:
+                return None
+            ts = pd.to_datetime(raw.get("timestamp") or raw.get("exchange_timestamp") or datetime.now(timezone.utc), utc=True, errors="coerce")
+            if pd.isna(ts):
+                ts = pd.Timestamp.utcnow()
+            ts_py = ts.to_pydatetime().astimezone(timezone.utc)
+            return {
+                "symbol": self._canonical_symbol(symbol),
+                "token": token,
+                "ltp": ltp,
+                "bid": _coerce_float(raw.get("bid")),
+                "ask": _coerce_float(raw.get("ask")),
+                "volume": _coerce_int(raw.get("volume") or raw.get("volume_traded") or raw.get("volume_traded_today")),
+                "oi": _coerce_int(raw.get("oi")),
+                "timestamp": ts_py,
+                "source": "poll" if str(source).lower() == "poll" else "ws",
+            }
+        return None
 
     def _ltp_stale_threshold_for_symbol(self, symbol: str) -> float:
         """Return per-symbol stale threshold. Args: symbol. Returns: seconds. Raises: none."""
