@@ -22,7 +22,9 @@ class Services:
     
     order_manager: Any | None
     risk_manager: Any | None
-    market_data: Any | None
+    market_data_manager: Any | None
+    data_hub: Any | None
+    bracket_manager: Any | None
     strategy_runner: Any | None
     config: Any | None
     broker: Any | None
@@ -30,10 +32,8 @@ class Services:
     metrics: Any | None
     market_regime: Any | None
     allowed_chat_id: int
-    order_execution_hub: Any | None = None
     order_queue: Any | None = None
     state_tracker: Any | None = None
-    preflight_validator: Any | None = None
     version_info: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
@@ -317,8 +317,8 @@ def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE, services: Servi
             raise
             
     mdm_connected = False
-    if services.market_data:
-        mdm_connected = bool(getattr(services.market_data, "ws_connected", False))
+    if services.market_data_manager:
+        mdm_connected = bool(getattr(services.market_data_manager, "ws_connected", False))
         
     return (
         f"diag: broker={broker_status} | "
@@ -376,7 +376,7 @@ def cmd_book(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) 
     if not sym:
         return "Usage: /book <SYMBOL>"
     
-    mdm = services.market_data
+    mdm = services.market_data_manager
     if not mdm:
         return "MDM unavailable"
         
@@ -394,8 +394,8 @@ def cmd_ohlc(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) 
     if not sym:
         return "Usage: /ohlc <SYMBOL>"
     
-    if services.market_data and hasattr(services.market_data, "get_ohlc"):
-        res = services.market_data.get_ohlc(sym)
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_ohlc"):
+        res = services.market_data_manager.get_ohlc(sym)
         return str(res) if res else "n/a"
     return "MDM unavailable"
 
@@ -405,9 +405,9 @@ def cmd_chain(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services)
     if not arg:
         return "Usage: /chain <ROOT> (e.g. NIFTY)"
     
-    if services.market_data and hasattr(services.market_data, "get_option_chain"):
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_option_chain"):
         try:
-            chain = services.market_data.get_option_chain(arg)
+            chain = services.market_data_manager.get_option_chain(arg)
             if chain:
                 return f"Chain fetched: {len(chain)} contracts."
         except Exception as e:
@@ -420,8 +420,8 @@ def cmd_atm(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -
     if not arg:
         return "Usage: /atm <ROOT>"
     
-    if services.market_data and hasattr(services.market_data, "get_atm_option"):
-        return str(services.market_data.get_atm_option(arg))
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_atm_option"):
+        return str(services.market_data_manager.get_atm_option(arg))
     return "ATM unavailable"
 
 
@@ -430,8 +430,8 @@ def cmd_spot(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) 
     if not arg:
         return "Usage: /spot <ROOT>"
     
-    if services.market_data and hasattr(services.market_data, "get_spot"):
-        return str(services.market_data.get_spot(arg))
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_spot"):
+        return str(services.market_data_manager.get_spot(arg))
     return "Spot unavailable"
 
 
@@ -440,8 +440,8 @@ def cmd_greeks(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services
     if not arg:
         return "Usage: /greeks <SYMBOL>"
     
-    if services.market_data and hasattr(services.market_data, "get_greeks"):
-        return str(services.market_data.get_greeks(arg))
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_greeks"):
+        return str(services.market_data_manager.get_greeks(arg))
     return "Greeks unavailable"
 
 
@@ -450,8 +450,8 @@ def cmd_iv(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) ->
     if not arg:
         return "Usage: /iv <ROOT>"
     
-    if services.market_data and hasattr(services.market_data, "get_iv_trend"):
-        return str(services.market_data.get_iv_trend(arg))
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_iv_trend"):
+        return str(services.market_data_manager.get_iv_trend(arg))
     return "IV unavailable"
 
 
@@ -460,20 +460,20 @@ def cmd_prevclose(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Servi
     if not arg:
         return "Usage: /prevclose <SYMBOL>"
     
-    if services.market_data and hasattr(services.market_data, "get_prev_close"):
-        return str(services.market_data.get_prev_close(arg))
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_prev_close"):
+        return str(services.market_data_manager.get_prev_close(arg))
     return "PrevClose unavailable"
 
 
 def cmd_session(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
-    if services.market_data and hasattr(services.market_data, "get_market_session"):
-        return str(services.market_data.get_market_session())
+    if services.market_data_manager and hasattr(services.market_data_manager, "get_market_session"):
+        return str(services.market_data_manager.get_market_session())
     return "Session info unavailable"
 
 
 def cmd_holiday(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
-    if services.market_data and hasattr(services.market_data, "next_holiday"):
-        return str(services.market_data.next_holiday())
+    if services.market_data_manager and hasattr(services.market_data_manager, "next_holiday"):
+        return str(services.market_data_manager.next_holiday())
     return "Holiday info unavailable"
 
 
@@ -559,25 +559,34 @@ def cmd_execstate(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Servi
     if not sym:
         return "Usage: /execstate <SYMBOL>"
     
-    hub = services.order_execution_hub
-    if hub and hasattr(hub, "get_position_state"):
-        return str(hub.get_position_state(sym))
-    return "Exec state unavailable"
+    om = services.order_manager
+    if om and hasattr(om, "get_execution_state"):
+        return str(om.get_execution_state(sym))
+    if om and hasattr(om, "recent_orders"):
+        recent = om.recent_orders(limit=10)
+        matching = [o for o in recent if str(o.get("symbol", "")).upper() == sym]
+        return str(matching[:3]) if matching else f"No recent execution state for {sym}"
+    return "OrderManager unavailable"
 
 
 def cmd_execqueue(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
-    q = services.order_queue
-    if q and hasattr(q, "get_queue_snapshot"):
-        snap = q.get_queue_snapshot()
-        return f"Queue depth: {len(snap)}"
+    om = services.order_manager
+    if om and hasattr(om, "get_pending_orders"):
+        return str(om.get_pending_orders())
+    if om and hasattr(om, "recent_orders"):
+        recent = om.recent_orders(limit=10)
+        pending = [o for o in recent if str(o.get("status", "")).lower() in {"pending", "submitted", "open"}]
+        return f"Pending/open orders: {len(pending)}"
     return "Queue unavailable"
 
 
 def cmd_execlast(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
-    hub = services.order_execution_hub
-    if hub and hasattr(hub, "get_stats"):
-        return str(hub.get_stats())
-    return "Exec stats unavailable"
+    om = services.order_manager
+    if om and hasattr(om, "get_execution_stats"):
+        return str(om.get_execution_stats())
+    if om and hasattr(om, "recent_orders"):
+        return str(om.recent_orders(limit=5))
+    return "Execution stats unavailable"
 
 
 def cmd_execwhy(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
@@ -585,18 +594,20 @@ def cmd_execwhy(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Service
     if not sym:
         return "Usage: /execwhy <SYMBOL>"
         
-    val = services.preflight_validator
-    if val and hasattr(val, "validate"):
-        res = val.validate(sym, context={})
-        return f"{sym}: allowed={res.allowed} reasons={res.reasons}"
-    return "Validator unavailable"
+    om = services.order_manager
+    if om and hasattr(om, "explain_preflight"):
+        return str(om.explain_preflight(sym))
+    return "OrderManager preflight diagnostics unavailable"
 
 
 def cmd_emergencystop(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
-    hub = services.order_execution_hub
-    if hub and hasattr(hub, "emergency_stop"):
-        res = hub.emergency_stop()
+    om = services.order_manager
+    if om and hasattr(om, "emergency_stop"):
+        res = om.emergency_stop(reason="telegram")
         return f"STOP triggered: {res}"
+    if om and hasattr(om, "engage_kill_switch"):
+        om.engage_kill_switch("telegram_emergency_stop")
+        return "STOP triggered: order kill switch engaged"
     return "Emergency stop unavailable"
 
 

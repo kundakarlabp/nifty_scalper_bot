@@ -177,6 +177,36 @@ class OrderDetails:
 
 
 @dataclass(slots=True)
+class OrderPreflightResult:
+    """Trade-plan preflight decision payload."""
+
+    allowed: bool
+    reason: str = "allowed"
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TradePlan:
+    """Strategy-to-execution trade intent contract."""
+
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    quantity: int
+    entry_price: float | None
+    stop_loss: float | None
+    take_profit: float | None
+    strategy_name: str = "runner"
+    signal_id: str | None = None
+    trace_id: str | None = None
+    tag: str = "runner"
+    product: str = "MIS"
+    variety: str = "regular"
+    max_quote_age_ms: int = 5000
+    max_spread_pct: float = 5.0
+    min_depth_qty: int = 150
+    allow_market_entry: bool = False
+
+@dataclass(slots=True)
 class ExitIntent:
     """Bound exit request to the originating entry instrument."""
 
@@ -2515,15 +2545,132 @@ class OrderManager:
         _log_order_decision(allowed=False, block_reason="order_placement_failed_after_retries")
         return None
 
+    def _get_latest_quote_safe(self, symbol: str) -> dict[str, Any] | None:
+        providers = (
+            getattr(self, "_data_hub", None),
+            getattr(self, "data_hub", None),
+            getattr(self, "_market_data", None),
+            getattr(self, "_market_data_manager", None),
+            getattr(self, "market_data_manager", None),
+        )
+        for provider in providers:
+            if provider is None:
+                continue
+            for method_name in ("get_quote", "get_latest_tick", "get_tick"):
+                method = getattr(provider, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    quote = method(symbol)
+                    if quote:
+                        return dict(quote)
+                except TypeError:
+                    try:
+                        quote = method(symbol, allow_pull=False)
+                        if quote:
+                            return dict(quote)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        return None
+
+    def _extract_quote_diagnostics(self, quote: Mapping[str, Any]) -> dict[str, Any]:
+        bid = float(quote.get("best_bid") or quote.get("bid") or quote.get("best_bid_price") or 0.0)
+        ask = float(quote.get("best_ask") or quote.get("ask") or quote.get("best_ask_price") or 0.0)
+        ltp = float(quote.get("ltp") or quote.get("last_price") or 0.0)
+        bid_qty = int(float(quote.get("bid_quantity") or quote.get("bid_qty") or 0))
+        ask_qty = int(float(quote.get("ask_quantity") or quote.get("ask_qty") or 0))
+        spread = max(0.0, ask - bid) if bid > 0 and ask > 0 else 0.0
+        ref = ask if ask > 0 else ltp if ltp > 0 else 1.0
+        spread_pct = (spread / ref) * 100.0 if ref > 0 else 999.0
+        age_ms = None
+        ts_raw = quote.get("timestamp") or quote.get("received_at")
+        try:
+            if isinstance(ts_raw, (int, float)):
+                age_ms = max(0.0, (time.time() - float(ts_raw)) * 1000.0)
+        except Exception:
+            age_ms = None
+        return {"bid": bid, "ask": ask, "ltp": ltp, "spread": spread, "spread_pct": spread_pct, "bid_qty": bid_qty, "ask_qty": ask_qty, "depth_qty": bid_qty + ask_qty, "age_ms": age_ms}
+
+    def _validate_trade_plan(self, plan: TradePlan) -> OrderPreflightResult:
+        symbol = normalize_symbol(plan.symbol)
+        if not is_strategy_instrument(symbol):
+            return OrderPreflightResult(False, "non_strategy_instrument", {"symbol": symbol})
+        if plan.quantity <= 0:
+            return OrderPreflightResult(False, "invalid_quantity", {"quantity": plan.quantity})
+        lot_size = self._lot_size_for_symbol(symbol)
+        if lot_size > 0 and plan.quantity % lot_size != 0:
+            return OrderPreflightResult(False, "quantity_not_lot_multiple", {"quantity": plan.quantity, "lot_size": lot_size})
+        is_entry = plan.side == "BUY" and "exit" not in (plan.tag or "").lower()
+        if is_entry and (plan.stop_loss is None or plan.stop_loss <= 0):
+            return OrderPreflightResult(False, "missing_stop_loss", {})
+        if is_entry and (plan.take_profit is None or plan.take_profit <= 0):
+            return OrderPreflightResult(False, "missing_take_profit", {})
+        quote = self._get_latest_quote_safe(symbol)
+        if quote is None:
+            return OrderPreflightResult(False, "quote_unavailable", {})
+        qd = self._extract_quote_diagnostics(quote)
+        if qd.get("age_ms") is not None and qd["age_ms"] > plan.max_quote_age_ms:
+            return OrderPreflightResult(False, "quote_stale", {"age_ms": qd["age_ms"], "limit_ms": plan.max_quote_age_ms})
+        if is_entry and qd["bid"] > 0 and qd["ask"] > 0 and qd["spread_pct"] > plan.max_spread_pct:
+            return OrderPreflightResult(False, "spread_too_wide", {"spread_pct": qd["spread_pct"], "limit_pct": plan.max_spread_pct})
+        if is_entry and qd["depth_qty"] < plan.min_depth_qty:
+            return OrderPreflightResult(False, "depth_insufficient", {"depth_qty": qd["depth_qty"], "limit_qty": plan.min_depth_qty})
+        return OrderPreflightResult(True, "allowed", {"quote": qd, "lot_size": lot_size})
+
+    def _protected_limit_price(self, plan: TradePlan) -> float | None:
+        quote = self._get_latest_quote_safe(plan.symbol)
+        tick_size = 0.05
+        if quote:
+            qd = self._extract_quote_diagnostics(quote)
+            if plan.side == "BUY":
+                if qd["ask"] > 0:
+                    return self._round_to_tick(qd["ask"] + tick_size, tick_size)
+            if plan.side == "SELL":
+                if qd["bid"] > 0:
+                    return self._round_to_tick(max(tick_size, qd["bid"] - tick_size), tick_size)
+        if plan.entry_price and plan.entry_price > 0:
+            return self._round_to_tick(float(plan.entry_price), tick_size)
+        return None
+
+    def explain_preflight(self, symbol: str, *, plan: TradePlan | None = None) -> dict[str, Any]:
+        quote = self._get_latest_quote_safe(symbol)
+        details = {"symbol": symbol, "quote_present": quote is not None}
+        if quote:
+            details.update(self._extract_quote_diagnostics(quote))
+        if plan is not None:
+            result = self._validate_trade_plan(plan)
+            details["allowed"] = result.allowed
+            details["reason"] = result.reason
+            details["validation_details"] = result.details
+        return details
+
+    def submit_trade_plan(self, plan: TradePlan) -> str | None:
+        symbol = normalize_symbol(plan.symbol)
+        validation = self._validate_trade_plan(plan)
+        if not validation.allowed:
+            return None
+        price = self._protected_limit_price(plan)
+        if hasattr(self, "place_managed_order"):
+            return self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+        return self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT if price else OrderType.MARKET, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+
     def place_managed_order(
         self,
         symbol: str,
         side: Literal["BUY", "SELL"],
         quantity: int,
-        stop_loss: float,
-        take_profit: float,
-        signal_id: str,
+        entry_price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        signal_id: str | None = None,
+        strategy_name: str = "runner",
         tag: str = "strategy",
+        product: str = "MIS",
+        variety: str = "regular",
+        trace_id: str | None = None,
+        allow_market_entry: bool = False,
     ) -> str | None:
         """
         Atomic wrapper that guarantees: Entry Order + Virtual Bracket OR Nothing.
@@ -2542,15 +2689,27 @@ class OrderManager:
             return None
 
         # 2. Execute Entry (Passes Safety Guard because SL is provided)
+        entry_order_type = OrderType.LIMIT
+        if entry_price is None or entry_price <= 0:
+            if not allow_market_entry:
+                self._logger.warning(
+                    "MANAGED_ORDER_REJECTED symbol=%s reason=protected_limit_unavailable",
+                    symbol,
+                )
+                return None
+            entry_order_type = OrderType.MARKET
+
         order_id = self.place_order(
             symbol=symbol,
             side=side,
             quantity=quantity,
+            order_type=entry_order_type,
+            price=entry_price,
             stop_loss=stop_loss,  # ✅ Critical: Passing this satisfies the Safety Guard
             take_profit=take_profit,
             signal_id=signal_id,
             tag=tag,
-            product="MIS",
+            product=product,
         )
 
         # 3. Immediate Bracket Registration (The "Virtual" Part)
