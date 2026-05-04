@@ -54,7 +54,12 @@ def _load_env_file() -> None:
     for env_path in search_paths:
         if env_path.exists() and env_path.is_file():
             print(f"✅ ENV FILE FOUND: {env_path}", flush=True)
-            load_dotenv(dotenv_path=str(env_path), override=True)
+            is_railway = bool(
+                os.getenv("RAILWAY_ENVIRONMENT")
+                or os.getenv("RAILWAY_PROJECT_ID")
+                or os.getenv("RAILWAY_SERVICE_ID")
+            )
+            load_dotenv(dotenv_path=str(env_path), override=not is_railway)
             env_loaded = True
 
             enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
