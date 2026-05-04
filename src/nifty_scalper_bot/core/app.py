@@ -54,6 +54,13 @@ LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 SYNC_LOCK = threading.Lock()
 instrument_cache_ready = threading.Event()
 
+async def _maybe_await(value: Any) -> Any:
+    """Await possibly-awaitable values. Args: value. Returns: resolved value. Raises: none."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 
 def _build_startup_fingerprint() -> dict[str, str]:
     """Build startup fingerprint metadata. Args: none. Returns: metadata map. Raises: none."""
@@ -4212,7 +4219,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 # Pass DataHub (SSOT) as the market-data facade; bracket manager
                 # only needs subscribe/unsubscribe + quote access, which DataHub
                 # exposes and transparently delegates to MDM.
-                market_data_manager=data_hub if 'data_hub' in locals() and data_hub else market_data_manager,
+                market_data=data_hub if 'data_hub' in locals() and data_hub else market_data_manager,
                 trade_journal=trade_journal,
             )
 
@@ -6650,118 +6657,6 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
 
     # ---------------------------------------------------------
-    # 2c. Token-based ATM contract selection + pre-hydration
-    #     Uses InstrumentManager (token-first) + hydrate_contracts()
-    #     MUST run before WS and strategy start.
-    # ---------------------------------------------------------
-    if broker_ready and ctx.instrument_manager is not None and ctx.instrument_manager.is_loaded():
-        try:
-            from nifty_scalper_bot.core.hydration import assert_valid_token, hydrate_contracts
-            from nifty_scalper_bot.core.contract_selector import get_atm_contracts
-            hydration_max_contracts = max(1, int(os.getenv("HYDRATION_MAX_CONTRACTS", "12") or 12))
-            hydration_min_bars = max(1, int(os.getenv("HYDRATION_MIN_BARS", "100") or 100))
-            hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
-
-            # Resolve the underlying sync broker (ZerodhaKiteClient)
-            _sync_broker_for_hydration = getattr(
-                ctx.broker_client, "_broker",
-                getattr(ctx.broker_client, "broker", ctx.broker_client),
-            )
-
-            # Resolve NIFTY spot — in LIVE mode this requires fresh WS tick
-            # proof; in PAPER/SHADOW it gracefully falls back to cached/REST
-            # values or a logged synthetic reference for off-hours testing.
-            try:
-                _spot_for_hydration = await _wait_for_live_spot_or_raise(
-                    ctx,
-                    timeout=float(policy.startup_wait_for_ws_spot_seconds or 60.0),
-                    configured_mode=configured_mode,
-                )
-            except RuntimeError as _spot_exc:
-                LOGGER.error(
-                    "LIVE_STARTUP_SPOT_UNAVAILABLE reason=%s",
-                    _spot_exc,
-                    extra={
-                        "event": "LIVE_STARTUP_SPOT_UNAVAILABLE",
-                        "reason": str(_spot_exc),
-                        "phase": "pre_hydration",
-                    },
-                )
-                ctx.live_orders_armed = False
-                ctx.trading_ready = False
-                ctx.readiness_mode = "DATA_WARMUP"
-                ctx.effective_mode = ctx.readiness_mode
-                ctx.live_block_reason = "fresh_spot_tick_unavailable"
-                # Skip the option pre-hydration in this iteration; the
-                # readiness gate will keep us in DATA_WARMUP and the
-                # supervisor will retry on the next loop.
-                _spot_for_hydration = None
-            if _spot_for_hydration is None:
-                raise RuntimeError("skip_pre_hydration_no_live_spot")
-
-            # Select ATM option contracts purely by token — no string building
-            _preloaded = (
-                ctx.instrument_manager.get_nifty_instruments_snapshot()
-                if hasattr(ctx.instrument_manager, "get_nifty_instruments_snapshot")
-                else None
-            )
-            _atm_contracts = get_atm_contracts(
-                _sync_broker_for_hydration,
-                _spot_for_hydration,
-                strike_band=100,
-                preloaded_instruments=_preloaded or None,
-            )
-            _atm_tokens = [int(c["instrument_token"]) for c in _atm_contracts[:hydration_max_contracts]]
-            # Validate all tokens before hydration
-            for _t in _atm_tokens:
-                assert_valid_token(_t)
-
-            LOGGER.info(
-                "HYDRATION_PLAN symbols=%d bars_target=%d lookback_days=%d spot=%.2f",
-                len(_atm_tokens),
-                hydration_min_bars,
-                hydration_lookback_days,
-                _spot_for_hydration,
-                extra={
-                    "event": "HYDRATION_PLAN",
-                    "symbols": len(_atm_tokens),
-                    "bars_target": hydration_min_bars,
-                    "lookback_days": hydration_lookback_days,
-                },
-            )
-
-            # Hydrate each token — with fail_fast=False to continue with remaining tokens
-            # even if some tokens fail (e.g., newly listed contracts with insufficient history)
-            _hydration_results = await asyncio.to_thread(
-                hydrate_contracts,
-                _sync_broker_for_hydration,
-                _atm_tokens,
-                min_bars=hydration_min_bars,
-                lookback_days=hydration_lookback_days,
-                fail_fast=False,  # Continue with other tokens even if some fail
-            )
-            LOGGER.info(
-                "✅ Token-based pre-hydration complete: %d tokens hydrated",
-                len(_hydration_results),
-                extra={"event": "token_hydration_complete", "count": len(_hydration_results)},
-            )
-        except RuntimeError as _hydration_err:
-            # Fail fast: if hydration fails, log critical but continue in degraded mode
-            # so the health endpoint still responds. The strategy will not trade without
-            # sufficient bars because mark_ready() won't be called.
-            LOGGER.critical(
-                "❌ Token pre-hydration FAILED: %s — strategy will remain unready",
-                _hydration_err,
-                extra={"event": "token_hydration_failed", "error": str(_hydration_err)},
-            )
-        except Exception as _hydration_exc:
-            LOGGER.warning(
-                "Token pre-hydration error (non-fatal): %s",
-                _hydration_exc,
-                exc_info=True,
-            )
-
-    # ---------------------------------------------------------
     # 3. Symbol resolution + HYDRATION (FIXED)
     # ---------------------------------------------------------
     if broker_ready:
@@ -7497,7 +7392,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     and float(last_tick_map.get(_sym, 0.0)) > 0
                 )
                 LOGGER.info(
-                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d broker_ws_token_count=%s live_tick_seen_count=%d",
+                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d mdm_subscribed_token_count=%s live_tick_seen_count=%d",
                     len(targets),
                     len(active_symbol_tokens),
                     len(getattr(ctx.market_data_manager, "_tracked_symbols", set())),
@@ -7530,7 +7425,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if ctx.data_hub is not None
                             else 0
                         ),
-                        "broker_ws_token_count": _safe_ws_token_count(ctx),
+                        "mdm_subscribed_token_count": _safe_ws_token_count(ctx),
                         "live_tick_seen_count": live_tick_seen_count,
                     },
                 )
@@ -8087,7 +7982,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 mdm_tracked_count = 0
                                 mdm_subscriber_count = 0
                                 datahub_callback_symbols_count = 0
-                                broker_ws_token_count = 0
+                                mdm_subscribed_token_count = 0
                                 live_tick_seen_count = 0
                                 if ctx.market_data_manager is not None:
                                     mdm_tracked_count = len(
@@ -8096,7 +7991,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     mdm_subscriber_count = len(
                                         getattr(ctx.market_data_manager, "_subscribers", {})
                                     )
-                                    broker_ws_token_count = _safe_ws_token_count(ctx)
+                                    mdm_subscribed_token_count = _safe_ws_token_count(ctx)
                                     last_tick_map = getattr(ctx.market_data_manager, "_last_tick_time", {}) or {}
                                     live_tick_seen_count = sum(
                                         1
@@ -8111,13 +8006,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         if bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(_s))
                                     )
                                 LOGGER.info(
-                                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d broker_ws_token_count=%s live_tick_seen_count=%d",
+                                    "LIVE_WIRING_FINAL_STATUS symbols_count=%d tokens_count=%d mdm_tracked_count=%d mdm_subscriber_count=%d datahub_callback_symbols_count=%d mdm_subscribed_token_count=%s live_tick_seen_count=%d",
                                     len(latest_symbols),
                                     len(active_symbol_tokens),
                                     mdm_tracked_count,
                                     mdm_subscriber_count,
                                     datahub_callback_symbols_count,
-                                    broker_ws_token_count,
+                                    mdm_subscribed_token_count,
                                     live_tick_seen_count,
                                     extra={
                                         "event": "LIVE_WIRING_FINAL_STATUS",
@@ -8126,7 +8021,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "mdm_tracked_count": mdm_tracked_count,
                                         "mdm_subscriber_count": mdm_subscriber_count,
                                         "datahub_callback_symbols_count": datahub_callback_symbols_count,
-                                        "broker_ws_token_count": broker_ws_token_count,
+                                        "mdm_subscribed_token_count": mdm_subscribed_token_count,
                                         "live_tick_seen_count": live_tick_seen_count,
                                     },
                                 )
@@ -8699,10 +8594,6 @@ async def startup_sequence(ctx: BotContext) -> None:
 async def shutdown_sequence(ctx: BotContext, *, reason: str = "shutdown") -> None:
     """Best-effort, idempotent shutdown. Must never raise during FastAPI lifespan."""
     LOGGER.info("Shutting down bot... reason=%s", reason)
-    async def _maybe_await(result: Any) -> Any:
-        if inspect.isawaitable(result):
-            return await result
-        return result
     async def _call_component(name: str, obj: Any, method_names: tuple[str, ...]) -> None:
         if obj is None:
             return
