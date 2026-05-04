@@ -732,10 +732,20 @@ class MarketDataManager:
         for cb in list(self._bar_subscribers):
             try:
                 cb(dict(bar))
-            except Exception:
+            except Exception as exc:
+                symbol = str(bar.get("symbol") or "")
+                callback_name = getattr(cb, "__qualname__", repr(cb))
                 self._logger.exception(
-                    "BAR_SUBSCRIBER_FAILED symbol=%s",
-                    bar.get("symbol"),
+                    "BAR_SUBSCRIBER_FAILED symbol=%s callback=%s error=%s",
+                    symbol,
+                    callback_name,
+                    exc,
+                    extra={
+                        "event": "BAR_SUBSCRIBER_FAILED",
+                        "symbol": symbol,
+                        "callback": callback_name,
+                        "error": str(exc),
+                    },
                 )
 
     def set_readiness_requirements(

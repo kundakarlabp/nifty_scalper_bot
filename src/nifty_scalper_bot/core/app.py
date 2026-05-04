@@ -1842,6 +1842,8 @@ class BotContext:
     health_app: FastAPI | None = None
     session_guard: TradingSessionGuard | None = None
     selfchecker: "RuntimeSelfChecker | None" = None
+    startup_spot_refresh_done: bool = False
+    startup_spot_listener_registered: bool = False
     underlying_spot_prices: OrderedDict[str, float] = field(
         default_factory=lambda: OrderedDict()
     )
@@ -6592,21 +6594,35 @@ async def startup_sequence(ctx: BotContext) -> None:
                     },
                     exc_info=True,
                 )
-            if not getattr(ctx, "_startup_spot_refresh_done", False):
+            if not getattr(ctx, "startup_spot_refresh_done", False):
                 def _startup_spot_tick_listener(tick: Mapping[str, Any]) -> None:
-                    symbol = str(tick.get("symbol") or "").upper()
-                    if symbol != policy.nifty_internal_symbol:
-                        return
-                    if getattr(ctx, "_startup_spot_refresh_done", False):
-                        return
-                    ctx._startup_spot_refresh_done = True
-                    loop.call_soon_threadsafe(
-                        lambda: asyncio.create_task(
-                            _refresh_readiness_after_first_tick(
-                                ctx, reason="first_spot_tick_listener"
+                    try:
+                        symbol = str(tick.get("symbol") or "").upper()
+                        if symbol != policy.nifty_internal_symbol:
+                            return
+                        if ctx.startup_spot_refresh_done:
+                            return
+
+                        ctx.startup_spot_refresh_done = True
+
+                        loop.call_soon_threadsafe(
+                            lambda: asyncio.create_task(
+                                _refresh_readiness_after_first_tick(
+                                    ctx,
+                                    reason="first_spot_tick_listener",
+                                )
                             )
                         )
-                    )
+                    except Exception as exc:
+                        LOGGER.exception(
+                            "STARTUP_SPOT_TICK_LISTENER_FAILED symbol=%s error=%s",
+                            tick.get("symbol") if isinstance(tick, Mapping) else None,
+                            exc,
+                            extra={
+                                "event": "STARTUP_SPOT_TICK_LISTENER_FAILED",
+                                "error": str(exc),
+                            },
+                        )
 
                 if ctx.data_hub is not None:
                     ctx.data_hub.subscribe_ticks(

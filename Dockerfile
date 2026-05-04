@@ -51,10 +51,6 @@ WORKDIR /app
 RUN mkdir -p /app/data \
     && chmod 777 /app/data
 
-# Copy and setup entrypoint
-COPY entrypoint.sh /app/entrypoint.sh
-RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
-
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
@@ -68,5 +64,4 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser \
 
 USER appuser
 
-# Use entrypoint script
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["sh", "-c", "python -m uvicorn nifty_scalper_bot.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
