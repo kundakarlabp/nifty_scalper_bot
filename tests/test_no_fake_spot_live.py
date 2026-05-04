@@ -40,6 +40,11 @@ class _StubMDM:
     def get_latest_price(self, _symbol: str) -> float:
         return float(self._cached_price)
 
+    def get_cached_ltp(
+        self, _symbol: str, *, max_age_seconds: float | None, require_ws: bool
+    ) -> float:
+        return float(self._cached_price)
+
 
 def _ctx(mdm: _StubMDM) -> SimpleNamespace:
     return SimpleNamespace(market_data_manager=mdm)
@@ -91,17 +96,19 @@ def test_paper_mode_falls_back_to_synthetic_with_log(
 
 
 def test_paper_mode_uses_cached_price_when_available(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "PAPER")
     monkeypatch.delenv("ENABLE_LIVE", raising=False)
     mdm = _StubMDM(ws_tick=None, cached_price=24123.45)
-    price = asyncio.run(
-        _wait_for_live_spot_or_raise(
-            _ctx(mdm), timeout=0.1, configured_mode="PAPER"
+    with caplog.at_level("INFO"):
+        price = asyncio.run(
+            _wait_for_live_spot_or_raise(
+                _ctx(mdm), timeout=0.1, configured_mode="PAPER"
+            )
         )
-    )
     assert price == pytest.approx(24123.45)
+    assert "STARTUP_SPOT_FALLBACK_PROBE" in caplog.text
 
 
 def test_allow_synthetic_market_data_overrides_live_block(

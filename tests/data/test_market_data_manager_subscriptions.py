@@ -317,6 +317,18 @@ def test_start_websocket_reconciles_tokens_before_connect() -> None:
     assert ws.calls == [[256265]]
 
 
+def test_mdm_ws_started_not_equal_connected() -> None:
+    ws = DummyWebSocket()
+    mdm = MarketDataManager(DummyBroker(), ws, resolver=DummyResolver())
+    mdm.request_token_subscription(256265, symbol='NSE:NIFTY')
+    mdm.start_websocket()
+    status = mdm.ws_status_snapshot()
+    assert status["connected"] is False
+    assert status["connect_task_alive"] is False or isinstance(
+        status["connect_task_alive"], bool
+    )
+
+
 def test_spot_ws_health_logs_first_tick_missing_not_stale(monkeypatch, caplog) -> None:
     mdm = MarketDataManager(DummyBroker(), websocket=None, resolver=DummyResolver())
     mdm.register_symbol('NSE:NIFTY', 256265)

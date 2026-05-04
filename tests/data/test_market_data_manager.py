@@ -1159,6 +1159,22 @@ def test_start_without_defer_ws_starts_websocket_immediately(
     manager.start()
     assert ws.start_calls == 1
 
+
+def test_mdm_datahub_register_no_recursion(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    class Hub:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def register_local_symbol(self, symbol: str, token: int) -> str:
+            self.calls += 1
+            return symbol
+
+    manager = MarketDataManager(broker, ws)
+    hub = Hub()
+    manager._datahub = hub  # noqa: SLF001
+    manager.register_symbol("NSE:NIFTY", 256265)
+    assert hub.calls == 1
+
     # Second start() call with defer_ws=False is a no-op because ws already up
     manager.start()
     assert ws.start_calls == 1

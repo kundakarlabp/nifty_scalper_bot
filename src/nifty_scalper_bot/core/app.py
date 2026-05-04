@@ -5851,11 +5851,8 @@ async def _wait_for_live_spot_or_raise(
         )
         return float(price)
 
-    if (
-        live_mode
-        and policy.block_live_if_no_ws_spot
-        and not policy.allow_synthetic_spot_in_live
-    ):
+    allow_rest_live = str(os.getenv("MARKETDATA_ALLOW_REST_SPOT_FOR_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    if live_mode and policy.block_live_if_no_ws_spot and not allow_rest_live:
         cached_probe_fn = getattr(mdm, "get_cached_ltp", None)
         rest_probe = (
             float(
@@ -5884,6 +5881,13 @@ async def _wait_for_live_spot_or_raise(
             "cannot build live option universe"
         )
 
+    if live_mode and allow_rest_live:
+        LOGGER.error(
+            "SPOT_REST_USED_FOR_LIVE_STARTUP symbol=%s severity=high",
+            policy.nifty_internal_symbol,
+            extra={"event": "SPOT_REST_USED_FOR_LIVE_STARTUP", "symbol": policy.nifty_internal_symbol},
+        )
+
     # Paper / off-hours fallback path: try cached REST/poll value first.
     cached_ltp_fn = getattr(mdm, "get_cached_ltp", None)
     cached = (
@@ -5899,6 +5903,12 @@ async def _wait_for_live_spot_or_raise(
         else 0.0
     )
     if cached > 0:
+        if not live_mode:
+            LOGGER.info(
+                "STARTUP_SPOT_FALLBACK_PROBE mode=%s source=rest_or_poll symbol=%s",
+                (configured_mode or "PAPER"),
+                policy.nifty_internal_symbol,
+            )
         LOGGER.info(
             "LIVE_SPOT_READY symbol=%s price=%.2f source=cache",
             policy.nifty_internal_symbol,
@@ -6475,7 +6485,23 @@ async def startup_sequence(ctx: BotContext) -> None:
         and hasattr(ctx.market_data_manager, "start_websocket")
     ):
         try:
+            ws_status_fn = getattr(ctx.market_data_manager, "ws_status_snapshot", None)
+            ws_status = ws_status_fn() if callable(ws_status_fn) else {}
+            desired_token_count_fn = getattr(
+                ctx.market_data_manager, "desired_token_count", None
+            )
+            desired_token_count = (
+                int(desired_token_count_fn()) if callable(desired_token_count_fn) else None
+            )
             register_fn = getattr(ctx.market_data_manager, "register_symbol", None)
+            LOGGER.info(
+                "STARTUP_SPOT_REGISTER_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
+                policy.nifty_internal_symbol,
+                policy.nifty_spot_token,
+                desired_token_count,
+                ws_status.get("tokens"),
+                ctx.websocket_enabled,
+            )
             if callable(register_fn):
                 try:
                     register_fn(policy.nifty_internal_symbol, policy.nifty_spot_token)
@@ -6484,8 +6510,24 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "Spot symbol registration failed (will retry later)",
                         exc_info=True,
                     )
+            LOGGER.info(
+                "STARTUP_SPOT_REGISTER_DONE symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
+                policy.nifty_internal_symbol,
+                policy.nifty_spot_token,
+                desired_token_count,
+                ws_status.get("tokens"),
+                ctx.websocket_enabled,
+            )
             subscribe_fn = getattr(
                 ctx.market_data_manager, "request_token_subscription", None
+            )
+            LOGGER.info(
+                "STARTUP_SPOT_TOKEN_REQUEST_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
+                policy.nifty_internal_symbol,
+                policy.nifty_spot_token,
+                desired_token_count,
+                ws_status.get("tokens"),
+                ctx.websocket_enabled,
             )
             if callable(subscribe_fn):
                 subscribed = bool(
@@ -6508,29 +6550,45 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ws_count = ws_token_count_fn()
                 ws_tokens = int(ws_count) if ws_count is not None else None
             LOGGER.info(
-                "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED symbol=%s token=%d subscribed=%s desired_tokens=%s ws_tokens=%s",
+                "STARTUP_SPOT_TOKEN_REQUEST_DONE symbol=%s token=%d subscribed=%s desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 subscribed,
                 desired_tokens,
                 ws_tokens,
-                extra={
-                    "event": "STARTUP_WS_SPOT_SUBSCRIBE_REQUESTED",
-                    "symbol": policy.nifty_internal_symbol,
-                    "token": policy.nifty_spot_token,
-                    "subscribed": subscribed,
-                    "desired_tokens": desired_tokens,
-                    "ws_tokens": ws_tokens,
-                },
+            )
+            LOGGER.info(
+                "STARTUP_WS_START_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
+                policy.nifty_internal_symbol,
+                policy.nifty_spot_token,
+                desired_tokens,
+                ws_tokens,
+                ctx.websocket_enabled,
             )
             ctx.market_data_manager.start_websocket()
             LOGGER.info(
-                "STARTUP_WS_STARTED phase=spot_first",
-                extra={"event": "STARTUP_WS_STARTED", "phase": "spot_first"},
+                "STARTUP_WS_START_DONE symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
+                policy.nifty_internal_symbol,
+                policy.nifty_spot_token,
+                desired_tokens,
+                ws_tokens,
+                ctx.websocket_enabled,
+            )
+            ws_status = ws_status_fn() if callable(ws_status_fn) else {}
+            LOGGER.info(
+                "STARTUP_WS_CONNECT_TASK_CREATED symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
+                policy.nifty_internal_symbol,
+                policy.nifty_spot_token,
+                desired_tokens,
+                ws_status.get("tokens"),
+                ctx.websocket_enabled,
             )
         except Exception as _ws_spot_first_exc:  # noqa: BLE001
             LOGGER.warning(
-                "WS spot-first start failed (will retry after token universe): %s",
+                "STARTUP_WS_SPOT_FIRST_FAILED symbol=%s token=%d websocket_enabled=%s err=%s",
+                policy.nifty_internal_symbol,
+                policy.nifty_spot_token,
+                ctx.websocket_enabled,
                 _ws_spot_first_exc,
                 extra={"event": "STARTUP_WS_SPOT_FIRST_FAILED"},
             )
@@ -6812,6 +6870,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         return None
                 return None
 
+            active_symbol_tokens: dict[str, int] = {}
             symbols_to_hydrate_raw = [sym for sym in targets if sym]
             symbols_to_hydrate: list[str] = []
             for _sym in symbols_to_hydrate_raw:
@@ -6823,6 +6882,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         extra={"event": "hydration_skip_no_token", "symbol": _sym},
                     )
                     continue
+                active_symbol_tokens[_sym] = int(_tok)
                 symbols_to_hydrate.append(_sym)
             atm_ce = next((s for s in targets if s.endswith("CE")), None)
             atm_pe = next((s for s in targets if s.endswith("PE")), None)
@@ -7072,9 +7132,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             "required": min_required_bars,
                         },
                     )
-            if runner is not None:
-                if hasattr(runner, "mark_ready"):
-                    runner.mark_ready(readiness_symbols)
+            pending_runner_symbols: set[str] = set(skipped_symbols)
+            if runner is not None and hasattr(runner, "mark_ready") and ready_symbols:
+                runner.mark_ready(ready_symbols)
             mode = str(
                 getattr(ctx, "effective_mode", None)
                 or getattr(ctx.settings, "execution_mode", None)
@@ -7119,9 +7179,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             if ctx.data_hub is not None and hasattr(ctx.data_hub, "flush_pending_live_subscriptions"):
                 flushed = ctx.data_hub.flush_pending_live_subscriptions()
                 LOGGER.info(
-                    "DATAHUB_DEFERRED_SUBSCRIPTIONS_FLUSHED count=%s",
+                    "DATAHUB_DEFERRED_SUBSCRIPTIONS_FLUSHED count=%s phase=post_token_wiring",
                     flushed,
-                    extra={"event": "DATAHUB_DEFERRED_SUBSCRIPTIONS_FLUSHED", "count": flushed},
+                    extra={"event": "DATAHUB_DEFERRED_SUBSCRIPTIONS_FLUSHED", "count": flushed, "phase": "post_token_wiring"},
                 )
             if (
                 ctx.market_data_manager is not None
@@ -7270,7 +7330,6 @@ async def startup_sequence(ctx: BotContext) -> None:
             unresolved_symbols = []
             live_mode_enabled = bool(ctx.settings.enable_live)
             active_symbols: list[str] = []
-            active_symbol_tokens: dict[str, int] = {}
             pending_runner_symbols: set[str] = set()
 
             for sym in targets:
