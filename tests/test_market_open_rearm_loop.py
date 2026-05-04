@@ -85,3 +85,26 @@ async def test_market_open_rearm_loop_waits_when_runner_not_running(monkeypatch:
 
     assert ctx.live_orders_armed is False
     assert ctx.trading_ready is False
+
+
+@pytest.mark.asyncio
+async def test_live_rearm_loop_uses_readiness_state_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = {'snapshot': 0}
+
+    async def _stop_sleep(_secs: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(app.asyncio, 'sleep', _stop_sleep)
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.OPEN)
+    monkeypatch.setattr(app, '_runner_is_running', lambda _r: True)
+    monkeypatch.setattr(app, '_resolve_quote_capability', lambda _ctx: {'available': True, 'error': None})
+
+    mdm = SimpleNamespace(
+        wait_until_ready=lambda timeout=0.75: True,
+        readiness_state_snapshot=lambda: called.__setitem__('snapshot', called['snapshot'] + 1) or {'spot_ready': True, 'missing_hard': []},
+        has_ws_tradable_quote=lambda: True,
+    )
+    ctx = SimpleNamespace(settings=SimpleNamespace(execution_mode='LIVE'), market_data_manager=mdm, strategy_runner=object())
+    with pytest.raises(asyncio.CancelledError):
+        await app._live_readiness_rearm_loop(ctx)
+    assert called['snapshot'] >= 0

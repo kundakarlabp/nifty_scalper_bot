@@ -5999,11 +5999,7 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
         getattr(ctx.message_bus, "running", False)
         or getattr(ctx.message_bus, "_running", False)
     )
-    runner_started = bool(
-        getattr(runner, "_started", False)
-        or getattr(runner, "started", False)
-        or getattr(ctx, "strategy_runner_task", None)
-    )
+    runner_started = _runner_is_running(runner)
     if spot_ready and bus_running:
         ctx.data_observation_ready = True
         if runner is not None and not runner_started:
@@ -6039,11 +6035,7 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
                             "reason": reason,
                         },
                     )
-                runner_started = bool(
-                    getattr(runner, "_started", False)
-                    or getattr(runner, "started", False)
-                    or getattr(ctx, "strategy_runner_task", None)
-                )
+                runner_started = _runner_is_running(runner)
         LOGGER.info(
             "DATA_PIPELINE_READY_AFTER_TICK spot_ready=%s bus_running=%s runner_started=%s reason=%s",
             spot_ready,
@@ -6276,8 +6268,15 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
         await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
         readiness_state = {}
         mdm = getattr(ctx, "market_data_manager", None)
-        if mdm is not None and hasattr(mdm, "readiness_snapshot"):
-            readiness_state = mdm.readiness_snapshot() or {}
+        wait_until_ready = getattr(mdm, "wait_until_ready", None)
+        if callable(wait_until_ready):
+            await _maybe_await(wait_until_ready(timeout=0.75))
+        snapshot_fn = getattr(mdm, "readiness_state_snapshot", None)
+        if callable(snapshot_fn):
+            readiness_state = snapshot_fn() or {}
+        else:
+            snapshot_fn = getattr(mdm, "readiness_snapshot", None)
+            readiness_state = snapshot_fn() or {} if callable(snapshot_fn) else {}
         missing_hard = readiness_state.get("missing_hard") or []
         spot_ready = bool(readiness_state.get("spot_ready"))
         futures_ready = "futures" not in set(missing_hard)
@@ -6288,21 +6287,31 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
         quote_available = bool(quote_capability["available"])
         ws_quote_proof_fn = getattr(mdm, "has_ws_tradable_quote", None)
         ws_quote_proof = bool(ws_quote_proof_fn()) if callable(ws_quote_proof_fn) else False
+        ws_ltp_proof_fn = getattr(mdm, "has_fresh_ws_ltp", None)
+        ws_ltp_proof = bool(ws_ltp_proof_fn()) if callable(ws_ltp_proof_fn) else False
+        ws_quote_for_gate = bool(ws_quote_proof or ws_ltp_proof)
         runner_running = _runner_is_running(ctx.strategy_runner)
         armed, reasons = compute_live_readiness(
             live_mode=True,
             hard_ready=data_hard_ready,
             quote_available=quote_available,
-            ws_quote_proof=ws_quote_proof,
+            ws_quote_proof=ws_quote_for_gate,
             market_open=market_open_now,
             runner_running=runner_running,
         )
         if armed:
             ctx.live_orders_armed = True
             ctx.trading_ready = True
+            ctx.readiness_mode = "LIVE"
             ctx.effective_mode = "LIVE"
-            LOGGER.info("LIVE_TRADING_REARMED", extra={"event": "LIVE_TRADING_REARMED"})
+            ctx.live_block_reason = None
+            LOGGER.info("LIVE_TRADING_REARMED hard_ready=%s runner_running=%s ws_quote_proof=%s quote_available=%s", data_hard_ready, runner_running, ws_quote_for_gate, quote_available, extra={"event": "LIVE_TRADING_REARMED", "hard_ready": data_hard_ready, "runner_running": runner_running, "ws_quote_proof": ws_quote_for_gate, "quote_available": quote_available})
         else:
+            ctx.live_orders_armed = False
+            ctx.trading_ready = False
+            ctx.readiness_mode = "DATA_WARMUP"
+            ctx.effective_mode = "DATA_WARMUP"
+            ctx.live_block_reason = ",".join(reasons)
             LOGGER.info("LIVE_TRADING_REARM_WAIT reasons=%s", reasons, extra={"event": "LIVE_TRADING_REARM_WAIT", "reasons": reasons})
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
@@ -6385,6 +6394,7 @@ async def _build_and_hydrate_live_basket_from_spot(
     *,
     spot_ltp: float,
     configured_mode: str,
+    hydrate: bool = False,
 ) -> dict[str, Any]:
     """Build/register/hydrate live basket from a trusted spot. Args: ctx/spot/mode. Returns: none. Raises: RuntimeError."""
 
@@ -6485,27 +6495,28 @@ async def _build_and_hydrate_live_basket_from_spot(
 
     # Reuse existing hydration/backfill path by ingesting historical bars
     # through MarketDataManager + StrategyRunner.
-    hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
-    hydration_max_bars = max(1, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300))
-    for symbol in targets:
-        try:
-            records = await ctx.market_data_manager.fetch_history(
+    if hydrate:
+        hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
+        hydration_max_bars = max(1, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300))
+        for symbol in targets:
+            try:
+                records = await ctx.market_data_manager.fetch_history(
+                    symbol,
+                    "minute",
+                    hydration_lookback_days,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            for row in list(records or [])[-hydration_max_bars:]:
+                bar_data = dict(row)
+                ctx.market_data_manager.ingest_historical_bar(bar_data)
+                runner = getattr(ctx, "strategy_runner", None)
+                if runner is not None and hasattr(runner, "ingest_historical_bar"):
+                    runner.ingest_historical_bar(bar_data)
+            ctx.market_data_manager.update_hydration_status(
                 symbol,
-                "minute",
-                hydration_lookback_days,
+                ctx.market_data_manager.get_ohlc_bars(symbol),
             )
-        except Exception:  # noqa: BLE001
-            continue
-        for row in list(records or [])[-hydration_max_bars:]:
-            bar_data = dict(row)
-            ctx.market_data_manager.ingest_historical_bar(bar_data)
-            runner = getattr(ctx, "strategy_runner", None)
-            if runner is not None and hasattr(runner, "ingest_historical_bar"):
-                runner.ingest_historical_bar(bar_data)
-        ctx.market_data_manager.update_hydration_status(
-            symbol,
-            ctx.market_data_manager.get_ohlc_bars(symbol),
-        )
     atm_ce = basket["ce_symbols"][len(basket["ce_symbols"]) // 2]
     atm_pe = basket["pe_symbols"][len(basket["pe_symbols"]) // 2]
     ctx.market_data_manager.set_readiness_requirements(
@@ -6868,11 +6879,23 @@ async def startup_sequence(ctx: BotContext) -> None:
                     await _refresh_readiness_after_first_tick(
                         ctx, reason="ws_spot_proof_ready"
                     )
-                elif live_mode:
+                elif live_mode and get_market_state() == MarketState.OPEN:
                     ctx.live_orders_armed = False
                     ctx.trading_ready = False
                     ctx.live_block_reason = "fresh_spot_tick_missing"
                     raise RuntimeError("fresh NIFTY WebSocket spot tick unavailable")
+                elif live_mode:
+                    ctx.live_orders_armed = False
+                    ctx.trading_ready = False
+                    ctx.readiness_mode = "DATA_WARMUP"
+                    ctx.effective_mode = "DATA_WARMUP"
+                    ctx.live_block_reason = "outside_market_waiting_for_spot_tick"
+                    LOGGER.warning(
+                        "STARTUP_WS_SPOT_PROOF_TIMEOUT_WARMUP symbol=%s mode=%s",
+                        policy.nifty_internal_symbol,
+                        mode,
+                        extra={"event": "STARTUP_WS_SPOT_PROOF_TIMEOUT_WARMUP"},
+                    )
                 else:
                     LOGGER.warning(
                         "STARTUP_WS_SPOT_PROOF_TIMEOUT_NONLIVE symbol=%s mode=%s",
@@ -6889,7 +6912,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 raise
         except Exception as _ws_spot_first_exc:  # noqa: BLE001
             is_live_configured = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper() == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
-            if is_live_configured:
+            if is_live_configured and get_market_state() == MarketState.OPEN:
                 ctx.live_orders_armed = False
                 ctx.trading_ready = False
                 ctx.live_block_reason = "ws_spot_first_failed"
@@ -6903,6 +6926,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                     extra={"event": "STARTUP_WS_SPOT_FIRST_FAILED_LIVE_BLOCKED"},
                 )
                 raise
+            if is_live_configured:
+                LOGGER.warning(
+                    "STARTUP_WS_SPOT_FIRST_FAILED_WARMUP symbol=%s token=%d websocket_enabled=%s err=%s",
+                    policy.nifty_internal_symbol,
+                    policy.nifty_spot_token,
+                    ctx.websocket_enabled,
+                    _ws_spot_first_exc,
+                    extra={"event": "STARTUP_WS_SPOT_FIRST_FAILED_WARMUP"},
+                )
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.readiness_mode = "DATA_WARMUP"
+                ctx.effective_mode = "DATA_WARMUP"
+                ctx.live_block_reason = "outside_market_waiting_for_spot_tick"
             LOGGER.warning(
                 "STARTUP_WS_SPOT_FIRST_FAILED symbol=%s token=%d websocket_enabled=%s err=%s",
                 policy.nifty_internal_symbol,
@@ -7135,6 +7172,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx,
                 spot_ltp=float(spot_ltp),
                 configured_mode=configured_mode,
+                hydrate=False,
             )
             targets = list(dict.fromkeys(basket["symbols"]))
 
@@ -7454,6 +7492,33 @@ async def startup_sequence(ctx: BotContext) -> None:
             pending_runner_symbols: set[str] = set(skipped_symbols)
             if runner is not None and hasattr(runner, "mark_ready") and ready_symbols:
                 runner.mark_ready(ready_symbols)
+                LOGGER.info(
+                    "RUNNER_READY_MARKED symbol_count=%d initial_ready_symbols=%s skipped_symbols=%s skipped_reasons=%s min_required_bars=%d",
+                    len(readiness_symbols),
+                    ready_symbols,
+                    skipped_symbols,
+                    skipped_reasons,
+                    min_required_bars,
+                    extra={
+                        "event": "RUNNER_READY_MARKED",
+                        "symbol_count": len(readiness_symbols),
+                        "initial_ready_symbols": ready_symbols,
+                        "min_required_bars": min_required_bars,
+                        "skipped_symbols": skipped_symbols,
+                        "skipped_reasons": skipped_reasons,
+                    },
+                )
+            else:
+                LOGGER.warning(
+                    "RUNNER_READY_MARK_SKIPPED reason=%s skipped_reasons=%s",
+                    "no_ready_symbols_or_method_missing",
+                    skipped_reasons,
+                    extra={
+                        "event": "RUNNER_READY_MARK_SKIPPED",
+                        "reason": "no_ready_symbols_or_method_missing",
+                        "skipped_reasons": skipped_reasons,
+                    },
+                )
             configured_runtime_mode = str(
                 getattr(ctx.settings, "execution_mode", None)
                 or os.getenv("EXECUTION_MODE", "PAPER")
@@ -7475,31 +7540,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     LOGGER.info("PAPER_RUNNER_STARTED symbol_count=%d live_orders_armed=%s", len(readiness_symbols), False, extra={"event":"PAPER_RUNNER_STARTED","symbol_count":len(readiness_symbols),"live_orders_armed":False,"mode":mode})
                     if not ready_symbols:
                         LOGGER.info("PAPER_RUNNER_STARTED_OBSERVATION_ONLY reason=no_hydrated_symbols_yet", extra={"event": "PAPER_RUNNER_STARTED_OBSERVATION_ONLY", "reason": "no_hydrated_symbols_yet"})
-                    LOGGER.info(
-                        "RUNNER_READY_MARKED symbol_count=%d initial_ready_symbols=%s skipped_symbols=%s skipped_reasons=%s min_required_bars=%d",
-                        len(readiness_symbols),
-                        ready_symbols,
-                        skipped_symbols,
-                        skipped_reasons,
-                        min_required_bars,
-                        extra={
-                            "event": "RUNNER_READY_MARKED",
-                            "symbol_count": len(readiness_symbols),
-                            "initial_ready_symbols": ready_symbols,
-                            "min_required_bars": min_required_bars,
-                            "skipped_symbols": skipped_symbols,
-                            "skipped_reasons": skipped_reasons,
-                        },
-                    )
-                else:
-                    LOGGER.warning(
-                        "RUNNER_READY_MARK_SKIPPED reason=%s",
-                        "method_missing",
-                        extra={
-                            "event": "RUNNER_READY_MARK_SKIPPED",
-                            "reason": "method_missing",
-                        },
-                    )
+                
             if ctx.data_hub is not None and hasattr(ctx.data_hub, "flush_pending_live_subscriptions"):
                 flushed = ctx.data_hub.flush_pending_live_subscriptions()
                 LOGGER.info(
@@ -8576,7 +8617,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
                             if callable(ws_quote_proof_fn):
                                 ws_quote_proof = bool(ws_quote_proof_fn())
-                            ws_quote_for_gate = bool(ws_quote_proof)
+                            ws_ltp_proof_fn = getattr(
+                                ctx.market_data_manager, "has_fresh_ws_ltp", None
+                            )
+                            ws_ltp_proof = bool(ws_ltp_proof_fn()) if callable(ws_ltp_proof_fn) else False
+                            ws_quote_for_gate = bool(ws_quote_proof or ws_ltp_proof)
                             if (
                                 ws_quote_for_gate
                                 and not quote_available

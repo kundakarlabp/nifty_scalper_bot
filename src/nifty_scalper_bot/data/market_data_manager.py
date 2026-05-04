@@ -3580,6 +3580,10 @@ class MarketDataManager:
         """Return latest readiness classification snapshot."""
         return dict(self._last_readiness_state)
 
+    def readiness_snapshot(self) -> dict[str, Any]:
+        """Backward-compatible alias for readiness_state_snapshot."""
+        return self.readiness_state_snapshot()
+
     def hard_ready(self) -> bool:
         """Args: none; Returns: hard readiness flag; Raises: none."""
         return bool(self._last_readiness_state.get("hard_ready"))
@@ -3628,6 +3632,53 @@ class MarketDataManager:
                     source in {"ws", "ws_full", "full"}
                     or bid_ask_source in {"market_depth", "ws_full"}
                 ):
+                    return True
+        return False
+
+    def has_fresh_ws_ltp(
+        self, symbols: Sequence[str] | None = None, max_age_seconds: float = 5.0
+    ) -> bool:
+        """Return whether fresh websocket LTP proof exists for active symbols."""
+        now = time.time()
+        max_age = max(float(max_age_seconds), 0.1)
+        allowed_sources = {"ws", "ws_full", "full"}
+        with self._lock:
+            candidate_symbols = (
+                [self._canonical_symbol(sym) for sym in symbols]
+                if symbols is not None
+                else list(self._active_subscribed_symbols)
+            )
+            if not candidate_symbols:
+                candidate_symbols = list(self._latest_ticks.keys())
+            for symbol in candidate_symbols:
+                tick = self._latest_ticks.get(symbol)
+                if not isinstance(tick, Mapping):
+                    continue
+                source = str(
+                    tick.get("source")
+                    or self._last_tick_source.get(symbol)
+                    or ""
+                ).lower()
+                if source not in allowed_sources:
+                    continue
+                price = tick.get("ltp", tick.get("last_price", tick.get("price", 0)))
+                try:
+                    ltp = float(price)
+                except (TypeError, ValueError):
+                    continue
+                if ltp <= 0:
+                    continue
+                tick_ts = tick.get("exchange_timestamp") or tick.get("timestamp")
+                age_seconds: float | None = None
+                if isinstance(tick_ts, datetime):
+                    ts = tick_ts if tick_ts.tzinfo is not None else tick_ts.replace(tzinfo=timezone.utc)
+                    age_seconds = max((datetime.now(timezone.utc) - ts).total_seconds(), 0.0)
+                elif tick_ts is not None:
+                    try:
+                        age_seconds = max(now - float(tick_ts), 0.0)
+                    except (TypeError, ValueError):
+                        age_seconds = None
+                if age_seconds is None or age_seconds <= max_age:
                     return True
         return False
 

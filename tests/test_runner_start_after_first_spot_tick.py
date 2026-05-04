@@ -54,3 +54,17 @@ async def test_ensure_runner_started_no_false_positive(caplog: pytest.LogCapture
     await app._ensure_strategy_runner_started(ctx, reason='unit_test')
     assert 'STRATEGY_RUNNER_STARTED reason=unit_test' not in caplog.text
     assert 'STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_refresh_readiness_after_first_tick_uses_runner_is_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = SimpleNamespace(
+        market_data_manager=_MdmStub(),
+        strategy_runner=SimpleNamespace(_running=True),
+        message_bus=SimpleNamespace(running=True),
+        strategy_runner_task=None,
+        data_observation_ready=False,
+    )
+    monkeypatch.setattr(app, '_ensure_strategy_runner_started', lambda *_a, **_k: None)
+    await app._refresh_readiness_after_first_tick(ctx, reason='unit')
+    assert ctx.data_observation_ready is True
