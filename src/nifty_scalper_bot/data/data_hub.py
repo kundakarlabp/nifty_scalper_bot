@@ -118,6 +118,7 @@ class DataHub:
 
         self._ticks: Dict[int, Tick] = {}
         self._quotes: Dict[str, Tick] = {}
+        self._token_quotes: Dict[int, Tick] = {}
         self._positions: Dict[Any, dict[str, Any]] = {}
         self._orders: Dict[str, dict[str, Any]] = {}
         self._token_by_symbol: Dict[str, int] = {}
@@ -726,8 +727,10 @@ class DataHub:
             if token is not None:
                 canonical_tick["instrument_token"] = token
                 self._ticks[token] = canonical_tick
+                self._token_quotes[token] = canonical_tick
                 self._token_by_symbol[symbol] = token
                 self._symbol_by_token[token] = symbol
+            first_seen = symbol not in self._quotes
             self._quotes[symbol] = canonical_tick
             self._last_ts[symbol] = ts_ms
             self._last_arrival[symbol] = now_ms
@@ -768,6 +771,19 @@ class DataHub:
                 "subscriber_count": len(subscribers),
             },
         )
+        if first_seen:
+            LOGGER.info(
+                "DATAHUB_QUOTE_CACHED symbol=%s token=%s source=%s",
+                symbol,
+                token,
+                source,
+                extra={
+                    "event": "DATAHUB_QUOTE_CACHED",
+                    "symbol": symbol,
+                    "token": token,
+                    "source": source,
+                },
+            )
 
         self._capture_option_metrics(symbol, canonical_tick)
 
