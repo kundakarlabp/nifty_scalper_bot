@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 
+from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
@@ -45,6 +46,8 @@ def _load_env_file() -> None:
             load_dotenv(dotenv_path=str(env_path), override=False)
             loaded_from = env_path
             break
+
+    normalise_live_env_defaults()
 
     if loaded_from is not None:
         print(f"✅ ENV FILE FOUND (defaults only): {loaded_from}", flush=True)
