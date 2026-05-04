@@ -5935,6 +5935,66 @@ async def _wait_for_live_spot_or_raise(
     return _SYNTHETIC_FALLBACK_SPOT
 
 
+def _safe_startup_log(
+    logger: logging.Logger,
+    level: int,
+    event: str,
+    message: str,
+    *args: Any,
+    **extra_fields: Any,
+) -> None:
+    """Emit startup log safely. Args: logger/level/event/message/args/extra_fields. Returns: none. Raises: none."""
+    try:
+        logger.log(level, message, *args, extra={"event": event, **extra_fields})
+    except TypeError:
+        logger.exception(
+            "STARTUP_LOG_FORMAT_ERROR event=%s message=%s args_count=%s",
+            event,
+            message,
+            len(args),
+            extra={
+                "event": "STARTUP_LOG_FORMAT_ERROR",
+                "failed_event": event,
+                "message_template": message,
+                "args_count": len(args),
+            },
+        )
+
+
+async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> None:
+    """Refresh readiness after startup tick proof. Args: ctx/reason. Returns: none. Raises: none."""
+    mdm = ctx.market_data_manager
+    runner = ctx.strategy_runner
+    spot_ready = False
+    if mdm is not None and hasattr(mdm, "get_fresh_spot_tick"):
+        spot_ready = mdm.get_fresh_spot_tick("NSE:NIFTY", require_ws=False) is not None
+    bus_running = bool(
+        getattr(ctx.message_bus, "running", False)
+        or getattr(ctx.message_bus, "_running", False)
+    )
+    runner_started = bool(
+        getattr(runner, "_started", False) or getattr(runner, "started", False)
+    )
+    if spot_ready and bus_running:
+        ctx.data_observation_ready = True
+        LOGGER.info(
+            "DATA_PIPELINE_READY_AFTER_TICK spot_ready=%s bus_running=%s runner_started=%s reason=%s",
+            spot_ready,
+            bus_running,
+            runner_started,
+            reason,
+            extra={"event": "DATA_PIPELINE_READY_AFTER_TICK", "spot_ready": spot_ready, "bus_running": bus_running, "runner_started": runner_started, "reason": reason},
+        )
+        return
+    LOGGER.info(
+        "DATA_PIPELINE_STILL_NOT_READY_AFTER_TICK spot_ready=%s bus_running=%s runner_started=%s reason=%s",
+        spot_ready,
+        bus_running,
+        runner_started,
+        reason,
+        extra={"event": "DATA_PIPELINE_STILL_NOT_READY_AFTER_TICK", "spot_ready": spot_ready, "bus_running": bus_running, "runner_started": runner_started, "reason": reason},
+    )
+
 
 
 def _runner_is_running(runner: Any) -> bool:
@@ -6450,23 +6510,21 @@ async def startup_sequence(ctx: BotContext) -> None:
             LOGGER.info(
                 "✅ MarketDataManager started — tick consumer active (WS deferred)"
             )
-            LOGGER.info(
+            _safe_startup_log(
+                LOGGER,
+                logging.INFO,
+                "STARTUP_WS_SPOT_FIRST_DECISION",
                 "STARTUP_WS_SPOT_FIRST_DECISION websocket_enabled=%s mdm_present=%s has_start_websocket=%s",
                 ctx.websocket_enabled,
                 ctx.market_data_manager is not None,
                 hasattr(ctx.market_data_manager, "start_websocket")
                 if ctx.market_data_manager
                 else False,
-                extra={
-                    "event": "STARTUP_WS_SPOT_FIRST_DECISION",
-                    "websocket_enabled": ctx.websocket_enabled,
-                    "mdm_present": ctx.market_data_manager is not None,
-                    "has_start_websocket": hasattr(
-                        ctx.market_data_manager, "start_websocket"
-                    )
-                    if ctx.market_data_manager
-                    else False,
-                },
+                websocket_enabled=ctx.websocket_enabled,
+                mdm_present=ctx.market_data_manager is not None,
+                has_start_websocket=hasattr(ctx.market_data_manager, "start_websocket")
+                if ctx.market_data_manager
+                else False,
             )
         except Exception as _mdm_start_exc:
             LOGGER.error("MarketDataManager.start() failed: %s", _mdm_start_exc)
@@ -6494,13 +6552,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                 int(desired_token_count_fn()) if callable(desired_token_count_fn) else None
             )
             register_fn = getattr(ctx.market_data_manager, "register_symbol", None)
-            LOGGER.info(
+            _safe_startup_log(
+                LOGGER, logging.INFO, "STARTUP_SPOT_REGISTER_BEGIN",
                 "STARTUP_SPOT_REGISTER_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_token_count,
                 ws_status.get("tokens"),
                 ctx.websocket_enabled,
+                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_token_count, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
             if callable(register_fn):
                 try:
@@ -6510,24 +6570,28 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "Spot symbol registration failed (will retry later)",
                         exc_info=True,
                     )
-            LOGGER.info(
+            _safe_startup_log(
+                LOGGER, logging.INFO, "STARTUP_SPOT_REGISTER_DONE",
                 "STARTUP_SPOT_REGISTER_DONE symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_token_count,
                 ws_status.get("tokens"),
                 ctx.websocket_enabled,
+                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_token_count, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
             subscribe_fn = getattr(
                 ctx.market_data_manager, "request_token_subscription", None
             )
-            LOGGER.info(
+            _safe_startup_log(
+                LOGGER, logging.INFO, "STARTUP_SPOT_TOKEN_REQUEST_BEGIN",
                 "STARTUP_SPOT_TOKEN_REQUEST_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_token_count,
                 ws_status.get("tokens"),
                 ctx.websocket_enabled,
+                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_token_count, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
             if callable(subscribe_fn):
                 subscribed = bool(
@@ -6549,40 +6613,64 @@ async def startup_sequence(ctx: BotContext) -> None:
             if callable(ws_token_count_fn):
                 ws_count = ws_token_count_fn()
                 ws_tokens = int(ws_count) if ws_count is not None else None
-            LOGGER.info(
+            _safe_startup_log(
+                LOGGER, logging.INFO, "STARTUP_SPOT_TOKEN_REQUEST_DONE",
                 "STARTUP_SPOT_TOKEN_REQUEST_DONE symbol=%s token=%d subscribed=%s desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 subscribed,
                 desired_tokens,
                 ws_tokens,
+                ctx.websocket_enabled,
+                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, subscribed=subscribed, desired_token_count=desired_tokens, ws_token_count=ws_tokens, websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
-            LOGGER.info(
+            _safe_startup_log(
+                LOGGER, logging.INFO, "STARTUP_WS_START_BEGIN",
                 "STARTUP_WS_START_BEGIN symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_tokens,
                 ws_tokens,
                 ctx.websocket_enabled,
+                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_tokens, websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
             ctx.market_data_manager.start_websocket()
-            LOGGER.info(
+            _safe_startup_log(
+                LOGGER, logging.INFO, "STARTUP_WS_START_DONE",
                 "STARTUP_WS_START_DONE symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_tokens,
                 ws_tokens,
                 ctx.websocket_enabled,
+                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_tokens, websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
             ws_status = ws_status_fn() if callable(ws_status_fn) else {}
-            LOGGER.info(
+            _safe_startup_log(
+                LOGGER, logging.INFO, "STARTUP_WS_CONNECT_TASK_CREATED",
                 "STARTUP_WS_CONNECT_TASK_CREATED symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
                 policy.nifty_internal_symbol,
                 policy.nifty_spot_token,
                 desired_tokens,
                 ws_status.get("tokens"),
                 ctx.websocket_enabled,
+                symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_status.get("tokens"), websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
+            spot_wait_seconds = float(os.getenv("STARTUP_WAIT_FOR_WS_SPOT_SECONDS", "8"))
+            mode = str(getattr(ctx, "effective_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
+            live_mode = mode == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).lower() in {"1", "true", "yes", "on"}
+            try:
+                spot_price = await _wait_for_live_spot_or_raise(ctx, timeout=spot_wait_seconds, configured_mode=mode)
+                LOGGER.info("STARTUP_WS_SPOT_PROOF_READY symbol=%s price=%.2f mode=%s", policy.nifty_internal_symbol, spot_price, mode, extra={"event": "STARTUP_WS_SPOT_PROOF_READY", "symbol": policy.nifty_internal_symbol, "price": spot_price, "mode": mode})
+                await _refresh_readiness_after_first_tick(ctx, reason="ws_spot_proof_ready")
+            except RuntimeError as exc:
+                if live_mode:
+                    ctx.live_orders_armed = False
+                    ctx.trading_ready = False
+                    ctx.live_block_reason = "fresh_spot_tick_missing"
+                    LOGGER.error("STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE symbol=%s reason=%s", policy.nifty_internal_symbol, exc, extra={"event": "STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE", "symbol": policy.nifty_internal_symbol, "reason": str(exc)})
+                    raise
+                LOGGER.warning("STARTUP_WS_SPOT_PROOF_TIMEOUT_NONLIVE symbol=%s mode=%s reason=%s", policy.nifty_internal_symbol, mode, exc, extra={"event": "STARTUP_WS_SPOT_PROOF_TIMEOUT_NONLIVE", "symbol": policy.nifty_internal_symbol, "mode": mode, "reason": str(exc)})
         except Exception as _ws_spot_first_exc:  # noqa: BLE001
             LOGGER.warning(
                 "STARTUP_WS_SPOT_FIRST_FAILED symbol=%s token=%d websocket_enabled=%s err=%s",
@@ -7145,12 +7233,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                 _wire_and_start_message_bus(ctx)
                 await _ensure_strategy_runner_started(ctx, reason="startup_mark_ready_complete")
                 await _replay_latest_mdm_ticks_to_bus(ctx, reason="post_runner_start")
+                await _refresh_readiness_after_first_tick(ctx, reason="post_runner_start")
                 ctx.data_observation_ready = True
                 if mode in {"PAPER", "SHADOW"}:
                     ctx.live_orders_armed = False
                     ctx.trading_ready = False
-                    ctx.live_block_reason = "paper_mode"
+                    ctx.live_block_reason = "paper_mode_or_startup_warmup"
                     LOGGER.info("PAPER_RUNNER_STARTED symbol_count=%d live_orders_armed=%s", len(readiness_symbols), False, extra={"event":"PAPER_RUNNER_STARTED","symbol_count":len(readiness_symbols),"live_orders_armed":False,"mode":mode})
+                    if not ready_symbols:
+                        LOGGER.info("PAPER_RUNNER_STARTED_OBSERVATION_ONLY reason=no_hydrated_symbols_yet", extra={"event": "PAPER_RUNNER_STARTED_OBSERVATION_ONLY", "reason": "no_hydrated_symbols_yet"})
                     LOGGER.info(
                         "RUNNER_READY_MARKED symbol_count=%d initial_ready_symbols=%s skipped_symbols=%s skipped_reasons=%s min_required_bars=%d",
                         len(readiness_symbols),
@@ -7436,14 +7527,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                 deferred_flush_count = int(
                     ctx.data_hub.flush_pending_live_subscriptions()
                 )
-                LOGGER.info(
-                    "startup_deferred_listener_subscriptions_flushed count=%d",
-                    deferred_flush_count,
-                    extra={
-                        "event": "startup_deferred_listener_subscriptions_flushed",
-                        "count": deferred_flush_count,
-                    },
-                )
+                if deferred_flush_count:
+                    LOGGER.info(
+                        "DATAHUB_DEFERRED_SUBSCRIPTIONS_RECHECK count=%d phase=post_runner_start",
+                        deferred_flush_count,
+                        extra={
+                            "event": "DATAHUB_DEFERRED_SUBSCRIPTIONS_RECHECK",
+                            "count": deferred_flush_count,
+                            "phase": "post_runner_start",
+                        },
+                    )
             if ctx.market_data_manager is not None:
                 last_tick_map = getattr(ctx.market_data_manager, "_last_tick_time", {}) or {}
                 live_tick_seen_count = sum(
@@ -8199,6 +8292,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     },
                                 )
                             else:
+                                non_live_mode = configured_mode in {"PAPER", "SHADOW"}
                                 LOGGER.info(
                                     "DATA_PIPELINE_NOT_READY hard_ready=%s spot_ready=%s missing=%s",
                                     hard_ready,
@@ -8211,18 +8305,29 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "missing": missing_hard,
                                     },
                                 )
-                                LOGGER.error(
-                                    "startup_pipeline_incomplete missing=%s",
-                                    ",".join(missing_hard) if missing_hard else "unknown",
-                                    extra={
-                                        "event": "startup_pipeline_incomplete",
-                                        "hard_ready": hard_ready,
-                                        "spot_ready": spot_ready,
-                                        "timed_out": not readiness_ready,
-                                        "missing": missing_hard,
-                                        "ws_connected": ws_connected,
-                                    },
-                                )
+                                if non_live_mode and _runner_is_running(ctx.strategy_runner):
+                                    ctx.data_observation_ready = True
+                                    ctx.live_orders_armed = False
+                                    ctx.trading_ready = False
+                                    ctx.live_block_reason = "paper_mode_or_startup_warmup"
+                                    LOGGER.warning(
+                                        "startup_pipeline_warmup_nonlive missing=%s",
+                                        ",".join(missing_hard) if missing_hard else "unknown",
+                                        extra={"event": "startup_pipeline_warmup_nonlive", "hard_ready": hard_ready, "spot_ready": spot_ready, "timed_out": not readiness_ready, "missing": missing_hard, "ws_connected": ws_connected},
+                                    )
+                                else:
+                                    LOGGER.error(
+                                        "startup_pipeline_incomplete missing=%s",
+                                        ",".join(missing_hard) if missing_hard else "unknown",
+                                        extra={
+                                            "event": "startup_pipeline_incomplete",
+                                            "hard_ready": hard_ready,
+                                            "spot_ready": spot_ready,
+                                            "timed_out": not readiness_ready,
+                                            "missing": missing_hard,
+                                            "ws_connected": ws_connected,
+                                        },
+                                    )
                             live_mode = configured_mode == "LIVE" or (
                                 str(os.getenv("ENABLE_LIVE", "false"))
                                 .strip()

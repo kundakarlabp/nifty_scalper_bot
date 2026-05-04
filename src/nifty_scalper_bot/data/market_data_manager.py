@@ -973,6 +973,25 @@ class MarketDataManager:
                 },
             )
             self._ws.start()
+            post_status = self.ws_status_snapshot()
+            self._ws_connect_task_started = bool(post_status.get("connect_task_alive"))
+            self._ws_connected = bool(post_status.get("connected"))
+            if not self._ws_connected:
+                self._logger.info(
+                    "MDM_WS_START_PENDING_CONNECTION connect_task_alive=%s desired_token_count=%s ws_token_count=%s",
+                    self._ws_connect_task_started,
+                    len(self._desired_tokens),
+                    post_status.get("tokens"),
+                    extra={"event": "MDM_WS_START_PENDING_CONNECTION", "connect_task_alive": self._ws_connect_task_started, "desired_token_count": len(self._desired_tokens), "ws_token_count": post_status.get("tokens")},
+                )
+            if not self._ws_connect_task_started and not self._ws_connected:
+                self._ws_start_requested = False
+                self._logger.warning(
+                    "MDM_WS_START_NO_CONNECT_TASK desired_token_count=%s ws_token_count=%s",
+                    len(self._desired_tokens),
+                    post_status.get("tokens"),
+                    extra={"event": "MDM_WS_START_NO_CONNECT_TASK", "desired_token_count": len(self._desired_tokens), "ws_token_count": post_status.get("tokens")},
+                )
         except Exception:
             self._ws_start_requested = False
             self._logger.exception("Failure in ws.start")
@@ -1012,11 +1031,9 @@ class MarketDataManager:
         """Record WebSocket connectivity state for health reporting."""
 
         self._ws_connected = bool(connected)
-        self._ws_connected = bool(connected)
         self._ws_connect_task_started = bool(
             self.ws_status_snapshot().get("connect_task_alive")
         )
-        self._ws_connected = bool(connected)
         self._ws_started = bool(connected)
         if not connected and not self._ws_connect_task_started:
             self._ws_start_requested = False
@@ -6869,10 +6886,11 @@ class MarketDataManager:
             log_throttled(
                 self._logger,
                 key="spot_ws_first_tick_missing",
-                msg="MDM_WS_FIRST_TICK_MISSING symbol=NSE:NIFTY reason=no_tick_received",
+                msg="MDM_WS_FIRST_TICK_MISSING symbol=%s reason=no_tick_received connected=%s connect_task_alive=%s ws_tokens=%s",
+                args=(symbol, self.ws_status_snapshot().get("connected"), self.ws_status_snapshot().get("connect_task_alive"), self.ws_status_snapshot().get("tokens")),
                 interval_sec=60.0,
                 level=logging.WARNING,
-                extra={"event": "MDM_WS_FIRST_TICK_MISSING", "symbol": symbol, "reason": "no_tick_received"},
+                extra={"event": "MDM_WS_FIRST_TICK_MISSING", "symbol": symbol, "reason": "no_tick_received", "connected": self.ws_status_snapshot().get("connected"), "connect_task_alive": self.ws_status_snapshot().get("connect_task_alive"), "ws_tokens": self.ws_status_snapshot().get("tokens")},
             )
             self._request_spot_resubscribe_if_due(symbol, reason="first_tick_missing")
             return

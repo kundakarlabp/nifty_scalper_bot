@@ -4253,6 +4253,17 @@ class StrategyRunner:
             except Exception:  # pragma: no cover - defensive
                 pass
             self._last_tick_time_by_symbol[normalized_symbol] = time.time()
+            if not hasattr(self, "_first_tick_ingested_symbols"):
+                self._first_tick_ingested_symbols = set()
+            if normalized_symbol not in self._first_tick_ingested_symbols:
+                self._first_tick_ingested_symbols.add(normalized_symbol)
+                history_count = len(self._indicator_engine.get_history(normalized_symbol) or [])
+                self._logger.info(
+                    "RUNNER_TICK_INGESTED symbol=%s history_count=%d",
+                    normalized_symbol,
+                    history_count,
+                    extra={"event": "RUNNER_TICK_INGESTED", "symbol": normalized_symbol, "history_count": history_count},
+                )
             engine = self._candle_engines.setdefault(normalized_symbol, CandleEngine())
             with self._symbol_locks[normalized_symbol]:
                 engine.on_tick(tick)

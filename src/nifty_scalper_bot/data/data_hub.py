@@ -808,7 +808,21 @@ class DataHub:
             tick = self._canonicalize_tick_payload(payload)
             if tick is None:
                 return
+            symbol = str(tick.get("symbol") or "")
+            first_seen_bus = False
+            if symbol:
+                if not hasattr(self, "_first_bus_ingested_symbols"):
+                    self._first_bus_ingested_symbols = set()
+                first_seen_bus = symbol not in self._first_bus_ingested_symbols
+                if first_seen_bus:
+                    self._first_bus_ingested_symbols.add(symbol)
             self._ingest_tick_impl(tick)
+            if first_seen_bus:
+                LOGGER.info(
+                    "DATAHUB_TICK_INGESTED_FROM_BUS symbol=%s",
+                    symbol,
+                    extra={"event": "DATAHUB_TICK_INGESTED_FROM_BUS", "symbol": symbol},
+                )
         except Exception as exc:
             LOGGER.exception("DATAHUB_TICK_INGEST_FAILED error=%r", exc, extra=to_json_safe({"event": "DATAHUB_TICK_INGEST_FAILED", "error": repr(exc)}))
 
