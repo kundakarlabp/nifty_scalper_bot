@@ -15,6 +15,7 @@ def compute_live_readiness(
     quote_available: bool,
     ws_quote_proof: bool,
     market_open: bool,
+    runner_running: bool,
 ) -> tuple[bool, list[str]]:
     """Decide whether live trading should be armed.
 
@@ -32,6 +33,7 @@ def compute_live_readiness(
         quote_available: Broker REST quote capability snapshot.
         ws_quote_proof: WebSocket tradable-quote proof flag.
         market_open: True when the exchange session is currently open.
+        runner_running: True when StrategyRunner is actively running.
 
     Returns:
         Tuple ``(armed, reasons)`` where ``armed`` indicates whether live
@@ -49,4 +51,6 @@ def compute_live_readiness(
         reasons.append("market_data_proof_unavailable")
     if not market_open:
         reasons.append("market_closed")
+    if not runner_running:
+        reasons.append("strategy_runner_not_running")
     return (len(reasons) == 0), reasons

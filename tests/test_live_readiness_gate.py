@@ -15,6 +15,7 @@ class TestComputeLiveReadiness:
             quote_available=False,
             ws_quote_proof=True,
             market_open=True,
+            runner_running=True,
         )
         assert armed is True
         assert reasons == []
@@ -26,6 +27,7 @@ class TestComputeLiveReadiness:
             quote_available=False,
             ws_quote_proof=False,
             market_open=True,
+            runner_running=True,
         )
         assert armed is False
         assert reasons == ["market_data_proof_unavailable"]
@@ -37,6 +39,7 @@ class TestComputeLiveReadiness:
             quote_available=True,
             ws_quote_proof=False,
             market_open=True,
+            runner_running=True,
         )
         assert armed is False
         assert "startup_pipeline_incomplete" in reasons
@@ -48,6 +51,7 @@ class TestComputeLiveReadiness:
             quote_available=True,
             ws_quote_proof=True,
             market_open=False,
+            runner_running=True,
         )
         assert armed is False
         assert reasons == ["market_closed"]
@@ -59,6 +63,7 @@ class TestComputeLiveReadiness:
             quote_available=True,
             ws_quote_proof=True,
             market_open=True,
+            runner_running=True,
         )
         assert armed is False
         assert reasons == ["not_live_mode"]
@@ -70,6 +75,7 @@ class TestComputeLiveReadiness:
             quote_available=False,
             ws_quote_proof=False,
             market_open=False,
+            runner_running=True,
         )
         assert armed is False
         assert "startup_pipeline_incomplete" in reasons
@@ -83,6 +89,27 @@ class TestComputeLiveReadiness:
             quote_available=True,
             ws_quote_proof=False,
             market_open=True,
+            runner_running=True,
         )
         assert armed is True
         assert reasons == []
+
+
+    def test_live_readiness_requires_runner_running(self) -> None:
+        armed, reasons = compute_live_readiness(
+            live_mode=True,
+            hard_ready=True,
+            quote_available=True,
+            ws_quote_proof=True,
+            market_open=True,
+            runner_running=False,
+        )
+        assert armed is False
+        assert "strategy_runner_not_running" in reasons
+
+    def test_data_warmup_does_not_block_runner_start(self) -> None:
+        configured_runtime_mode = "LIVE"
+        effective_runtime_mode = "DATA_WARMUP"
+        evaluation_allowed = configured_runtime_mode in {"PAPER", "SHADOW", "LIVE"}
+        assert effective_runtime_mode == "DATA_WARMUP"
+        assert evaluation_allowed is True

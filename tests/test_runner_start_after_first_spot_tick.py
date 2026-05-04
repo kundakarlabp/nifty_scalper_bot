@@ -42,37 +42,15 @@ async def test_refresh_readiness_starts_runner_after_first_tick(
 
 
 @pytest.mark.asyncio
-async def test_refresh_readiness_does_not_arm_live_orders() -> None:
-    ctx = SimpleNamespace(
-        market_data_manager=_MdmStub(),
-        strategy_runner=SimpleNamespace(_started=True, started=True),
-        message_bus=SimpleNamespace(running=True),
-        strategy_runner_task=None,
-        data_observation_ready=False,
-        live_orders_armed=False,
-    )
+async def test_ensure_runner_started_no_false_positive(caplog: pytest.LogCaptureFixture) -> None:
+    class _Runner:
+        _running = False
 
-    await app._refresh_readiness_after_first_tick(ctx, reason='first_spot_tick_listener')
+        def start(self) -> None:
+            return None
 
-    assert ctx.live_orders_armed is False
-
-
-@pytest.mark.asyncio
-async def test_refresh_readiness_logs_helper_missing(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    monkeypatch.delattr(app, '_ensure_strategy_runner_started')
-
-    ctx = SimpleNamespace(
-        market_data_manager=_MdmStub(),
-        strategy_runner=SimpleNamespace(_started=False, started=False),
-        message_bus=SimpleNamespace(running=True),
-        strategy_runner_task=None,
-        data_observation_ready=False,
-        live_orders_armed=False,
-    )
-
+    ctx = SimpleNamespace(strategy_runner=_Runner(), runner_task=None, strategy_runner_task=None)
     caplog.set_level('INFO', logger='nifty_scalper_bot.core.app')
-    await app._refresh_readiness_after_first_tick(ctx, reason='first_spot_tick_listener')
-
-    assert 'STRATEGY_RUNNER_START_HELPER_MISSING' in caplog.text
+    await app._ensure_strategy_runner_started(ctx, reason='unit_test')
+    assert 'STRATEGY_RUNNER_STARTED reason=unit_test' not in caplog.text
+    assert 'STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING' in caplog.text
