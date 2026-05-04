@@ -1,13 +1,7 @@
 [build]
-builder = "DOCKERFILE" # Change from NIXPACKS to DOCKERFILE
+builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-# The startCommand is already handled by ENTRYPOINT in Dockerfile, 
-# but keeping it here is fine as an override.
-startCommand = "/bin/bash /app/entrypoint.sh"
-
-[env]
-source = ".env"

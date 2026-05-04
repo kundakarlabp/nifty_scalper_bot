@@ -31,51 +31,39 @@ sys.stdout.reconfigure(line_buffering=True)
 
 
 def _load_env_file() -> None:
-    """Load .env file from multiple possible locations.
-
-    Search order:
-    1. Current working directory
-    2. /app/.env (Docker/Railway standard)
-    3. Project root (relative to this file)
-    4. Parent directories up to 3 levels
-    """
+    """Load .env defaults only. Args: none. Returns: None. Raises: none."""
     search_paths = [
         Path.cwd() / ".env",
-        Path("/app/.env"),
-        Path(__file__).resolve().parent.parent.parent.parent / ".env",
-        Path(__file__).resolve().parent.parent.parent / ".env",
+        Path('/app/.env'),
+        Path(__file__).resolve().parents[3] / '.env',
+        Path(__file__).resolve().parents[2] / '.env',
     ]
 
-    workdir = os.getenv("WORKDIR") or os.getenv("APP_DIR")
-    if workdir:
-        search_paths.insert(0, Path(workdir) / ".env")
-
-    env_loaded = False
+    loaded_from: Path | None = None
     for env_path in search_paths:
         if env_path.exists() and env_path.is_file():
-            print(f"✅ ENV FILE FOUND: {env_path}", flush=True)
-            is_railway = bool(
-                os.getenv("RAILWAY_ENVIRONMENT")
-                or os.getenv("RAILWAY_PROJECT_ID")
-                or os.getenv("RAILWAY_SERVICE_ID")
-            )
-            load_dotenv(dotenv_path=str(env_path), override=not is_railway)
-            env_loaded = True
-
-            enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
-            exec_mode = os.getenv("EXECUTION_MODE", "NOT_SET")
-            print(f"   📋 ENABLE_LIVE={enable_live}", flush=True)
-            print(f"   📋 EXECUTION_MODE={exec_mode}", flush=True)
+            load_dotenv(dotenv_path=str(env_path), override=False)
+            loaded_from = env_path
             break
 
-    if not env_loaded:
-        print(
-            "⚠️ WARNING: No .env file found! Using Railway/system env vars only.",
-            flush=True,
-        )
-        print(f"   Searched paths: {[str(p) for p in search_paths]}", flush=True)
+    if loaded_from is not None:
+        print(f"✅ ENV FILE FOUND (defaults only): {loaded_from}", flush=True)
+    else:
+        print('⚠️ WARNING: No .env file found! Using system env vars only.', flush=True)
 
-    load_dotenv(override=False)
+    effective_keys = [
+        'ENABLE_LIVE',
+        'ENABLE_LIVE_TRADING',
+        'EXECUTION_MODE',
+        'ORDERS__ENABLE_LIVE',
+        'PAPER__ENABLED',
+        'PAPER_MODE',
+        'SHADOW_MODE',
+        'DATA_DIR',
+        'PORT',
+    ]
+    for key in effective_keys:
+        print(f"   🔧 {key} = {os.getenv(key, 'NOT_SET')}", flush=True)
 
 
 def _ensure_data_directory() -> None:
@@ -105,10 +93,6 @@ logging.basicConfig(level="INFO", stream=sys.stdout)
 LOG = logging.getLogger("nifty_scalper_bot.main")
 
 print("🚀 PYTHON START: Initializing...", flush=True)
-print(f"   🔧 ENABLE_LIVE = {os.getenv('ENABLE_LIVE', 'NOT_SET')}", flush=True)
-print(f"   🔧 EXECUTION_MODE = {os.getenv('EXECUTION_MODE', 'NOT_SET')}", flush=True)
-print(f"   🔧 FORCE_SIGNAL = {os.getenv('FORCE_SIGNAL', 'NOT_SET')}", flush=True)
-print(f"   🔧 DATA_DIR = {os.getenv('DATA_DIR', 'NOT_SET')}", flush=True)
 
 
 # -------------------------------------------------------

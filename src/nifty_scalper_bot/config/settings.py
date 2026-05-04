@@ -83,7 +83,7 @@ def _ensure_env_loaded_before_settings() -> None:
     for env_path in search_paths:
         try:
             if env_path.exists() and env_path.is_file():
-                load_dotenv(dotenv_path=str(env_path), override=True)
+                load_dotenv(dotenv_path=str(env_path), override=False)
                 enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
                 print(f"✅ [SETTINGS] Loaded .env from {env_path}", flush=True)
                 print(f"   ENABLE_LIVE={enable_live}", flush=True)
@@ -93,7 +93,7 @@ def _ensure_env_loaded_before_settings() -> None:
             continue
 
     # Fallback
-    load_dotenv(override=True)
+    load_dotenv(override=False)
     print("⚠️ [SETTINGS] No .env found, using system environment", flush=True)
 
 
