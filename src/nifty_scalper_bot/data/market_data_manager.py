@@ -280,8 +280,9 @@ class MarketDataManager:
             else 1.0
         )
         self._poll_max_symbols = int(
-            getattr(settings, "poll_max_symbols", 16) if settings is not None else 16
+            getattr(settings, "poll_max_symbols", 12) if settings is not None else 12
         )
+        self._poll_error_last_log: dict[str, float] = {}
         self._history_lock = asyncio.Lock()
         self._last_history_request_ts = 0.0
         self._history_min_interval_sec = float(
@@ -5586,7 +5587,10 @@ class MarketDataManager:
                 candidates.update(self._tracked_symbols)
             ordered = sorted(symbol for symbol in candidates if symbol)
             now_dt = datetime.now(timezone.utc)
-            ordered = [sym for sym in ordered if self._should_poll_symbol(sym, now_dt)]
+            if self._active_subscribed_symbols or self._tracked_symbols:
+                ordered = self._poll_candidates(now_dt)
+            else:
+                ordered = [sym for sym in ordered if self._should_poll_symbol(sym, now_dt)]
             limit = self._rest_poll_max_symbols
             if limit > 0 and len(ordered) > limit:
                 self._logger.debug(
@@ -6553,21 +6557,44 @@ class MarketDataManager:
             None.
         """
         symbol = self._canonical_symbol(symbol)
-        quote = self._broker.get_quote(symbol)
-        if not isinstance(quote, dict):
-            return
-        quote = self._prepare_rest_tick(quote, source="rest")
-        with self._lock:
-            previous = self._latest_ticks.get(symbol)
-        normalized = self._normalize_tick(symbol, quote, previous)
-        if normalized is None:
-            return
-        normalized_live = self.normalize_live_tick(normalized, source="poll")
-        if normalized_live is None:
-            return
-        self._poll_fallback_count = int(getattr(self, "_poll_fallback_count", 0)) + 1
-        self._ingest_normalized_tick(normalized_live)
-        self._process_poll_quote(symbol, normalized)
+        try:
+            quote = self._broker.get_quote(symbol)
+            if not isinstance(quote, dict):
+                return
+            quote = self._prepare_rest_tick(quote, source="rest")
+            with self._lock:
+                previous = self._latest_ticks.get(symbol)
+            normalized = self._normalize_tick(symbol, quote, previous)
+            if normalized is None:
+                return
+            normalized_live = self.normalize_live_tick(normalized, source="poll")
+            if normalized_live is None:
+                return
+            self._poll_fallback_count = int(getattr(self, "_poll_fallback_count", 0)) + 1
+            self._ingest_normalized_tick(normalized_live)
+            self._process_poll_quote(symbol, normalized)
+            self._logger.info(
+                "POLL_TICK_INGESTED symbol=%s ltp=%s",
+                symbol,
+                normalized_live.get("ltp"),
+                extra={"event": "POLL_TICK_INGESTED", "symbol": symbol},
+            )
+        except Exception as exc:
+            self._log_poll_error(symbol, exc)
+
+    def _log_poll_error(self, symbol: str, err: Exception | str) -> None:
+        """Throttle poll error logs. Args: symbol/err. Returns: none. Raises: none."""
+        now = time.monotonic()
+        key = str(symbol or "UNKNOWN")
+        last = self._poll_error_last_log.get(key, 0.0)
+        if now - last >= 30.0:
+            self._logger.warning(
+                "POLL_QUOTE_FAILED symbol=%s err=%s",
+                key,
+                err,
+                extra={"event": "POLL_QUOTE_FAILED", "symbol": key},
+            )
+            self._poll_error_last_log[key] = now
 
     def _is_context_symbol(self, symbol: str) -> bool:
         """Return whether symbol is context feed. Args: symbol; Returns: bool; Raises: none."""
@@ -6594,6 +6621,30 @@ class MarketDataManager:
             else self._poll_option_stale_seconds
         )
         return age >= threshold
+
+    def _poll_candidates(self, now: datetime) -> list[str]:
+        """Build stale-only poll candidates. Args: now. Returns: symbols. Raises: none."""
+        with self._lock:
+            active = set(self._active_subscribed_symbols) | set(self._tracked_symbols)
+        ordered = sorted(sym for sym in active if sym)
+        stale: list[str] = []
+        skipped_fresh = 0
+        for sym in ordered:
+            if self._should_poll_symbol(sym, now):
+                stale.append(sym)
+            else:
+                skipped_fresh += 1
+        limit = max(0, int(self._poll_max_symbols))
+        if limit > 0:
+            stale = stale[:limit]
+        self._logger.info(
+            "POLL_CANDIDATES total=%d stale=%d skipped_fresh=%d",
+            len(ordered),
+            len(stale),
+            skipped_fresh,
+            extra={"event": "POLL_CANDIDATES"},
+        )
+        return stale
 
     def _is_ws_fresh_enough(self, symbol: str, now: datetime) -> bool:
         """Return whether websocket tick freshness is sufficient. Args: symbol, now. Returns: bool. Raises: none."""
