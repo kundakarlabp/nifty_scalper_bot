@@ -6237,8 +6237,9 @@ async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> No
         result = runner.start()
         if inspect.isawaitable(result):
             await result
-        LOGGER.info("STRATEGY_RUNNER_STARTED reason=%s", reason, extra={"event": "STRATEGY_RUNNER_STARTED", "reason": reason})
-        if not _runner_is_running(runner):
+        if _runner_is_running(runner):
+            LOGGER.info("STRATEGY_RUNNER_STARTED reason=%s", reason, extra={"event": "STRATEGY_RUNNER_STARTED", "reason": reason})
+        else:
             LOGGER.warning("STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING reason=%s active_symbols=%d runner_state=%s", reason, len(getattr(runner, "_active_symbols", set()) or []), getattr(runner, "_runner_state", None), extra={"event":"STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING","reason":reason,"active_symbols":len(getattr(runner, "_active_symbols", set()) or []),"runner_state":str(getattr(runner, "_runner_state", None))})
         return
     if hasattr(runner, "run"):
@@ -6253,6 +6254,56 @@ async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> No
     LOGGER.warning("STRATEGY_RUNNER_START_SKIPPED reason=no_start_or_run_method")
 
 
+
+
+async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
+    """Re-arm LIVE trading when market opens. Args: ctx. Returns: none. Raises: none."""
+
+    while True:
+        await asyncio.sleep(30)
+        configured_mode = str(
+            getattr(ctx.settings, "execution_mode", None)
+            or os.getenv("EXECUTION_MODE", "PAPER")
+        ).upper()
+        if configured_mode != "LIVE":
+            continue
+        try:
+            market_open_now = get_market_state() == MarketState.OPEN
+        except Exception:
+            market_open_now = False
+        if not market_open_now:
+            continue
+        await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
+        readiness_state = {}
+        mdm = getattr(ctx, "market_data_manager", None)
+        if mdm is not None and hasattr(mdm, "readiness_snapshot"):
+            readiness_state = mdm.readiness_snapshot() or {}
+        missing_hard = readiness_state.get("missing_hard") or []
+        spot_ready = bool(readiness_state.get("spot_ready"))
+        futures_ready = "futures" not in set(missing_hard)
+        atm_ce_ready = "atm_ce" not in set(missing_hard)
+        atm_pe_ready = "atm_pe" not in set(missing_hard)
+        data_hard_ready = bool(spot_ready and futures_ready and atm_ce_ready and atm_pe_ready)
+        quote_capability = _resolve_quote_capability(ctx)
+        quote_available = bool(quote_capability["available"])
+        ws_quote_proof_fn = getattr(mdm, "has_ws_tradable_quote", None)
+        ws_quote_proof = bool(ws_quote_proof_fn()) if callable(ws_quote_proof_fn) else False
+        runner_running = _runner_is_running(ctx.strategy_runner)
+        armed, reasons = compute_live_readiness(
+            live_mode=True,
+            hard_ready=data_hard_ready,
+            quote_available=quote_available,
+            ws_quote_proof=ws_quote_proof,
+            market_open=market_open_now,
+            runner_running=runner_running,
+        )
+        if armed:
+            ctx.live_orders_armed = True
+            ctx.trading_ready = True
+            ctx.effective_mode = "LIVE"
+            LOGGER.info("LIVE_TRADING_REARMED", extra={"event": "LIVE_TRADING_REARMED"})
+        else:
+            LOGGER.info("LIVE_TRADING_REARM_WAIT reasons=%s", reasons, extra={"event": "LIVE_TRADING_REARM_WAIT", "reasons": reasons})
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
@@ -6837,6 +6888,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                 LOGGER.error("STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE symbol=%s reason=%s", policy.nifty_internal_symbol, exc, extra={"event": "STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE", "symbol": policy.nifty_internal_symbol, "reason": str(exc)})
                 raise
         except Exception as _ws_spot_first_exc:  # noqa: BLE001
+            is_live_configured = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper() == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            if is_live_configured:
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.live_block_reason = "ws_spot_first_failed"
+                LOGGER.error(
+                    "STARTUP_WS_SPOT_FIRST_FAILED_LIVE_BLOCKED symbol=%s token=%d websocket_enabled=%s err=%s",
+                    policy.nifty_internal_symbol,
+                    policy.nifty_spot_token,
+                    ctx.websocket_enabled,
+                    _ws_spot_first_exc,
+                    exc_info=True,
+                    extra={"event": "STARTUP_WS_SPOT_FIRST_FAILED_LIVE_BLOCKED"},
+                )
+                raise
             LOGGER.warning(
                 "STARTUP_WS_SPOT_FIRST_FAILED symbol=%s token=%d websocket_enabled=%s err=%s",
                 policy.nifty_internal_symbol,
@@ -7388,19 +7454,21 @@ async def startup_sequence(ctx: BotContext) -> None:
             pending_runner_symbols: set[str] = set(skipped_symbols)
             if runner is not None and hasattr(runner, "mark_ready") and ready_symbols:
                 runner.mark_ready(ready_symbols)
-            mode = str(
-                getattr(ctx, "effective_mode", None)
-                or getattr(ctx.settings, "execution_mode", None)
+            configured_runtime_mode = str(
+                getattr(ctx.settings, "execution_mode", None)
                 or os.getenv("EXECUTION_MODE", "PAPER")
             ).upper()
-            evaluation_allowed = mode in {"PAPER", "SHADOW", "LIVE"}
+            effective_runtime_mode = str(
+                getattr(ctx, "effective_mode", None) or configured_runtime_mode
+            ).upper()
+            evaluation_allowed = configured_runtime_mode in {"PAPER", "SHADOW", "LIVE"}
             if evaluation_allowed and readiness_symbols:
                 _wire_and_start_message_bus(ctx)
                 await _ensure_strategy_runner_started(ctx, reason="startup_mark_ready_complete")
                 await _replay_latest_mdm_ticks_to_bus(ctx, reason="post_runner_start")
                 await _refresh_readiness_after_first_tick(ctx, reason="post_runner_start")
                 ctx.data_observation_ready = True
-                if mode in {"PAPER", "SHADOW"}:
+                if configured_runtime_mode in {"PAPER", "SHADOW"}:
                     ctx.live_orders_armed = False
                     ctx.trading_ready = False
                     ctx.live_block_reason = "paper_mode_or_startup_warmup"
@@ -8549,7 +8617,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                             ctx.data_hard_ready = bool(spot_ready and futures_ready and atm_ce_ready and atm_pe_ready)
                             ctx.data_pipeline_ready = bool(hard_ready)
                             ctx.trading_ready = bool(ctx.data_hard_ready and mode == "LIVE")
-                            if mode in {"PAPER", "SHADOW"}:
+                            if configured_runtime_mode in {"PAPER", "SHADOW"}:
                                 ctx.live_orders_armed = False
                                 if ctx.strategy_runner is not None:
                                     status = ctx.strategy_runner.get_status()
@@ -8572,12 +8640,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     },
                                 )
                             market_open_now = market_state == MarketState.OPEN
+                            runner_running = _runner_is_running(ctx.strategy_runner)
                             armed, blocking_reasons = compute_live_readiness(
                                 live_mode=bool(live_mode),
                                 hard_ready=bool(ctx.data_hard_ready),
                                 quote_available=bool(quote_available),
                                 ws_quote_proof=bool(ws_quote_for_gate),
                                 market_open=bool(market_open_now),
+                                runner_running=bool(runner_running),
                             )
                             data_warmup_reasons: list[str] = list(blocking_reasons)
                             if live_mode and not quote_available and ws_quote_proof:
@@ -8756,6 +8826,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     await asyncio.sleep(15 if _imo() else 120)
 
             asyncio.create_task(_sync_loop())
+            asyncio.create_task(_live_readiness_rearm_loop(ctx))
 
         except Exception as e:
             LOGGER.error(f"Post-start tasks failed: {e}")
