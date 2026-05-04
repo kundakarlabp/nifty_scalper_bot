@@ -1064,15 +1064,17 @@ class DataHub:
                 getattr(callback, "__qualname__", repr(callback)),
             )
         if self._defer_live_symbol_subscriptions:
+            already_pending = normalized in self._pending_live_symbols
             self._pending_live_symbols.add(normalized)
-            LOGGER.info(
-                "datahub_symbol_registered_deferred symbol=%s",
-                normalized,
-                extra={
-                    "event": "datahub_symbol_registered_deferred",
-                    "symbol": normalized,
-                },
-            )
+            if not already_pending:
+                LOGGER.info(
+                    "datahub_symbol_registered_deferred symbol=%s",
+                    normalized,
+                    extra={
+                        "event": "datahub_symbol_registered_deferred",
+                        "symbol": normalized,
+                    },
+                )
             LOGGER.info(
                 "DATAHUB_SYMBOL_STATUS symbol=%s state=deferred",
                 normalized,
