@@ -692,7 +692,7 @@ class DataHub:
         symbol = self._normalize_tick_symbol(tick)
         if not symbol:
             return
-        token = tick.get("instrument_token")
+        token = tick.get("instrument_token") or tick.get("token")
         try:
             token = int(token) if token is not None else None
         except (TypeError, ValueError):
@@ -726,6 +726,7 @@ class DataHub:
             canonical_tick["arrival_time"] = now_ms
             if token is not None:
                 canonical_tick["instrument_token"] = token
+                canonical_tick["token"] = token
                 self._ticks[token] = canonical_tick
                 self._token_quotes[token] = canonical_tick
                 self._token_by_symbol[symbol] = token
@@ -819,12 +820,23 @@ class DataHub:
     def get_quote(self, symbol: str, allow_pull: bool = True) -> Optional[Tick]:
         lookup = self._canonical_quote_symbol(symbol)
         with self._lock:
+            if str(symbol).strip().isdigit():
+                tok = int(str(symbol).strip())
+                tick = self._ticks.get(tok) or self._token_quotes.get(tok)
+                if tick is not None:
+                    return dict(tick)
             token = self._token_by_symbol.get(lookup)
-            if token is not None and token in self._ticks:
-                return dict(self._ticks[token])
+            if token is not None:
+                tick = self._ticks.get(token) or self._token_quotes.get(token)
+                if tick is not None:
+                    return dict(tick)
             tick = self._quotes.get(lookup)
             if tick is not None:
                 return dict(tick)
+            for alias in self._symbol_aliases.get(lookup, set()):
+                t = self._quotes.get(alias)
+                if t is not None:
+                    return dict(t)
         if allow_pull:
             return self.pull_quote(symbol) or None
         return None

@@ -18,7 +18,6 @@ from nifty_scalper_bot.utils.symbols import canonical, enforce_canonical
 
 LOGGER = get_logger(__name__)
 _STARVATION_CANDIDATE_STATUSES = {
-    "quote_request_failed",
     "websocket_silent",
     "combined_starvation",
 }
@@ -59,6 +58,8 @@ class PollingStreamer:
         self._websocket_mode_enabled = False
         self._last_poll_heartbeat = time.monotonic()
         self._last_fetch_status = "idle"
+        self._last_poll_error_log: dict[str, float] = {}
+        self._poll_error_log_interval = 30.0
 
         # Metrics
         self._m_poll_ok = Counter("polling_success_total", "Successful poll cycles")
@@ -445,11 +446,61 @@ class PollingStreamer:
             sleep_time = max(0.1, backoff - elapsed)
             time.sleep(sleep_time)
 
+
+    def _log_quote_request_failed(self, symbols: Sequence[str], exc: Exception) -> None:
+        """Args: symbols/exc. Returns: None. Raises: None."""
+        key = ",".join(list(symbols)[:4]) or "UNKNOWN"
+        now = time.monotonic()
+        last = self._last_poll_error_log.get(key, 0.0)
+        if now - last < self._poll_error_log_interval:
+            return
+        self._last_poll_error_log[key] = now
+        LOGGER.warning(
+            "POLL_QUOTE_FAILED symbols=%s err=%s",
+            list(symbols)[:8],
+            exc,
+            extra={
+                "event": "POLL_QUOTE_FAILED",
+                "symbols": list(symbols)[:8],
+                "error": str(exc),
+            },
+        )
+
+    def _has_recent_tick(self) -> bool:
+        """Args: none. Returns: whether spot/option ticks are recent. Raises: None."""
+        hub = self._data_hub
+        if hub is None:
+            return False
+        try:
+            now = time.time()
+            stale_sec = 10.0
+            symbols = []
+            if hasattr(hub, "get_tracked_symbols"):
+                symbols = list(hub.get_tracked_symbols() or [])
+            for sym in symbols:
+                q = hub.get_quote(sym, allow_pull=False) if hasattr(hub, "get_quote") else None
+                if not q:
+                    continue
+                ts = q.get("timestamp") if isinstance(q, dict) else None
+                if isinstance(ts, (int, float)):
+                    ts_sec = float(ts) / 1000.0 if ts > 1e12 else float(ts)
+                    if now - ts_sec <= stale_sec:
+                        return True
+        except Exception:
+            return False
+        return False
+
     def _should_escalate_starvation(
         self, *, tokens_present: bool, seen_any_tick: bool, ws_healthy: bool
     ) -> bool:
         """Args: status flags. Returns: starvation escalation decision. Raises: None."""
         if not tokens_present or seen_any_tick or ws_healthy:
+            return False
+        if self._last_fetch_status == "quote_request_failed" and self._has_recent_tick():
+            LOGGER.info(
+                "MARKET_DATA_STARVATION_SKIPPED reason=recent_ticks_quote_failure_only",
+                extra={"event": "MARKET_DATA_STARVATION_SKIPPED"},
+            )
             return False
         return self._last_fetch_status in _STARVATION_CANDIDATE_STATUSES
 
@@ -548,15 +599,7 @@ class PollingStreamer:
                 quote_map = self._broker.quote(symbols_for_api)
             except Exception as exc:  # noqa: BLE001
                 self._last_fetch_status = "quote_request_failed"
-                LOGGER.warning(
-                    "POLL_QUOTE_REQUEST_FAILED err=%s",
-                    exc,
-                    exc_info=True,
-                    extra={
-                        "event": "polling_quote_request_failed",
-                        "symbols": symbols_for_api[:8],
-                    },
-                )
+                self._log_quote_request_failed(symbols_for_api, exc)
                 return []
 
             if not quote_map:

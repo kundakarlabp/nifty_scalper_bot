@@ -1088,9 +1088,17 @@ class StrategyRunner:
 
         self._logger.info("Tracking symbol %s", normalized)
 
+    def _required_bars_for_symbol(self, symbol: str) -> int:
+        """Args: symbol. Returns: required bar count by symbol role. Raises: None."""
+        return (
+            self._option_required_bars
+            if self._is_tradable_option_symbol(symbol)
+            else self._context_required_bars
+        )
+
     def _prehydrate_symbol_history(self, symbol: str) -> None:
         """Fetch startup candles for symbol hydration and indicator readiness."""
-        target = max(self._required_candles, 50)
+        target = self._required_bars_for_symbol(symbol)
         rows = self._hydrate_missing_bars(symbol, target)
         if not rows:
             self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
@@ -1203,9 +1211,10 @@ class StrategyRunner:
         """Validate symbol candle data integrity from the indicator engine."""
         try:
             history = self._symbol_history.get(symbol, [])
-            if len(history) < self._required_candles:
+            required = self._required_bars_for_symbol(symbol)
+            if len(history) < required:
                 if self._indicator_engine and self._indicator_engine.has_min_bars(
-                    symbol, self._required_candles
+                    symbol, required
                 ):
                     return True
                 return False
@@ -1218,7 +1227,7 @@ class StrategyRunner:
             required_columns = {"open", "high", "low", "close", "volume"}
             if not required_columns.issubset(frame.columns):
                 return False
-            if len(frame) < self._required_candles:
+            if len(frame) < required:
                 return False
             if frame[list(required_columns)].isna().any().any():
                 return False
@@ -2294,6 +2303,20 @@ class StrategyRunner:
     def ingest_historical_bar(self, data: dict) -> None:
         """Public API for startup hydration ingestion. Args: data. Returns: None. Raises: None."""
         self._startup_hydrated = True
+        symbol = self._normalize_symbol(data.get("symbol", "")) if isinstance(data, dict) else ""
+        normalized = normalize_history_row(symbol, data, source=(data.get("source", "historical") if isinstance(data, dict) else "historical")) if symbol else None
+        if normalized is not None and self._indicator_engine is not None:
+            self._indicator_engine.ingest_bar(symbol, normalized)
+            indicator_count = 0
+            if hasattr(self._indicator_engine, "history_count"):
+                indicator_count = self._indicator_engine.history_count(symbol)
+            elif hasattr(self._indicator_engine, "get_history"):
+                indicator_count = len(self._indicator_engine.get_history(symbol) or [])
+            self._logger.info("RUNNER_BAR_INGESTED symbol=%s source=%s runner_bars=%d indicator_bars=%d", symbol, normalized.get("source"), len(self._symbol_history.get(symbol, [])), indicator_count)
+            if len(self._symbol_history.get(symbol, [])) > 0 and indicator_count == 0:
+                for row in self._symbol_history.get(symbol, [])[-100:]:
+                    self._indicator_engine.ingest_bar(symbol, row)
+                self._logger.info("INDICATOR_HISTORY_AUTO_SYNC symbol=%s", symbol)
         self._ingest_historical_bar_unlocked(data)
 
     async def safe_ingest(self, data: dict[str, Any]) -> None:

@@ -4615,6 +4615,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         bracket_manager=bracket_manager,
     )
     strategy_runner.attach_persistent_state(persistent_state)
+    market_data_manager.subscribe_bars(strategy_runner.ingest_historical_bar)
     strategy_runner.restore_trades(persistent_state.load_trades())
     settings.enable_live = bool(live_toggle_env)
     mandatory_paper = not live_possible
@@ -7013,15 +7014,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
 
-            readiness_symbols = list(
-                dict.fromkeys(
-                    [
-                        basket.get("spot_symbol"),
-                        basket.get("futures_symbol"),
-                        *(basket.get("option_symbols", []) or []),
-                    ]
-                )
+            active_option_symbols = select_active_option_symbols(
+                option_symbols=basket.get("option_symbols", []) or [],
+                atm=basket.get("atm"),
+                max_active=int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "6")),
             )
+            readiness_symbols = list(dict.fromkeys([
+                basket.get("spot_symbol"),
+                basket.get("futures_symbol"),
+                *active_option_symbols,
+            ]))
             readiness_symbols = [str(sym) for sym in readiness_symbols if sym]
             LOGGER.info(
                 "READINESS_SYMBOLS_SELECTED count=%d spot=%s futures=%s option_count=%d symbols=%s",
