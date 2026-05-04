@@ -264,6 +264,38 @@ class MarketDataManager:
         self._option_stale_seconds = self._parse_float_env(
             "MDM_OPTION_STALE_SECONDS", default=60.0, minimum=1.0
         )
+        self._poll_context_stale_seconds = float(
+            getattr(settings, "poll_context_stale_seconds", 30.0)
+            if settings is not None
+            else 30.0
+        )
+        self._poll_option_stale_seconds = float(
+            getattr(settings, "poll_option_stale_seconds", 60.0)
+            if settings is not None
+            else 60.0
+        )
+        self._poll_interval_seconds = float(
+            getattr(settings, "poll_interval_seconds", 1.0)
+            if settings is not None
+            else 1.0
+        )
+        self._poll_max_symbols = int(
+            getattr(settings, "poll_max_symbols", 16) if settings is not None else 16
+        )
+        self._history_lock = asyncio.Lock()
+        self._last_history_request_ts = 0.0
+        self._history_min_interval_sec = float(
+            getattr(settings, "history_min_interval_sec", 1.2)
+            if settings is not None
+            else 1.2
+        )
+        self._logger.info(
+            "POLL_POLICY_READY context_stale=%s option_stale=%s interval=%s max_symbols=%s",
+            self._poll_context_stale_seconds,
+            self._poll_option_stale_seconds,
+            self._poll_interval_seconds,
+            self._poll_max_symbols,
+        )
         self._poll_fallback_count = 0
         self._ltp_stale_seconds = self._parse_float_env(
             "MDM_LTP_STALE_SECONDS", default=5.0, minimum=1.0
@@ -6557,11 +6589,56 @@ class MarketDataManager:
         last_ts = datetime.fromtimestamp(float(last_ts_raw), tz=timezone.utc)
         age = (now - last_ts).total_seconds()
         threshold = (
-            self._critical_symbol_stale_seconds
+            self._poll_context_stale_seconds
             if self._is_context_symbol(sym)
-            else self._option_stale_seconds
+            else self._poll_option_stale_seconds
         )
         return age >= threshold
+
+    def _is_ws_fresh_enough(self, symbol: str, now: datetime) -> bool:
+        """Return whether websocket tick freshness is sufficient. Args: symbol, now. Returns: bool. Raises: none."""
+        ts = self._last_tick_time.get(self._canonical_symbol(symbol))
+        if ts is None:
+            return False
+        tick_dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        age = (now - tick_dt).total_seconds()
+        threshold = (
+            self._poll_context_stale_seconds
+            if self._is_context_symbol(symbol)
+            else self._poll_option_stale_seconds
+        )
+        return age < threshold
+
+    def _is_true_market_data_starvation(self, now: datetime) -> bool:
+        """Return starvation status after WS/options freshness checks. Args: now. Returns: bool. Raises: none."""
+        is_open_fn = getattr(self, "_is_market_open_now", None)
+        if callable(is_open_fn) and not bool(is_open_fn()):
+            return False
+        in_grace_fn = getattr(self, "_in_startup_grace", None)
+        if callable(in_grace_fn) and bool(in_grace_fn(now)):
+            return False
+        if self._is_ws_fresh_enough("NSE:NIFTY", now):
+            self._logger.info(
+                "MARKET_DATA_STARVATION_SKIPPED reason=ws_or_option_ticks_fresh"
+            )
+            return False
+        live_symbols = [
+            sym
+            for sym, ts in self._last_tick_time.items()
+            if (now - datetime.fromtimestamp(float(ts), tz=timezone.utc)).total_seconds()
+            < self._poll_option_stale_seconds
+        ]
+        if live_symbols:
+            self._logger.info(
+                "MARKET_DATA_STARVATION_SKIPPED reason=ws_or_option_ticks_fresh"
+            )
+            return False
+        self._logger.error(
+            "MARKET_DATA_STARVATION_CONFIRMED spot_age=%s live_symbols=%d",
+            "stale",
+            len(live_symbols),
+        )
+        return True
 
     def normalize_live_tick(
         self, raw: Mapping[str, Any], source: str = "ws"
@@ -7158,6 +7235,14 @@ class MarketDataManager:
             return []
 
         try:
+            async with self._history_lock:
+                now_mono = time.monotonic()
+                wait = self._history_min_interval_sec - (
+                    now_mono - self._last_history_request_ts
+                )
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                self._last_history_request_ts = time.monotonic()
             fetcher = None
 
             # List of method names to hunt for
@@ -7189,9 +7274,22 @@ class MarketDataManager:
 
             if callable(fetcher):
                 # Run blocking I/O in thread
-                data = await asyncio.to_thread(
-                    fetcher, token, from_date, to_date, interval
-                )
+                try:
+                    data = await asyncio.to_thread(
+                        fetcher, token, from_date, to_date, interval
+                    )
+                except Exception as exc:
+                    err = str(exc)
+                    if "Rate limit exceeded" in err or "zerodha.historical" in err:
+                        self._logger.warning(
+                            "HISTORY_RATE_LIMIT_BACKOFF symbol=%s sleep=2.5", symbol
+                        )
+                        await asyncio.sleep(2.5)
+                        data = await asyncio.to_thread(
+                            fetcher, token, from_date, to_date, interval
+                        )
+                    else:
+                        raise
                 raw_rows = data or []
                 normalized = [
                     bar

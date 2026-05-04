@@ -667,6 +667,8 @@ class StrategyRunner:
             self._config.min_indicator_bars,
             int(os.getenv("REQUIRED_CANDLES", str(warmup_bars))),
         )
+        self._context_required_bars = max(50, self._required_candles)
+        self._option_required_bars = 5
         self._max_symbol_count: int = int(os.getenv("STRATEGY_MAX_SYMBOL_COUNT", "32"))
         self._universe_controller = UniverseController()
         self._universe_dynamic_mode = bool(
@@ -4961,6 +4963,33 @@ class StrategyRunner:
         value = str(symbol or "").upper()
         return value == "NSE:NIFTY" or (value.startswith("NFO:NIFTY") and value.endswith("FUT"))
 
+    def _required_bars_for_symbol(self, symbol: str) -> int:
+        """Return readiness bars by role. Args: symbol. Returns: int. Raises: none."""
+        return self._context_required_bars if self._is_context_symbol(symbol) else self._option_required_bars
+
+    def _sync_indicator_history_if_needed(self, symbol: str) -> None:
+        """Ensure indicator engine has runner bars for symbol. Args: symbol. Returns: none. Raises: none."""
+        runner_hist = self._symbol_history.get(symbol) or []
+        indicator_count = len(self._indicator_engine.get_history(symbol) or [])
+        if runner_hist and indicator_count == 0:
+            limit = max(self._context_required_bars, self._option_required_bars)
+            for bar in runner_hist[-limit:]:
+                if hasattr(self._indicator_engine, "update_bar"):
+                    self._indicator_engine.update_bar(symbol, bar)
+                else:
+                    self._indicator_engine.update_price(
+                        symbol,
+                        bar.as_mapping(),
+                        volume=bar.volume,
+                        timestamp=bar.timestamp,
+                        is_complete=True,
+                    )
+            self._logger.warning(
+                "INDICATOR_HISTORY_AUTO_SYNC symbol=%s synced=%d",
+                symbol,
+                len(runner_hist[-limit:]),
+            )
+
     def _strategy_evaluation_allowed(
         self, symbol: str, trace_id: str | None = None
     ) -> bool:
@@ -4975,22 +5004,23 @@ class StrategyRunner:
                     trace_id=trace_id,
                 )
                 return False
-            if not self._indicator_engine.has_min_bars(symbol, self._required_candles):
+            required_bars = self._required_bars_for_symbol(symbol)
+            if not self._indicator_engine.has_min_bars(symbol, required_bars):
                 history_count = len(self._indicator_engine.get_history(symbol) or [])
-                if history_count < self._required_candles:
+                if history_count < required_bars:
                     if self._is_context_symbol(symbol):
                         if symbol == "NSE:NIFTY" and self._should_log_throttled(f"spot_cold:{symbol}", 120.0):
-                            self._logger.warning("CONTEXT_SPOT_HISTORY_COLD symbol=NSE:NIFTY bars=%d required=%d", history_count, self._required_candles)
+                            self._logger.warning("CONTEXT_SPOT_HISTORY_COLD symbol=NSE:NIFTY bars=%d required=%d", history_count, required_bars)
                         elif self._should_log_throttled(f"fut_cold:{symbol}", 120.0):
-                            self._logger.warning("CONTEXT_FUTURES_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, self._required_candles)
+                            self._logger.warning("CONTEXT_FUTURES_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, required_bars)
                     elif self._is_tradable_symbol(symbol):
                         if self._should_log_throttled(f"opt_cold:{symbol}", 120.0):
-                            self._logger.warning("OPTION_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, self._required_candles)
+                            self._logger.warning("OPTION_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, required_bars)
                         spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
                         fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY"), "")
                         fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
-                        if (spot_bars < self._required_candles or fut_bars < self._required_candles) and self._should_log_throttled(f"opt_ctx_cold:{symbol}", 120.0):
-                            self._logger.warning("OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d", symbol, spot_bars, fut_bars, self._required_candles)
+                        if (spot_bars < self._context_required_bars or fut_bars < self._context_required_bars) and self._should_log_throttled(f"opt_ctx_cold:{symbol}", 120.0):
+                            self._logger.warning("OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d", symbol, spot_bars, fut_bars, self._context_required_bars)
                     if self._should_log_throttled(
                         f"eval_block_cold_history:{symbol}", 120.0
                     ):
@@ -4998,12 +5028,12 @@ class StrategyRunner:
                             "EVALUATION_BLOCKED_COLD_HISTORY symbol=%s bars=%d required=%d",
                             symbol,
                             history_count,
-                            self._required_candles,
+                            required_bars,
                             extra={
                                 "event": "EVALUATION_BLOCKED_COLD_HISTORY",
                                 "symbol": symbol,
                                 "bars": history_count,
-                                "required": self._required_candles,
+                                "required": required_bars,
                             },
                         )
                 self._emit_runner_eval_decision(
