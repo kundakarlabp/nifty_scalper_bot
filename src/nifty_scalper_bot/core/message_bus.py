@@ -68,6 +68,7 @@ class MessageBus:
             msg_type: set() for msg_type in MessageType
         }
         self._dropped_counts: dict[MessageType, int] = defaultdict(int)
+        self._first_tick_delivered_symbols: set[str] = set()
         LOGGER.info(
             "MessageBus initialized with max_queue_size=%s", self._max_queue_size
         )
@@ -160,6 +161,18 @@ class MessageBus:
                             extra={"event": "message_bus_handler_dispatch_error"},
                             exc_info=exc,
                         )
+                    if message_type == MessageType.TICK:
+                        symbol = str((message.data or {}).get("symbol") or "")
+                        if symbol and symbol not in self._first_tick_delivered_symbols:
+                            self._first_tick_delivered_symbols.add(symbol)
+                            LOGGER.info(
+                                "MESSAGE_BUS_TICK_DELIVERED_TO_DATAHUB symbol=%s",
+                                symbol,
+                                extra={
+                                    "event": "MESSAGE_BUS_TICK_DELIVERED_TO_DATAHUB",
+                                    "symbol": symbol,
+                                },
+                            )
 
                 queue.task_done()
 
