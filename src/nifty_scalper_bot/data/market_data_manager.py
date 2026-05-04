@@ -110,6 +110,30 @@ class ResolvedInstrument:
     tradingsymbol: str
 
 
+
+
+@dataclass(frozen=True)
+class PollingPolicy:
+    """Polling policy values. Args: settings. Returns: policy. Raises: none."""
+
+    context_stale_seconds: float = 30.0
+    option_stale_seconds: float = 60.0
+    interval_seconds: float = 1.0
+    max_symbols: int = 12
+    error_log_throttle_seconds: float = 30.0
+
+    @classmethod
+    def from_settings(cls, settings: Any | None) -> "PollingPolicy":
+        """Build policy from settings. Args: settings. Returns: policy. Raises: none."""
+        if settings is None:
+            return cls()
+        return cls(
+            context_stale_seconds=float(getattr(settings, "poll_context_stale_seconds", 30.0)),
+            option_stale_seconds=float(getattr(settings, "poll_option_stale_seconds", 60.0)),
+            interval_seconds=float(getattr(settings, "poll_interval_seconds", 1.0)),
+            max_symbols=int(getattr(settings, "poll_max_symbols", 12)),
+            error_log_throttle_seconds=float(getattr(settings, "poll_error_log_throttle_seconds", 30.0)),
+        )
 def canonical_symbol(symbol: str) -> str:
     """Canonicalize symbols (including NIFTY spot aliases) to EXCHANGE:SYMBOL."""
     normalized = enforce_canonical(normalize_symbol(str(symbol or "")))
@@ -264,24 +288,7 @@ class MarketDataManager:
         self._option_stale_seconds = self._parse_float_env(
             "MDM_OPTION_STALE_SECONDS", default=60.0, minimum=1.0
         )
-        self._poll_context_stale_seconds = float(
-            getattr(settings, "poll_context_stale_seconds", 30.0)
-            if settings is not None
-            else 30.0
-        )
-        self._poll_option_stale_seconds = float(
-            getattr(settings, "poll_option_stale_seconds", 60.0)
-            if settings is not None
-            else 60.0
-        )
-        self._poll_interval_seconds = float(
-            getattr(settings, "poll_interval_seconds", 1.0)
-            if settings is not None
-            else 1.0
-        )
-        self._poll_max_symbols = int(
-            getattr(settings, "poll_max_symbols", 12) if settings is not None else 12
-        )
+        self._polling_policy = PollingPolicy.from_settings(settings)
         self._poll_error_last_log: dict[str, float] = {}
         self._history_lock = asyncio.Lock()
         self._last_history_request_ts = 0.0
@@ -292,10 +299,11 @@ class MarketDataManager:
         )
         self._logger.info(
             "POLL_POLICY_READY context_stale=%s option_stale=%s interval=%s max_symbols=%s",
-            self._poll_context_stale_seconds,
-            self._poll_option_stale_seconds,
-            self._poll_interval_seconds,
-            self._poll_max_symbols,
+            self._polling_policy.context_stale_seconds,
+            self._polling_policy.option_stale_seconds,
+            self._polling_policy.interval_seconds,
+            self._polling_policy.max_symbols,
+            extra={"event": "POLL_POLICY_READY"},
         )
         self._poll_fallback_count = 0
         self._ltp_stale_seconds = self._parse_float_env(
@@ -6559,16 +6567,19 @@ class MarketDataManager:
         symbol = self._canonical_symbol(symbol)
         try:
             quote = self._broker.get_quote(symbol)
-            if not isinstance(quote, dict):
+            if not quote or not isinstance(quote, dict):
+                self._log_poll_error(symbol, "empty_quote")
                 return
             quote = self._prepare_rest_tick(quote, source="rest")
             with self._lock:
                 previous = self._latest_ticks.get(symbol)
             normalized = self._normalize_tick(symbol, quote, previous)
             if normalized is None:
+                self._log_poll_error(symbol, "quote_normalization_failed")
                 return
             normalized_live = self.normalize_live_tick(normalized, source="poll")
             if normalized_live is None:
+                self._log_poll_error(symbol, "quote_normalization_failed")
                 return
             self._poll_fallback_count = int(getattr(self, "_poll_fallback_count", 0)) + 1
             self._ingest_normalized_tick(normalized_live)
@@ -6587,19 +6598,36 @@ class MarketDataManager:
         now = time.monotonic()
         key = str(symbol or "UNKNOWN")
         last = self._poll_error_last_log.get(key, 0.0)
-        if now - last >= 30.0:
-            self._logger.warning(
-                "POLL_QUOTE_FAILED symbol=%s err=%s",
-                key,
-                err,
-                extra={"event": "POLL_QUOTE_FAILED", "symbol": key},
-            )
-            self._poll_error_last_log[key] = now
+        if now - last < self._polling_policy.error_log_throttle_seconds:
+            return
+        self._poll_error_last_log[key] = now
+        self._logger.warning(
+            "POLL_QUOTE_FAILED symbol=%s err=%s",
+            key,
+            err,
+            extra={"event": "POLL_QUOTE_FAILED", "symbol": key, "error": str(err)},
+        )
 
     def _is_context_symbol(self, symbol: str) -> bool:
         """Return whether symbol is context feed. Args: symbol; Returns: bool; Raises: none."""
-        sym = self._canonical_symbol(symbol)
-        return sym == "NSE:NIFTY" or "FUT" in sym
+        s = str(symbol or "").upper()
+        return s == "NSE:NIFTY" or (s.startswith("NFO:NIFTY") and s.endswith("FUT"))
+
+    def _is_option_symbol(self, symbol: str) -> bool:
+        """Return whether symbol is NIFTY option. Args: symbol; Returns: bool; Raises: none."""
+        s = str(symbol or "").upper()
+        return s.startswith("NFO:NIFTY") and (s.endswith("CE") or s.endswith("PE"))
+
+    def _tick_age_seconds(self, symbol: str, now: datetime) -> float | None:
+        """Return tick age in seconds. Args: symbol, now; Returns: age or none; Raises: none."""
+        ts = self._last_tick_time.get(symbol)
+        if ts is None:
+            return None
+        if isinstance(ts, datetime):
+            ts_dt = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        else:
+            ts_dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        return max(0.0, (now - ts_dt).total_seconds())
 
     def _should_poll_symbol(self, symbol: str, now: datetime) -> bool:
         """Decide REST poll fallback need. Args: symbol, now; Returns: bool; Raises: none."""
@@ -6610,15 +6638,13 @@ class MarketDataManager:
                 return False
             if not self._is_ws_connected():
                 return True
-            last_ts_raw = self._last_tick_time.get(sym)
-        if last_ts_raw is None:
+            age = self._tick_age_seconds(sym, now)
+        if age is None:
             return True
-        last_ts = datetime.fromtimestamp(float(last_ts_raw), tz=timezone.utc)
-        age = (now - last_ts).total_seconds()
         threshold = (
-            self._poll_context_stale_seconds
+            self._polling_policy.context_stale_seconds
             if self._is_context_symbol(sym)
-            else self._poll_option_stale_seconds
+            else self._polling_policy.option_stale_seconds
         )
         return age >= threshold
 
@@ -6634,7 +6660,7 @@ class MarketDataManager:
                 stale.append(sym)
             else:
                 skipped_fresh += 1
-        limit = max(0, int(self._poll_max_symbols))
+        limit = max(0, int(self._polling_policy.max_symbols))
         if limit > 0:
             stale = stale[:limit]
         self._logger.info(
@@ -6654,9 +6680,9 @@ class MarketDataManager:
         tick_dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
         age = (now - tick_dt).total_seconds()
         threshold = (
-            self._poll_context_stale_seconds
+            self._polling_policy.context_stale_seconds
             if self._is_context_symbol(symbol)
-            else self._poll_option_stale_seconds
+            else self._polling_policy.option_stale_seconds
         )
         return age < threshold
 
@@ -6665,30 +6691,19 @@ class MarketDataManager:
         is_open_fn = getattr(self, "_is_market_open_now", None)
         if callable(is_open_fn) and not bool(is_open_fn()):
             return False
-        in_grace_fn = getattr(self, "_in_startup_grace", None)
-        if callable(in_grace_fn) and bool(in_grace_fn(now)):
+        grace_until = getattr(self, "_ws_reconnect_grace_until", None)
+        if isinstance(grace_until, datetime) and now < grace_until:
             return False
-        if self._is_ws_fresh_enough("NSE:NIFTY", now):
-            self._logger.info(
-                "MARKET_DATA_STARVATION_SKIPPED reason=ws_or_option_ticks_fresh"
-            )
+        spot_age = self._tick_age_seconds("NSE:NIFTY", now)
+        if spot_age is not None and spot_age < self._polling_policy.context_stale_seconds:
             return False
-        live_symbols = [
-            sym
-            for sym, ts in self._last_tick_time.items()
-            if (now - datetime.fromtimestamp(float(ts), tz=timezone.utc)).total_seconds()
-            < self._poll_option_stale_seconds
-        ]
-        if live_symbols:
-            self._logger.info(
-                "MARKET_DATA_STARVATION_SKIPPED reason=ws_or_option_ticks_fresh"
-            )
+        recent_live_symbols = 0
+        for sym in list(getattr(self, "_last_tick_time", {}).keys()):
+            age = self._tick_age_seconds(sym, now)
+            if age is not None and age < self._polling_policy.option_stale_seconds:
+                recent_live_symbols += 1
+        if recent_live_symbols > 0:
             return False
-        self._logger.error(
-            "MARKET_DATA_STARVATION_CONFIRMED spot_age=%s live_symbols=%d",
-            "stale",
-            len(live_symbols),
-        )
         return True
 
     def normalize_live_tick(
