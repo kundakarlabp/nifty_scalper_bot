@@ -916,6 +916,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         if not tokens:
             return {}
 
+        policy = getattr(self, "_md_policy", MarketDataPolicy.from_env())
+
         canonical_input = all(
             isinstance(item, str) and ":" in str(item).strip() for item in tokens
         )

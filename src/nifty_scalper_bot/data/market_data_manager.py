@@ -179,6 +179,7 @@ class MarketDataManager:
         )
 
         self._subscribers: dict[str, set[TickCallback]] = defaultdict(set)
+        self._bar_subscribers: list[Callable[[dict[str, Any]], None]] = []
         self._latest_ticks: dict[str, dict[str, Any]] = {}
         self._history: dict[str, Deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self._cache_len)
@@ -720,6 +721,22 @@ class MarketDataManager:
         except Exception as exc:  # noqa: BLE001
             self._logger.error("Failure in ingest_historical_ohlc: %s", exc, exc_info=exc)
         return accepted
+
+    def subscribe_bars(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Args: callback. Returns: None. Raises: None."""
+        if callback not in self._bar_subscribers:
+            self._bar_subscribers.append(callback)
+
+    def _publish_closed_bar(self, bar: dict[str, Any]) -> None:
+        """Args: bar. Returns: None. Raises: None."""
+        for cb in list(self._bar_subscribers):
+            try:
+                cb(dict(bar))
+            except Exception:
+                self._logger.exception(
+                    "BAR_SUBSCRIBER_FAILED symbol=%s",
+                    bar.get("symbol"),
+                )
 
     def set_readiness_requirements(
         self,
@@ -4538,7 +4555,23 @@ class MarketDataManager:
             return
         self._ingest_normalized_tick(normalized_live)
         if candle:
-            self._ohlc[symbol].append(candle)
+            bar = {
+                "symbol": symbol,
+                "timestamp": candle["timestamp"] if isinstance(candle, dict) else candle.timestamp,
+                "open": float(candle["open"] if isinstance(candle, dict) else candle.open),
+                "high": float(candle["high"] if isinstance(candle, dict) else candle.high),
+                "low": float(candle["low"] if isinstance(candle, dict) else candle.low),
+                "close": float(candle["close"] if isinstance(candle, dict) else candle.close),
+                "volume": int(float((candle.get("volume", 0) if isinstance(candle, dict) else getattr(candle, "volume", 0)) or 0)),
+                "source": "ws_candle",
+            }
+            self._ohlc[symbol].append(bar)
+            self._publish_closed_bar(bar)
+            self._logger.info(
+                "LIVE_CANDLE_CLOSED symbol=%s source=ws_candle close=%s",
+                symbol,
+                bar["close"],
+            )
 
         # ── PIPELINE FEED ─────────────────────────────────────────────────────
         # Feed the deterministic MarketDataPipeline so pipeline.candles_ready()
@@ -7301,14 +7334,6 @@ class MarketDataManager:
             return []
 
         try:
-            async with self._history_lock:
-                now_mono = time.monotonic()
-                wait = self._history_min_interval_sec - (
-                    now_mono - self._last_history_request_ts
-                )
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                self._last_history_request_ts = time.monotonic()
             fetcher = None
 
             # List of method names to hunt for
@@ -7339,23 +7364,33 @@ class MarketDataManager:
                             break
 
             if callable(fetcher):
-                # Run blocking I/O in thread
-                try:
-                    data = await asyncio.to_thread(
-                        fetcher, token, from_date, to_date, interval
+                async with self._history_lock:
+                    now_mono = time.monotonic()
+                    wait = self._history_min_interval_sec - (
+                        now_mono - self._last_history_request_ts
                     )
-                except Exception as exc:
-                    err = str(exc)
-                    if "Rate limit exceeded" in err or "zerodha.historical" in err:
-                        self._logger.warning(
-                            "HISTORY_RATE_LIMIT_BACKOFF symbol=%s sleep=2.5", symbol
-                        )
-                        await asyncio.sleep(2.5)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    self._last_history_request_ts = time.monotonic()
+                    try:
                         data = await asyncio.to_thread(
                             fetcher, token, from_date, to_date, interval
                         )
-                    else:
-                        raise
+                    except Exception as exc:
+                        err = str(exc)
+                        if "Rate limit exceeded" in err or "zerodha.historical" in err:
+                            self._logger.warning(
+                                "HISTORY_RATE_LIMIT_BACKOFF symbol=%s sleep=2.5",
+                                symbol,
+                                extra={"event": "HISTORY_RATE_LIMIT_BACKOFF", "symbol": symbol},
+                            )
+                            await asyncio.sleep(2.5)
+                            self._last_history_request_ts = time.monotonic()
+                            data = await asyncio.to_thread(
+                                fetcher, token, from_date, to_date, interval
+                            )
+                        else:
+                            raise
                 raw_rows = data or []
                 normalized = [
                     bar
@@ -7365,31 +7400,6 @@ class MarketDataManager:
                     )
                     if bar is not None
                 ]
-
-                if normalized:
-                    self._logger.info(
-                        "HISTORY_FETCH_NORMALIZED symbol=%s raw=%d normalized=%d",
-                        symbol,
-                        len(raw_rows),
-                        len(normalized),
-                        extra={
-                            "event": "HISTORY_FETCH_NORMALIZED",
-                            "symbol": symbol,
-                            "raw": len(raw_rows),
-                            "normalized": len(normalized),
-                        },
-                    )
-                else:
-                    self._logger.warning(
-                        "HISTORY_FETCH_ZERO_NORMALIZED symbol=%s raw=%d",
-                        symbol,
-                        len(raw_rows),
-                        extra={
-                            "event": "HISTORY_FETCH_ZERO_NORMALIZED",
-                            "symbol": symbol,
-                            "raw": len(raw_rows),
-                        },
-                    )
 
                 return normalized
 
