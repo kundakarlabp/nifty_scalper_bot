@@ -32,6 +32,7 @@ from typing import (
     Coroutine,
     Iterable,
     Literal,
+    Sequence,
     Mapping,
     TypedDict,
     TypeVar,
@@ -137,24 +138,35 @@ def _history_lookback_minutes(required_bars: int) -> int:
     return max(180, required + buffer_bars)
 
 
-def _prioritize_startup_hydration_symbols(symbols: Sequence[str], max_symbols: int = 4) -> list[str]:
-    """Prioritize startup hydration symbols. Args: symbols/max_symbols. Returns: ordered symbols. Raises: none."""
-    spot = [s for s in symbols if s == "NSE:NIFTY" or s.endswith(":NIFTY")]
-    futures = [s for s in symbols if s.startswith("NFO:NIFTY") and s.endswith("FUT")]
-    options = [
-        s
-        for s in symbols
-        if s.startswith("NFO:NIFTY") and (s.endswith("CE") or s.endswith("PE"))
-    ]
+def nearest_available_strike(spot: float, strikes: Sequence[float]) -> int:
+    """Pick nearest strike from available list. Args: spot, strikes. Returns: strike. Raises: ValueError."""
+    valid = sorted({int(float(s)) for s in strikes if float(s) > 0})
+    if not valid:
+        raise ValueError("No valid strikes available")
+    return min(valid, key=lambda strike: (abs(strike - float(spot)), strike))
 
-    selected: list[str] = []
-    for bucket in (spot, futures, options):
-        for sym in bucket:
-            if sym not in selected:
-                selected.append(sym)
-            if len(selected) >= max_symbols:
-                return selected
-    return selected
+
+def prioritize_startup_hydration_symbols(
+    symbols: Sequence[str],
+    atm_ce: str | None,
+    atm_pe: str | None,
+    futures_symbol: str | None,
+) -> list[str]:
+    """Prioritize startup symbols. Args: symbols/atm/futures. Returns: <=4 symbols. Raises: none."""
+    priority = ["NSE:NIFTY"]
+    if futures_symbol:
+        priority.append(futures_symbol)
+    if atm_ce:
+        priority.append(atm_ce)
+    if atm_pe:
+        priority.append(atm_pe)
+
+    out: list[str] = []
+    known = set(symbols)
+    for sym in priority:
+        if sym and sym in known and sym not in out:
+            out.append(sym)
+    return out[:4]
 
 
 def _gate_runner_symbol_add(
@@ -2611,26 +2623,8 @@ def _get_symbols(
         )
 
     if ltp <= 0:
-        if _allow_offhours:
-            fallback = os.getenv("NIFTY_FALLBACK_LTP", "24000.0")
-            try:
-                ltp = float(fallback)
-                LOGGER.warning(
-                    "spot_ltp_unavailable_offhours",
-                    extra={
-                        "event": "spot_ltp_unavailable_offhours",
-                        "fallback_ltp": ltp,
-                    },
-                )
-            except (TypeError, ValueError):
-                LOGGER.error(
-                    "invalid_nifty_fallback_ltp",
-                    extra={"event": "invalid_nifty_fallback_ltp", "value": fallback},
-                )
-                return []
-        else:
-            LOGGER.error("Strategy skipped — missing live tick")
-            return []
+        LOGGER.warning("ATM_SELECTION_BLOCKED reason=spot_unavailable_or_stale age_sec=%s", -1)
+        return []
 
     global _LATEST_CTX
     universe = option_universe
@@ -2661,7 +2655,7 @@ def _get_symbols(
     if strike_step <= 0:
         raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
 
-    atm = round(ltp / strike_step) * strike_step
+    atm = nearest_available_strike(float(ltp), unique_strikes)
     selected = [c for c in filtered if abs(c["strike"] - atm) <= 200]
     final_symbols = [c["tradingsymbol"] for c in selected]
     final_symbols = list(dict.fromkeys(sym for sym in final_symbols if sym))
@@ -2669,6 +2663,7 @@ def _get_symbols(
     if not final_symbols:
         raise RuntimeError("No valid option contracts resolved. Check instrument dump.")
 
+    LOGGER.info("ATM_SELECTED spot=%s atm=%s source=fresh_spot_tick strike_source=instrument_dump expiry=%s", float(ltp), atm, nearest_expiry)
     LOGGER.info(
         "RESOLVED_CONTRACTS count=%d expiry=%s",
         len(final_symbols),
@@ -6849,6 +6844,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
                 else:
+                    LOGGER.info("OUT_OF_HOURS_DATA_MODE option_hydration_nonfatal=true trading_ready=false")
                     LOGGER.info(
                         "BASKET_BUILD_DEFERRED reason=market_closed_or_spot_not_ready",
                         extra={
@@ -6932,12 +6928,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
                     continue
                 symbols_to_hydrate.append(_sym)
-            symbols_to_hydrate = _prioritize_startup_hydration_symbols(
+            atm_ce = next((s for s in targets if s.endswith("CE")), None)
+            atm_pe = next((s for s in targets if s.endswith("PE")), None)
+            symbols_to_hydrate = prioritize_startup_hydration_symbols(
                 symbols_to_hydrate,
-                max_symbols=min(4, hydration_max_contracts),
+                atm_ce=atm_ce,
+                atm_pe=atm_pe,
+                futures_symbol=future_symbol if future_symbol in symbols_to_hydrate else None,
             )
             LOGGER.info(
-                "HYDRATION_PLAN symbols=%d bars_target=%d lookback_days=%d",
+                "HYDRATION_PLAN_STARTUP symbols=%d bars_target=%d lookback_days=%d",
                 len(symbols_to_hydrate),
                 hydration_max_bars,
                 hydration_lookback_days,
