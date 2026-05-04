@@ -5922,6 +5922,11 @@ async def _wait_for_live_spot_or_raise(
         )
         return float(cached)
 
+    if live_mode:
+        raise RuntimeError(
+            "fresh NIFTY spot unavailable; refusing synthetic spot in LIVE mode"
+        )
+
     LOGGER.warning(
         "SYNTHETIC_SPOT_USED mode=%s price=%.2f reason=no_live_tick",
         configured_mode or ("LIVE" if live_mode else "NON_LIVE"),
@@ -5933,6 +5938,26 @@ async def _wait_for_live_spot_or_raise(
         },
     )
     return _SYNTHETIC_FALLBACK_SPOT
+
+
+async def _wait_for_ws_spot_proof(ctx: BotContext, *, timeout: float) -> float | None:
+    """Wait for WS-only NIFTY spot proof. Args: ctx/timeout. Returns: spot or none. Raises: none."""
+
+    policy = MarketDataPolicy.from_env()
+    mdm = ctx.market_data_manager
+    if mdm is None:
+        return None
+    wait_fn = getattr(mdm, "wait_for_fresh_spot_tick", None)
+    if not callable(wait_fn):
+        return None
+    tick = await wait_fn(
+        policy.nifty_internal_symbol,
+        timeout=float(timeout),
+        max_age_seconds=policy.startup_spot_max_age_seconds,
+        require_ws=True,
+    )
+    price = _coerce_spot_price(tick)
+    return float(price) if price and price > 0 else None
 
 
 def _safe_startup_log(
@@ -6543,8 +6568,52 @@ async def startup_sequence(ctx: BotContext) -> None:
         and hasattr(ctx.market_data_manager, "start_websocket")
     ):
         try:
+            LOGGER.info(
+                "STARTUP_SPOT_FIRST_BLOCK_ENTERED websocket_enabled=%s mdm_id=%s",
+                ctx.websocket_enabled,
+                id(ctx.market_data_manager),
+                extra={
+                    "event": "STARTUP_SPOT_FIRST_BLOCK_ENTERED",
+                    "websocket_enabled": ctx.websocket_enabled,
+                    "mdm_id": id(ctx.market_data_manager),
+                },
+            )
             ws_status_fn = getattr(ctx.market_data_manager, "ws_status_snapshot", None)
-            ws_status = ws_status_fn() if callable(ws_status_fn) else {}
+            try:
+                ws_status = ws_status_fn() if callable(ws_status_fn) else {}
+            except Exception as exc:
+                ws_status = {}
+                LOGGER.warning(
+                    "STARTUP_WS_STATUS_SNAPSHOT_FAILED err=%s",
+                    exc,
+                    extra={
+                        "event": "STARTUP_WS_STATUS_SNAPSHOT_FAILED",
+                        "error": str(exc),
+                    },
+                    exc_info=True,
+                )
+            if not getattr(ctx, "_startup_spot_refresh_done", False):
+                def _startup_spot_tick_listener(tick: Mapping[str, Any]) -> None:
+                    symbol = str(tick.get("symbol") or "").upper()
+                    if symbol != policy.nifty_internal_symbol:
+                        return
+                    if getattr(ctx, "_startup_spot_refresh_done", False):
+                        return
+                    ctx._startup_spot_refresh_done = True
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(
+                            _refresh_readiness_after_first_tick(
+                                ctx, reason="first_spot_tick_listener"
+                            )
+                        )
+                    )
+
+                if ctx.data_hub is not None:
+                    ctx.data_hub.subscribe_ticks(
+                        policy.nifty_internal_symbol,
+                        _startup_spot_tick_listener,
+                        token=policy.nifty_spot_token,
+                    )
             desired_token_count_fn = getattr(
                 ctx.market_data_manager, "desired_token_count", None
             )
@@ -6645,7 +6714,19 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.websocket_enabled,
                 symbol=policy.nifty_internal_symbol, token=policy.nifty_spot_token, desired_token_count=desired_tokens, ws_token_count=ws_tokens, websocket_enabled=ctx.websocket_enabled, phase="spot_first",
             )
-            ws_status = ws_status_fn() if callable(ws_status_fn) else {}
+            try:
+                ws_status = ws_status_fn() if callable(ws_status_fn) else {}
+            except Exception as exc:
+                ws_status = {}
+                LOGGER.warning(
+                    "STARTUP_WS_STATUS_SNAPSHOT_FAILED err=%s",
+                    exc,
+                    extra={
+                        "event": "STARTUP_WS_STATUS_SNAPSHOT_FAILED",
+                        "error": str(exc),
+                    },
+                    exc_info=True,
+                )
             _safe_startup_log(
                 LOGGER, logging.INFO, "STARTUP_WS_CONNECT_TASK_CREATED",
                 "STARTUP_WS_CONNECT_TASK_CREATED symbol=%s token=%d desired_token_count=%s ws_token_count=%s websocket_enabled=%s phase=spot_first",
@@ -6660,17 +6741,45 @@ async def startup_sequence(ctx: BotContext) -> None:
             mode = str(getattr(ctx, "effective_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
             live_mode = mode == "LIVE" or str(os.getenv("ENABLE_LIVE", "false")).lower() in {"1", "true", "yes", "on"}
             try:
-                spot_price = await _wait_for_live_spot_or_raise(ctx, timeout=spot_wait_seconds, configured_mode=mode)
-                LOGGER.info("STARTUP_WS_SPOT_PROOF_READY symbol=%s price=%.2f mode=%s", policy.nifty_internal_symbol, spot_price, mode, extra={"event": "STARTUP_WS_SPOT_PROOF_READY", "symbol": policy.nifty_internal_symbol, "price": spot_price, "mode": mode})
-                await _refresh_readiness_after_first_tick(ctx, reason="ws_spot_proof_ready")
-            except RuntimeError as exc:
-                if live_mode:
+                spot_price = await _wait_for_ws_spot_proof(
+                    ctx, timeout=spot_wait_seconds
+                )
+                if spot_price is not None:
+                    LOGGER.info(
+                        "STARTUP_WS_SPOT_PROOF_READY symbol=%s price=%.2f mode=%s source=ws",
+                        policy.nifty_internal_symbol,
+                        spot_price,
+                        mode,
+                        extra={
+                            "event": "STARTUP_WS_SPOT_PROOF_READY",
+                            "symbol": policy.nifty_internal_symbol,
+                            "price": spot_price,
+                            "mode": mode,
+                            "source": "ws",
+                        },
+                    )
+                    await _refresh_readiness_after_first_tick(
+                        ctx, reason="ws_spot_proof_ready"
+                    )
+                elif live_mode:
                     ctx.live_orders_armed = False
                     ctx.trading_ready = False
                     ctx.live_block_reason = "fresh_spot_tick_missing"
-                    LOGGER.error("STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE symbol=%s reason=%s", policy.nifty_internal_symbol, exc, extra={"event": "STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE", "symbol": policy.nifty_internal_symbol, "reason": str(exc)})
-                    raise
-                LOGGER.warning("STARTUP_WS_SPOT_PROOF_TIMEOUT_NONLIVE symbol=%s mode=%s reason=%s", policy.nifty_internal_symbol, mode, exc, extra={"event": "STARTUP_WS_SPOT_PROOF_TIMEOUT_NONLIVE", "symbol": policy.nifty_internal_symbol, "mode": mode, "reason": str(exc)})
+                    raise RuntimeError("fresh NIFTY WebSocket spot tick unavailable")
+                else:
+                    LOGGER.warning(
+                        "STARTUP_WS_SPOT_PROOF_TIMEOUT_NONLIVE symbol=%s mode=%s",
+                        policy.nifty_internal_symbol,
+                        mode,
+                        extra={
+                            "event": "STARTUP_WS_SPOT_PROOF_TIMEOUT_NONLIVE",
+                            "symbol": policy.nifty_internal_symbol,
+                            "mode": mode,
+                        },
+                    )
+            except RuntimeError as exc:
+                LOGGER.error("STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE symbol=%s reason=%s", policy.nifty_internal_symbol, exc, extra={"event": "STARTUP_WS_SPOT_PROOF_BLOCKED_LIVE", "symbol": policy.nifty_internal_symbol, "reason": str(exc)})
+                raise
         except Exception as _ws_spot_first_exc:  # noqa: BLE001
             LOGGER.warning(
                 "STARTUP_WS_SPOT_FIRST_FAILED symbol=%s token=%d websocket_enabled=%s err=%s",
