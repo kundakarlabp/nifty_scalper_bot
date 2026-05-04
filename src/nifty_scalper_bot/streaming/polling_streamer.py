@@ -549,7 +549,7 @@ class PollingStreamer:
             except Exception as exc:  # noqa: BLE001
                 self._last_fetch_status = "quote_request_failed"
                 LOGGER.warning(
-                    "[POLL] Quote request failed: %s",
+                    "POLL_QUOTE_REQUEST_FAILED err=%s",
                     exc,
                     exc_info=True,
                     extra={

@@ -15,7 +15,7 @@ def test_stale_context_symbol_should_poll() -> None:
     mdm = MarketDataManager()
     mdm._ws_connected = True
     mdm._active_subscribed_symbols = {'NSE:NIFTY'}
-    stale = datetime.now(timezone.utc) - timedelta(seconds=mdm._critical_symbol_stale_seconds + 1)
+    stale = datetime.now(timezone.utc) - timedelta(seconds=mdm._polling_policy.context_stale_seconds + 1)
     mdm._last_tick_time['NSE:NIFTY'] = stale.timestamp()
     assert mdm._should_poll_symbol('NSE:NIFTY', datetime.now(timezone.utc)) is True
 
@@ -44,7 +44,7 @@ def test_poll_candidates_only_returns_stale_active_symbols() -> None:
     stale = 'NFO:NIFTY26MAY22500CE'
     mdm._active_subscribed_symbols = {fresh, stale}
     mdm._last_tick_time[fresh] = now.timestamp()
-    mdm._last_tick_time[stale] = (now - timedelta(seconds=mdm._poll_option_stale_seconds + 1)).timestamp()
+    mdm._last_tick_time[stale] = (now - timedelta(seconds=mdm._polling_policy.option_stale_seconds + 1)).timestamp()
     candidates = mdm._poll_candidates(now)
     assert stale in candidates
     assert fresh not in candidates
