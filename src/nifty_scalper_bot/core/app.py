@@ -6000,10 +6000,50 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
         or getattr(ctx.message_bus, "_running", False)
     )
     runner_started = bool(
-        getattr(runner, "_started", False) or getattr(runner, "started", False)
+        getattr(runner, "_started", False)
+        or getattr(runner, "started", False)
+        or getattr(ctx, "strategy_runner_task", None)
     )
     if spot_ready and bus_running:
         ctx.data_observation_ready = True
+        if runner is not None and not runner_started:
+            ensure_runner_started = globals().get("_ensure_strategy_runner_started")
+            if ensure_runner_started is None:
+                LOGGER.warning(
+                    "STRATEGY_RUNNER_START_HELPER_MISSING reason=%s",
+                    reason,
+                    extra={
+                        "event": "STRATEGY_RUNNER_START_HELPER_MISSING",
+                        "reason": reason,
+                    },
+                )
+            else:
+                LOGGER.info(
+                    "STRATEGY_RUNNER_START_REQUESTED_AFTER_TICK reason=%s",
+                    reason,
+                    extra={
+                        "event": "STRATEGY_RUNNER_START_REQUESTED_AFTER_TICK",
+                        "reason": reason,
+                    },
+                )
+                try:
+                    await ensure_runner_started(
+                        ctx, reason=f"{reason}:data_pipeline_ready_after_tick"
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "STRATEGY_RUNNER_START_AFTER_TICK_FAILED reason=%s",
+                        reason,
+                        extra={
+                            "event": "STRATEGY_RUNNER_START_AFTER_TICK_FAILED",
+                            "reason": reason,
+                        },
+                    )
+                runner_started = bool(
+                    getattr(runner, "_started", False)
+                    or getattr(runner, "started", False)
+                    or getattr(ctx, "strategy_runner_task", None)
+                )
         LOGGER.info(
             "DATA_PIPELINE_READY_AFTER_TICK spot_ready=%s bus_running=%s runner_started=%s reason=%s",
             spot_ready,
