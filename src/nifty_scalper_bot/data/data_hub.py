@@ -1598,6 +1598,19 @@ class DataHub:
                 pass
         return self._mdm_call("register_symbol", symbol, token)
 
+    def register_local_symbol(self, symbol: str, token: Optional[int] = None) -> str:
+        """Register symbol/token aliases locally only. Args: symbol/token. Returns: normalized symbol. Raises: None."""
+
+        normalized = self._register_symbol_alias(symbol, token)
+        if token is not None:
+            try:
+                token_int = int(token)
+                self._token_by_symbol[normalized] = token_int
+                self._symbol_by_token[token_int] = normalized
+            except (TypeError, ValueError):
+                pass
+        return normalized
+
     def untrack(self, symbol: str) -> Any:
         return self._mdm_call("untrack", symbol)
 

@@ -412,6 +412,32 @@ class WebSocketManager:
             "circuit_open": self._circuit.open_until_mono > now,
         }
 
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return runtime websocket status. Args: none. Returns: status map. Raises: none."""
+
+        now = time.monotonic()
+        last_tick_age = (
+            max(0.0, now - self._last_tick_mono) if self._last_tick_mono > 0 else None
+        )
+        last_pong_age = (
+            max(0.0, now - self._last_pong_mono) if self._last_pong_mono > 0 else None
+        )
+        return {
+            "running": bool(self.is_running()),
+            "connected": bool(self.is_connected()),
+            "state": self.connection_state().name.lower(),
+            "tokens": len(self._tokens),
+            "connect_task_alive": bool(
+                self._connect_task is not None and not self._connect_task.done()
+            ),
+            "watchdog_task_alive": bool(
+                self._watchdog_task is not None and not self._watchdog_task.done()
+            ),
+            "last_tick_age_s": last_tick_age,
+            "last_pong_age_s": last_pong_age,
+            "circuit_open": bool(self._circuit_is_open()),
+        }
+
     async def _connect_once(self, reason: str) -> None:
         """Args: reason; Returns: none; Raises: Exception."""
 

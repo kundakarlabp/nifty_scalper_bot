@@ -952,14 +952,29 @@ class MarketDataManager:
 
         if self._ws is None:
             return
-        if getattr(self, "_ws_started", False):
+        status = self.ws_status_snapshot()
+        if bool(getattr(self, "_ws_start_requested", False)) and bool(
+            status.get("connect_task_alive")
+        ):
             return
-        self._ws_started = True
+        self._ws_start_requested = True
         try:
             self._reconcile_ws_subscriptions()
+            desired_tokens = len(self._desired_tokens)
+            ws_token_count = int(status.get("tokens", 0))
+            self._logger.info(
+                "MDM_WS_START_REQUESTED desired_token_count=%s ws_token_count=%s",
+                desired_tokens,
+                ws_token_count,
+                extra={
+                    "event": "MDM_WS_START_REQUESTED",
+                    "desired_token_count": desired_tokens,
+                    "ws_token_count": ws_token_count,
+                },
+            )
             self._ws.start()
         except Exception:
-            self._ws_started = False
+            self._ws_start_requested = False
             self._logger.exception("Failure in ws.start")
 
     def stop(self) -> None:
@@ -997,6 +1012,14 @@ class MarketDataManager:
         """Record WebSocket connectivity state for health reporting."""
 
         self._ws_connected = bool(connected)
+        self._ws_connected = bool(connected)
+        self._ws_connect_task_started = bool(
+            self.ws_status_snapshot().get("connect_task_alive")
+        )
+        self._ws_connected = bool(connected)
+        self._ws_started = bool(connected)
+        if not connected and not self._ws_connect_task_started:
+            self._ws_start_requested = False
         if self._ws_connected:
             pending_tokens = sorted(
                 self._pending_subscriptions or self._pending_subscription_tokens
@@ -4624,8 +4647,11 @@ class MarketDataManager:
             if self._resolver is not None and hasattr(self._resolver, "register"):
                 self._resolver.register(normalized_symbol, token_int)
             datahub = getattr(self, "_datahub", None)
-            if datahub is not None and hasattr(datahub, "register_symbol"):
-                datahub.register_symbol(normalized_symbol, token_int)
+            if datahub is not None:
+                if hasattr(datahub, "register_local_symbol"):
+                    datahub.register_local_symbol(normalized_symbol, token_int)
+                elif hasattr(datahub, "register_symbol"):
+                    datahub.register_symbol(normalized_symbol, token_int)
             if normalized_symbol == "NSE:NIFTY":
                 self._logger.info(
                     "SPOT_TOKEN_RESOLVED symbol=%s token=%s",
@@ -4639,6 +4665,27 @@ class MarketDataManager:
                 )
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Resolver/DataHub sync skipped: %s", exc, exc_info=exc)
+
+    def ws_status_snapshot(self) -> dict[str, Any]:
+        """Return websocket runtime status. Args: none. Returns: status map. Raises: none."""
+
+        ws = self._ws
+        if ws is not None and hasattr(ws, "status_snapshot"):
+            try:
+                return dict(ws.status_snapshot())
+            except Exception:
+                self._logger.debug("ws.status_snapshot failed", exc_info=True)
+        return {
+            "running": False,
+            "connected": bool(getattr(self, "_ws_connected", False)),
+            "state": "disconnected",
+            "tokens": 0,
+            "connect_task_alive": False,
+            "watchdog_task_alive": False,
+            "last_tick_age_s": None,
+            "last_pong_age_s": None,
+            "circuit_open": False,
+        }
 
     def _store_tick(self, symbol: str, tick: dict[str, Any]) -> None:
         """Persist normalized *tick* for *symbol* and refresh derived series."""
