@@ -19,6 +19,7 @@ from importlib import metadata as importlib_metadata
 import inspect
 import hashlib
 import logging
+import math
 import os
 from pathlib import Path
 import random
@@ -2184,22 +2185,44 @@ class RuntimeSelfChecker:
                 return True, "no_symbols_yet", {}
 
             interval = getattr(self._context.streamer, "_interval_s", 0.7) or 0.7
-            # Adaptive threshold: 2.5x poll interval, clamped 2s-5s
             adaptive_ms = max(2000, min(5000, int(float(interval) * 1000.0 * 2.5)))
+            hard_ready_fn = getattr(self._context.market_data_manager, "hard_ready", None)
+            hard_ready = bool(hard_ready_fn()) if callable(hard_ready_fn) else False
 
-            symbol = None
+            def _threshold_for_symbol(symbol_name: str) -> float:
+                upper = str(symbol_name or "").upper()
+                if upper.startswith("NFO:"):
+                    return 60000.0
+                if upper == "NSE:NIFTY":
+                    return 30000.0
+                return float(adaptive_ms)
+
+            per_symbol: list[tuple[str, bool, dict[str, object], float]] = []
             for s in symbols:
-                ok, _ = hub.is_fresh(s, threshold_ms=float(adaptive_ms))
-                if ok:
-                    symbol = s
-                    break
+                threshold_ms = _threshold_for_symbol(s)
+                ok_s, meta_s = hub.is_fresh(s, threshold_ms=threshold_ms)
+                per_symbol.append((s, bool(ok_s), dict(meta_s or {}), threshold_ms))
 
-            if symbol is None:
-                symbol = symbols[0]
+            fresh = [item for item in per_symbol if item[1]]
+            stale = [item for item in per_symbol if not item[1]]
+            critical = [
+                item
+                for item in per_symbol
+                if str(item[0]).upper().startswith("NFO:") or str(item[0]).upper() == "NSE:NIFTY"
+            ] or per_symbol
+            all_critical_stale = not any(item[1] for item in critical)
+            if hard_ready and symbols and stale and not all_critical_stale:
+                return True, "partial_stale_ignored", {
+                    "fresh_symbols": len(fresh),
+                    "stale_symbols": len(stale),
+                    "live_symbols": len(symbols),
+                }
+
+            symbol, ok, meta, symbol_threshold_ms = fresh[0] if fresh else per_symbol[0]
 
             if hasattr(hub, "is_fresh"):
                 try:
-                    ok, meta = hub.is_fresh(symbol, threshold_ms=float(adaptive_ms))
+                    ok, meta = hub.is_fresh(symbol, threshold_ms=float(symbol_threshold_ms))
                 except Exception as exc:
                     self._logger.error(
                         "Failure in RuntimeSelfChecker._check_data_freshness: %s",
@@ -2215,20 +2238,20 @@ class RuntimeSelfChecker:
                     detail = cast(str, meta.get("reason") or "ok")
                     payload = cast(dict[str, object], dict(meta or {}))
                     payload["symbol_checked"] = canonical(symbol)
-                    payload["adaptive_ms"] = adaptive_ms
+                    payload["adaptive_ms"] = symbol_threshold_ms
                     self._logger.info(
                         "Condition met: runtime_self_check_data_freshness",
                         extra={
                             "event": "runtime_self_check_data_freshness",
                             "symbol": symbol,
                             "symbol_checked": symbol,
-                            "adaptive_ms": adaptive_ms,
+                            "adaptive_ms": symbol_threshold_ms,
                             "detail": detail,
                             "detail_code": detail,
                         },
                     )
                     if not ok:
-                        backoff_seconds = max(0.0, float(adaptive_ms) * 2.0 / 1000.0)
+                        backoff_seconds = max(0.0, float(symbol_threshold_ms) * 2.0 / 1000.0)
                         runner = getattr(self._context, "strategy_runner", None)
                         if runner is not None:
                             try:
