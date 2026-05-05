@@ -735,11 +735,14 @@ class MarketDataManager:
             except Exception as exc:
                 symbol = str(bar.get("symbol") or "")
                 callback_name = getattr(cb, "__qualname__", repr(cb))
-                self._logger.exception(
-                    "BAR_SUBSCRIBER_FAILED symbol=%s callback=%s error=%s",
-                    symbol,
-                    callback_name,
-                    exc,
+                log_throttled(
+                    self._logger,
+                    f"bar_subscriber_failed:{symbol}:{callback_name}:{type(exc).__name__}",
+                    "BAR_SUBSCRIBER_FAILED symbol=%s callback=%s error=%s"
+                    % (symbol, callback_name, exc),
+                    interval_sec=60,
+                    level=logging.ERROR,
+                    exc_info=True,
                     extra={
                         "event": "BAR_SUBSCRIBER_FAILED",
                         "symbol": symbol,
@@ -5025,25 +5028,41 @@ class MarketDataManager:
             if first_seen_map is None:
                 first_seen_map = {}
                 self._first_seen_at_by_symbol = first_seen_map
-            first_seen_at = first_seen_map.get(symbol)
+                first_seen_at = first_seen_map.get(symbol)
             if first_seen_at is None:
                 first_seen_map[symbol] = time.monotonic()
             else:
                 age = time.monotonic() - first_seen_at
                 if selected_or_active and age > 30:
-                    log_throttled(
-                        self._logger,
-                        f"mdm_tick_no_direct_subscriber_{symbol}",
-                        "MDM_TICK_NO_DIRECT_SUBSCRIBER symbol=%s age_s=%.1f note=bus_path_may_still_be_active"
-                        % (symbol, age),
-                        interval_sec=60,
-                        level=logging.WARNING,
-                        extra={
-                            "event": "MDM_TICK_NO_DIRECT_SUBSCRIBER",
-                            "symbol": symbol,
-                            "age_s": age,
-                        },
-                    )
+                    bus_running = bool(getattr(self.bus, "is_running", lambda: False)())
+                    if bus_running:
+                        log_throttled(
+                            self._logger,
+                            f"mdm_tick_bus_only_delivery_{symbol}",
+                            "MDM_TICK_BUS_ONLY_DELIVERY symbol=%s age_s=%.1f"
+                            % (symbol, age),
+                            interval_sec=120,
+                            level=logging.DEBUG,
+                            extra={
+                                "event": "MDM_TICK_BUS_ONLY_DELIVERY",
+                                "symbol": symbol,
+                                "age_s": age,
+                            },
+                        )
+                    else:
+                        log_throttled(
+                            self._logger,
+                            f"mdm_tick_no_direct_subscriber_{symbol}",
+                            "MDM_TICK_NO_DIRECT_SUBSCRIBER symbol=%s age_s=%.1f note=bus_unavailable"
+                            % (symbol, age),
+                            interval_sec=60,
+                            level=logging.WARNING,
+                            extra={
+                                "event": "MDM_TICK_NO_DIRECT_SUBSCRIBER",
+                                "symbol": symbol,
+                                "age_s": age,
+                            },
+                        )
         _price_val = tick.get("ltp") or tick.get("last_price") or tick.get("price")
         _token_val = tick.get("instrument_token") or tick.get("token")
         try:

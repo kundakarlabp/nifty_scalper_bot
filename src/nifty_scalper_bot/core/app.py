@@ -7539,6 +7539,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
             pending_runner_symbols: set[str] = set(skipped_symbols)
+            if runner is not None:
+                for sym in readiness_symbols:
+                    try:
+                        runner.add_symbol(sym)
+                    except Exception as e:
+                        LOGGER.error(
+                            "RUNNER_ADD_SYMBOL_FROM_READINESS_FAILED symbol=%s error=%s",
+                            sym,
+                            e,
+                            extra={
+                                "event": "RUNNER_ADD_SYMBOL_FROM_READINESS_FAILED",
+                                "symbol": sym,
+                                "error": str(e),
+                            },
+                        )
             if runner is not None and hasattr(runner, "mark_ready") and ready_symbols:
                 runner.mark_ready(ready_symbols)
                 LOGGER.info(
@@ -7566,6 +7581,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "event": "RUNNER_READY_MARK_SKIPPED",
                         "reason": "no_ready_symbols_or_method_missing",
                         "skipped_reasons": skipped_reasons,
+                    },
+                )
+            if (
+                ctx.data_hub is not None
+                and hasattr(ctx.data_hub, "flush_pending_live_subscriptions")
+            ):
+                flushed = int(ctx.data_hub.flush_pending_live_subscriptions())
+                LOGGER.info(
+                    "DATAHUB_PENDING_SUBSCRIPTIONS_FLUSHED count=%d phase=startup_readiness",
+                    flushed,
+                    extra={
+                        "event": "DATAHUB_PENDING_SUBSCRIPTIONS_FLUSHED",
+                        "count": flushed,
+                        "phase": "startup_readiness",
                     },
                 )
             configured_runtime_mode = str(
