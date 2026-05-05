@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any
 
 
@@ -34,7 +35,7 @@ class TradeCandidate:
 
 
 class TradeCandidateSelector:
-    def __init__(self, *, quality_mode: str = 'normal', option_strike_window_each_side: int = 2, min_option_premium: float = 80.0, max_option_premium: float = 350.0) -> None:
+    def __init__(self, *, quality_mode: str = 'normal', option_strike_window_each_side: int = 2, min_option_premium: float = 80.0, max_option_premium: float = float(os.getenv("MAX_OPTION_PREMIUM", "650"))) -> None:
         self.quality_mode = quality_mode
         self.option_strike_window_each_side = option_strike_window_each_side
         self.min_option_premium = min_option_premium

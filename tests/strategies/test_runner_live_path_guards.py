@@ -1053,3 +1053,46 @@ def test_signal_generated_log_occurs_after_regime_skip_guard_in_source() -> None
     assert source.index('Strategy skipped due to detected market regime') < source.index(
         'SIGNAL_GENERATED symbol=%s action=%s reason=%s trace_id=%s'
     )
+
+
+def test_build_single_candidate_from_signal_includes_tick_fields() -> None:
+    runner = _build_runner()
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=374.95, bid=374.5, ask=375.4, tick_age_s=None, real_ticks_last_60s=0, tradable_quote=True, source='ws'
+    )
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26MAY24050PE', quantity=1, confidence=0.8, reason='x', stop_loss=300.0, take_profit=450.0, metadata={})
+    candidate = runner._build_single_candidate_from_signal(signal=signal, metadata={}, option_side='PE')
+    assert candidate is not None
+    assert candidate['tick_age_s'] == 0.0
+    assert candidate['real_ticks_last_60s'] >= 1
+
+
+def test_pre_order_rejection_logs_signal_execution_result() -> None:
+    runner = _build_runner()
+    logs: list[dict[str, object]] = []
+    runner._logger.info = lambda *args, **kwargs: logs.append(kwargs.get('extra', {}))  # type: ignore[method-assign]
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800CE', quantity=1, confidence=0.9, reason='x', stop_loss=90.0, take_profit=120.0, metadata={'candidate_snapshots': []})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=100.0, timestamp=datetime.now(timezone.utc), trace_id='trace-pre')
+    assert result.accepted is False
+    assert any(item.get('event') == 'SIGNAL_EXECUTION_RESULT' for item in logs)
+
+
+def test_fallback_candidate_reaches_order_request_path() -> None:
+    runner = _build_runner()
+    emitted: list[str] = []
+    runner._logger.info = lambda *_args, **kwargs: emitted.append(str(kwargs.get('extra', {}).get('event', '')))  # type: ignore[method-assign]
+    runner._transition_execution_state = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    runner._order_manager.submit_trade_plan = MagicMock(return_value='oid-1')  # type: ignore[attr-defined]
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=374.95, bid=374.5, ask=375.4, tick_age_s=0.2, real_ticks_last_60s=3, tradable_quote=True, source='ws'
+    )
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26MAY24050PE', quantity=1, confidence=0.9, reason='x', stop_loss=300.0, take_profit=450.0, metadata={'candidate_snapshots': [{'symbol': 'NFO:NIFTY26MAY24050PE', 'side': 'PE', 'strike': 24050, 'atm_strike': 24050, 'ltp': 374.95, 'bid': 374.5, 'ask': 375.4, 'tick_age_s': 0.2, 'real_ticks_last_60s': 3}]})
+    runner._trade_candidate_selector.select_best_candidate = MagicMock(
+        return_value=SimpleNamespace(symbol=signal.symbol, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.01)
+    )
+    result = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id='trace-order')
+    assert result.accepted is True
+    assert 'ORDER_QTY_NORMALIZED' in emitted
+    assert 'RUNNER_ORDER_REQUEST' in emitted

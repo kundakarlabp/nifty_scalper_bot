@@ -104,3 +104,14 @@ def test_selector_sets_pe_side_for_pe_bias() -> None:
     )
     assert best is not None
     assert best.side == 'PE'
+
+
+def test_selector_allows_higher_nifty_premium_default_cap() -> None:
+    selector = TradeCandidateSelector()
+    best = selector.select_best_candidate(
+        underlying='NIFTY',
+        direction_bias='PE',
+        atm_strike=24050,
+        snapshots=[_snapshot('NFO:NIFTY26MAY24050PE', 24050, ltp=374.95, bid=374.5, ask=375.4)],
+    )
+    assert best is not None

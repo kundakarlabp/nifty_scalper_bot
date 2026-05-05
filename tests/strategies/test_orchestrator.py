@@ -114,3 +114,14 @@ def test_orchestrator_requires_futures_context_when_datahub() -> None:
     result = orchestrator.filter_signal(signal, {}, pos_manager)
     assert result is None
     assert order_manager.reason == "orchestrator_futures"
+
+
+def test_orchestrator_does_not_set_underlying_cooldown_before_submission() -> None:
+    risk = _RiskStub(balance=100_000.0)
+    orchestrator = StrategyOrchestrator(risk_manager=risk)
+    signal = _make_signal("unknown")
+    pos_manager = _PositionManagerStub()
+    first = orchestrator.filter_signal(signal, {}, pos_manager)
+    second = orchestrator.filter_signal(signal, {}, pos_manager)
+    assert first is signal
+    assert second is signal
