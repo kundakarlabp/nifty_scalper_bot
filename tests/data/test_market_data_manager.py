@@ -923,6 +923,27 @@ def test_market_snapshot_handles_missing_bid_ask(
     assert snapshot.tick_age_s is not None
 
 
+def test_market_snapshot_uses_candle_close_when_ltp_missing(
+    broker: DummyBroker, ws: DummyWebSocket
+) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager._store_tick(  # noqa: SLF001
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "ltp": None,
+            "timestamp": time.time(),
+            "received_at": time.time(),
+            "source": "ws",
+        },
+    )
+    bar_key = manager._bar_symbol_key("NSE:NIFTY")  # noqa: SLF001
+    manager._ohlc[bar_key].append({"close": 25234.5, "provisional": False})  # noqa: SLF001
+    snapshot = manager.get_symbol_snapshot("NSE:NIFTY")
+    assert snapshot.ltp == 25234.5
+    assert snapshot.source == "ws_candle_fallback"
+
+
 def test_zombie_restart_respects_cooldown(
     monkeypatch: pytest.MonkeyPatch, broker: DummyBroker, ws: DummyWebSocket
 ) -> None:

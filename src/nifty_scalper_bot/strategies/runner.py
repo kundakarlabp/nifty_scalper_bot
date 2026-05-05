@@ -1848,6 +1848,20 @@ class StrategyRunner:
             return dataclasses.replace(signal, metadata=metadata), None
         candidate_snapshots_obj = metadata.get("candidate_snapshots")
         if not isinstance(candidate_snapshots_obj, list):
+            fallback_candidate = self._build_single_candidate_from_signal(
+                signal=signal,
+                metadata=metadata,
+                option_side=cast(Literal["CE", "PE"], option_side),
+            )
+            if fallback_candidate is not None:
+                metadata["candidate_snapshots"] = [fallback_candidate]
+                metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
+                self._logger.info(
+                    "CANDIDATE_FALLBACK_FROM_SIGNAL_USED symbol=%s",
+                    signal.symbol,
+                    extra={"event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED", "symbol": signal.symbol},
+                )
+                return dataclasses.replace(signal, metadata=metadata), None
             underlying = self._extract_underlying(signal.symbol) or "NIFTY"
             if underlying in {"NFO", "NSE", ""}:
                 underlying = "NIFTY"
@@ -1870,6 +1884,45 @@ class StrategyRunner:
         if not metadata.get("candidate_snapshots"):
             return None, "missing_candidate_snapshots"
         return dataclasses.replace(signal, metadata=metadata), None
+
+    def _build_single_candidate_from_signal(
+        self,
+        *,
+        signal: Signal,
+        metadata: Mapping[str, Any],
+        option_side: Literal["CE", "PE"],
+    ) -> dict[str, Any] | None:
+        """Build a single candidate snapshot from signal and MDM data. Args: signal/metadata/option_side. Returns: candidate or none. Raises: none."""
+        try:
+            if self._market_data is None:
+                return None
+            get_snapshot = getattr(self._market_data, "get_symbol_snapshot", None)
+            if not callable(get_snapshot):
+                return None
+            snapshot = get_snapshot(signal.symbol)
+            ltp = float(snapshot.ltp) if snapshot.ltp is not None and float(snapshot.ltp) > 0 else None
+            if ltp is None:
+                return None
+            bid = float(snapshot.bid) if snapshot.bid is not None and float(snapshot.bid) > 0 else ltp
+            ask = float(snapshot.ask) if snapshot.ask is not None and float(snapshot.ask) > 0 else ltp
+            strike_match = re.search(r"(\d{5})(CE|PE)$", str(signal.symbol).upper())
+            parsed_strike = int(strike_match.group(1)) if strike_match is not None else 0
+            strike = int(metadata.get("strike") or parsed_strike or metadata.get("atm_strike") or 0)
+            atm_strike = int(metadata.get("atm_strike") or strike)
+            return {
+                "symbol": signal.symbol,
+                "side": option_side,
+                "strike": strike,
+                "atm_strike": atm_strike,
+                "ltp": ltp,
+                "bid": bid,
+                "ask": ask,
+                "tradable_quote": bool(snapshot.tradable_quote or ltp > 0),
+                "source": str(snapshot.source or "signal_snapshot"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("Failure in _build_single_candidate_from_signal: %s", exc, exc_info=exc)
+            return None
 
     @staticmethod
     def _call_contract_resolver(
@@ -5138,6 +5191,23 @@ class StrategyRunner:
                 )
                 return False
             required_bars = self._required_bars_for_symbol(symbol)
+            if self._is_tradable_symbol(symbol):
+                min_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "3"))
+                capped_required = max(1, min(required_bars, min_live_bars))
+                if capped_required != required_bars:
+                    self._logger.info(
+                        "OPTION_LIVE_BARS_REQUIREMENT_CAPPED symbol=%s required=%d capped_required=%d",
+                        symbol,
+                        required_bars,
+                        capped_required,
+                        extra={
+                            "event": "OPTION_LIVE_BARS_REQUIREMENT_CAPPED",
+                            "symbol": symbol,
+                            "required": required_bars,
+                            "capped_required": capped_required,
+                        },
+                    )
+                    required_bars = capped_required
             if not self._indicator_engine.has_min_bars(symbol, required_bars):
                 history_count = len(self._indicator_engine.get_history(symbol) or [])
                 if history_count < required_bars:

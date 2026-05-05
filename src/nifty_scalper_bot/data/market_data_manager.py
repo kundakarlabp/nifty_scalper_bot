@@ -6184,6 +6184,23 @@ class MarketDataManager:
                 and (self._tick_wallclock(row) or 0.0) >= recent_cutoff
             )
             bars = list(self._ohlc.get(self._bar_symbol_key(canonical), ()))
+        if ltp is None:
+            latest_bar = bars[-1] if bars else {}
+            candle_close = _coerce_float(latest_bar.get("close")) if isinstance(latest_bar, Mapping) else None
+            if candle_close is not None and candle_close > 0:
+                ltp = candle_close
+                source = "ws_candle_fallback"
+                self._logger.info(
+                    "SPOT_SNAPSHOT_FROM_CANDLE_FALLBACK symbol=%s ltp=%s",
+                    canonical,
+                    round(candle_close, 4),
+                    extra={
+                        "event": "SPOT_SNAPSHOT_FROM_CANDLE_FALLBACK",
+                        "symbol": canonical,
+                        "ltp": candle_close,
+                        "source": source,
+                    },
+                )
         latest = bars[-1] if bars else {}
         latest_candle_provisional = bool(latest.get("provisional")) if isinstance(latest, Mapping) else False
         latest_candle_synthetic = bool(latest.get("synthetic")) if isinstance(latest, Mapping) else False

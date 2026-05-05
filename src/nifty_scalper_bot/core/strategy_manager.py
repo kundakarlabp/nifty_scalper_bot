@@ -2082,6 +2082,29 @@ class StrategyManager(_BaseStrategyManager):
             self._observability_counters["signals_blocked_by_risk"] += 1
             count = self._symbol_invalid_counts.get(symbol, 0) + 1
             self._symbol_invalid_counts[symbol] = count
+            is_nifty_context_symbol = symbol in {"NSE:NIFTY", "NIFTY"}
+            if invalid_reason == "vwap_zero_or_invalid" and is_nifty_context_symbol:
+                log.info(
+                    "CONTEXT_SYMBOL_INVALID_NOT_SUSPENDED symbol=%s reason=%s",
+                    symbol,
+                    invalid_reason,
+                    extra={
+                        "event": "CONTEXT_SYMBOL_INVALID_NOT_SUSPENDED",
+                        "symbol": symbol,
+                        "reason_code": invalid_reason,
+                        "invalid_streak": count,
+                    },
+                )
+                _log_reject(
+                    "data_invalid",
+                    {
+                        "reason_code": invalid_reason,
+                        "invalid_streak": count,
+                        "ltp": current_price,
+                        "vwap": vwap,
+                    },
+                )
+                return None
             if count > self._symbol_invalid_threshold:
                 if symbol not in self._symbol_temporarily_ineligible:
                     self._symbol_temporarily_ineligible[symbol] = invalid_reason
