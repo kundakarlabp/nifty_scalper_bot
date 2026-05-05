@@ -28,6 +28,7 @@ from typing import Any, Dict, Mapping, Optional
 import pandas as pd
 
 from nifty_scalper_bot.data.source import DataIntegrityError
+from nifty_scalper_bot.utils.logging import log_throttled
 
 LOGGER = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ class TickValidator:
             if not symbol_raw or str(symbol_raw).strip() == "":
                 raise DataIntegrityError("missing symbol")
 
-            ts_raw = raw.get("timestamp") or raw.get("ts") or raw.get("exchange_timestamp")
+            ts_raw = raw.get("exchange_timestamp") or raw.get("timestamp") or raw.get("ts")
             if ts_raw is None:
                 raise DataIntegrityError("missing timestamp")
             ts = pd.to_datetime(ts_raw, utc=True, errors="coerce")
@@ -179,8 +180,16 @@ class CandleBuilder:
         last = self._last_ts.get(sym)
         if last is not None and ts < last:
             _DROPPED_TICKS.increment()
-            LOGGER.warning(
-                "tick_out_of_order",
+            log_throttled(
+                LOGGER,
+                f"tick_out_of_order:{sym}",
+                (
+                    f"tick_out_of_order symbol={sym} "
+                    f"tick_ts={ts.isoformat()} last_ts={last.isoformat()} "
+                    f"total_dropped={_DROPPED_TICKS.value}"
+                ),
+                interval_sec=30.0,
+                level=logging.DEBUG,
                 extra={
                     "event": "tick_out_of_order",
                     "symbol": sym,

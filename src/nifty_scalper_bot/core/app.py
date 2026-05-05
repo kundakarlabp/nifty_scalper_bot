@@ -145,6 +145,10 @@ def _history_lookback_minutes(required_bars: int) -> int:
     return max(180, required + buffer_bars)
 
 
+def _history_lookback_days(required_bars: int) -> int:
+    """Convert required minute bars into safe historical lookback days."""
+    minutes = _history_lookback_minutes(required_bars)
+    return max(2, int(math.ceil(minutes / 375.0)) + 1)
 
 
 def select_active_option_symbols(
@@ -1926,6 +1930,8 @@ class BotContext:
     data_pipeline_ready: bool = False
     data_hard_ready: bool = False
     spot_ready: bool = False
+    evaluation_ready: bool = False
+    runner_task: asyncio.Task[Any] | None = None
     readiness_mode: str = "SHADOW"
     effective_mode: str = "SHADOW"
     started_mono: float = field(default_factory=time_module.monotonic)
@@ -6615,7 +6621,14 @@ async def _build_and_hydrate_live_basket_from_spot(
     if float(spot_ltp) <= 0:
         raise RuntimeError("spot_ltp must be positive for live basket hydration")
     if ctx.instrument_manager is None or not ctx.instrument_manager.is_loaded():
-        raise RuntimeError("instrument_manager_unavailable_for_live_basket")
+        LOGGER.info(
+            "LIVE_BASKET_BUILD_DEFERRED reason=instrument_manager_not_ready",
+            extra={
+                "event": "LIVE_BASKET_BUILD_DEFERRED",
+                "reason": "instrument_manager_not_ready",
+            },
+        )
+        return {"deferred": True, "reason": "instrument_manager_not_ready"}
     if ctx.market_data_manager is None:
         raise RuntimeError("market_data_manager_unavailable_for_live_basket")
     if ctx.broker_client is None:
