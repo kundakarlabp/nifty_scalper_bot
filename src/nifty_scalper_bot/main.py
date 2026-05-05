@@ -132,10 +132,21 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             app.state.bot_error = str(exc)
             print(f"⚠️ BOT STARTUP WARNING: {exc}", flush=True)
-            LOG.error("Failure in run_bot_background: %s", exc, exc_info=exc)
-            LOG.warning(
-                "Condition met: bot entered degraded mode after startup failure"
-            )
+            warmup_tokens = ('WARMING_UP', 'DATA_WARMUP', 'HISTORICAL_READY')
+            is_warmup_like = any(token in str(exc).upper() for token in warmup_tokens)
+            if is_warmup_like:
+                LOG.info(
+                    'run_bot_background warmup continuation: %s',
+                    exc,
+                )
+                LOG.warning(
+                    'Condition met: bot entered warmup mode after startup delay'
+                )
+            else:
+                LOG.error('Failure in run_bot_background: %s', exc, exc_info=exc)
+                LOG.warning(
+                    'Condition met: bot entered degraded mode after startup failure'
+                )
 
     task = safe_task(run_bot_background())
     yield
