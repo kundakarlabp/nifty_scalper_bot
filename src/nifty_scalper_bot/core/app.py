@@ -6340,6 +6340,15 @@ async def _replay_latest_mdm_ticks_to_bus(ctx: BotContext, *, reason: str) -> in
     bus = getattr(ctx, "message_bus", None)
     if mdm is None or bus is None:
         return 0
+    if getattr(ctx, "data_observation_ready", False):
+        LOGGER.info(
+            "MDM_CACHED_TICKS_REPLAY_SKIPPED reason=live_data_already_observed",
+            extra={
+                "event": "MDM_CACHED_TICKS_REPLAY_SKIPPED",
+                "reason": "live_data_already_observed",
+            },
+        )
+        return 0
     latest_ticks = getattr(mdm, "_latest_ticks", {}) or {}
     replayed = 0
     for symbol, tick in list(latest_ticks.items()):
