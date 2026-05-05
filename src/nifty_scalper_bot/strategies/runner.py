@@ -884,8 +884,21 @@ class StrategyRunner:
             # promoted the state to EXECUTION_ENABLED.  The startup sequence calls
             # mark_ready() → EXECUTION_ENABLED, then calls start() seconds later.
             if not self._active_symbols:
-                LOGGER.warning("Runner start deferred — no active hydrated symbols")
-                self._runner_state = RunnerState.STARTING
+                log_throttled(
+                    self._logger,
+                    "runner_start_deferred_no_active_symbols",
+                    "STRATEGY_RUNNER_START_DEFERRED reason=no_active_symbols state=%s",
+                    self._runner_state,
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "STRATEGY_RUNNER_START_DEFERRED",
+                        "reason": "no_active_symbols",
+                        "state": str(self._runner_state),
+                    },
+                )
+                if self._runner_state != RunnerState.EXECUTION_ENABLED:
+                    self._runner_state = RunnerState.STARTING
                 self._running = False
                 return
             if self._runner_state != RunnerState.EXECUTION_ENABLED:

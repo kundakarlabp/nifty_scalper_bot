@@ -1021,6 +1021,7 @@ class DataHub:
         callback: Optional[TickListener] = None,
         *,
         token: int | None = None,
+        force_live: bool = False,
     ):
         normalized = self._register_symbol_alias(symbol, token)
         if not normalized or normalized.isdigit():
@@ -1063,7 +1064,7 @@ class DataHub:
                 token_int,
                 getattr(callback, "__qualname__", repr(callback)),
             )
-        if self._defer_live_symbol_subscriptions:
+        if self._defer_live_symbol_subscriptions and not force_live:
             already_pending = normalized in self._pending_live_symbols
             self._pending_live_symbols.add(normalized)
             if not already_pending:
@@ -1075,7 +1076,7 @@ class DataHub:
                         "symbol": normalized,
                     },
                 )
-            LOGGER.info(
+            LOGGER.debug(
                 "DATAHUB_SYMBOL_STATUS symbol=%s state=deferred",
                 normalized,
                 extra={
@@ -1092,20 +1093,22 @@ class DataHub:
                 },
             )
         else:
+            reason = "force_live" if force_live else "subscribe_immediate"
             LOGGER.info(
-                "DATAHUB_SYMBOL_STATUS symbol=%s state=registered",
+                "DATAHUB_SYMBOL_STATUS symbol=%s state=active reason=%s",
                 normalized,
+                reason,
                 extra={
                     "event": "DATAHUB_SYMBOL_STATUS",
                     "symbol": normalized,
                     "trace_id": trace_id,
                     "state": "active",
-                    "deferred_mode": False,
+                    "deferred_mode": bool(self._defer_live_symbol_subscriptions and not force_live),
                     "callback_attached": bool(self._tick_subscribers.get(normalized)),
                     "mdm_subscribe_requested": True,
                     "success": True,
                     "pending_count": len(self._pending_live_symbols),
-                    "reason": "subscribe_immediate",
+                    "reason": reason,
                 },
             )
             self._subscribe_symbol(normalized)

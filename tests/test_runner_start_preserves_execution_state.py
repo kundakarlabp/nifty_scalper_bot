@@ -54,3 +54,14 @@ def test_runner_start_preserves_execution_enabled_state_and_warmup() -> None:
     assert runner._symbol_bar_count == {'NSE:NIFTY': 42}
     assert runner._hydration_ready_streak == {'NSE:NIFTY': 5}
     assert runner._history_ready_by_symbol == {'NSE:NIFTY': True}
+
+
+def test_runner_start_with_no_active_symbols_keeps_execution_state() -> None:
+    runner = _build_runner()
+    runner._active_symbols = set()
+    runner._runner_state = RunnerState.EXECUTION_ENABLED
+
+    runner.start()
+
+    assert runner._running is False
+    assert runner._runner_state == RunnerState.EXECUTION_ENABLED
