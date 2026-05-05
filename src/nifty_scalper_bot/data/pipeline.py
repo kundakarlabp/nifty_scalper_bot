@@ -179,7 +179,7 @@ class CandleBuilder:
         last = self._last_ts.get(sym)
         if last is not None and ts < last:
             _DROPPED_TICKS.increment()
-            LOGGER.error(
+            LOGGER.warning(
                 "tick_out_of_order",
                 extra={
                     "event": "tick_out_of_order",

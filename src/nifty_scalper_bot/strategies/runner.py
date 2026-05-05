@@ -124,6 +124,34 @@ RELAX_REGIME_FILTER = (
 MIN_EVAL_INTERVAL_SECONDS = 5.0
 _IST = ZoneInfo("Asia/Kolkata")
 
+_TRUE_VALUES = {"1", "true", "yes", "y", "on", "enable", "enabled"}
+_FALSE_VALUES = {"0", "false", "no", "n", "off", "disable", "disabled"}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read bool env flag. Args: name/default. Returns: bool. Raises: none."""
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    value = raw.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    LOGGER.warning(
+        "INVALID_ENV_BOOL name=%s value=%r default=%s",
+        name,
+        raw,
+        default,
+        extra={
+            "event": "INVALID_ENV_BOOL",
+            "name": name,
+            "value": raw,
+            "default": bool(default),
+        },
+    )
+    return bool(default)
+
 
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
