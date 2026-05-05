@@ -329,6 +329,7 @@ class StrategyRunnerConfig:
         if self.trade_cooldown_seconds < 0:
             raise ValueError("trade_cooldown_seconds must be >= 0")
 
+
 class RunnerState(Enum):
     """State machine for strategy runner lifecycle."""
 
@@ -1941,14 +1942,26 @@ class StrategyRunner:
             parsed_strike = int(strike_match.group(1)) if strike_match is not None else 0
             strike = int(metadata.get("strike") or parsed_strike or metadata.get("atm_strike") or 0)
             atm_strike = int(metadata.get("atm_strike") or strike)
+            spread_pct = ((ask - bid) / ltp) if ltp > 0 else 0.0
+            tick_age_raw = getattr(snapshot, "tick_age_s", None)
+            tick_age_s = float(tick_age_raw) if tick_age_raw is not None else 0.0
+            tick_age_s = max(0.0, tick_age_s)
+            real_ticks_raw = getattr(snapshot, "real_ticks_last_60s", None)
+            real_ticks_last_60s = int(real_ticks_raw) if real_ticks_raw is not None else 0
+            if ltp > 0 and real_ticks_last_60s < 1:
+                real_ticks_last_60s = 1
             return {
                 "symbol": signal.symbol,
                 "side": option_side,
+                "option_type": option_side,
                 "strike": strike,
                 "atm_strike": atm_strike,
                 "ltp": ltp,
                 "bid": bid,
                 "ask": ask,
+                "spread_pct": spread_pct,
+                "tick_age_s": tick_age_s,
+                "real_ticks_last_60s": real_ticks_last_60s,
                 "tradable_quote": bool(snapshot.tradable_quote or ltp > 0),
                 "source": str(snapshot.source or "signal_snapshot"),
             }
@@ -1987,6 +2000,32 @@ class StrategyRunner:
             except Exception:
                 continue
         return []
+
+    def _reject_signal_execution(
+        self,
+        *,
+        symbol: str,
+        trace_id: str,
+        reason: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> SignalExecutionResult:
+        """Log and return rejection. Args: symbol/trace_id/reason/details. Returns: result. Raises: none."""
+        payload = dict(details or {})
+        self._logger.info(
+            "SIGNAL_EXECUTION_RESULT accepted=False reason=%s symbol=%s trace_id=%s",
+            reason,
+            symbol,
+            trace_id,
+            extra={
+                "event": "SIGNAL_EXECUTION_RESULT",
+                "accepted": False,
+                "reason": reason,
+                "symbol": symbol,
+                "trace_id": trace_id,
+                **payload,
+            },
+        )
+        return SignalExecutionResult(False, reason, details=payload)
 
     def _resolve_candidate_contracts(
         self, *, side: str, target_strikes: set[int]
@@ -7809,10 +7848,18 @@ class StrategyRunner:
                 candidate_snapshots_obj, list
             ):
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(False, "candidate_refresh_pending")
+                return self._reject_signal_execution(
+                    symbol=base_symbol,
+                    trace_id=trace_id,
+                    reason="candidate_refresh_pending",
+                )
             if is_live_mode and is_directional_option and not candidate_snapshots_obj:
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(False, "missing_candidate_snapshots")
+                return self._reject_signal_execution(
+                    symbol=base_symbol,
+                    trace_id=trace_id,
+                    reason="missing_candidate_snapshots",
+                )
             if isinstance(candidate_snapshots_obj, list):
                 atm_strike = int(metadata.get("atm_strike") or 0)
                 if atm_strike <= 0:
@@ -7823,7 +7870,11 @@ class StrategyRunner:
                             break
                 if atm_strike <= 0:
                     self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "missing_atm_strike")
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="missing_atm_strike",
+                    )
                 try:
                     candidate = self._trade_candidate_selector.select_best_candidate(
                         underlying=underlying,
@@ -7847,10 +7898,14 @@ class StrategyRunner:
                         exc_info=exc,
                     )
                     self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "no_valid_candidate")
+                    return self._reject_signal_execution(
+                        symbol=base_symbol, trace_id=trace_id, reason="no_valid_candidate"
+                    )
                 if candidate is None:
                     self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "no_valid_candidate")
+                    return self._reject_signal_execution(
+                        symbol=base_symbol, trace_id=trace_id, reason="no_valid_candidate"
+                    )
                 selected_symbol = normalize_symbol(candidate.symbol)
                 original_symbol = normalize_symbol(signal.symbol)
                 if selected_symbol != original_symbol:
@@ -7981,10 +8036,11 @@ class StrategyRunner:
                     },
                 )
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(
-                    False,
-                    "missing_signal_score_components",
-                    details={"trace_id": trace_id, "missing": missing_components},
+                return self._reject_signal_execution(
+                    symbol=base_symbol,
+                    trace_id=trace_id,
+                    reason="missing_signal_score_components",
+                    details={"missing": missing_components},
                 )
             quality = score_signal_quality(
                 direction_score=float(metadata.get("direction_score", 0.0) or 0.0),
@@ -8035,10 +8091,11 @@ class StrategyRunner:
                     return SignalExecutionResult(False, "final_score_required")
             if not quality.allowed:
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(
-                    False,
-                    "score_below_threshold",
-                    details={"trace_id": trace_id, "score": quality.final_score},
+                return self._reject_signal_execution(
+                    symbol=base_symbol,
+                    trace_id=trace_id,
+                    reason="score_below_threshold",
+                    details={"score": quality.final_score},
                 )
             signal = dataclasses.replace(
                 signal,
@@ -8082,12 +8139,16 @@ class StrategyRunner:
             except Exception as lot_exc:
                 self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s error=%s", trade_symbol or base_symbol, lot_exc)
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(False, "invalid_lot_quantity")
+                return self._reject_signal_execution(
+                    symbol=base_symbol, trace_id=trace_id, reason="invalid_lot_quantity"
+                )
             qty = final_qty
             if qty <= 0 or (lot_size > 0 and qty % lot_size != 0):
                 self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s", trade_symbol or base_symbol, qty, lot_size)
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(False, "invalid_lot_quantity")
+                return self._reject_signal_execution(
+                    symbol=base_symbol, trace_id=trace_id, reason="invalid_lot_quantity"
+                )
 
             # Resolve price: prefer signal metadata, fall back to live tick
             price: float | None = None
@@ -8114,7 +8175,11 @@ class StrategyRunner:
                 base_symbol, ExecutionState.ORDER_PENDING
             ):
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(False, "order_state_rejected", details={"trace_id": trace_id})
+                return self._reject_signal_execution(
+                    symbol=base_symbol,
+                    trace_id=trace_id,
+                    reason="order_state_rejected",
+                )
 
             self._logger.info(
                 "RUNNER_ORDER_REQUEST symbol=%s side=%s qty=%s price=%s sl=%s tp=%s strategy=%s trace_id=%s",

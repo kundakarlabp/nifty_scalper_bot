@@ -302,7 +302,6 @@ class StrategyOrchestrator:
         if not strategy_name:
             if action in {"BUY"}:
                 self._last_signal_time = now
-                self._pending_underlyings[underlying] = now
             self._logger.info(
                 f"✅ SIGNAL PASSED (no strategy allocation): {symbol} | {action}",
                 extra={"event": "orchestrator_pass_no_allocation", "symbol": symbol},
@@ -313,7 +312,6 @@ class StrategyOrchestrator:
         if allocation is None:
             if action in {"BUY"}:
                 self._last_signal_time = now
-                self._pending_underlyings[underlying] = now
             self._logger.info(
                 f"✅ SIGNAL PASSED (strategy not registered): {symbol} | {action} | {strategy_name}",
                 extra={"event": "orchestrator_pass_unregistered", "symbol": symbol},
@@ -364,7 +362,6 @@ class StrategyOrchestrator:
         # Update rate limit timestamps on successful pass
         if action in {"BUY"}:
             self._last_signal_time = now
-            self._pending_underlyings[underlying] = now
 
             # Lock direction ONLY after ALL checks pass
             _sym_upper = symbol.upper()
@@ -408,6 +405,7 @@ class StrategyOrchestrator:
         if not normalized:
             return
         with self._lock:
+            self._pending_underlyings[normalized] = datetime.now(timezone.utc).timestamp()
             self._active[normalized] = ActiveAllocation(
                 strategy=strategy_name,
                 tags=allocation.tags,
