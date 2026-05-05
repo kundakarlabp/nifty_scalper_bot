@@ -417,7 +417,8 @@ def _extract_int(payload: Mapping[str, Any], *keys: str) -> int:
 def _extract_timestamp(payload: Mapping[str, Any], fallback: datetime) -> datetime:
     """Extract a timestamp from *payload* or return *fallback*."""
     candidate = (
-        payload.get("timestamp")
+        payload.get("exchange_timestamp")
+        or payload.get("timestamp")
         or payload.get("ts")
         or payload.get("ts_ms")
         or payload.get("last_trade_time")
@@ -1721,6 +1722,10 @@ class StrategyRunner:
                 candidates.append(
                     {
                         "symbol": snap.canonical_symbol,
+                        "side": side,
+                        "option_type": side,
+                        "direction_bias": side,
+                        "atm_strike": atm,
                         "strike": strike,
                         "ltp": snap.ltp,
                         "bid": snap.bid,
@@ -1844,6 +1849,8 @@ class StrategyRunner:
         candidate_snapshots_obj = metadata.get("candidate_snapshots")
         if not isinstance(candidate_snapshots_obj, list):
             underlying = self._extract_underlying(signal.symbol) or "NIFTY"
+            if underlying in {"NFO", "NSE", ""}:
+                underlying = "NIFTY"
             atm_strike = int(metadata.get("atm_strike") or 0)
             built, refresh_pending = await self.build_candidate_snapshots_async(
                 direction_bias=cast(Literal["CE", "PE"], option_side),
@@ -1855,6 +1862,11 @@ class StrategyRunner:
             if not built:
                 return None, "missing_candidate_snapshots"
             metadata["candidate_snapshots"] = built
+            if not metadata.get("atm_strike"):
+                for snap in built:
+                    if isinstance(snap, dict) and snap.get("atm_strike"):
+                        metadata["atm_strike"] = int(snap["atm_strike"])
+                        break
         if not metadata.get("candidate_snapshots"):
             return None, "missing_candidate_snapshots"
         return dataclasses.replace(signal, metadata=metadata), None
@@ -7684,11 +7696,21 @@ class StrategyRunner:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "missing_candidate_snapshots")
             if isinstance(candidate_snapshots_obj, list):
+                atm_strike = int(metadata.get("atm_strike") or 0)
+                if atm_strike <= 0:
+                    for snap in candidate_snapshots_obj:
+                        if isinstance(snap, dict) and snap.get("atm_strike"):
+                            atm_strike = int(snap["atm_strike"])
+                            metadata["atm_strike"] = atm_strike
+                            break
+                if atm_strike <= 0:
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "missing_atm_strike")
                 try:
                     candidate = self._trade_candidate_selector.select_best_candidate(
                         underlying=underlying,
                         direction_bias=option_side,
-                        atm_strike=int(metadata.get("atm_strike") or 0),
+                        atm_strike=atm_strike,
                         snapshots=[
                             snap
                             for snap in candidate_snapshots_obj
@@ -7711,23 +7733,30 @@ class StrategyRunner:
                 if candidate is None:
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "no_valid_candidate")
-                if normalize_symbol(signal.symbol) != normalize_symbol(candidate.symbol):
+                selected_symbol = normalize_symbol(candidate.symbol)
+                original_symbol = normalize_symbol(signal.symbol)
+                if selected_symbol != original_symbol:
                     self._logger.info(
-                        "SIGNAL_EXECUTION_RESULT accepted=False reason=not_selected_candidate symbol=%s selected_symbol=%s trace_id=%s",
+                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original=%s selected=%s trace_id=%s",
                         signal.symbol,
                         candidate.symbol,
                         trace_id,
                         extra={
-                            "event": "SIGNAL_EXECUTION_RESULT",
-                            "accepted": False,
-                            "reason": "not_selected_candidate",
-                            "symbol": signal.symbol,
+                            "event": "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE",
+                            "original_symbol": signal.symbol,
                             "selected_symbol": candidate.symbol,
                             "trace_id": trace_id,
                         },
                     )
-                    self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "not_selected_candidate")
+                    trade_symbol = selected_symbol
+                    base_symbol = selected_symbol
+                    signal = dataclasses.replace(
+                        signal,
+                        symbol=selected_symbol,
+                        stop_loss=candidate.stop_loss or signal.stop_loss,
+                        take_profit=candidate.target or signal.take_profit,
+                        metadata=metadata,
+                    )
                 metadata["option_score"] = candidate.score
                 metadata["data_score"] = candidate.data_quality_score
                 metadata["spread_pct"] = candidate.spread_pct
@@ -8134,26 +8163,27 @@ class StrategyRunner:
         return atr_val
 
     def _extract_underlying(self, symbol: str) -> str:
-        """Extract underlying from option symbol (e.g., NIFTY from NIFTY2620325200CE)."""
-        if not symbol:
+        """Extract underlying symbol. Args: symbol. Returns: underlying. Raises: none."""
+        raw = str(symbol or "").strip().upper()
+        if not raw:
             return ""
-
-        # Common patterns
-        if symbol.startswith("NIFTY") and not symbol.startswith("NIFTYFUT"):
-            return "NIFTY"
-        if symbol.startswith("BANKNIFTY"):
+        if ":" in raw:
+            _, raw = raw.split(":", 1)
+        compact = "".join(raw.replace("_", " ").split())
+        if compact.startswith("BANKNIFTY"):
             return "BANKNIFTY"
-        if symbol.startswith("FINNIFTY"):
+        if compact.startswith("FINNIFTY"):
             return "FINNIFTY"
-
-        # Generic extraction: take alphabetic prefix
+        if compact.startswith("NIFTY"):
+            return "NIFTY"
         import re
-
-        match = re.match(r"^([A-Z]+)", symbol)
+        match = re.match(r"^([A-Z]+)", compact)
         if match:
-            return match.group(1)
-
-        return symbol
+            prefix = match.group(1)
+            if prefix in {"NFO", "NSE"}:
+                return "NIFTY"
+            return prefix
+        return compact
 
     def _stale_tick_threshold_for_symbol(self, symbol: str) -> float:
         """Return configured stale threshold for symbol type."""

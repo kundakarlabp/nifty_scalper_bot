@@ -151,6 +151,13 @@ def test_stale_thresholds_are_instrument_specific() -> None:
     assert runner._stale_tick_threshold_for_symbol('NFO:NIFTY26APRFUT') == 120.0
 
 
+def test_extract_underlying_handles_canonical_derivatives() -> None:
+    runner = _build_runner()
+    assert runner._extract_underlying('NFO:NIFTY26MAY23850CE') == 'NIFTY'
+    assert runner._extract_underlying('NFO:NIFTY26MAYFUT') == 'NIFTY'
+    assert runner._extract_underlying('NSE:NIFTY') == 'NIFTY'
+
+
 def test_handle_signal_entry_transitions_to_signal_and_order_pending(monkeypatch) -> None:
     runner = _build_runner()
     monkeypatch.setattr(
@@ -340,6 +347,7 @@ async def test_live_async_path_builds_candidates_before_sync_handler(monkeypatch
                 {
                     'symbol': 'NFO:NIFTY26APR23800PE',
                     'strike': 23800,
+                    'atm_strike': 23800,
                     'tradable_quote': True,
                 }
             ],
@@ -370,7 +378,36 @@ async def test_live_async_path_builds_candidates_before_sync_handler(monkeypatch
     assert reason is None
     assert prepared is not None
     assert isinstance(prepared.metadata.get('candidate_snapshots'), list)
+    assert prepared.metadata.get('atm_strike') == 23800
     runner.build_candidate_snapshots_async.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_prepare_signal_sanitizes_underlying_to_nifty(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    captured: dict[str, object] = {}
+
+    async def _fake_builder(**kwargs):
+        captured.update(kwargs)
+        return ([{'symbol': 'NFO:NIFTY26APR23800PE', 'atm_strike': 23800}], False)
+
+    runner._extract_underlying = lambda _symbol: 'NFO'
+    runner.build_candidate_snapshots_async = _fake_builder
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.8,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={},
+    )
+    prepared, reason = await runner._prepare_signal_for_handling(signal, price=110.0, trace_id='u1')
+    assert reason is None
+    assert prepared is not None
+    assert captured.get('underlying') == 'NIFTY'
 
 
 @pytest.mark.asyncio
@@ -661,6 +698,7 @@ async def test_process_token_awaits_prepare_signal_for_handling(monkeypatch) -> 
 @pytest.mark.asyncio
 async def test_build_candidate_snapshots_per_symbol_refresh_pending() -> None:
     runner = _build_runner()
+    runner.build_candidate_snapshots_async = StrategyRunner.build_candidate_snapshots_async.__get__(runner, StrategyRunner)
     spot = MagicMock()
     spot.ltp = 23800.0
     spot.canonical_symbol = 'NSE:NIFTY'
@@ -747,11 +785,39 @@ async def test_build_candidate_snapshots_per_symbol_refresh_pending() -> None:
         for cand in candidates
     )
     assert refresh_pending is False  # at least one valid candidate keeps overall flag clear
+    assert all('side' in cand and 'option_type' in cand and 'atm_strike' in cand for cand in candidates)
+
+
+def test_live_entry_uses_selected_candidate_symbol(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._trade_candidate_selector.select_best_candidate.return_value = MagicMock(
+        symbol='NFO:NIFTY26APR23950CE', score=8.5, data_quality_score=8.5, spread_pct=0.01, stop_loss=95.0, target=130.0
+    )
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR24000CE',
+        quantity=1,
+        confidence=0.9,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={
+            'atm_strike': 23950,
+            'candidate_snapshots': [{'symbol': 'NFO:NIFTY26APR23950CE', 'atm_strike': 23950, 'side': 'CE', 'tradable_quote': True}],
+            'direction_score': 9.0, 'strategy_score': 9.0, 'option_score': 9.0, 'data_score': 9.0, 'rr_score': 9.0,
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal, 'NFO:NIFTY26APR24000CE', 'NFO:NIFTY26APR24000CE', 110.0, datetime.now(timezone.utc), trace_id='sel-1'
+    )
+    assert result.reason != 'not_selected_candidate'
 
 
 @pytest.mark.asyncio
 async def test_build_candidate_snapshots_all_pending_returns_refresh_pending() -> None:
     runner = _build_runner()
+    runner.build_candidate_snapshots_async = StrategyRunner.build_candidate_snapshots_async.__get__(runner, StrategyRunner)
     spot = MagicMock()
     spot.ltp = 23800.0
     spot.canonical_symbol = 'NSE:NIFTY'

@@ -13,6 +13,10 @@ def test_history_lookback_days_defined() -> None:
     assert source.index('def _history_lookback_days') < source.index('_history_lookback_days(required_bars)')
 
 
+def test_history_lookback_days_executes() -> None:
+    assert app_module._history_lookback_days(100) >= 2
+
+
 def test_botcontext_slots_include_evaluation_ready() -> None:
     assert 'evaluation_ready' in app_module.BotContext.__slots__
     assert 'runner_task' in app_module.BotContext.__slots__
