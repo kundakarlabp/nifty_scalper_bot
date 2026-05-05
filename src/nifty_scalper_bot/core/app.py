@@ -6534,13 +6534,14 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
         if runner is not None and not bool(getattr(runner, "ready", False)):
             live_ready_symbols: list[str] = []
             min_required_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "3") or 3)
+            runner_required = int(getattr(runner, "_required_candles", 20) or 20)
             for _sym in list(getattr(runner, "_active_symbols", set()) or []):
                 _bars = len(mdm.get_ohlc_bars(_sym) or []) if mdm is not None else 0
                 _required = (
                     min_required_live_bars
                     if str(_sym).startswith("NFO:")
                     and (str(_sym).endswith("CE") or str(_sym).endswith("PE"))
-                    else int(getattr(runner, "_required_candles", 20) or 20)
+                    else runner_required
                 )
                 if _bars >= _required:
                     live_ready_symbols.append(str(_sym))
@@ -6555,6 +6556,14 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                     },
                 )
                 runner_running = _runner_is_running(ctx.strategy_runner)
+                missing_hard = readiness_state.get("missing_hard") or []
+                spot_ready = bool(readiness_state.get("spot_ready"))
+                futures_ready = "futures" not in set(missing_hard)
+                atm_ce_ready = "atm_ce" not in set(missing_hard)
+                atm_pe_ready = "atm_pe" not in set(missing_hard)
+                data_hard_ready = bool(
+                    spot_ready and futures_ready and atm_ce_ready and atm_pe_ready
+                )
         armed, reasons = compute_live_readiness(
             live_mode=True,
             hard_ready=data_hard_ready,
@@ -8892,14 +8901,15 @@ async def startup_sequence(ctx: BotContext) -> None:
             asyncio.create_task(_option_universe_sync_loop())
             startup_trade_ready = True
         except Exception as e:
-            LOGGER.error("Hydration/Tracking failed: %s", e, exc_info=True)
-            ctx.live_orders_armed = False
-            ctx.trading_ready = False
-            ctx.live_block_reason = f"hydration_tracking_failed:{e}"
             warmup_tokens = {"WARMING_UP", "DATA_WARMUP", "HISTORICAL_READY"}
             error_text = str(e).upper()
             is_warmup_like = any(token in error_text for token in warmup_tokens)
             if is_warmup_like:
+                LOGGER.warning(
+                    "Hydration/Tracking warmup state: %s",
+                    e,
+                    extra={"event": "HYDRATION_TRACKING_WARMUP", "error": str(e)},
+                )
                 ctx.live_orders_armed = False
                 ctx.trading_ready = False
                 ctx.readiness_mode = "DATA_WARMUP"
@@ -8914,6 +8924,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                     },
                 )
                 startup_trade_ready = True
+            else:
+                LOGGER.error("Hydration/Tracking failed: %s", e, exc_info=True)
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.live_block_reason = f"hydration_tracking_failed:{e}"
             configured_mode = str(
                 getattr(ctx.settings, "execution_mode", None)
                 or os.getenv("EXECUTION_MODE", "PAPER")
