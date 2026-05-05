@@ -6265,6 +6265,43 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
             market_open_now = False
         if not market_open_now:
             continue
+        runner = getattr(ctx, "strategy_runner", None)
+        active_symbols = len(getattr(runner, "_active_symbols", set()) or [])
+        if active_symbols == 0:
+            try:
+                spot_ltp = await _wait_for_live_spot_or_raise(
+                    ctx,
+                    timeout=10.0,
+                    configured_mode=configured_mode,
+                )
+                await _build_and_hydrate_live_basket_from_spot(
+                    ctx,
+                    spot_ltp=float(spot_ltp),
+                    configured_mode=configured_mode,
+                    hydrate=False,
+                )
+                LOGGER.info(
+                    "LIVE_REARM_BASKET_BUILT spot_ltp=%.2f",
+                    float(spot_ltp),
+                    extra={
+                        "event": "LIVE_REARM_BASKET_BUILT",
+                        "spot_ltp": float(spot_ltp),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.live_block_reason = f"live_rearm_basket_build_failed:{exc}"
+                LOGGER.warning(
+                    "LIVE_REARM_BASKET_BUILD_FAILED error=%s",
+                    exc,
+                    exc_info=True,
+                    extra={
+                        "event": "LIVE_REARM_BASKET_BUILD_FAILED",
+                        "error": str(exc),
+                    },
+                )
+                continue
         await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
         readiness_state = {}
         mdm = getattr(ctx, "market_data_manager", None)
@@ -6327,11 +6364,13 @@ async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
     configured_mode: str,
-    max_attempts: int = 24,
-    delay_seconds: float = 5.0,
+    max_attempts: int | None = None,
+    delay_seconds: float = 15.0,
 ) -> None:
     """Retry startup basket hydration until fresh WS spot arrives. Args: ctx/mode. Returns: none. Raises: none."""
 
+    if max_attempts is None:
+        max_attempts = int(os.getenv("DEFERRED_BASKET_MAX_ATTEMPTS", "160") or "160")
     policy = MarketDataPolicy.from_env()
     for attempt in range(1, max_attempts + 1):
         await asyncio.sleep(delay_seconds)
@@ -8513,6 +8552,15 @@ async def startup_sequence(ctx: BotContext) -> None:
             startup_trade_ready = True
         except Exception as e:
             LOGGER.error("Hydration/Tracking failed: %s", e, exc_info=True)
+            ctx.live_orders_armed = False
+            ctx.trading_ready = False
+            ctx.live_block_reason = f"hydration_tracking_failed:{e}"
+            configured_mode = str(
+                getattr(ctx.settings, "execution_mode", None)
+                or os.getenv("EXECUTION_MODE", "PAPER")
+            ).upper()
+            if configured_mode == "LIVE" and get_market_state() == MarketState.OPEN:
+                raise
 
     # ---------------------------------------------------------
     # 4. Start subsystems (guarded singleton startup)
