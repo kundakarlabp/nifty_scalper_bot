@@ -6779,6 +6779,26 @@ class MarketDataManager:
             if normalized_live is None:
                 self._log_poll_error(symbol, "quote_normalization_failed")
                 return
+            ws_age = self._tick_age_seconds(symbol)
+            stale_threshold = (
+                self._polling_policy.context_stale_seconds
+                if self._is_context_symbol(symbol)
+                else self._polling_policy.option_stale_seconds
+            )
+            if ws_age is not None and ws_age <= stale_threshold and self._last_tick_source.get(symbol) == "ws":
+                self._logger.debug(
+                    "poll_tick_skipped_fresh_ws symbol=%s ws_age=%.3f threshold=%.3f",
+                    symbol,
+                    ws_age,
+                    stale_threshold,
+                    extra={
+                        "event": "poll_tick_skipped_fresh_ws",
+                        "symbol": symbol,
+                        "ws_age": float(ws_age),
+                        "threshold": float(stale_threshold),
+                    },
+                )
+                return
             self._poll_fallback_count = int(getattr(self, "_poll_fallback_count", 0)) + 1
             self._ingest_normalized_tick(normalized_live)
             self._process_poll_quote(symbol, normalized)

@@ -747,6 +747,16 @@ class WebSocketManager:
         now = time.monotonic()
         self._last_tick_mono = now
         self._last_pong_mono = now
+        if not self._connected.is_set() or self._state != ConnectionState.CONNECTED:
+            self._connected.set()
+            self._state = ConnectionState.CONNECTED
+            self._stream_health = "healthy"
+            self._circuit.failures = 0
+            self._circuit.open_until_mono = 0.0
+            self._logger.info(
+                "WEBSOCKET_CONNECTION_RESTORED_BY_TICK",
+                extra={"event": "WEBSOCKET_CONNECTION_RESTORED_BY_TICK"},
+            )
         update_authoritative = getattr(
             market_data_manager, "update_authoritative_ticks", None
         )
