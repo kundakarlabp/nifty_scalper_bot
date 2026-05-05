@@ -1799,7 +1799,23 @@ class StrategyRunner:
                     extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": signal.symbol, "accepted": False, "reason": prepare_reason, "order_id": None, "trace_id": trace_id},
                 )
                 return
-            self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
+            result = self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
+            self._logger.info(
+                "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
+                signal.symbol,
+                result.accepted,
+                result.reason,
+                result.order_id,
+                trace_id,
+                extra={
+                    "event": "SIGNAL_EXECUTION_RESULT",
+                    "symbol": signal.symbol,
+                    "accepted": result.accepted,
+                    "reason": result.reason,
+                    "order_id": result.order_id,
+                    "trace_id": trace_id,
+                },
+            )
 
         try:
             loop = asyncio.get_running_loop()
@@ -1809,7 +1825,23 @@ class StrategyRunner:
             )
             if prepared_signal is None:
                 return False, prepare_reason
-            self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
+            result = self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
+            self._logger.info(
+                "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
+                signal.symbol,
+                result.accepted,
+                result.reason,
+                result.order_id,
+                trace_id,
+                extra={
+                    "event": "SIGNAL_EXECUTION_RESULT",
+                    "symbol": signal.symbol,
+                    "accepted": result.accepted,
+                    "reason": result.reason,
+                    "order_id": result.order_id,
+                    "trace_id": trace_id,
+                },
+            )
             return True, None
         loop.create_task(_job())
         return True, "signal_preparation_scheduled"
@@ -2477,7 +2509,7 @@ class StrategyRunner:
         async with self._ingest_lock:
             self._ingest_historical_bar_unlocked(data)
 
-    def mark_ready(self, symbols: list[str]) -> None:
+    def mark_ready(self, symbols: list[str]) -> bool:
         """
         Public API to finalize startup hydration.
         Explicitly registers symbols and sets readiness flags.
@@ -2552,7 +2584,11 @@ class StrategyRunner:
                 f"✅ StrategyRunner marked READY with {len(valid_symbols)} active symbols"
             )
         else:
-            self._runner_state = RunnerState.HISTORICAL_READY
+            self._runner_state = (
+                RunnerState.WARMING_UP
+                if len(valid_symbols) == 0
+                else RunnerState.HISTORICAL_READY
+            )
             self._logger.info(
                 "mark_ready: HISTORICAL_READY "
                 f"(valid={len(valid_symbols)}/{len(symbols)}, "
@@ -2600,6 +2636,7 @@ class StrategyRunner:
                     "ready": _ok,
                 },
             )
+        return self.ready
 
     def _set_symbol_hydration_state(
         self,
@@ -6758,8 +6795,9 @@ class StrategyRunner:
                         ).inc()
 
                         self._logger.info(
-                            "SIGNAL_GENERATED",
+                            "SIGNAL_CANDIDATE_GENERATED",
                             extra={
+                                "event": "SIGNAL_CANDIDATE_GENERATED",
                                 "strategy": str(
                                     signal.metadata.get("strategy")
                                     if signal.metadata
@@ -6920,6 +6958,20 @@ class StrategyRunner:
                     symbol, signal.action, signal.reason, price,
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
+                )
+                self._logger.info(
+                    "SIGNAL_GENERATED symbol=%s action=%s reason=%s trace_id=%s",
+                    symbol,
+                    signal.action,
+                    signal.reason,
+                    trace_id,
+                    extra={
+                        "event": "SIGNAL_GENERATED",
+                        "symbol": symbol,
+                        "action": signal.action,
+                        "reason": signal.reason,
+                        "trace_id": trace_id,
+                    },
                 )
                 scheduled, prepare_reason = self._schedule_signal_preparation(
                     signal, price, now, trace_id
@@ -7136,7 +7188,6 @@ class StrategyRunner:
         tp_pct = self._vwap_tp_pct
         calculated_sl = price * (1 - sl_pct / 100)
         calculated_tp = price * (1 + tp_pct / 100)
-        self._premium_squeeze_last_signal_ts[underlying] = now_epoch
         self._logger.info(
             "PREMIUM_SQUEEZE_SIGNAL_EMITTED symbol=%s rsi=%.2f trace_id=%s",
             symbol,
@@ -7729,9 +7780,6 @@ class StrategyRunner:
                 log_throttled(self._logger, "runner_order_attempt_rate", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=300.0, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "max_order_attempts_per_minute"})
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "max_order_attempts_per_minute")
-            if reason_key == "premium_momentum_squeeze":
-                self._premium_squeeze_last_signal_ts[underlying] = now_epoch
-
             metadata = dict(signal.metadata or {})
             mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
             is_live_mode = mode == "LIVE" or (
@@ -8096,6 +8144,8 @@ class StrategyRunner:
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
                 self._reason_last_signal_ts[underlying_reason_key] = now_epoch
+                if reason_key == "premium_momentum_squeeze":
+                    self._premium_squeeze_last_signal_ts[underlying] = now_epoch
                 self._order_attempt_window.append(now_epoch)
                 try:
                     self._record_trade(

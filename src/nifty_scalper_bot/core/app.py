@@ -6802,15 +6802,16 @@ async def _build_and_hydrate_live_basket_from_spot(
                 LOGGER.debug("RUNNER_ADD_SYMBOL_SKIPPED symbol=%s", symbol)
         mark_ready = getattr(runner, "mark_ready", None)
         if callable(mark_ready):
-            mark_ready(ready_symbols)
-            LOGGER.info(
-                "RUNNER_READY_MARKED_FROM_LIVE_BASKET symbols=%d",
-                len(ready_symbols),
-                extra={
-                    "event": "RUNNER_READY_MARKED_FROM_LIVE_BASKET",
-                    "symbols": ready_symbols,
-                },
-            )
+            runner_ready = bool(mark_ready(ready_symbols))
+            if runner_ready:
+                LOGGER.info(
+                    "RUNNER_READY_MARKED_FROM_LIVE_BASKET symbols=%d",
+                    len(ready_symbols),
+                    extra={
+                        "event": "RUNNER_READY_MARKED_FROM_LIVE_BASKET",
+                        "symbols": ready_symbols,
+                    },
+                )
     data_hub = getattr(ctx, "data_hub", None)
     flush_pending = (
         getattr(data_hub, "flush_pending_live_subscriptions", None)
