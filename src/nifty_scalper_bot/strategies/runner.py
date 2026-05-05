@@ -1036,6 +1036,14 @@ class StrategyRunner:
     def add_symbol(self, symbol: str) -> None:
         """Begin tracking a new symbol."""
         normalized = self._normalize_symbol(symbol)
+        dynamic_option_add_enabled = bool(
+            _env_flag("RUNNER_ALLOW_DYNAMIC_SYMBOL_ADD", True)
+        )
+        is_dynamic_option_symbol = bool(
+            dynamic_option_add_enabled
+            and normalized.startswith("NFO:")
+            and ("CE" in normalized or "PE" in normalized)
+        )
         with self._lock:
             self._candle_engines.setdefault(normalized, CandleEngine())
             state = self._symbol_state.get(normalized)
@@ -1053,11 +1061,21 @@ class StrategyRunner:
                 and self._frozen_universe
                 and normalized not in self._frozen_universe
             ):
-                self._logger.info(
-                    "Symbol add deferred until next session boundary",
-                    extra={"event": "symbol_add_deferred", "symbol": normalized},
-                )
-                return
+                if is_dynamic_option_symbol:
+                    self._frozen_universe.add(normalized)
+                    self._logger.info(
+                        "Dynamic option symbol admitted to frozen universe",
+                        extra={
+                            "event": "symbol_add_dynamic_option_admitted",
+                            "symbol": normalized,
+                        },
+                    )
+                else:
+                    self._logger.info(
+                        "Symbol add deferred until next session boundary",
+                        extra={"event": "symbol_add_deferred", "symbol": normalized},
+                    )
+                    return
             self._active_symbols.add(normalized)
             self._tracked_symbols.add(normalized)
             self._data_phase[normalized] = "HYDRATION"
@@ -7691,6 +7709,43 @@ class StrategyRunner:
                     )
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "final_score_required")
+            quality_hint = max(
+                0.0,
+                min(
+                    10.0,
+                    float(metadata.get("confidence", 0.0) or 0.0) * 10.0,
+                ),
+            )
+            metadata.setdefault(
+                "direction_score",
+                float(metadata.get("direction_quality", quality_hint) or quality_hint),
+            )
+            metadata.setdefault(
+                "strategy_score",
+                float(metadata.get("setup_quality", quality_hint) or quality_hint),
+            )
+            metadata.setdefault(
+                "option_score",
+                float(metadata.get("option_quality", quality_hint) or quality_hint),
+            )
+            metadata.setdefault(
+                "data_score",
+                float(metadata.get("data_quality", quality_hint) or quality_hint),
+            )
+            if metadata.get("rr_score") is None:
+                rr_score = quality_hint
+                try:
+                    entry_price = float(metadata.get("entry_price", 0.0) or 0.0)
+                    stop_price = float(metadata.get("stop_loss", 0.0) or 0.0)
+                    target_price = float(metadata.get("take_profit", 0.0) or 0.0)
+                    risk = abs(entry_price - stop_price)
+                    reward = abs(target_price - entry_price)
+                    if risk > 0 and reward > 0:
+                        rr_ratio = reward / risk
+                        rr_score = max(0.0, min(10.0, rr_ratio * 5.0))
+                except (TypeError, ValueError):
+                    rr_score = quality_hint
+                metadata["rr_score"] = rr_score
             missing_components = missing_score_components(metadata)
             if missing_components and reason_key == "premium_momentum_squeeze":
                 metadata["shadow_only"] = True
