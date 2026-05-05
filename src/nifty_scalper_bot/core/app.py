@@ -6052,13 +6052,49 @@ def _safe_startup_log(
         )
 
 
+def _create_named_task(coro: Any, *, name: str) -> asyncio.Task[Any]:
+    """Create startup task with exception logging. Args: coro/name. Returns: task. Raises: None."""
+    task = asyncio.create_task(coro, name=name)
+
+    def _done(done_task: asyncio.Task[Any]) -> None:
+        try:
+            exc = done_task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning(
+                "TASK_EXCEPTION_CHECK_FAILED task=%s error=%s",
+                name,
+                err,
+                extra={
+                    "event": "TASK_EXCEPTION_CHECK_FAILED",
+                    "task": name,
+                    "error": str(err),
+                },
+            )
+            return
+        if exc is not None:
+            LOGGER.exception(
+                "BACKGROUND_TASK_FAILED task=%s error=%s",
+                name,
+                exc,
+                exc_info=exc,
+                extra={"event": "BACKGROUND_TASK_FAILED", "task": name},
+            )
+
+    task.add_done_callback(_done)
+    return task
+
+
 async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> None:
     """Refresh readiness after startup tick proof. Args: ctx/reason. Returns: none. Raises: none."""
+    configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
     mdm = ctx.market_data_manager
     runner = ctx.strategy_runner
-    spot_ready = False
+    spot_tick: Mapping[str, Any] | None = None
     if mdm is not None and hasattr(mdm, "get_fresh_spot_tick"):
-        spot_ready = mdm.get_fresh_spot_tick("NSE:NIFTY", require_ws=False) is not None
+        spot_tick = mdm.get_fresh_spot_tick("NSE:NIFTY", require_ws=False)
+    spot_ready = spot_tick is not None
     bus_running = bool(
         getattr(ctx.message_bus, "running", False)
         or getattr(ctx.message_bus, "_running", False)
@@ -6070,19 +6106,45 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
             active_count = len(getattr(runner, "_active_symbols", set()) or [])
             ensure_runner_started = globals().get("_ensure_strategy_runner_started")
             if active_count <= 0:
-                log_throttled(
-                    LOGGER,
-                    "runner_start_deferred_after_spot_no_symbols",
-                    "STRATEGY_RUNNER_START_DEFERRED_AFTER_SPOT reason=no_active_symbols_yet active_symbols=%d",
-                    active_count,
-                    interval_sec=60.0,
-                    level=logging.INFO,
-                    extra={
-                        "event": "STRATEGY_RUNNER_START_DEFERRED_AFTER_SPOT",
-                        "reason": "no_active_symbols_yet",
-                        "active_symbols": active_count,
-                    },
-                )
+                spot_ltp = _coerce_spot_price(spot_tick)
+                if (
+                    configured_mode in {"LIVE", "PAPER", "SHADOW"}
+                    and spot_ltp > 0.0
+                    and "_build_and_hydrate_live_basket_from_spot" in globals()
+                ):
+                    try:
+                        await _build_and_hydrate_live_basket_from_spot(
+                            ctx,
+                            spot_ltp=spot_ltp,
+                            configured_mode=configured_mode,
+                            hydrate=True,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.warning(
+                            "LIVE_BASKET_BUILD_FAILED reason=%s",
+                            exc,
+                            extra={
+                                "event": "LIVE_BASKET_BUILD_FAILED",
+                                "reason": str(exc),
+                            },
+                        )
+                else:
+                    log_throttled(
+                        LOGGER,
+                        "runner_start_deferred_after_spot_no_symbols",
+                        "STRATEGY_RUNNER_START_DEFERRED_AFTER_SPOT reason=no_active_symbols_yet active_symbols=%d",
+                        active_count,
+                        interval_sec=60.0,
+                        level=logging.INFO,
+                        extra={
+                            "event": "STRATEGY_RUNNER_START_DEFERRED_AFTER_SPOT",
+                            "reason": "no_active_symbols_yet",
+                            "active_symbols": active_count,
+                        },
+                    )
+            active_count = len(getattr(runner, "_active_symbols", set()) or [])
+            if active_count <= 0:
+                pass
             elif ensure_runner_started is None:
                 LOGGER.warning(
                     "STRATEGY_RUNNER_START_HELPER_MISSING reason=%s",
@@ -6103,7 +6165,7 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
                 )
                 try:
                     await ensure_runner_started(
-                        ctx, reason=f"{reason}:data_pipeline_ready_after_tick"
+                        ctx, reason=f"{reason}:symbols_ready_after_spot"
                     )
                 except Exception:
                     LOGGER.exception(
@@ -6650,7 +6712,10 @@ async def _build_and_hydrate_live_basket_from_spot(
             except Exception:  # noqa: BLE001
                 continue
             for row in list(records or [])[-hydration_max_bars:]:
+                if not isinstance(row, Mapping):
+                    continue
                 bar_data = dict(row)
+                bar_data["symbol"] = symbol
                 ctx.market_data_manager.ingest_historical_bar(bar_data)
                 runner = getattr(ctx, "strategy_runner", None)
                 if runner is not None and hasattr(runner, "ingest_historical_bar"):
@@ -6728,11 +6793,12 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) ->
 
     ctx.deferred_basket_retry_started = True
     ctx.last_deferred_basket_retry_ts = time_module.time()
-    ctx.deferred_basket_retry_task = asyncio.create_task(
+    ctx.deferred_basket_retry_task = _create_named_task(
         _deferred_basket_hydration_retry(
             ctx,
             configured_mode=configured_mode,
-        )
+        ),
+        name="deferred_basket_hydration_retry",
     )
     LOGGER.info(
         "BASKET_BUILD_DEFERRED reason=market_closed_or_spot_not_ready",
@@ -6893,11 +6959,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                         ctx.startup_spot_refresh_done = True
 
                         loop.call_soon_threadsafe(
-                            lambda: asyncio.create_task(
+                            lambda: _create_named_task(
                                 _refresh_readiness_after_first_tick(
                                     ctx,
                                     reason="first_spot_tick_listener",
-                                )
+                                ),
+                                name="startup_spot_tick_listener",
                             )
                         )
                     except Exception as exc:
@@ -7526,7 +7593,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 runner_ingested = 0
                 for row in records:
                     try:
-                        if not isinstance(row, dict):
+                        if not isinstance(row, Mapping):
                             continue
                         bar_data = dict(row)
                         bar_data["symbol"] = sym
