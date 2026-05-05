@@ -62,3 +62,13 @@ def test_duplicate_listeners_same_symbol_keep_fanout_with_single_live_subscribe(
     assert mdm.subscribed == ['NSE:NIFTY']
     assert len(received_one) == 1
     assert len(received_two) == 1
+
+
+def test_subscribe_ticks_force_live_bypasses_deferred_mode() -> None:
+    mdm = _StubMdm()
+    hub = DataHub(market_data_manager=mdm)
+
+    hub.subscribe_ticks('NSE:NIFTY', lambda _tick: None, force_live=True)
+
+    assert mdm.subscribed == ['NSE:NIFTY']
+    assert 'NSE:NIFTY' not in hub._pending_live_symbols  # noqa: SLF001

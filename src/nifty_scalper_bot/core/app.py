@@ -266,7 +266,8 @@ def _gate_runner_symbol_add(
         canonical_symbol = ctx.data_hub._canonical_quote_symbol(symbol)
         subscription_key = f"{canonical_symbol}|{token or ''}"
         if subscription_key not in ctx.datahub_runner_subscriptions:
-            ctx.data_hub.subscribe_ticks(
+            _subscribe_ticks_force_live_compat(
+                ctx.data_hub,
                 canonical_symbol,
                 ctx.strategy_runner.on_datahub_tick,
                 token=token,
@@ -4382,7 +4383,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             except Exception:  # pragma: no cover - defensive
                 LOGGER.debug("risk_state_attach_data_hub_failed", exc_info=True)
         if hasattr(data_hub, "subscribe_ticks") and risk_symbol:
-            data_hub.subscribe_ticks(risk_symbol, _risk_state_tick_listener)
+            _subscribe_ticks_force_live_compat(data_hub, risk_symbol, _risk_state_tick_listener)
         if hasattr(data_hub, "subscribe_orders"):
             data_hub.subscribe_orders(_risk_state_order_listener)
 
@@ -6066,8 +6067,23 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
     if spot_ready and bus_running:
         ctx.data_observation_ready = True
         if runner is not None and not runner_started:
+            active_count = len(getattr(runner, "_active_symbols", set()) or [])
             ensure_runner_started = globals().get("_ensure_strategy_runner_started")
-            if ensure_runner_started is None:
+            if active_count <= 0:
+                log_throttled(
+                    LOGGER,
+                    "runner_start_deferred_after_spot_no_symbols",
+                    "STRATEGY_RUNNER_START_DEFERRED_AFTER_SPOT reason=no_active_symbols_yet active_symbols=%d",
+                    active_count,
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "STRATEGY_RUNNER_START_DEFERRED_AFTER_SPOT",
+                        "reason": "no_active_symbols_yet",
+                        "active_symbols": active_count,
+                    },
+                )
+            elif ensure_runner_started is None:
                 LOGGER.warning(
                     "STRATEGY_RUNNER_START_HELPER_MISSING reason=%s",
                     reason,
@@ -6139,6 +6155,20 @@ def _runner_is_running(runner: Any) -> bool:
         pass
 
     return bool(getattr(runner, "_running", False))
+
+
+def _subscribe_ticks_force_live_compat(
+    data_hub: Any,
+    symbol: str,
+    callback: Any,
+    *,
+    token: int | None = None,
+) -> None:
+    """Subscribe startup-critical ticks. Args: hub/symbol/callback/token. Returns: none. Raises: none."""
+    try:
+        data_hub.subscribe_ticks(symbol, callback, token=token, force_live=True)
+    except TypeError:
+        data_hub.subscribe_ticks(symbol, callback, token=token)
 
 
 def _coerce_ohlc_row(row: Any) -> dict[str, Any] | None:
@@ -6882,7 +6912,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                         )
 
                 if ctx.data_hub is not None:
-                    ctx.data_hub.subscribe_ticks(
+                    _subscribe_ticks_force_live_compat(
+                        ctx.data_hub,
                         policy.nifty_internal_symbol,
                         _startup_spot_tick_listener,
                         token=policy.nifty_spot_token,
@@ -7495,9 +7526,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                 runner_ingested = 0
                 for row in records:
                     try:
-                        bar_data = row if isinstance(row, dict) else None
-                        if bar_data is None:
+                        if not isinstance(row, dict):
                             continue
+                        bar_data = dict(row)
+                        bar_data["symbol"] = sym
                         if ctx.market_data_manager is not None:
                             ctx.market_data_manager.ingest_historical_bar(bar_data)
                         if (
@@ -7660,6 +7692,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 "error": str(e),
                             },
                         )
+            registered_symbol_count = (
+                len(getattr(runner, "_active_symbols", set()) or []) if runner is not None else 0
+            )
+            LOGGER.info(
+                "RUNNER_SYMBOLS_REGISTERED count=%d",
+                registered_symbol_count,
+                extra={"event": "RUNNER_SYMBOLS_REGISTERED", "count": registered_symbol_count},
+            )
             if runner is not None and hasattr(runner, "mark_ready") and ready_symbols:
                 runner.mark_ready(ready_symbols)
                 LOGGER.info(
@@ -7713,9 +7753,9 @@ async def startup_sequence(ctx: BotContext) -> None:
             evaluation_allowed = configured_runtime_mode in {"PAPER", "SHADOW", "LIVE"}
             if evaluation_allowed and readiness_symbols:
                 _wire_and_start_message_bus(ctx)
-                if ready_symbols:
+                if registered_symbol_count > 0:
                     await _ensure_strategy_runner_started(
-                        ctx, reason="startup_mark_ready_complete"
+                        ctx, reason="startup_symbols_registered"
                     )
                 else:
                     ctx.live_orders_armed = False
@@ -8465,7 +8505,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     )
                                     runner_ingested = 0
                                     for row in list(records or []):
+                                        if not isinstance(row, dict):
+                                            continue
                                         bar_data = dict(row)
+                                        bar_data["symbol"] = sym
                                         ctx.market_data_manager.ingest_historical_bar(bar_data)
                                         if (
                                             getattr(ctx, "strategy_runner", None) is not None
@@ -8886,11 +8929,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                             futures_ready = "futures" not in set(missing_hard)
                             atm_ce_ready = "atm_ce" not in set(missing_hard)
                             atm_pe_ready = "atm_pe" not in set(missing_hard)
+                            runner_running = _runner_is_running(ctx.strategy_runner)
                             ctx.spot_ready = bool(spot_ready)
-                            ctx.data_observation_ready = bool(spot_ready and option_ticks_ready)
+                            ctx.data_observation_ready = bool(spot_ready or ws_quote_proof or ws_ltp_proof)
+                            ctx.evaluation_ready = bool(runner_running and len(getattr(ctx.strategy_runner, "_active_symbols", set()) or []) > 0 if ctx.strategy_runner is not None else False)
                             ctx.data_hard_ready = bool(spot_ready and futures_ready and atm_ce_ready and atm_pe_ready)
                             ctx.data_pipeline_ready = bool(hard_ready)
-                            ctx.trading_ready = bool(ctx.data_hard_ready and mode == "LIVE")
+                            ctx.trading_ready = bool(ctx.data_hard_ready and mode == "LIVE" and runner_running)
                             if configured_runtime_mode in {"PAPER", "SHADOW"}:
                                 ctx.live_orders_armed = False
                                 if ctx.strategy_runner is not None:
@@ -8914,7 +8959,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     },
                                 )
                             market_open_now = market_state == MarketState.OPEN
-                            runner_running = _runner_is_running(ctx.strategy_runner)
                             armed, blocking_reasons = compute_live_readiness(
                                 live_mode=bool(live_mode),
                                 hard_ready=bool(ctx.data_hard_ready),
