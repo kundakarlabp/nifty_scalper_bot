@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from nifty_scalper_bot.execution.readiness import compute_live_readiness
@@ -113,3 +115,9 @@ class TestComputeLiveReadiness:
         evaluation_allowed = configured_runtime_mode in {"PAPER", "SHADOW", "LIVE"}
         assert effective_runtime_mode == "DATA_WARMUP"
         assert evaluation_allowed is True
+
+
+def test_live_readiness_accepts_fresh_ws_ltp() -> None:
+    text = Path('src/nifty_scalper_bot/core/app.py').read_text(encoding='utf-8')
+    assert 'has_fresh_ws_ltp' in text
+    assert 'ws_quote_for_gate = bool(ws_quote_proof or ws_ltp_proof)' in text

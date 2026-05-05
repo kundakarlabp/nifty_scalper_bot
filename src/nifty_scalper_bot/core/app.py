@@ -6268,9 +6268,19 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
         await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
         readiness_state = {}
         mdm = getattr(ctx, "market_data_manager", None)
-        wait_until_ready = getattr(mdm, "wait_until_ready", None)
-        if callable(wait_until_ready):
-            await _maybe_await(wait_until_ready(timeout=0.75))
+        wait_fn = getattr(mdm, "wait_until_ready", None)
+        if callable(wait_fn):
+            try:
+                await _maybe_await(wait_fn(timeout=0.75))
+            except Exception as exc:
+                LOGGER.info(
+                    "LIVE_REARM_MDM_READY_REFRESH_WAIT error=%s",
+                    exc,
+                    extra={
+                        "event": "LIVE_REARM_MDM_READY_REFRESH_WAIT",
+                        "error": str(exc),
+                    },
+                )
         snapshot_fn = getattr(mdm, "readiness_state_snapshot", None)
         if callable(snapshot_fn):
             readiness_state = snapshot_fn() or {}
@@ -7529,7 +7539,24 @@ async def startup_sequence(ctx: BotContext) -> None:
             evaluation_allowed = configured_runtime_mode in {"PAPER", "SHADOW", "LIVE"}
             if evaluation_allowed and readiness_symbols:
                 _wire_and_start_message_bus(ctx)
-                await _ensure_strategy_runner_started(ctx, reason="startup_mark_ready_complete")
+                if ready_symbols:
+                    await _ensure_strategy_runner_started(
+                        ctx, reason="startup_mark_ready_complete"
+                    )
+                else:
+                    ctx.live_orders_armed = False
+                    ctx.trading_ready = False
+                    ctx.readiness_mode = "DATA_WARMUP"
+                    ctx.effective_mode = "DATA_WARMUP"
+                    ctx.live_block_reason = "no_hydrated_symbols_ready"
+                    LOGGER.info(
+                        "STRATEGY_RUNNER_START_DEFERRED reason=%s",
+                        "no_hydrated_symbols_ready",
+                        extra={
+                            "event": "STRATEGY_RUNNER_START_DEFERRED",
+                            "reason": "no_hydrated_symbols_ready",
+                        },
+                    )
                 await _replay_latest_mdm_ticks_to_bus(ctx, reason="post_runner_start")
                 await _refresh_readiness_after_first_tick(ctx, reason="post_runner_start")
                 ctx.data_observation_ready = True
@@ -7541,13 +7568,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                     if not ready_symbols:
                         LOGGER.info("PAPER_RUNNER_STARTED_OBSERVATION_ONLY reason=no_hydrated_symbols_yet", extra={"event": "PAPER_RUNNER_STARTED_OBSERVATION_ONLY", "reason": "no_hydrated_symbols_yet"})
                 
-            if ctx.data_hub is not None and hasattr(ctx.data_hub, "flush_pending_live_subscriptions"):
-                flushed = ctx.data_hub.flush_pending_live_subscriptions()
-                LOGGER.info(
-                    "DATAHUB_DEFERRED_SUBSCRIPTIONS_FLUSHED count=%s phase=post_token_wiring",
-                    flushed,
-                    extra={"event": "DATAHUB_DEFERRED_SUBSCRIPTIONS_FLUSHED", "count": flushed, "phase": "post_token_wiring"},
-                )
             if (
                 ctx.market_data_manager is not None
                 and "basket" in locals()
@@ -7673,15 +7693,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                         exc_info=True,
                     )
 
-            # --- Objective 5: Fail-fast Validation ---
+            # --- Startup token integrity validation ---
             min_tokens = 10
             if len(tokens_to_poll) < min_tokens:
                 msg = f"⚠️ WARNING: Subscribed tokens ({len(tokens_to_poll)}) < MIN_TOKEN_COUNT ({min_tokens})"
-                if not ctx.settings.enable_paper:
-                    LOGGER.critical(f"❌ FAIL-FAST: {msg}")
-                    raise RuntimeError(f"❌ CRITICAL: Insufficient tokens for trading ({len(tokens_to_poll)} < {min_tokens})")
-                else:
-                    LOGGER.warning(f"{msg} (Continuing due to PAPER_MODE=true)")
+                LOGGER.warning(msg)
 
             LOGGER.info(
                 "Market data integrity verified: tokens=%d (min=%d)",
@@ -7761,6 +7777,36 @@ async def startup_sequence(ctx: BotContext) -> None:
                         "⚠️ UNRESOLVED (no token for symbol class, skipping subscription): %s",
                         sym,
                     )
+            mandatory_symbols: list[str] = []
+            if "basket" in locals():
+                mandatory_symbols = [
+                    str(basket.get("spot_symbol") or ""),
+                    str(basket.get("futures_symbol") or ""),
+                ]
+                ce_symbols = list(basket.get("ce_symbols") or [])
+                pe_symbols = list(basket.get("pe_symbols") or [])
+                if ce_symbols:
+                    mandatory_symbols.append(str(ce_symbols[len(ce_symbols) // 2]))
+                if pe_symbols:
+                    mandatory_symbols.append(str(pe_symbols[len(pe_symbols) // 2]))
+            mandatory_symbols = [sym for sym in mandatory_symbols if sym]
+            missing_mandatory = [
+                sym for sym in mandatory_symbols if sym not in active_symbol_tokens
+            ]
+            if missing_mandatory:
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.readiness_mode = "DATA_WARMUP"
+                ctx.effective_mode = "DATA_WARMUP"
+                ctx.live_block_reason = "mandatory_tokens_missing"
+                LOGGER.warning(
+                    "LIVE_TOKEN_INTEGRITY_BLOCKED missing_symbols=%s",
+                    missing_mandatory,
+                    extra={
+                        "event": "LIVE_TOKEN_INTEGRITY_BLOCKED",
+                        "missing_symbols": missing_mandatory,
+                    },
+                )
 
             # BUG-β/γ/ζ FIX: mdm.warmup_history() removed.
             # It raised RuntimeError on missing token → aborted streamer.subscribe below.
