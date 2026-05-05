@@ -2321,21 +2321,50 @@ class StrategyRunner:
     def ingest_historical_bar(self, data: dict) -> None:
         """Public API for startup hydration ingestion. Args: data. Returns: None. Raises: None."""
         self._startup_hydrated = True
-        symbol = self._normalize_symbol(data.get("symbol", "")) if isinstance(data, dict) else ""
-        normalized = normalize_history_row(symbol, data, source=(data.get("source", "historical") if isinstance(data, dict) else "historical")) if symbol else None
-        if normalized is not None and self._indicator_engine is not None:
-            self._indicator_engine.ingest_bar(symbol, normalized)
+        symbol = (
+            self._normalize_symbol(data.get("symbol", ""))
+            if isinstance(data, dict)
+            else ""
+        )
+        normalized = (
+            normalize_history_row(
+                symbol,
+                data,
+                source=(
+                    data.get("source", "historical")
+                    if isinstance(data, dict)
+                    else "historical"
+                ),
+            )
+            if symbol
+            else None
+        )
+        if normalized is None:
+            return
+        try:
+            self._ingest_historical_bar_unlocked(normalized)
             indicator_count = 0
             if hasattr(self._indicator_engine, "history_count"):
-                indicator_count = self._indicator_engine.history_count(symbol)
-            elif hasattr(self._indicator_engine, "get_history"):
-                indicator_count = len(self._indicator_engine.get_history(symbol) or [])
-            self._logger.info("RUNNER_BAR_INGESTED symbol=%s source=%s runner_bars=%d indicator_bars=%d", symbol, normalized.get("source"), len(self._symbol_history.get(symbol, [])), indicator_count)
-            if len(self._symbol_history.get(symbol, [])) > 0 and indicator_count == 0:
-                for row in self._symbol_history.get(symbol, [])[-100:]:
-                    self._indicator_engine.ingest_bar(symbol, row)
-                self._logger.info("INDICATOR_HISTORY_AUTO_SYNC symbol=%s", symbol)
-        self._ingest_historical_bar_unlocked(data)
+                indicator_count = int(self._indicator_engine.history_count(symbol))
+            self._logger.debug(
+                "RUNNER_BAR_INGESTED symbol=%s source=%s runner_bars=%d indicator_bars=%d",
+                symbol,
+                normalized.get("source"),
+                len(self._symbol_history.get(symbol, [])),
+                indicator_count,
+            )
+        except Exception as e:
+            self._logger.error(
+                "RUNNER_BAR_INGEST_FAILED symbol=%s error=%s",
+                symbol,
+                e,
+                extra={
+                    "event": "RUNNER_BAR_INGEST_FAILED",
+                    "symbol": symbol,
+                    "error": str(e),
+                },
+            )
+            raise
 
     async def safe_ingest(self, data: dict[str, Any]) -> None:
         """Synchronize hydration ingestion on event loop. Args: data. Returns: None. Raises: None."""

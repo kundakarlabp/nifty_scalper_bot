@@ -210,6 +210,63 @@ class IndicatorEngine:
             )
             self._cache.pop(symbol, None)
 
+    def ingest_bar(self, symbol: str, bar: Any) -> None:
+        """Ingest normalized/live bar. Args: symbol, bar. Returns: None. Raises: Exception."""
+        try:
+            if isinstance(bar, Mapping):
+                ts_value = bar.get("timestamp") or bar.get("start")
+                open_price = float(bar["open"])
+                high_price = float(bar["high"])
+                low_price = float(bar["low"])
+                close_price = float(bar["close"])
+                volume = int(bar.get("volume", 0) or 0)
+            else:
+                ts_value = getattr(bar, "timestamp", None) or getattr(bar, "start", None)
+                open_price = float(getattr(bar, "open"))
+                high_price = float(getattr(bar, "high"))
+                low_price = float(getattr(bar, "low"))
+                close_price = float(getattr(bar, "close"))
+                volume = int(getattr(bar, "volume", 0) or 0)
+
+            if isinstance(ts_value, datetime):
+                ts = ts_value
+            elif isinstance(ts_value, (int, float)):
+                ts = datetime.fromtimestamp(float(ts_value), tz=timezone.utc)
+            elif isinstance(ts_value, str):
+                ts = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
+            else:
+                raise ValueError(f"Unsupported bar timestamp: {ts_value!r}")
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            payload_ohlc = {
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+            }
+            self.update_price(
+                symbol,
+                payload_ohlc,
+                volume=volume,
+                timestamp=ts,
+                is_complete=True,
+                is_provisional=False,
+            )
+        except Exception as e:
+            self._logger.error(
+                "Failure in IndicatorEngine.ingest_bar: %s",
+                e,
+                extra={"event": "INDICATOR_INGEST_BAR_FAILED", "symbol": symbol},
+            )
+            raise
+
+    def history_count(self, symbol: str) -> int:
+        """Return symbol history length. Args: symbol. Returns: count. Raises: none."""
+        with self._lock:
+            history = self._histories.get(symbol)
+            return len(history) if history is not None else 0
+
     def get_history(self, symbol: str, count: int | None = None) -> list[float]:
         """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
         LOGGER.debug(
