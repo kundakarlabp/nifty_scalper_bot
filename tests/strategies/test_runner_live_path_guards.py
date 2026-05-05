@@ -141,6 +141,31 @@ def test_premium_squeeze_suppresses_second_signal_within_cooldown() -> None:
     assert runner._order_manager.calls == 1
 
 
+def test_premium_squeeze_does_not_self_suppress_on_first_execution() -> None:
+    runner = _build_runner()
+    runner._order_manager.submit_trade_plan = MagicMock(return_value='order-1')
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800CE',
+        quantity=1,
+        confidence=0.9,
+        reason='premium_momentum_squeeze',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NFO:NIFTY26APR23800CE',
+        trade_symbol='NFO:NIFTY26APR23800CE',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='t-premium-first',
+    )
+    assert result.accepted is True
+    assert result.reason == 'order_submitted'
+    assert runner._premium_squeeze_last_signal_ts.get('NIFTY', 0.0) > 0.0
+
 def test_stale_thresholds_are_instrument_specific() -> None:
     runner = _build_runner()
     runner._option_stale_tick_seconds = 900.0
@@ -951,6 +976,37 @@ def test_schedule_signal_preparation_uses_asyncio_run_without_loop() -> None:
     runner._handle_signal.assert_called_once()
 
 
+def test_schedule_signal_preparation_logs_result_when_handle_signal_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _build_runner()
+    logs: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    runner._logger.info = lambda *args, **kwargs: logs.append((args, kwargs))  # type: ignore[method-assign]
+
+    async def _fake_prepare(signal, price, trace_id):
+        return signal, None
+
+    runner._prepare_signal_for_handling = _fake_prepare
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800CE',
+        quantity=1,
+        confidence=0.9,
+        reason='unit_test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={},
+    )
+    runner._handle_signal = MagicMock(return_value=SignalExecutionResult(False, 'blocked'))  # type: ignore[method-assign]
+    runner._schedule_signal_preparation(
+        signal, 101.0, datetime.now(timezone.utc), 'trace-reject'
+    )
+    assert any(
+        kwargs.get('extra', {}).get('event') == 'SIGNAL_EXECUTION_RESULT'
+        and kwargs.get('extra', {}).get('accepted') is False
+        for _, kwargs in logs
+    )
+
 @pytest.mark.asyncio
 async def test_schedule_signal_preparation_schedules_when_loop_running() -> None:
     runner = _build_runner()
@@ -988,3 +1044,12 @@ def test_runner_no_async_event_loop_fallback_in_runner_source() -> None:
     assert 'asyncio.run(\n                        self._prepare_signal_for_handling' not in source
     # _handle_entry_signal_inner must not build snapshots in sync path
     assert 'asyncio.run(\n                        self.build_candidate_snapshots_async' not in source
+
+
+def test_signal_generated_log_occurs_after_regime_skip_guard_in_source() -> None:
+    from pathlib import Path
+
+    source = Path('src/nifty_scalper_bot/strategies/runner.py').read_text(encoding='utf-8')
+    assert source.index('Strategy skipped due to detected market regime') < source.index(
+        'SIGNAL_GENERATED symbol=%s action=%s reason=%s trace_id=%s'
+    )

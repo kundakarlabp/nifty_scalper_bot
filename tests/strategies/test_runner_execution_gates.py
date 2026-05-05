@@ -85,6 +85,20 @@ def test_mark_ready_controls_readiness_not_start() -> None:
     assert symbol in runner._active_symbols
 
 
+def test_mark_ready_stays_unready_when_no_valid_hydrated_symbols() -> None:
+    runner = _runner()
+    symbol = 'NIFTY25JAN25000CE'
+    runner._indicator_engine.has_min_bars.return_value = False
+    runner._indicator_engine.get_history.return_value = []
+    runner._active_symbols = set()
+
+    marked_ready = runner.mark_ready([symbol])
+
+    assert marked_ready is False
+    assert runner.ready is False
+    assert runner._runner_state == RunnerState.WARMING_UP
+
+
 def test_mark_symbol_unready_sets_state_flags() -> None:
     runner = _runner()
     symbol = "NIFTY25JAN25000CE"
