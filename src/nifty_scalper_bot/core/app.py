@@ -145,6 +145,69 @@ def _history_lookback_minutes(required_bars: int) -> int:
     return max(180, required + buffer_bars)
 
 
+
+
+def select_active_option_symbols(
+    option_symbols: Sequence[str],
+    atm: int | float | str | None = None,
+    max_active: int = 6,
+) -> list[str]:
+    """Select balanced CE/PE symbols near ATM. Args: option_symbols/atm/max_active. Returns: selected symbols. Raises: none."""
+
+    safe_limit = max(1, int(max_active or 1))
+    unique_symbols = [str(sym) for sym in dict.fromkeys(option_symbols or ()) if sym]
+    if not unique_symbols:
+        return []
+
+    try:
+        atm_value = int(float(atm)) if atm is not None else None
+    except Exception:
+        atm_value = None
+
+    parsed: list[tuple[int, int, str, str]] = []
+    fallback: list[str] = []
+    for rank, symbol in enumerate(unique_symbols):
+        try:
+            head, tail = symbol.rsplit(":", 1)
+            _ = head
+            side = "CE" if tail.endswith("CE") else "PE" if tail.endswith("PE") else ""
+            if not side:
+                fallback.append(symbol)
+                continue
+            strike_digits = ""
+            for char in reversed(tail[:-2]):
+                if char.isdigit():
+                    strike_digits = char + strike_digits
+                elif strike_digits:
+                    break
+            if not strike_digits:
+                fallback.append(symbol)
+                continue
+            strike = int(strike_digits)
+            distance = abs(strike - atm_value) if atm_value is not None else 0
+            parsed.append((distance, rank, side, symbol))
+        except Exception:
+            fallback.append(symbol)
+
+    if not parsed:
+        return unique_symbols[:safe_limit]
+
+    ce_sorted = [item for item in sorted(parsed) if item[2] == "CE"]
+    pe_sorted = [item for item in sorted(parsed) if item[2] == "PE"]
+    selected: list[str] = []
+    while (ce_sorted or pe_sorted) and len(selected) < safe_limit:
+        if ce_sorted and len(selected) < safe_limit:
+            selected.append(ce_sorted.pop(0)[3])
+        if pe_sorted and len(selected) < safe_limit:
+            selected.append(pe_sorted.pop(0)[3])
+
+    for symbol in fallback + unique_symbols:
+        if len(selected) >= safe_limit:
+            break
+        if symbol not in selected:
+            selected.append(symbol)
+    return selected[:safe_limit]
+
 def nearest_available_strike(spot: float, strikes: Sequence[float]) -> int:
     """Pick nearest strike from available list. Args: spot, strikes. Returns: strike. Raises: ValueError."""
     valid = sorted({int(float(s)) for s in strikes if float(s) > 0})
