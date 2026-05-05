@@ -133,6 +133,26 @@ class MessageBus:
             for msg_type in MessageType
         }
 
+    def _log_task_failure(self, task: asyncio.Task[Any]) -> None:
+        """Log async handler task failures safely. Args: task. Returns: none. Raises: none."""
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as err:  # noqa: BLE001 - defensive callback safety
+            LOGGER.error(
+                "MESSAGE_BUS_HANDLER_FAILED error=%r",
+                err,
+                extra={"event": "MESSAGE_BUS_HANDLER_FAILED"},
+            )
+            return
+        if exc is not None:
+            LOGGER.error(
+                "MESSAGE_BUS_HANDLER_FAILED",
+                extra={"event": "MESSAGE_BUS_HANDLER_FAILED"},
+                exc_info=exc,
+            )
+
     async def _dispatch_loop(self, message_type: MessageType) -> None:
         """Dispatch messages from a queue to its subscribers."""
         queue = self.queues[message_type]
@@ -149,11 +169,7 @@ class MessageBus:
                         result = handler(message)
                         if asyncio.iscoroutine(result):
                             task = safe_task(result)
-                            task.add_done_callback(
-                                lambda t: LOGGER.error("Handler failed", exc_info=t.exception())
-                                if t.exception()
-                                else None
-                            )
+                            task.add_done_callback(self._log_task_failure)
                     except Exception as exc:
                         LOGGER.error(
                             "Failure in MessageBus handler dispatch: %s",

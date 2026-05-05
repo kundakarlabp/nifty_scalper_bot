@@ -89,6 +89,20 @@ class PriceHistory:
         open_price, high_price, low_price, close_price = self._normalize_price(price)
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp = timestamp.astimezone(timezone.utc).replace(microsecond=0)
+        if self._timestamps:
+            last_ts = self._timestamps[-1]
+            if timestamp < last_ts:
+                return
+            if timestamp == last_ts:
+                self._opens.pop()
+                self._highs.pop()
+                self._lows.pop()
+                self._closes.pop()
+                self._volumes.pop()
+                self._timestamps.pop()
+                self._is_complete.pop()
+                self._is_provisional.pop()
         self._opens.append(open_price)
         self._highs.append(high_price)
         self._lows.append(low_price)

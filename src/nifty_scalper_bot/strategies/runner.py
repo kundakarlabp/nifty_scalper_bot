@@ -7709,35 +7709,6 @@ class StrategyRunner:
             requires_final_score = bool(metadata.get("preliminary_only")) or bool(
                 metadata.get("requires_runner_final_score")
             )
-            if requires_final_score:
-                required_components = (
-                    "direction_score",
-                    "strategy_score",
-                    "option_score",
-                    "data_score",
-                    "rr_score",
-                )
-                has_components = all(
-                    metadata.get(component) is not None
-                    for component in required_components
-                )
-                has_candidate = bool(metadata.get("candidate_selected"))
-                has_tradable_quote = bool(metadata.get("tradable_quote"))
-                if not (has_components and has_candidate and has_tradable_quote):
-                    self._logger.info(
-                        "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required symbol=%s trace_id=%s",
-                        base_symbol,
-                        trace_id,
-                        extra={
-                            "event": "SIGNAL_EXECUTION_RESULT",
-                            "accepted": False,
-                            "reason": "final_score_required",
-                            "symbol": base_symbol,
-                            "trace_id": trace_id,
-                        },
-                    )
-                    self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "final_score_required")
             quality_hint = max(
                 0.0,
                 min(
@@ -7775,6 +7746,35 @@ class StrategyRunner:
                 except (TypeError, ValueError):
                     rr_score = quality_hint
                 metadata["rr_score"] = rr_score
+            if requires_final_score:
+                required_components = (
+                    "direction_score",
+                    "strategy_score",
+                    "option_score",
+                    "data_score",
+                    "rr_score",
+                )
+                has_components = all(
+                    metadata.get(component) is not None
+                    for component in required_components
+                )
+                has_candidate = bool(metadata.get("candidate_selected"))
+                has_tradable_quote = bool(metadata.get("tradable_quote"))
+                if not (has_components and has_candidate and has_tradable_quote):
+                    self._logger.info(
+                        "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required symbol=%s trace_id=%s",
+                        base_symbol,
+                        trace_id,
+                        extra={
+                            "event": "SIGNAL_EXECUTION_RESULT",
+                            "accepted": False,
+                            "reason": "final_score_required",
+                            "symbol": base_symbol,
+                            "trace_id": trace_id,
+                        },
+                    )
+                    self._reset_execution_state(base_symbol)
+                    return SignalExecutionResult(False, "final_score_required")
             missing_components = missing_score_components(metadata)
             if missing_components and reason_key == "premium_momentum_squeeze":
                 metadata["shadow_only"] = True

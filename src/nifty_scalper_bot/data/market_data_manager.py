@@ -4835,7 +4835,7 @@ class MarketDataManager:
                 level=logging.DEBUG,
             )
             return
-        if not getattr(bus, "running", False):
+        if not self._bus_is_running():
             log_throttled(
                 self._logger,
                 "mdm_bus_publish_skipped_bus_not_running",
@@ -4899,6 +4899,27 @@ class MarketDataManager:
                 interval_sec=10.0,
                 level=logging.ERROR,
             )
+
+    def _bus_is_running(self) -> bool:
+        """Check message bus running status safely. Args: none. Returns: bool. Raises: none."""
+        bus = getattr(self, "bus", None) or getattr(self, "_tick_bus", None)
+        if bus is None:
+            return False
+        running_attr = getattr(bus, "running", None)
+        if isinstance(running_attr, bool):
+            return running_attr
+        if callable(running_attr):
+            try:
+                return bool(running_attr())
+            except Exception:
+                return False
+        is_running_method = getattr(bus, "is_running", None)
+        if callable(is_running_method):
+            try:
+                return bool(is_running_method())
+            except Exception:
+                return False
+        return bool(getattr(bus, "_running", False))
 
 
     def _dispatch_awaitable_callback_result(
@@ -5034,8 +5055,7 @@ class MarketDataManager:
             else:
                 age = time.monotonic() - first_seen_at
                 if selected_or_active and age > 30:
-                    bus_obj = getattr(self, "bus", None)
-                    bus_running = bool(getattr(bus_obj, "is_running", lambda: False)())
+                    bus_running = self._bus_is_running()
                     if bus_running:
                         log_throttled(
                             self._logger,
