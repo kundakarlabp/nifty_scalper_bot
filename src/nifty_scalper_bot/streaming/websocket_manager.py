@@ -445,6 +445,19 @@ class WebSocketManager:
             async with self._connect_lock:
                 if self._shutdown or self._manual_disconnect:
                     return
+                if self._connected.is_set() and self._ticker is not None and self._tokens:
+                    self._logger.info(
+                        "WS_CONNECT_SKIPPED already_connected reason=%s tokens=%d",
+                        reason,
+                        len(self._tokens),
+                        extra={
+                            "event": "WS_CONNECT_SKIPPED",
+                            "reason": reason,
+                            "state": "already_connected",
+                            "tokens": len(self._tokens),
+                        },
+                    )
+                    return
         
                 self._state = ConnectionState.CONNECTING
                 self._connected.clear()

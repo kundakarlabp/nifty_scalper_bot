@@ -138,6 +138,21 @@ async def test_watchdog_schedules_reconnect_for_missing_pong(
 
 
 @pytest.mark.asyncio
+async def test_connect_once_skips_when_already_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    manager = ws_module.WebSocketManager("k", "t", [111], trading_window_enabled=False)
+    await manager.connect()
+    ticker = manager.ticker
+    assert isinstance(ticker, FakeKiteTicker)
+    calls_before = ticker.connect_calls
+    await manager._connect_once("token_update")
+    assert ticker.connect_calls == calls_before
+    await manager.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_watchdog_suppresses_pong_reconnect_outside_trading_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

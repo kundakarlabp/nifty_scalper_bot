@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from datetime import datetime, timezone
 import logging
+from types import SimpleNamespace
 import threading
 from unittest.mock import AsyncMock, MagicMock
 import pytest
@@ -438,6 +439,52 @@ async def test_live_async_path_blocks_on_refresh_pending(monkeypatch) -> None:
     )
     assert prepared is None
     assert reason == 'candidate_refresh_pending'
+
+
+@pytest.mark.asyncio
+async def test_live_async_path_uses_signal_candidate_fallback(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    snapshot = SimpleNamespace(
+        ltp=111.0,
+        bid=None,
+        ask=None,
+        source='ws',
+        tradable_quote=False,
+    )
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot = MagicMock(return_value=snapshot)
+    runner.build_candidate_snapshots_async = AsyncMock(return_value=([], True))
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.8,
+        reason='test',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={},
+    )
+    prepared, reason = await runner._prepare_signal_for_handling(signal, price=110.0, trace_id='fallback')
+    assert reason is None
+    assert prepared is not None
+    candidate = prepared.metadata['candidate_snapshots'][0]
+    assert candidate['ltp'] == 111.0
+    assert candidate['bid'] == 111.0
+    assert candidate['ask'] == 111.0
+
+
+def test_strategy_evaluation_caps_required_option_bars(monkeypatch) -> None:
+    runner = _build_runner()
+    runner._active_symbols = {'NFO:NIFTY26APR23800PE'}
+    monkeypatch.setenv('OPTION_MIN_LIVE_BARS', '3')
+    runner._required_bars_for_symbol = lambda _s: 5
+    runner._is_tradable_symbol = lambda _s: True
+    runner._is_context_symbol = lambda _s: False
+    runner._indicator_engine.has_min_bars = MagicMock(return_value=True)
+    allowed = runner._strategy_evaluation_allowed('NFO:NIFTY26APR23800PE')
+    assert allowed is True
+    runner._indicator_engine.has_min_bars.assert_called_once_with('NFO:NIFTY26APR23800PE', 3)
 
 
 def test_contract_resolver_invoked_with_side_and_strikes() -> None:
