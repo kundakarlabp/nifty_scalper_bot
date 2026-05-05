@@ -6531,6 +6531,30 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
         ws_ltp_proof = bool(ws_ltp_proof_fn()) if callable(ws_ltp_proof_fn) else False
         ws_quote_for_gate = bool(ws_quote_proof or ws_ltp_proof)
         runner_running = _runner_is_running(ctx.strategy_runner)
+        if runner is not None and not bool(getattr(runner, "ready", False)):
+            live_ready_symbols: list[str] = []
+            min_required_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "3") or 3)
+            for _sym in list(getattr(runner, "_active_symbols", set()) or []):
+                _bars = len(mdm.get_ohlc_bars(_sym) or []) if mdm is not None else 0
+                _required = (
+                    min_required_live_bars
+                    if str(_sym).startswith("NFO:")
+                    and (str(_sym).endswith("CE") or str(_sym).endswith("PE"))
+                    else int(getattr(runner, "_required_candles", 20) or 20)
+                )
+                if _bars >= _required:
+                    live_ready_symbols.append(str(_sym))
+            if live_ready_symbols and hasattr(runner, "mark_ready"):
+                runner.mark_ready(live_ready_symbols)
+                LOGGER.info(
+                    "RUNNER_READY_PROMOTED_FROM_LIVE_BARS symbols=%s",
+                    live_ready_symbols,
+                    extra={
+                        "event": "RUNNER_READY_PROMOTED_FROM_LIVE_BARS",
+                        "symbols": live_ready_symbols,
+                    },
+                )
+                runner_running = _runner_is_running(ctx.strategy_runner)
         armed, reasons = compute_live_readiness(
             live_mode=True,
             hard_ready=data_hard_ready,
@@ -7759,13 +7783,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                 },
             )
             ready_symbols: list[str] = []
-            min_required_bars = int(
+            default_required_bars = int(
                 getattr(runner, "_required_candles", 20) if runner else 20
             )
+            option_min_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "3") or 3)
             skipped_symbols: list[str] = []
             skipped_reasons: dict[str, str] = {}
             for sym in readiness_symbols:
                 runner_history_count = 0
+                mdm_ohlc_count = 0
                 if runner is not None:
                     try:
                         runner_history_count = len(
@@ -7773,12 +7799,36 @@ async def startup_sequence(ctx: BotContext) -> None:
                         )
                     except Exception:
                         runner_history_count = 0
-                if runner_history_count >= min_required_bars:
+                if ctx.market_data_manager is not None:
+                    mdm_ohlc_count = len(ctx.market_data_manager.get_ohlc_bars(sym) or [])
+                if (
+                    runner is not None
+                    and runner_history_count <= 0
+                    and mdm_ohlc_count > 0
+                    and hasattr(runner, "ingest_historical_bar")
+                    and ctx.market_data_manager is not None
+                ):
+                    for _bar in ctx.market_data_manager.get_ohlc_bars(sym) or []:
+                        if isinstance(_bar, Mapping):
+                            runner.ingest_historical_bar(dict(_bar))
+                    try:
+                        runner_history_count = len(
+                            runner._indicator_engine.get_history(sym) or []
+                        )
+                    except Exception:
+                        runner_history_count = 0
+                min_required_bars = (
+                    option_min_live_bars
+                    if str(sym).startswith("NFO:") and (str(sym).endswith("CE") or str(sym).endswith("PE"))
+                    else default_required_bars
+                )
+                effective_bar_count = max(runner_history_count, mdm_ohlc_count)
+                if effective_bar_count >= min_required_bars:
                     ready_symbols.append(sym)
                 else:
                     skipped_symbols.append(sym)
                     skipped_reasons[sym] = (
-                        f"runner_history_below_required:{runner_history_count}/{min_required_bars}"
+                        f"effective_history_below_required:{effective_bar_count}/{min_required_bars}"
                     )
                     LOGGER.info(
                         "Condition met: startup_hydration_incomplete",
@@ -7821,12 +7871,12 @@ async def startup_sequence(ctx: BotContext) -> None:
                     ready_symbols,
                     skipped_symbols,
                     skipped_reasons,
-                    min_required_bars,
+                    default_required_bars,
                     extra={
                         "event": "RUNNER_READY_MARKED",
                         "symbol_count": len(readiness_symbols),
                         "initial_ready_symbols": ready_symbols,
-                        "min_required_bars": min_required_bars,
+                        "min_required_bars": default_required_bars,
                         "skipped_symbols": skipped_symbols,
                         "skipped_reasons": skipped_reasons,
                     },
@@ -7922,8 +7972,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                     "Indicators hydration pre-check complete; waiting for live readiness gate"
                 )
             else:
-                LOGGER.warning(
-                    "Indicators remain unready because no symbols passed hydration barrier"
+                LOGGER.info(
+                    "Indicators remain in warmup mode because no symbols passed hydration barrier"
                 )
 
             # ---------- Tracking / execution wiring (UNCHANGED) ----------
@@ -8846,11 +8896,33 @@ async def startup_sequence(ctx: BotContext) -> None:
             ctx.live_orders_armed = False
             ctx.trading_ready = False
             ctx.live_block_reason = f"hydration_tracking_failed:{e}"
+            warmup_tokens = {"WARMING_UP", "DATA_WARMUP", "HISTORICAL_READY"}
+            error_text = str(e).upper()
+            is_warmup_like = any(token in error_text for token in warmup_tokens)
+            if is_warmup_like:
+                ctx.live_orders_armed = False
+                ctx.trading_ready = False
+                ctx.readiness_mode = "DATA_WARMUP"
+                ctx.effective_mode = "DATA_WARMUP"
+                ctx.live_block_reason = "startup_warmup_waiting_for_live_bars"
+                LOGGER.info(
+                    "LIVE_STARTUP_CONTINUES_IN_WARMUP reason=%s",
+                    e,
+                    extra={
+                        "event": "LIVE_STARTUP_CONTINUES_IN_WARMUP",
+                        "reason": str(e),
+                    },
+                )
+                startup_trade_ready = True
             configured_mode = str(
                 getattr(ctx.settings, "execution_mode", None)
                 or os.getenv("EXECUTION_MODE", "PAPER")
             ).upper()
-            if configured_mode == "LIVE" and get_market_state() == MarketState.OPEN:
+            if (
+                configured_mode == "LIVE"
+                and get_market_state() == MarketState.OPEN
+                and not is_warmup_like
+            ):
                 raise
 
     # ---------------------------------------------------------
