@@ -5028,13 +5028,14 @@ class MarketDataManager:
             if first_seen_map is None:
                 first_seen_map = {}
                 self._first_seen_at_by_symbol = first_seen_map
-                first_seen_at = first_seen_map.get(symbol)
+            first_seen_at = first_seen_map.get(symbol)
             if first_seen_at is None:
                 first_seen_map[symbol] = time.monotonic()
             else:
                 age = time.monotonic() - first_seen_at
                 if selected_or_active and age > 30:
-                    bus_running = bool(getattr(self.bus, "is_running", lambda: False)())
+                    bus_obj = getattr(self, "bus", None)
+                    bus_running = bool(getattr(bus_obj, "is_running", lambda: False)())
                     if bus_running:
                         log_throttled(
                             self._logger,
