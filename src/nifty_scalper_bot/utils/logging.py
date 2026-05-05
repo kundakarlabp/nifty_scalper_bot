@@ -539,7 +539,7 @@ def log_throttled(
     logger: logging.Logger,
     key: str,
     msg: str,
-    *,
+    *fmt_args: Any,
     interval_sec: float = 60.0,
     level: int = logging.INFO,
     extra: Optional[dict[str, Any]] = None,
@@ -563,6 +563,11 @@ def log_throttled(
             if now - last_emit < interval:
                 return
             _THROTTLE_STATE[key] = now
+        if fmt_args:
+            try:
+                msg = msg % fmt_args
+            except Exception:
+                msg = f"{msg} | fmt_args={fmt_args!r}"
         logger.log(level, msg, extra=extra or {}, exc_info=exc_info)
     except Exception as exc:  # noqa: BLE001
         logger.error(

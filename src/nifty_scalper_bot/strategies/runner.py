@@ -887,8 +887,7 @@ class StrategyRunner:
                 log_throttled(
                     self._logger,
                     "runner_start_deferred_no_active_symbols",
-                    "STRATEGY_RUNNER_START_DEFERRED reason=no_active_symbols state=%s",
-                    self._runner_state,
+                    f"STRATEGY_RUNNER_START_DEFERRED reason=no_active_symbols state={self._runner_state}",
                     interval_sec=60.0,
                     level=logging.INFO,
                     extra={
