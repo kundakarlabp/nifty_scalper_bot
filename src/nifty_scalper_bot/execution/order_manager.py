@@ -2615,7 +2615,12 @@ class OrderManager:
             return OrderPreflightResult(False, "quote_stale", {"age_ms": qd["age_ms"], "limit_ms": plan.max_quote_age_ms})
         if is_entry and qd["bid"] > 0 and qd["ask"] > 0 and qd["spread_pct"] > plan.max_spread_pct:
             return OrderPreflightResult(False, "spread_too_wide", {"spread_pct": qd["spread_pct"], "limit_pct": plan.max_spread_pct})
-        if is_entry and qd["depth_qty"] < plan.min_depth_qty:
+        has_depth_fields = (
+            int(qd.get("bid_qty", 0) or 0) > 0
+            or int(qd.get("ask_qty", 0) or 0) > 0
+            or int(qd.get("depth_qty", 0) or 0) > 0
+        )
+        if is_entry and has_depth_fields and qd["depth_qty"] < plan.min_depth_qty:
             return OrderPreflightResult(False, "depth_insufficient", {"depth_qty": qd["depth_qty"], "limit_qty": plan.min_depth_qty})
         return OrderPreflightResult(True, "allowed", {"quote": qd, "lot_size": lot_size})
 
