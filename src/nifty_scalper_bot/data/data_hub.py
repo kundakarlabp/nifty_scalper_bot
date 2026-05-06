@@ -1474,6 +1474,28 @@ class DataHub:
             return None
         return float(spot) * float(iv) * sqrt(float(days) / 365.0)
 
+    async def hydrate_symbol_history(
+        self,
+        symbol: str,
+        *,
+        interval: str = "minute",
+        days: int = 2,
+        max_bars: int = 300,
+        reason: str = "datahub",
+    ) -> list[dict[str, Any]]:
+        """Delegate symbol hydration to MDM. Args: symbol/interval/days/max_bars/reason. Returns: rows. Raises: none."""
+        mdm_fn = getattr(self._mdm, "hydrate_symbol_history", None)
+        if callable(mdm_fn):
+            return await mdm_fn(
+                symbol,
+                interval=interval,
+                days=days,
+                max_bars=max_bars,
+                reason=reason,
+            )
+        rows = await self.fetch_history(symbol, interval, days)
+        return list(rows or [])[-max_bars:]
+
     async def fetch_history(self, symbol: str, interval: str, days: int = 3) -> list[dict]:
         normalized = self._canonical_quote_symbol(symbol)
         key = (normalized, str(interval or "minute").lower(), int(days or 0))
