@@ -6,6 +6,10 @@ from dataclasses import dataclass
 import os
 from typing import Any
 
+from nifty_scalper_bot.utils.logging import get_logger
+
+LOGGER = get_logger(__name__)
+
 
 @dataclass(slots=True)
 class DataQualityResult:
@@ -51,30 +55,47 @@ class TradeCandidateSelector:
     def select_ranked_candidates(self, *, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]]) -> list[TradeCandidate]:
         max_spread, max_age, min_ticks = self._limits()
         ranked: list[TradeCandidate] = []
+        rejects = {
+            'side_mismatch': 0,
+            'atm_distance': 0,
+            'missing_bid_ask': 0,
+            'premium_out_of_range': 0,
+            'spread_too_wide': 0,
+            'tick_stale': 0,
+            'insufficient_ticks': 0,
+            'invalid_rr': 0,
+        }
         for s in snapshots:
             side = str(s.get('side') or s.get('option_type') or '').upper()
             symbol = str(s.get('symbol') or '')
             if side != direction_bias:
+                rejects['side_mismatch'] += 1
                 continue
             strike = int(s.get('strike') or 0)
             atm_distance = abs((strike - atm_strike) // 50) if strike and atm_strike else 999
             if atm_distance > self.option_strike_window_each_side:
+                rejects['atm_distance'] += 1
                 continue
             bid, ask, ltp = self._f(s.get('bid')), self._f(s.get('ask')), self._f(s.get('ltp'))
             if ltp is None or bid is None or ask is None or bid <= 0 or ask <= 0:
+                rejects['missing_bid_ask'] += 1
                 continue
             premium = ltp
             if premium < self.min_option_premium or premium > self.max_option_premium:
+                rejects['premium_out_of_range'] += 1
                 continue
             mid = (bid + ask) / 2.0
             spread_pct = (ask - bid) / mid if mid > 0 else 1.0
             if spread_pct > max_spread:
+                rejects['spread_too_wide'] += 1
                 continue
             tick_age_s = self._f(s.get('tick_age_s'))
             if tick_age_s is None or tick_age_s > max_age:
+                rejects['tick_stale'] += 1
                 continue
             real_ticks = int(s.get('real_ticks_last_60s') or 0)
             if real_ticks < min_ticks:
+                rejects['insufficient_ticks'] += 1
                 continue
             entry = ask if ask > 0 else ltp
             atr = self._f(s.get('atr_option')) or max(entry * 0.012, (ask - bid) * 1.5, 1.0)
@@ -86,12 +107,23 @@ class TradeCandidateSelector:
             target = entry + max(1.6 * risk, atr * 1.2)
             rr = (target - entry) / (entry - sl)
             if rr < 1.5:
+                rejects['invalid_rr'] += 1
                 continue
             liquidity = max(0.0, 10.0 - spread_pct * 100.0)
             micro = min(10.0, real_ticks * 3.0)
             score = 6.0 + liquidity * 0.2 + micro * 0.2 - atm_distance * 0.5
             ranked.append(TradeCandidate(symbol=symbol, side=side, score=score, reasons=['candidate_valid'], spread_pct=spread_pct, tick_age_s=tick_age_s, premium=premium, atm_distance=atm_distance, data_quality_score=10.0, entry_price=entry, stop_loss=sl, target=target, rr=rr, liquidity_score=liquidity, microstructure_score=micro, final_score=score))
-        return sorted(ranked, key=lambda c: c.final_score or 0.0, reverse=True)
+        sorted_ranked = sorted(ranked, key=lambda c: c.final_score or 0.0, reverse=True)
+        LOGGER.info(
+            'CANDIDATE_SELECTION_SUMMARY direction=%s atm=%s total=%s ranked=%s rejects=%s',
+            direction_bias,
+            atm_strike,
+            len(snapshots),
+            len(sorted_ranked),
+            rejects,
+            extra={'event': 'CANDIDATE_SELECTION_SUMMARY', 'direction': direction_bias, 'atm': atm_strike, 'total': len(snapshots), 'ranked': len(sorted_ranked), 'rejects': rejects},
+        )
+        return sorted_ranked
 
     def select_best_candidate(self, *, underlying: str, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]]) -> TradeCandidate | None:
         ranked = self.select_ranked_candidates(direction_bias=direction_bias, atm_strike=atm_strike, snapshots=snapshots)

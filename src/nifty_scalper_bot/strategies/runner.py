@@ -1662,13 +1662,18 @@ class StrategyRunner:
             if self._market_data is None or not hasattr(self._market_data, "get_symbol_snapshot"):
                 return [], True
             spot_snapshot = self._market_data.get_symbol_snapshot(underlying)
-            if spot_snapshot.ltp is None or spot_snapshot.canonical_symbol != "NSE:NIFTY":
+            spot_ltp = getattr(spot_snapshot, "ltp", None)
+            spot_canonical = str(getattr(spot_snapshot, "canonical_symbol", "") or "").upper()
+            if spot_ltp is None or float(spot_ltp) <= 0:
                 self._logger.warning(
-                    "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=spot_missing",
-                    extra={"event": "CANDIDATE_SNAPSHOT_BUILD_FAILED", "reason": "spot_missing"},
+                    "CANDIDATE_SNAPSHOT_BUILD_FAILED reason=spot_missing underlying=%s spot_canonical=%s spot_ltp=%s",
+                    underlying,
+                    spot_canonical,
+                    spot_ltp,
+                    extra={"event": "CANDIDATE_SNAPSHOT_BUILD_FAILED", "reason": "spot_missing", "underlying": underlying, "spot_canonical": spot_canonical, "spot_ltp": spot_ltp},
                 )
                 return [], True
-            atm = int(atm_strike or round(float(spot_snapshot.ltp) / 50.0) * 50)
+            atm = int(atm_strike or round(float(spot_ltp) / 50.0) * 50)
             side = str(direction_bias).upper()
             if side not in {"CE", "PE"}:
                 side = "CE"
@@ -1904,6 +1909,21 @@ class StrategyRunner:
                 atm_strike=atm_strike,
                 underlying=underlying,
             )
+            if refresh_pending or not built:
+                fallback_candidate = self._build_single_candidate_from_signal(
+                    signal=signal,
+                    metadata=metadata,
+                    option_side=cast(Literal["CE", "PE"], option_side),
+                )
+                if fallback_candidate is not None:
+                    metadata["candidate_snapshots"] = [fallback_candidate]
+                    metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
+                    self._logger.info(
+                        "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING symbol=%s",
+                        signal.symbol,
+                        extra={"event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING", "symbol": signal.symbol},
+                    )
+                    return dataclasses.replace(signal, metadata=metadata), None
             if refresh_pending:
                 return None, "candidate_refresh_pending"
             if not built:
@@ -1936,8 +1956,12 @@ class StrategyRunner:
             ltp = float(snapshot.ltp) if snapshot.ltp is not None and float(snapshot.ltp) > 0 else None
             if ltp is None:
                 return None
-            bid = float(snapshot.bid) if snapshot.bid is not None and float(snapshot.bid) > 0 else ltp
-            ask = float(snapshot.ask) if snapshot.ask is not None and float(snapshot.ask) > 0 else ltp
+            bid = float(snapshot.bid) if snapshot.bid is not None and float(snapshot.bid) > 0 else 0.0
+            ask = float(snapshot.ask) if snapshot.ask is not None and float(snapshot.ask) > 0 else 0.0
+            has_bid_ask = bid > 0 and ask > 0
+            if not has_bid_ask:
+                bid = ltp
+                ask = ltp
             strike_match = re.search(r"(\d{5})(CE|PE)$", str(signal.symbol).upper())
             parsed_strike = int(strike_match.group(1)) if strike_match is not None else 0
             strike = int(metadata.get("strike") or parsed_strike or metadata.get("atm_strike") or 0)
@@ -1962,7 +1986,8 @@ class StrategyRunner:
                 "spread_pct": spread_pct,
                 "tick_age_s": tick_age_s,
                 "real_ticks_last_60s": real_ticks_last_60s,
-                "tradable_quote": bool(snapshot.tradable_quote or ltp > 0),
+                "tradable_quote": bool(snapshot.tradable_quote and has_bid_ask),
+                "ltp_only_fallback": not has_bid_ask,
                 "source": str(snapshot.source or "signal_snapshot"),
             }
         except Exception as exc:  # noqa: BLE001
@@ -3906,7 +3931,12 @@ class StrategyRunner:
         )
 
         lot_size = 1
-        if metadata is not None:
+        if self._order_manager is not None and hasattr(self._order_manager, "resolve_lot_size"):
+            try:
+                lot_size = max(1, int(self._order_manager.resolve_lot_size(symbol)))
+            except Exception:
+                lot_size = 1
+        elif metadata is not None:
             raw_lot = metadata.get("lot_size")
             if isinstance(raw_lot, (int, float)):
                 lot_size = max(1, int(raw_lot))

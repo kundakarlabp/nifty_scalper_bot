@@ -583,10 +583,18 @@ class WebSocketManager:
                     and self._connect_started_mono > 0.0
                     and (now - self._connect_started_mono) > self._handshake_timeout
                 ):
-                    self._logger.warning("Condition met: websocket_handshake_timeout")
-                    self._connected.clear()
-                    self._schedule_reconnect("watchdog_handshake_timeout")
-                    continue
+                    recent_tick_age = (now - self._last_tick_mono) if self._last_tick_mono > 0.0 else None
+                    if recent_tick_age is not None and recent_tick_age <= self._stale_threshold:
+                        self._connected.set()
+                        self._state = ConnectionState.CONNECTED
+                        self._stream_health = "healthy"
+                        self._circuit.failures = 0
+                        self._circuit.open_until_mono = 0.0
+                    else:
+                        self._logger.warning("Condition met: websocket_handshake_timeout")
+                        self._connected.clear()
+                        self._schedule_reconnect("watchdog_handshake_timeout")
+                        continue
 
                 if self._connected.is_set() and self._last_pong_mono > 0.0:
                     # Use max(pong, tick) as activity indicator.
@@ -760,12 +768,13 @@ class WebSocketManager:
         now = time.monotonic()
         self._last_tick_mono = now
         self._last_pong_mono = now
-        if not self._connected.is_set() or self._state != ConnectionState.CONNECTED:
-            self._connected.set()
-            self._state = ConnectionState.CONNECTED
-            self._stream_health = "healthy"
-            self._circuit.failures = 0
-            self._circuit.open_until_mono = 0.0
+        restored = (not self._connected.is_set() or self._state != ConnectionState.CONNECTED)
+        self._connected.set()
+        self._state = ConnectionState.CONNECTED
+        self._stream_health = "healthy"
+        self._circuit.failures = 0
+        self._circuit.open_until_mono = 0.0
+        if restored:
             self._logger.info(
                 "WEBSOCKET_CONNECTION_RESTORED_BY_TICK",
                 extra={"event": "WEBSOCKET_CONNECTION_RESTORED_BY_TICK"},

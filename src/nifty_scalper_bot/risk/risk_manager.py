@@ -869,30 +869,21 @@ class RiskManager:
         self._lot_size_symbol = symbol
 
     def _resolve_lot_size(self, symbol: str | None) -> int:
-        """Resolve lot size with robust fallbacks."""
-        # 1. Try the wired lookup function (Primary)
-        lookup = self._lot_size_lookup
-        target_symbol = symbol or self._lot_size_symbol
-
-        if lookup is not None and callable(lookup) and target_symbol:
-            try:
-                resolved = lookup(target_symbol)
-                lot_size = int(resolved)
-                if lot_size > 0:
-                    return lot_size
-            except Exception as e:
-                self._logger.exception("Unhandled exception in risk manager", exc_info=True)
-                raise  # Fallthrough to settings
-
-        # 2. Fallback to Settings (Safety Net)
-        # Your settings.py already defaults contract_lot_size to 75. Use it!
-        if hasattr(self.settings, "contract_lot_size"):
-            default_size = int(self.settings.contract_lot_size)
-            if default_size > 0:
-                return default_size
-
-        # 3. Last Resort Hardcoded Fallback
-        return 75
+        """Resolve lot size. Args: symbol. Returns: lot size. Raises: Exception."""
+        lookup = self._lot_size_lookup if callable(self._lot_size_lookup) else None
+        target_symbol = symbol or self._lot_size_symbol or "NIFTY"
+        try:
+            lot_size, source = resolve_lot_size_with_source(target_symbol, lookup)
+            self._logger.info(
+                "LOT_SIZE_RESOLVED underlying=%s lot_size=%s source=%s",
+                "NIFTY" if "NIFTY" in str(target_symbol).upper() else target_symbol,
+                lot_size,
+                source,
+            )
+            return lot_size
+        except Exception as e:
+            self._logger.error("Failure in _resolve_lot_size: %s", e, exc_info=True)
+            raise
 
     def record_fill(self, realized_pnl: float) -> None:  # pragma: no cover
         """Update realised PnL state and consecutive loss counters."""
