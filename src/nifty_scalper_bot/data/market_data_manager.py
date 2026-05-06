@@ -3547,25 +3547,27 @@ class MarketDataManager:
         atm_pe = str(requirements.get("atm_pe") or "")
         options = [str(s) for s in requirements.get("options") or []]
 
-        missing_hard: list[str] = []
-        if futures and bars.get(futures, 0) < min_bars:
-            missing_hard.append("futures")
-        if atm_ce and bars.get(atm_ce, 0) < min_bars:
-            missing_hard.append("atm_ce")
-        if atm_pe and bars.get(atm_pe, 0) < min_bars:
-            missing_hard.append("atm_pe")
+        strict_atm_ce_ready = bool(atm_ce and bars.get(atm_ce, 0) >= min_bars)
+        strict_atm_pe_ready = bool(atm_pe and bars.get(atm_pe, 0) >= min_bars)
+        selected_ce = atm_ce if strict_atm_ce_ready else next(
+            (sym for sym in options if sym.endswith("CE") and bars.get(sym, 0) >= min_bars),
+            "",
+        )
+        selected_pe = atm_pe if strict_atm_pe_ready else next(
+            (sym for sym in options if sym.endswith("PE") and bars.get(sym, 0) >= min_bars),
+            "",
+        )
+        ce_ready = bool(selected_ce)
+        pe_ready = bool(selected_pe)
 
-        if not atm_ce or not atm_pe:
-            ce_ready = any(
-                sym.endswith("CE") and bars.get(sym, 0) >= min_bars for sym in options
-            )
-            pe_ready = any(
-                sym.endswith("PE") and bars.get(sym, 0) >= min_bars for sym in options
-            )
-            if not ce_ready:
-                missing_hard.append("options_ce")
-            if not pe_ready:
-                missing_hard.append("options_pe")
+        missing_hard: list[str] = []
+        if not ce_ready:
+            missing_hard.append("options_ce")
+        if not pe_ready:
+            missing_hard.append("options_pe")
+        missing_soft: list[str] = []
+        if futures and bars.get(futures, 0) < min_bars:
+            missing_soft.append("futures")
 
         spot_ready = True
         if spot:
@@ -3574,9 +3576,14 @@ class MarketDataManager:
             except Exception:
                 spot_ready = False
         return {
-            "hard_ready": len(missing_hard) == 0,
+            "hard_ready": bool(spot_ready and ce_ready and pe_ready),
             "spot_ready": spot_ready,
             "missing_hard": missing_hard,
+            "missing_soft": missing_soft,
+            "selected_ce": selected_ce or None,
+            "selected_pe": selected_pe or None,
+            "strict_atm_ce_ready": strict_atm_ce_ready,
+            "strict_atm_pe_ready": strict_atm_pe_ready,
         }
 
     def readiness_state_snapshot(self) -> dict[str, Any]:
@@ -7372,6 +7379,8 @@ class MarketDataManager:
         value = (
             tick.get("received_at")
             or tick.get("wallclock")
+            or tick.get("exchange_timestamp")
+            or tick.get("last_trade_time")
             or tick.get("timestamp")
             or tick.get("ts")
             or tick.get("ts_ms")

@@ -1930,6 +1930,7 @@ class BotContext:
     data_observation_ready: bool = False
     data_pipeline_ready: bool = False
     data_hard_ready: bool = False
+    mdm_strict_hard_ready: bool = False
     spot_ready: bool = False
     evaluation_ready: bool = False
     runner_task: asyncio.Task[Any] | None = None
@@ -6626,8 +6627,12 @@ def _sync_mdm_bars_to_runner(ctx: BotContext, symbol: str, *, min_bars: int) -> 
                 bars = list(fn(symbol) or [])
             except Exception:
                 bars = []
+    existing = _runner_bar_count(ctx, symbol)
+    if existing >= min_bars:
+        return 0
+    missing = max(0, min_bars - existing)
     ingested = 0
-    for bar in bars:
+    for bar in bars[-missing:]:
         try:
             payload = dict(bar)
             payload["symbol"] = symbol
@@ -6636,7 +6641,11 @@ def _sync_mdm_bars_to_runner(ctx: BotContext, symbol: str, *, min_bars: int) -> 
         except Exception:
             continue
     if ingested:
-        LOGGER.info(
+        log_throttled(
+            LOGGER,
+            logging.INFO,
+            "RUNNER_MDM_BAR_SYNC",
+            60.0,
             "RUNNER_MDM_BAR_SYNC symbol=%s ingested=%d min_bars=%d",
             symbol,
             ingested,
@@ -6646,7 +6655,7 @@ def _sync_mdm_bars_to_runner(ctx: BotContext, symbol: str, *, min_bars: int) -> 
     return ingested
 
 
-def _best_ready_option(
+def _best_fresh_option(
     ctx: BotContext, symbols: list[str], *, side: str, min_bars: int, max_age_s: float = 60.0
 ) -> str | None:
     """Pick best ready CE/PE option from candidates. Args: ctx/symbols/side/min_bars/max_age_s. Returns: symbol|None. Raises: none."""
@@ -6681,6 +6690,39 @@ def _best_ready_option(
             best_score = score
             best_symbol = sym
     return best_symbol if best_score >= 3 else None
+
+
+def _best_hydrated_option(
+    ctx: BotContext, symbols: list[str], *, side: str, min_bars: int
+) -> str | None:
+    """Pick option candidate with hydrated bars. Args: ctx/symbols/side/min_bars. Returns: symbol|None. Raises: none."""
+    side = side.upper()
+    candidates = [s for s in symbols if str(s).upper().endswith(side)]
+    best_symbol: str | None = None
+    best_count = -1
+    for sym in candidates:
+        try:
+            bars_count = (
+                len(list(ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or []))
+                if ctx.market_data_manager is not None
+                else 0
+            )
+        except Exception:
+            bars_count = 0
+        if bars_count < min_bars:
+            _sync_mdm_bars_to_runner(ctx, sym, min_bars=min_bars)
+            try:
+                bars_count = (
+                    len(list(ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or []))
+                    if ctx.market_data_manager is not None
+                    else bars_count
+                )
+            except Exception:
+                pass
+        if bars_count >= min_bars and bars_count > best_count:
+            best_count = bars_count
+            best_symbol = sym
+    return best_symbol
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
@@ -9252,25 +9294,53 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     "SOFT_READINESS_MISSING missing=futures action=continue_with_spot_option_context",
                                     extra={"event": "SOFT_READINESS_MISSING", "missing": "futures", "action": "continue_with_spot_option_context"},
                                 )
-                            ready_ce = _best_ready_option(ctx, list(readiness_state.get("requirements", {}).get("options", []) or []), side="CE", min_bars=20)
-                            ready_pe = _best_ready_option(ctx, list(readiness_state.get("requirements", {}).get("options", []) or []), side="PE", min_bars=20)
-                            option_ticks_ready = bool(ready_ce is not None and ready_pe is not None)
+                            option_symbols = list(readiness_state.get("requirements", {}).get("options", []) or [])
+                            quote_ce = _best_fresh_option(ctx, option_symbols, side="CE", min_bars=20)
+                            quote_pe = _best_fresh_option(ctx, option_symbols, side="PE", min_bars=20)
+                            hydrated_ce = _best_hydrated_option(ctx, option_symbols, side="CE", min_bars=20)
+                            hydrated_pe = _best_hydrated_option(ctx, option_symbols, side="PE", min_bars=20)
+                            option_ticks_ready = bool(quote_ce is not None and quote_pe is not None)
                             futures_ready = "futures" not in set(missing_soft)
-                            atm_ce_ready = ready_ce is not None
-                            atm_pe_ready = ready_pe is not None
+                            atm_ce_ready = quote_ce is not None
+                            atm_pe_ready = quote_pe is not None
                             req_atm_ce = readiness_state.get("requirements", {}).get("atm_ce")
                             req_atm_pe = readiness_state.get("requirements", {}).get("atm_pe")
-                            if ready_ce and req_atm_ce and ready_ce != req_atm_ce:
-                                LOGGER.info("ATM_CE_SUBSTITUTED_WITH_READY_OPTION atm_ce=%s ready_ce=%s", req_atm_ce, ready_ce)
-                            if ready_pe and req_atm_pe and ready_pe != req_atm_pe:
-                                LOGGER.info("ATM_PE_SUBSTITUTED_WITH_READY_OPTION atm_pe=%s ready_pe=%s", req_atm_pe, ready_pe)
+                            if quote_ce and req_atm_ce and quote_ce != req_atm_ce:
+                                LOGGER.info("ATM_CE_SUBSTITUTED_WITH_READY_OPTION atm_ce=%s ready_ce=%s", req_atm_ce, quote_ce)
+                            if quote_pe and req_atm_pe and quote_pe != req_atm_pe:
+                                LOGGER.info("ATM_PE_SUBSTITUTED_WITH_READY_OPTION atm_pe=%s ready_pe=%s", req_atm_pe, quote_pe)
                             runner_running = _runner_is_running(ctx.strategy_runner)
                             ctx.spot_ready = bool(spot_ready)
                             ctx.data_observation_ready = bool(spot_ready or ws_quote_proof or ws_ltp_proof)
-                            ctx.evaluation_ready = bool(runner_running and len(getattr(ctx.strategy_runner, "_active_symbols", set()) or []) > 0 if ctx.strategy_runner is not None else False)
+                            enough_runner_symbols = bool(
+                                len(getattr(ctx.strategy_runner, "_active_symbols", set()) or []) > 0
+                                if ctx.strategy_runner is not None
+                                else False
+                            )
+                            ctx.evaluation_ready = bool(
+                                runner_running
+                                and (bool(hydrated_ce) or bool(hydrated_pe) or enough_runner_symbols)
+                            )
                             ctx.data_hard_ready = bool(spot_ready and atm_ce_ready and atm_pe_ready)
-                            ctx.data_pipeline_ready = bool(hard_ready)
-                            ctx.trading_ready = bool(ctx.data_hard_ready and mode == "LIVE" and runner_running)
+                            LOGGER.info(
+                                "OPTION_QUOTE_READY selected_ce=%s selected_pe=%s",
+                                quote_ce,
+                                quote_pe,
+                                extra={"event": "OPTION_QUOTE_READY", "selected_ce": quote_ce, "selected_pe": quote_pe},
+                            )
+                            LOGGER.info(
+                                "OPTION_HISTORY_READY selected_ce=%s selected_pe=%s",
+                                hydrated_ce,
+                                hydrated_pe,
+                                extra={"event": "OPTION_HISTORY_READY", "selected_ce": hydrated_ce, "selected_pe": hydrated_pe},
+                            )
+                            ctx.mdm_strict_hard_ready = bool(hard_ready)
+                            ctx.data_pipeline_ready = bool(ctx.data_hard_ready)
+                            ctx.trading_ready = bool(
+                                ctx.data_hard_ready
+                                and configured_runtime_mode == "LIVE"
+                                and runner_running
+                            )
                             if configured_runtime_mode in {"PAPER", "SHADOW"}:
                                 ctx.live_orders_armed = False
                                 if ctx.strategy_runner is not None:
@@ -10623,5 +10693,3 @@ __all__ = [
     "get_telegram_notifier",
     "get_nifty_expiry",
 ]
-
-# Deployment Fix: Force Update 2026-01-11
