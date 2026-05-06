@@ -6803,10 +6803,12 @@ async def _build_and_hydrate_live_basket_from_spot(
         hydration_max_bars = max(1, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300))
         for symbol in targets:
             try:
-                records = await ctx.market_data_manager.fetch_history(
+                records = await ctx.market_data_manager.hydrate_symbol_history(
                     symbol,
-                    "minute",
-                    hydration_lookback_days,
+                    interval="minute",
+                    days=hydration_lookback_days,
+                    max_bars=hydration_max_bars,
+                    reason="dynamic_option_universe",
                 )
             except Exception:  # noqa: BLE001
                 continue
@@ -8674,18 +8676,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 try:
                                     required_bars = _symbol_history_requirement(ctx)
                                     lookback_minutes = _history_lookback_minutes(required_bars)
-                                    records = await ctx.market_data_manager.fetch_history(
+                                    await ctx.market_data_manager.hydrate_symbol_history(
                                         sym,
-                                        "minute",
-                                        _history_lookback_days(required_bars),
+                                        interval="minute",
+                                        days=_history_lookback_days(required_bars),
+                                        max_bars=required_bars,
+                                        reason="dynamic_option_universe",
                                     )
                                     runner_ingested = 0
-                                    for row in list(records or []):
-                                        if not isinstance(row, dict):
-                                            continue
+                                    bars = ctx.market_data_manager.get_ohlc_bars(sym, limit=required_bars)
+                                    for row in list(bars or []):
                                         bar_data = dict(row)
                                         bar_data["symbol"] = sym
-                                        ctx.market_data_manager.ingest_historical_bar(bar_data)
                                         if (
                                             getattr(ctx, "strategy_runner", None) is not None
                                             and hasattr(ctx.strategy_runner, "ingest_historical_bar")

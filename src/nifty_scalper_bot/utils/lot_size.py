@@ -23,7 +23,7 @@ def resolve_lot_size(symbol: str, lookup: Callable[[str], int] | None = None) ->
             if lot > 0:
                 return lot, 'instrument_dump'
     if 'NIFTY' in normalized_symbol and ('CE' in normalized_symbol or 'PE' in normalized_symbol):
-        return 75, 'fallback'
+        return 65, 'fallback'
     fallback_settings = app_settings.get_settings()
     fallback_lot = int(getattr(fallback_settings, 'contract_lot_size', 0) or 0)
     if fallback_lot > 0:
