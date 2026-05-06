@@ -2585,10 +2585,20 @@ class OrderManager:
         ref = ask if ask > 0 else ltp if ltp > 0 else 1.0
         spread_pct = (spread / ref) * 100.0 if ref > 0 else 999.0
         age_ms = None
-        ts_raw = quote.get("timestamp") or quote.get("received_at")
+        ts_raw = quote.get("received_at") or quote.get("wallclock") or quote.get("exchange_timestamp") or quote.get("timestamp") or quote.get("ts") or quote.get("last_trade_time")
         try:
-            if isinstance(ts_raw, (int, float)):
-                age_ms = max(0.0, (time.time() - float(ts_raw)) * 1000.0)
+            parsed_ts = None
+            if isinstance(ts_raw, datetime):
+                parsed_ts = ts_raw.timestamp()
+            elif isinstance(ts_raw, (int, float)):
+                raw_val = float(ts_raw)
+                parsed_ts = raw_val / 1000.0 if raw_val > 1_000_000_000_000 else raw_val
+            elif isinstance(ts_raw, str) and ts_raw.strip():
+                iso = ts_raw.strip().replace("Z", "+00:00")
+                parsed_dt = datetime.fromisoformat(iso)
+                parsed_ts = parsed_dt.timestamp()
+            if parsed_ts is not None:
+                age_ms = max(0.0, (time.time() - float(parsed_ts)) * 1000.0)
         except Exception:
             age_ms = None
         return {"bid": bid, "ask": ask, "ltp": ltp, "spread": spread, "spread_pct": spread_pct, "bid_qty": bid_qty, "ask_qty": ask_qty, "depth_qty": bid_qty + ask_qty, "age_ms": age_ms}
@@ -2632,9 +2642,13 @@ class OrderManager:
             if plan.side == "BUY":
                 if qd["ask"] > 0:
                     return self._round_to_tick(qd["ask"] + tick_size, tick_size)
+                if qd["ltp"] > 0:
+                    return self._round_to_tick(qd["ltp"] * 1.003, tick_size)
             if plan.side == "SELL":
                 if qd["bid"] > 0:
                     return self._round_to_tick(max(tick_size, qd["bid"] - tick_size), tick_size)
+                if qd["ltp"] > 0:
+                    return self._round_to_tick(max(tick_size, qd["ltp"] * 0.997), tick_size)
         if plan.entry_price and plan.entry_price > 0:
             return self._round_to_tick(float(plan.entry_price), tick_size)
         return None
@@ -10579,42 +10593,19 @@ class OrderManager:
 
     def _lot_size_for_symbol(self, symbol: str) -> int:
         lookup = self._lot_lookup()
-        if lookup is None:
-            raise OrderPlacementError("Instrument resolver with lot sizes required")
         normalized_symbol = normalize_symbol(symbol) or str(symbol).strip().upper()
-        candidates = [normalized_symbol]
-        if ":" in normalized_symbol:
-            candidates.append(normalized_symbol.split(":", 1)[-1])
         try:
-            resolved = None
-            for candidate in candidates:
-                resolved = lookup(candidate)
-                if resolved is not None:
-                    break
-        except Exception as exc:  # noqa: BLE001 - surface resolver error
+            lot_size, source = resolve_lot_size_with_source(normalized_symbol, lookup)
+        except Exception as exc:  # noqa: BLE001
             self._logger.debug("lot_size_lookup_failed", exc_info=True)
             raise OrderPlacementError("Failed to resolve lot size") from exc
-        if resolved is None and "NIFTY" in normalized_symbol and ("CE" in normalized_symbol or "PE" in normalized_symbol):
-            try:
-                fallback_settings = app_settings.get_settings()
-                fallback_lot = int(getattr(fallback_settings, "contract_lot_size", 0) or 0)
-                if fallback_lot > 0:
-                    resolved = fallback_lot
-            except Exception:  # pragma: no cover - defensive
-                resolved = None
-        if resolved is None:
-            raise OrderPlacementError("No lot size available for symbol")
-        try:
-            lot_size = int(resolved)
-        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
-            raise OrderPlacementError("Invalid lot size returned by resolver") from exc
-        if lot_size <= 0:
-            raise OrderPlacementError("Lot size must be positive")
         self._logger.info(
-            "LOT_SIZE_RESOLVED symbol=%s lot_size=%s",
+            "LOT_SIZE_RESOLVED underlying=%s symbol=%s lot_size=%s source=%s",
+            "NIFTY" if "NIFTY" in normalized_symbol else normalized_symbol,
             normalized_symbol,
             lot_size,
-            extra={"event": "LOT_SIZE_RESOLVED", "symbol": normalized_symbol, "lot_size": lot_size},
+            source,
+            extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY" if "NIFTY" in normalized_symbol else normalized_symbol, "symbol": normalized_symbol, "lot_size": lot_size, "source": source},
         )
         return lot_size
 
