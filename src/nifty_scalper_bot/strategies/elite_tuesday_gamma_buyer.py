@@ -19,7 +19,7 @@ from nifty_scalper_bot.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 BaseEliteStrategy = EliteStrategy
-NIFTY_LOT_SIZE = 65
+NIFTY_LOT_SIZE = int(os.getenv("NIFTY_LOT_SIZE", "65"))
 MAX_RISK_PER_TRADE = 0.006
 MAX_DAILY_RISK = 0.02
 MAX_CAPITAL_DEPLOYMENT = 0.15
