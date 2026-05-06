@@ -2693,12 +2693,12 @@ class OrderManager:
         allow_market_entry: bool = False,
     ) -> str | None:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
-        # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY changed to 75 on 31 Jan 2025.
+        # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
         # Use dynamic resolution with a safe fallback to reject mismatched quantities.
         try:
             _lot = self._lot_size_for_symbol(symbol)
         except Exception:
-            _lot = 75  # current NIFTY lot size as safe fallback
+            _lot = 65  # current NIFTY lot size as safe fallback
         if _lot > 0 and quantity % _lot != 0:
             self._logger.error(
                 f"🛑 INVALID QTY: {quantity} is not a multiple of {_lot} (lot size for {symbol}). Order aborted."

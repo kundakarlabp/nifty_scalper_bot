@@ -1144,7 +1144,7 @@ class StrategyRunner:
         if running:
             self._subscribe_symbol(normalized)
 
-        self._prehydrate_symbol_history(normalized)
+        self._hydrate_from_mdm_cache(normalized)
 
         self._logger.info("Tracking symbol %s", normalized)
 
@@ -1157,106 +1157,72 @@ class StrategyRunner:
         )
 
     def _prehydrate_symbol_history(self, symbol: str) -> None:
-        """Fetch startup candles for symbol hydration and indicator readiness."""
+        """Hydrate startup candles from cache only. Args: symbol. Returns: None. Raises: None."""
+        self._hydrate_from_mdm_cache(symbol)
+
+    def _get_mdm_bars(self, symbol: str, limit: int) -> list[dict[str, Any]]:
+        """Fetch cached bars from MDM/DataHub only. Args: symbol, limit. Returns: rows. Raises: None."""
+        for source in (self._market_data, self._data_hub):
+            if source is None:
+                continue
+            for name in ("get_ohlc_bars", "get_ohlc", "get_recent_bars"):
+                fn = getattr(source, name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    try:
+                        bars = fn(symbol, limit=limit)
+                    except TypeError:
+                        bars = fn(symbol)
+                    if bars:
+                        return [dict(row) for row in list(bars)[-limit:]]
+                except Exception:
+                    continue
+        return []
+
+    def _request_mdm_hydration(self, symbol: str, min_bars: int) -> None:
+        """Request async hydration from owner service. Args: symbol/min_bars. Returns: None. Raises: None."""
+        for source in (self._market_data, self._data_hub):
+            fn = getattr(source, "request_hydration", None)
+            if callable(fn):
+                try:
+                    fn(symbol, min_bars=min_bars, reason="runner_missing_bars")
+                    return
+                except Exception:
+                    pass
+        log_throttled(
+            self._logger,
+            f"runner_waiting_for_mdm_hydration:{symbol}",
+            f"RUNNER_WAITING_FOR_MDM_HYDRATION symbol={symbol} min_bars={min_bars}",
+            interval_sec=60.0,
+            level=logging.INFO,
+            extra={"event": "RUNNER_WAITING_FOR_MDM_HYDRATION", "symbol": symbol, "min_bars": min_bars},
+        )
+
+    def _hydrate_from_mdm_cache(self, symbol: str) -> int:
+        """Hydrate symbol from cached MDM bars. Args: symbol. Returns: count. Raises: None."""
         target = self._required_bars_for_symbol(symbol)
-        rows = self._hydrate_missing_bars(symbol, target)
-        if not rows:
-            self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
-            return
-        rows_ingested = 0
+        rows = self._get_mdm_bars(symbol, target)
+        ingested = 0
         for row in rows:
-            payload: dict[str, Any] = {"symbol": symbol}
-            if isinstance(row, dict):
-                payload.update(row)
-            elif isinstance(row, (list, tuple)) and len(row) >= 6:
-                payload.update(
-                    {
-                        "timestamp": row[0],
-                        "open": row[1],
-                        "high": row[2],
-                        "low": row[3],
-                        "close": row[4],
-                        "volume": row[5],
-                    }
-                )
-            else:
-                continue
+            payload = dict(row)
             payload["symbol"] = symbol
-            timestamp = payload.get("timestamp") or payload.get("date")
-            if timestamp is None:
-                continue
-            payload["timestamp"] = timestamp
-            try:
-                payload["open"] = float(payload["open"])
-                payload["high"] = float(payload["high"])
-                payload["low"] = float(payload["low"])
-                payload["close"] = float(payload["close"])
-                payload["volume"] = int(payload.get("volume", 0) or 0)
-            except (KeyError, TypeError, ValueError):
-                continue
             self.ingest_historical_bar(payload)
-            rows_ingested += 1
-        runner_history_count = len(self._indicator_engine.get_history(symbol) or [])
-        ready = runner_history_count >= target and not self._has_session_candle_gaps(symbol)
-        self._logger.info(
-            "RUNNER_PREHYDRATE_INGESTED symbol=%s rows_fetched=%d rows_ingested=%d runner_history_count=%d target=%d ready=%s",
-            symbol,
-            len(rows),
-            rows_ingested,
-            runner_history_count,
-            target,
-            ready,
-            extra={
-                "event": "RUNNER_PREHYDRATE_INGESTED",
-                "symbol": symbol,
-                "rows_fetched": len(rows),
-                "rows_ingested": rows_ingested,
-                "runner_history_count": runner_history_count,
-                "target": target,
-                "ready": ready,
-            },
-        )
-        mdm_history_count = 0
-        try:
-            if self._market_data is not None and hasattr(self._market_data, "get_ohlc_bars"):
-                mdm_history_count = len(self._market_data.get_ohlc_bars(symbol) or [])
-        except Exception:
-            mdm_history_count = 0
-        self._logger.info(
-            "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d runner_history_count=%d mdm_history_count=%d source=%s",
-            symbol,
-            None,
-            rows_ingested,
-            runner_history_count,
-            mdm_history_count,
-            "dynamic_hydration",
-            extra={
-                "event": "RUNNER_HISTORY_INGESTED",
-                "symbol": symbol,
-                "token": None,
-                "bars_ingested": rows_ingested,
-                "runner_history_count": runner_history_count,
-                "mdm_history_count": mdm_history_count,
-                "source": "dynamic_hydration",
-            },
-        )
-        if len(rows) > 0 and rows_ingested == 0:
-            self._logger.warning(
-                "RUNNER_PREHYDRATE_INGEST_FAILED symbol=%s rows_fetched=%d reason=%s",
-                symbol,
-                len(rows),
-                "no_valid_rows",
-                extra={
-                    "event": "RUNNER_PREHYDRATE_INGEST_FAILED",
-                    "symbol": symbol,
-                    "rows_fetched": len(rows),
-                    "reason": "no_valid_rows",
-                },
-            )
-        if ready:
+            ingested += 1
+        if ingested >= target:
             self._set_symbol_hydration_state(symbol, SymbolState.READY)
-            return
-        self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+        else:
+            self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+            self._request_mdm_hydration(symbol, target)
+        log_throttled(
+            self._logger,
+            f"runner_mdm_cache_hydration:{symbol}",
+            f"RUNNER_MDM_CACHE_HYDRATION symbol={symbol} ingested={ingested} target={target}",
+            interval_sec=60.0,
+            level=logging.INFO,
+            extra={"event": "RUNNER_MDM_CACHE_HYDRATION", "symbol": symbol, "ingested": ingested, "target": target},
+        )
+        return ingested
 
     def _should_log_throttled(self, key: str, interval_s: float = 30.0) -> bool:
         """Decide whether a throttled log should emit. Args: key/interval_s. Returns: bool. Raises: None."""
@@ -1977,7 +1943,7 @@ class StrategyRunner:
             parsed_strike = int(strike_match.group(1)) if strike_match is not None else 0
             strike = int(metadata.get("strike") or parsed_strike or metadata.get("atm_strike") or 0)
             atm_strike = int(metadata.get("atm_strike") or strike)
-            spread_pct = ((ask - bid) / ltp) if ltp > 0 else 0.0
+            spread_pct = ((ask - bid) / ltp) if has_bid_ask and ltp > 0 else None
             tick_age_raw = getattr(snapshot, "tick_age_s", None)
             tick_age_s = float(tick_age_raw) if tick_age_raw is not None else 0.0
             tick_age_s = max(0.0, tick_age_s)
@@ -3123,54 +3089,34 @@ class StrategyRunner:
             if gap_count > 1:
                 reason = "repeated_missing_candles" if recent_tick else "no_recent_tick_for_gap_assessment"
                 log_level = logging.INFO if is_option and recent_tick else logging.WARNING
-                self._logger.log(
+                log_throttled(
                     log_level,
-                    "SOFT_DATA_ISSUE symbol=%s reason=%s source=%s age_s=%s",
-                    symbol,
-                    reason,
-                    "candle_gap_detector",
-                    tick_age_s,
-                    extra={
-                        "event": "SOFT_DATA_ISSUE",
-                        "symbol": symbol,
-                        "reason": reason,
-                        "source": "candle_gap_detector",
-                        "age_s": tick_age_s,
-                        "details": {"gaps": gap_count},
-                        "gaps": gap_count,
-                    },
+                    f"soft_data_issue:{symbol}",
+                    f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
+                    interval_sec=60.0,
+                    level=log_level,
+                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
                 )
-                if not (is_option and recent_tick):
+                if gap_count > 1 and recent_tick:
                     return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
             else:
                 reason = "single_missing_candle" if recent_tick else "no_recent_tick_for_gap_assessment"
-                self._logger.info(
-                    "SOFT_DATA_ISSUE symbol=%s reason=%s source=%s age_s=%s",
-                    symbol,
-                    reason,
-                    "candle_gap_detector",
-                    tick_age_s,
-                    extra={
-                        "event": "SOFT_DATA_ISSUE",
-                        "symbol": symbol,
-                        "reason": reason,
-                        "source": "candle_gap_detector",
-                        "age_s": tick_age_s,
-                        "details": {"gaps": gap_count},
-                    },
+                log_throttled(
+                    self._logger,
+                    f"soft_data_issue:{symbol}",
+                    f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                    extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}},
                 )
-                if not (is_option and recent_tick):
+                if gap_count > 1 and recent_tick:
                     return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
 
         if valid_vwap and valid_volume:
-            streak = int(self._hydration_ready_streak.get(symbol, 0)) + 1
-            self._hydration_ready_streak[symbol] = streak
-            if prev_state == SymbolState.READY or streak >= 2:
-                return self._set_symbol_hydration_state(symbol, SymbolState.READY)
-
-        self._hydration_ready_streak[symbol] = 0
-        # Soft degrade on transient VWAP/volume issues; avoid repeated hard resets.
-        return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
+            self._hydration_ready_streak[symbol] = int(self._hydration_ready_streak.get(symbol, 0)) + 1
+        else:
+            self._hydration_ready_streak[symbol] = max(1, int(self._hydration_ready_streak.get(symbol, 0)))
+        return self._set_symbol_hydration_state(symbol, SymbolState.READY)
 
     def _ensure_symbol_vwap_state(self, symbol: str, now: datetime) -> dict[str, Any]:
         """Return session-scoped VWAP accumulator for symbol."""
@@ -3887,12 +3833,28 @@ class StrategyRunner:
         return {"weights": dict(self._option_score_weights), "delta_target": float(self._option_delta_target), "max_iv_rank": float(self._option_max_iv_rank), "min_liquidity": float(self._option_min_liquidity), "side": side, }
 
     def _get_spot_tick(self) -> dict[str, Any] | None:
-        """Resilient spot tick fetcher checking canonical variants."""
-        if not self._market_data:
-            return None
-        tick = self._market_data.get_latest_tick("NSE:NIFTY")
-        if tick:
-            return tick
+        """Resilient spot tick fetcher with aliases and snapshot fallback."""
+        aliases = ("NSE:NIFTY", "NIFTY", "NIFTY50", "NSE:NIFTY 50")
+        for alias in aliases:
+            if self._market_data:
+                tick = self._market_data.get_latest_tick(alias)
+                if tick:
+                    return tick
+            if self._data_hub:
+                tick = getattr(self._data_hub, "get_latest_tick", lambda *_: None)(alias)
+                if tick:
+                    return tick
+                tick = getattr(self._data_hub, "get_quote", lambda *_: None)(alias)
+                if tick:
+                    return tick
+        if self._market_data and hasattr(self._market_data, "get_symbol_snapshot"):
+            snap = self._market_data.get_symbol_snapshot("NSE:NIFTY")
+            if snap:
+                return {"symbol": "NSE:NIFTY", "ltp": snap.get("ltp") or snap.get("close"), "received_at": snap.get("received_at") or snap.get("timestamp"), "source": "market_data_snapshot"}
+        if self._market_data and hasattr(self._market_data, "get_cached_ltp"):
+            ltp = self._market_data.get_cached_ltp("NSE:NIFTY", max_age_seconds=300, require_ws=False)
+            if ltp:
+                return {"symbol": "NSE:NIFTY", "ltp": ltp, "received_at": time.time(), "source": "market_data_cached_ltp"}
         return None
 
     def _get_spot_price(self) -> float:
@@ -4881,40 +4843,22 @@ class StrategyRunner:
                 self._logger.warning("⚠️ Backfill skipped: No active symbols found.")
                 return
 
-            # Determine Data Source
-            source = None
-            if (
-                hasattr(self, "_data_hub")
-                and self._data_hub
-                and hasattr(self._data_hub, "fetch_history")
-            ):
-                source = self._data_hub
-            elif hasattr(self, "_orchestrator") and self._orchestrator:
-                source = self._orchestrator
-
-            if not source:
-                return
-
-            # 3. SEQUENTIAL FETCH
             for symbol in targets:
                 try:
-                    # [FIX] Added interval="minute" to fix TypeError
-                    history = await source.fetch_history(
-                        symbol, interval="minute", days=5
-                    )
-
-                    if history:
-                        for bar_data in history:
+                    target = self._required_bars_for_symbol(symbol)
+                    rows = self._get_mdm_bars(symbol, target)
+                    if rows:
+                        for bar_data in rows:
                             self.ingest_historical_bar(bar_data)
                             total_bars += 1
-                        self._set_symbol_hydration_state(symbol, SymbolState.READY)
-                        self._logger.info(
-                            f"✅ Fallback backfill: Ingested {len(history)} bars for {symbol}"
-                        )
+                        if len(rows) >= target:
+                            self._set_symbol_hydration_state(symbol, SymbolState.READY)
+                        else:
+                            self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
+                            self._request_mdm_hydration(symbol, target)
                     else:
                         self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
-
-                    await asyncio.sleep(0.5)
+                        self._request_mdm_hydration(symbol, target)
 
                 except Exception as e:
                     self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
@@ -4930,104 +4874,15 @@ class StrategyRunner:
 
     def _hydrate_missing_bars(self, symbol: str, min_bars: int) -> list[dict[str, Any]]:
         """Fetch missing candles for *symbol* and return normalized OHLC bars."""
-        needed_bars = max(0, min_bars - len(self._indicator_engine.get_history(symbol)))
-        last_bar_ts = self._last_bar_ts.get(symbol)
-        if needed_bars <= 0:
-            return []
-        if last_bar_ts and self._hydration_log_bar_cache.get(symbol) != last_bar_ts:
-            self._hydration_log_bar_cache[symbol] = last_bar_ts
-            self._logger.info(
-                "Hydrating historical data",
-                extra={
-                    "symbol": symbol,
-                    "needed_bars": needed_bars,
-                    "have_bars": len(self._indicator_engine.get_history(symbol)),
-                },
-            )
-        if self._main_loop is None:
-            return []
-        fetch_factory: Callable[[], Any] | None = None
-        if self._data_hub and hasattr(self._data_hub, "fetch_history"):
-            fetch_factory = lambda: self._data_hub.fetch_history(
-                symbol, interval="minute", days=5
-            )
-        elif self._orchestrator and hasattr(self._orchestrator, "fetch_history"):
-            fetch_factory = lambda: self._orchestrator.fetch_history(
-                symbol, interval="minute", days=5
-            )
-        if fetch_factory is None:
-            return []
-        attempts = int(self._hydrate_failures.get(symbol, 0))
-        try:
-            rows = asyncio.run_coroutine_threadsafe(
-                fetch_factory(),
-                self._main_loop,
-            ).result(timeout=5.0)
-        except Exception as exc:  # noqa: BLE001
-            self._hydrate_failures[symbol] = attempts + 1
-            time_module.sleep(
-                min(4.0, 0.25 * (2**attempts))
-            )  # bounded exponential backoff
-            self._logger.warning(
-                "Historical hydration unavailable",
-                extra={
-                    "event": "indicator_hydration_failed",
-                    "symbol": symbol,
-                    "error": str(exc),
-                },
-            )
-            return self._load_history_cache(symbol)
-        normalized: list[dict[str, Any]] = []
-        seen_ts: set[datetime] = set()
-        for row in rows or []:
-            bar = normalize_history_row(symbol, row, source="historical")
-            if bar is None:
-                continue
-            ts = bar["timestamp"]
-            if ts in seen_ts:
-                continue
-            seen_ts.add(ts)
-            normalized.append(bar)
-        normalized.sort(key=lambda row: cast(datetime, row["timestamp"]))
-        if normalized:
-            self._hydrate_failures[symbol] = 0
-            self._write_history_cache(symbol, normalized)
-        else:
-            normalized = self._load_history_cache(symbol)
-
-        if len(normalized) < self._required_candles:
+        normalized = self._get_mdm_bars(symbol, min_bars)
+        for row in normalized:
+            payload = dict(row)
+            payload["symbol"] = symbol
+            self.ingest_historical_bar(payload)
+        if len(normalized) < min_bars:
             self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
-            self._warn_symbol_gate(
-                "insufficient_history",
-                symbol,
-                "Hydration excluded due to insufficient candles",
-                reason="insufficient_hydrated_candles",
-                candles=len(normalized),
-                required_candles=self._required_candles,
-            )
+            self._request_mdm_hydration(symbol, min_bars)
             return []
-        if self._data_hub and hasattr(self._data_hub, "history_freshness"):
-            fresh, meta = self._data_hub.history_freshness(symbol, "minute")
-            if not fresh:
-                self._set_symbol_hydration_state(symbol, SymbolState.HYDRATING)
-                self._warn_symbol_gate(
-                    "insufficient_history",
-                    symbol,
-                    "Hydrated history failed freshness validation",
-                    reason="hydrated_history_stale",
-                    meta=meta,
-                )
-                return []
-        has_gap = any(
-            (
-                cast(datetime, curr["timestamp"]) - cast(datetime, prev["timestamp"])
-            ).total_seconds()
-            > 120
-            for prev, curr in zip(normalized, normalized[1:])
-        )
-        if has_gap:
-            self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
-            return normalized
         self._set_symbol_hydration_state(symbol, SymbolState.READY)
         return normalized
 
@@ -6238,15 +6093,29 @@ class StrategyRunner:
                 #   if not spot_tick: spot_stale = True
                 # The middle line always reset the flag, making the first branch useless.
                 # Correct logic: stale if tick absent OR if timestamp is too old.
-                spot_stale = not spot_tick  # True when None or empty dict
-                spot_ts = (
-                    _extract_float(spot_tick, "timestamp", "ts", "ts_ms")
-                    if spot_tick
-                    else None
-                )
+                spot_stale = not spot_tick
+                spot_ts = None
+                if spot_tick:
+                    spot_ts = _extract_float(
+                        spot_tick,
+                        "received_at",
+                        "wallclock",
+                        "exchange_timestamp",
+                        "timestamp",
+                        "ts",
+                        "ts_ms",
+                        "last_trade_time",
+                    )
                 if spot_ts is not None and spot_ts > 1_000_000_000_000:
                     spot_ts = spot_ts / 1000.0
                 spot_age = time.time() - float(spot_ts) if spot_ts is not None else None
+                if spot_age is None and self._market_data is not None:
+                    try:
+                        since = self._market_data.time_since_last_tick("NSE:NIFTY")
+                        if since is not None:
+                            spot_age = float(since)
+                    except Exception:
+                        spot_age = None
                 spot_max_age = float(
                     os.environ.get(
                         "RUNNER_INDEX_STALE_TICK_SECONDS",
@@ -6257,12 +6126,13 @@ class StrategyRunner:
                     spot_stale = True
 
                 if spot_stale:
-                    if time.monotonic() - self._last_spot_warn_ts > 30:
-                        self._logger.warning(
-                            "Spot data stale — evaluation continuing cautiously",
-                            extra={"event": "spot_stale"},
-                        )
-                        self._last_spot_warn_ts = time.monotonic()
+                    log_throttled(
+                        self._logger,
+                        "spot_stale",
+                        f"SPOT_STALE age_s={spot_age} threshold_s={spot_max_age}",
+                        interval_sec=120.0,
+                        level=logging.WARNING,
+                    )
                     if not self._spot_stale_flag:
                         self._spot_stale_flag = True
                 else:
@@ -7269,17 +7139,20 @@ class StrategyRunner:
         tp_pct = self._vwap_tp_pct
         calculated_sl = price * (1 - sl_pct / 100)
         calculated_tp = price * (1 + tp_pct / 100)
-        self._logger.info(
-            "PREMIUM_SQUEEZE_SIGNAL_EMITTED symbol=%s rsi=%.2f trace_id=%s",
-            symbol,
-            float(rsi),
-            trace_id,
+        self._premium_squeeze_last_signal_ts[underlying] = now_epoch
+        self._reason_last_signal_ts[f"{underlying}:premium_momentum_squeeze"] = now_epoch
+        log_throttled(
+            self._logger,
+            f"premium_squeeze_signal_emitted:{symbol}",
+            f"PREMIUM_SQUEEZE_SIGNAL_EMITTED symbol={symbol} rsi={float(rsi):.2f} trace_id={trace_id}",
+            interval_sec=60.0,
+            level=logging.INFO,
         )
         return Signal(
             action="BUY",
             symbol=symbol,
             quantity=1,
-            confidence=0.0,
+            confidence=0.72,
             reason="premium_momentum_squeeze",
             stop_loss=calculated_sl,
             take_profit=calculated_tp,
@@ -7289,6 +7162,14 @@ class StrategyRunner:
                 "rsi": rsi,
                 "tag": "premium_squeeze",
                 "feature": "premium_momentum_squeeze",
+                "strategy_name": "premium_momentum_squeeze",
+                "direction_score": 7.0,
+                "strategy_score": 7.0,
+                "setup_quality": 7.0,
+                "confidence": 0.72,
+                "option_score": 6.0,
+                "data_score": 6.0,
+                "rr_score": 6.0,
             },
         )
 
