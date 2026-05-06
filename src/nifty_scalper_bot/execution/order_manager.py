@@ -2670,11 +2670,26 @@ class OrderManager:
         symbol = normalize_symbol(plan.symbol)
         validation = self._validate_trade_plan(plan)
         if not validation.allowed:
+            self._logger.warning(
+                "ORDER_REJECTED symbol=%s reason=%s details=%s trace_id=%s",
+                symbol,
+                validation.reason,
+                validation.details,
+                plan.trace_id,
+            )
             return None
         price = self._protected_limit_price(plan)
+        if price is None:
+            self._logger.warning(
+                "ORDER_REJECTED symbol=%s reason=protected_limit_unavailable details=%s trace_id=%s",
+                symbol,
+                {"entry_price": plan.entry_price},
+                plan.trace_id,
+            )
+            return None
         if hasattr(self, "place_managed_order"):
-            return self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
-        return self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT if price else OrderType.MARKET, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+            return self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=False)
+        return self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
 
     def place_managed_order(
         self,
