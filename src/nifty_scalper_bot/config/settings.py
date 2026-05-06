@@ -1190,7 +1190,7 @@ def _build_risk_settings() -> RiskSettings:
     if max_lots < min_lots:
         max_lots = min_lots
     atr_multiple = _env_float("ATR_MULT", default=1.0, minimum=0.0)
-    contract_lot_size = _env_int("NIFTY_LOT_SIZE", default=75, minimum=1)
+    contract_lot_size = _env_int("NIFTY_LOT_SIZE", default=65, minimum=1)
     return RiskSettings(
         daily_loss_pct=daily_loss_pct,
         daily_pnl_cap_pct=_env_float(

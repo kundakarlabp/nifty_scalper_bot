@@ -4216,10 +4216,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             # Fallback defaults
             sym_upper = symbol.upper()
             if "NIFTY" in sym_upper:
-                env_lot = int(getattr(settings.risk, "contract_lot_size", 75) or 75)
+                env_lot = int(getattr(settings.risk, "contract_lot_size", 65) or 65)
                 source = "env"
                 if env_lot <= 0:
-                    env_lot = 75
+                    env_lot = 65
                     source = "fallback"
                 LOGGER.info(
                     "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=%s source=%s",
@@ -4234,10 +4234,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         except Exception:
             if "NIFTY" in symbol.upper():
                 LOGGER.info(
-                    "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=75 source=fallback",
-                    extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY", "lot_size": 75, "source": "fallback"},
+                    "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=65 source=fallback",
+                    extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY", "lot_size": 65, "source": "fallback"},
                 )
-                return 75
+                return 65
             return 1
 
     # Always attach the provider
