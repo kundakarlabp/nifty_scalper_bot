@@ -1199,3 +1199,44 @@ def test_mdm_datahub_register_no_recursion(broker: DummyBroker, ws: DummyWebSock
     # Second start() call with defer_ws=False is a no-op because ws already up
     manager.start()
     assert ws.start_calls == 1
+
+
+def test_readiness_state_marks_futures_soft_requirement() -> None:
+    manager = MarketDataManager.__new__(MarketDataManager)
+    manager._tick_stale_threshold_ms = 60_000  # noqa: SLF001
+    manager._is_symbol_fresh = lambda *_a, **_k: True  # type: ignore[method-assign]  # noqa: SLF001
+    state = manager._readiness_state(  # noqa: SLF001
+        {"NFO:NIFTYCE": 20, "NFO:NIFTYPE": 20, "NFO:FUT": 0},
+        20,
+        {"spot": "NSE:NIFTY", "futures": "NFO:FUT", "options": ["NFO:NIFTYCE", "NFO:NIFTYPE"]},
+    )
+    assert state["hard_ready"] is True
+    assert "futures" in state["missing_soft"]
+    assert "futures" not in state["missing_hard"]
+
+
+def test_readiness_state_accepts_nearby_options_when_exact_atm_missing() -> None:
+    manager = MarketDataManager.__new__(MarketDataManager)
+    manager._tick_stale_threshold_ms = 60_000  # noqa: SLF001
+    manager._is_symbol_fresh = lambda *_a, **_k: True  # type: ignore[method-assign]  # noqa: SLF001
+    state = manager._readiness_state(  # noqa: SLF001
+        {"NFO:NIFTY24CE": 20, "NFO:NIFTY24PE": 20, "NFO:ATMCE": 0, "NFO:ATMPE": 0},
+        20,
+        {
+            "spot": "NSE:NIFTY",
+            "atm_ce": "NFO:ATMCE",
+            "atm_pe": "NFO:ATMPE",
+            "options": ["NFO:NIFTY24CE", "NFO:NIFTY24PE"],
+        },
+    )
+    assert state["hard_ready"] is True
+    assert state["strict_atm_ce_ready"] is False
+    assert state["strict_atm_pe_ready"] is False
+    assert state["selected_ce"] == "NFO:NIFTY24CE"
+    assert state["selected_pe"] == "NFO:NIFTY24PE"
+
+
+def test_coerce_timestamp_prefers_exchange_timestamp() -> None:
+    tick = {"exchange_timestamp": "2026-05-06T10:00:00+00:00", "timestamp": 0}
+    coerced = MarketDataManager._coerce_timestamp(tick)  # noqa: SLF001
+    assert coerced > 1_700_000_000
