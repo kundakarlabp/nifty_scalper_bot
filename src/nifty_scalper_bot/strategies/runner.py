@@ -582,6 +582,10 @@ class StrategyRunner:
         self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "120") or 120))
         self._max_order_attempts_per_minute = max(1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "3") or 3))
         self._last_execution_halted_log_ts: float = 0.0
+        self._runtime_data_hard_ready = False
+        self._runtime_evaluation_ready = False
+        self._runtime_live_orders_armed = False
+        self._runtime_readiness_reason: str | None = None
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
@@ -1836,6 +1840,20 @@ class StrategyRunner:
         task.add_done_callback(_on_done)
         return True, "signal_preparation_scheduled"
 
+    def set_runtime_readiness(
+        self,
+        *,
+        data_hard_ready: bool,
+        evaluation_ready: bool,
+        live_orders_armed: bool,
+        reason: str | None = None,
+    ) -> None:
+        """Set app-level runtime readiness flags. Args: flags/reason. Returns: none. Raises: none."""
+        self._runtime_data_hard_ready = bool(data_hard_ready)
+        self._runtime_evaluation_ready = bool(evaluation_ready)
+        self._runtime_live_orders_armed = bool(live_orders_armed)
+        self._runtime_readiness_reason = reason
+
     async def _prepare_signal_for_handling(
         self,
         signal: Signal,
@@ -1851,18 +1869,12 @@ class StrategyRunner:
         )
         if not is_live_mode:
             return signal, None
-        if self._market_data is not None:
-            readiness = getattr(
-                self._market_data, "readiness_state_snapshot", lambda: {}
-            )()
-            hard_ready_fn = getattr(self._market_data, "hard_ready", None)
-            hard_ready = (
-                bool(hard_ready_fn())
-                if callable(hard_ready_fn)
-                else bool(readiness.get("hard_ready"))
+        runtime_ready = bool(getattr(self, "_runtime_data_hard_ready", False))
+        if is_live_mode and not runtime_ready:
+            return None, str(
+                getattr(self, "_runtime_readiness_reason", None)
+                or "startup_pipeline_not_ready"
             )
-            if not hard_ready:
-                return None, "startup_pipeline_not_ready"
         metadata = dict(signal.metadata or {})
         option_side = infer_option_side(signal.symbol, metadata)
         is_directional_option = option_side in {"CE", "PE"}
@@ -7890,6 +7902,15 @@ class StrategyRunner:
                 metadata["tradable_quote"] = bool(
                     (selected_snapshot or {}).get("tradable_quote")
                 )
+                metadata["quote_usable_for_order_plan"] = bool(
+                    (selected_snapshot or {}).get("tradable_quote")
+                    or (
+                        (selected_snapshot or {}).get("ltp_only_fallback")
+                        and candidate.entry_price
+                        and candidate.stop_loss
+                        and candidate.target
+                    )
+                )
             requires_final_score = bool(metadata.get("preliminary_only")) or bool(
                 metadata.get("requires_runner_final_score")
             )
@@ -7943,8 +7964,8 @@ class StrategyRunner:
                     for component in required_components
                 )
                 has_candidate = bool(metadata.get("candidate_selected"))
-                has_tradable_quote = bool(metadata.get("tradable_quote"))
-                if not (has_components and has_candidate and has_tradable_quote):
+                has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
+                if not (has_components and has_candidate and has_quote_usable):
                     self._logger.info(
                         "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required symbol=%s trace_id=%s",
                         base_symbol,

@@ -64,6 +64,10 @@ def _build_runner() -> StrategyRunner:
     runner.build_candidate_snapshots = MagicMock(return_value=[])
     runner.build_candidate_snapshots_async = MagicMock(return_value=([], False))
     runner._market_data = None
+    runner._runtime_data_hard_ready = True
+    runner._runtime_evaluation_ready = True
+    runner._runtime_live_orders_armed = True
+    runner._runtime_readiness_reason = None
     return runner
 
 
@@ -495,8 +499,9 @@ async def test_live_async_path_uses_signal_candidate_fallback(monkeypatch) -> No
     assert prepared is not None
     candidate = prepared.metadata['candidate_snapshots'][0]
     assert candidate['ltp'] == 111.0
-    assert candidate['bid'] == 111.0
-    assert candidate['ask'] == 111.0
+    assert candidate['bid'] == 0.0
+    assert candidate['ask'] == 0.0
+    assert candidate['ltp_only_fallback'] is True
 
 
 def test_strategy_evaluation_caps_required_option_bars(monkeypatch) -> None:

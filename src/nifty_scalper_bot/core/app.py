@@ -6656,25 +6656,14 @@ def _sync_mdm_bars_to_runner(ctx: BotContext, symbol: str, *, min_bars: int) -> 
 
 
 def _best_fresh_option(
-    ctx: BotContext, symbols: list[str], *, side: str, min_bars: int, max_age_s: float = 60.0
+    ctx: BotContext, symbols: list[str], *, side: str, max_age_s: float = 60.0
 ) -> str | None:
-    """Pick best ready CE/PE option from candidates. Args: ctx/symbols/side/min_bars/max_age_s. Returns: symbol|None. Raises: none."""
+    """Pick best fresh quote CE/PE option. Args: ctx/symbols/side/max_age_s. Returns: symbol|None. Raises: none."""
     side = side.upper()
     candidates = [s for s in symbols if str(s).upper().endswith(side)]
     best_symbol: str | None = None
     best_score = -1
     for sym in candidates:
-        bars_count = 0
-        try:
-            bars_count = len(list(ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or [])) if ctx.market_data_manager is not None else 0
-        except Exception:
-            bars_count = 0
-        if bars_count < min_bars:
-            _sync_mdm_bars_to_runner(ctx, sym, min_bars=min_bars)
-            try:
-                bars_count = len(list(ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or [])) if ctx.market_data_manager is not None else bars_count
-            except Exception:
-                pass
         quote_fresh = False
         try:
             snap = ctx.market_data_manager.get_symbol_snapshot(sym) if ctx.market_data_manager is not None else None
@@ -6683,9 +6672,7 @@ def _best_fresh_option(
             quote_fresh = ltp > 0 and age <= max_age_s
         except Exception:
             quote_fresh = False
-        score = 2 if bars_count >= min_bars else (1 if bars_count > 0 else 0)
-        if quote_fresh:
-            score += 3
+        score = 3 if quote_fresh else 0
         if score > best_score:
             best_score = score
             best_symbol = sym
@@ -9295,8 +9282,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     extra={"event": "SOFT_READINESS_MISSING", "missing": "futures", "action": "continue_with_spot_option_context"},
                                 )
                             option_symbols = list(readiness_state.get("requirements", {}).get("options", []) or [])
-                            quote_ce = _best_fresh_option(ctx, option_symbols, side="CE", min_bars=20)
-                            quote_pe = _best_fresh_option(ctx, option_symbols, side="PE", min_bars=20)
+                            quote_ce = _best_fresh_option(ctx, option_symbols, side="CE")
+                            quote_pe = _best_fresh_option(ctx, option_symbols, side="PE")
                             hydrated_ce = _best_hydrated_option(ctx, option_symbols, side="CE", min_bars=20)
                             hydrated_pe = _best_hydrated_option(ctx, option_symbols, side="PE", min_bars=20)
                             option_ticks_ready = bool(quote_ce is not None and quote_pe is not None)
@@ -9341,6 +9328,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 and configured_runtime_mode == "LIVE"
                                 and runner_running
                             )
+                            if ctx.strategy_runner is not None and hasattr(
+                                ctx.strategy_runner, "set_runtime_readiness"
+                            ):
+                                ctx.strategy_runner.set_runtime_readiness(
+                                    data_hard_ready=ctx.data_hard_ready,
+                                    evaluation_ready=ctx.evaluation_ready,
+                                    live_orders_armed=ctx.live_orders_armed,
+                                    reason=ctx.live_block_reason,
+                                )
                             if configured_runtime_mode in {"PAPER", "SHADOW"}:
                                 ctx.live_orders_armed = False
                                 if ctx.strategy_runner is not None:
