@@ -6607,6 +6607,80 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
             ctx.effective_mode = "DATA_WARMUP"
             ctx.live_block_reason = ",".join(reasons)
             LOGGER.info("LIVE_TRADING_REARM_WAIT reasons=%s", reasons, extra={"event": "LIVE_TRADING_REARM_WAIT", "reasons": reasons})
+
+
+def _sync_mdm_bars_to_runner(ctx: BotContext, symbol: str, *, min_bars: int) -> int:
+    """Sync OHLC bars from MDM/DataHub into runner. Args: ctx/symbol/min_bars. Returns: ingested count. Raises: none."""
+    if ctx.market_data_manager is None or ctx.strategy_runner is None:
+        return 0
+    try:
+        bars = list(ctx.market_data_manager.get_ohlc_bars(symbol, limit=min_bars) or [])
+    except Exception:
+        bars = []
+    if not bars and getattr(ctx, "data_hub", None) is not None:
+        fn = getattr(ctx.data_hub, "get_ohlc_bars", None)
+        if callable(fn):
+            try:
+                bars = list(fn(symbol, limit=min_bars) or [])
+            except TypeError:
+                bars = list(fn(symbol) or [])
+            except Exception:
+                bars = []
+    ingested = 0
+    for bar in bars:
+        try:
+            payload = dict(bar)
+            payload["symbol"] = symbol
+            ctx.strategy_runner.ingest_historical_bar(payload)
+            ingested += 1
+        except Exception:
+            continue
+    if ingested:
+        LOGGER.info(
+            "RUNNER_MDM_BAR_SYNC symbol=%s ingested=%d min_bars=%d",
+            symbol,
+            ingested,
+            min_bars,
+            extra={"event": "RUNNER_MDM_BAR_SYNC", "symbol": symbol, "ingested": ingested, "min_bars": min_bars},
+        )
+    return ingested
+
+
+def _best_ready_option(
+    ctx: BotContext, symbols: list[str], *, side: str, min_bars: int, max_age_s: float = 60.0
+) -> str | None:
+    """Pick best ready CE/PE option from candidates. Args: ctx/symbols/side/min_bars/max_age_s. Returns: symbol|None. Raises: none."""
+    side = side.upper()
+    candidates = [s for s in symbols if str(s).upper().endswith(side)]
+    best_symbol: str | None = None
+    best_score = -1
+    for sym in candidates:
+        bars_count = 0
+        try:
+            bars_count = len(list(ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or [])) if ctx.market_data_manager is not None else 0
+        except Exception:
+            bars_count = 0
+        if bars_count < min_bars:
+            _sync_mdm_bars_to_runner(ctx, sym, min_bars=min_bars)
+            try:
+                bars_count = len(list(ctx.market_data_manager.get_ohlc_bars(sym, limit=min_bars) or [])) if ctx.market_data_manager is not None else bars_count
+            except Exception:
+                pass
+        quote_fresh = False
+        try:
+            snap = ctx.market_data_manager.get_symbol_snapshot(sym) if ctx.market_data_manager is not None else None
+            ltp = float(getattr(snap, "ltp", 0.0) or 0.0)
+            age = float(getattr(snap, "tick_age_s", 9999.0) or 9999.0)
+            quote_fresh = ltp > 0 and age <= max_age_s
+        except Exception:
+            quote_fresh = False
+        score = 2 if bars_count >= min_bars else (1 if bars_count > 0 else 0)
+        if quote_fresh:
+            score += 3
+        if score > best_score:
+            best_score = score
+            best_symbol = sym
+    return best_symbol if best_score >= 3 else None
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
@@ -8992,6 +9066,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                 if ctx.strategy_runner:
                     if ctx.market_data_manager is not None:
                         try:
+                            def _safe_runtime_mode(local_ctx: BotContext) -> str:
+                                mode = str(
+                                    getattr(local_ctx, "configured_mode", None)
+                                    or getattr(local_ctx, "runtime_mode", None)
+                                    or os.getenv("EXECUTION_MODE", "")
+                                    or os.getenv("MODE", "")
+                                    or "LIVE"
+                                ).upper()
+                                return mode if mode in {"LIVE", "PAPER", "SHADOW", "DATA_WARMUP"} else "LIVE"
+
+                            configured_runtime_mode = _safe_runtime_mode(ctx)
                             await ctx.market_data_manager.wait_until_ready(timeout=30.0)
                             readiness_ready = bool(ctx.market_data_manager.ready)
                             readiness_state = (
@@ -9045,6 +9130,30 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 )
                             else:
                                 non_live_mode = configured_mode in {"PAPER", "SHADOW"}
+                                runner_bars: dict[str, int] = {}
+                                mdm_bars: dict[str, int] = {}
+                                datahub_bars: dict[str, int] = {}
+                                fresh_quote_symbols: list[str] = []
+                                for sym in list((readiness_state.get("requirements", {}) or {}).get("options", []) or []):
+                                    try:
+                                        runner_bars[sym] = int(len(ctx.strategy_runner.get_recent_bars(sym) or [])) if hasattr(ctx.strategy_runner, "get_recent_bars") else 0
+                                    except Exception:
+                                        runner_bars[sym] = 0
+                                    try:
+                                        mdm_bars[sym] = int(len(ctx.market_data_manager.get_ohlc_bars(sym, limit=20) or []))
+                                    except Exception:
+                                        mdm_bars[sym] = 0
+                                    if getattr(ctx, "data_hub", None) is not None and hasattr(ctx.data_hub, "get_ohlc_bars"):
+                                        try:
+                                            datahub_bars[sym] = int(len(ctx.data_hub.get_ohlc_bars(sym, limit=20) or []))
+                                        except Exception:
+                                            datahub_bars[sym] = 0
+                                    try:
+                                        snap = ctx.market_data_manager.get_symbol_snapshot(sym)
+                                        if float(getattr(snap, "ltp", 0.0) or 0.0) > 0 and float(getattr(snap, "tick_age_s", 9999.0) or 9999.0) <= 60.0:
+                                            fresh_quote_symbols.append(sym)
+                                    except Exception:
+                                        pass
                                 LOGGER.info(
                                     "DATA_PIPELINE_NOT_READY hard_ready=%s spot_ready=%s missing=%s",
                                     hard_ready,
@@ -9055,6 +9164,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "hard_ready": hard_ready,
                                         "spot_ready": spot_ready,
                                         "missing": missing_hard,
+                                        "runner_bars": runner_bars,
+                                        "mdm_bars": mdm_bars,
+                                        "datahub_bars": datahub_bars,
+                                        "fresh_quote_symbols": fresh_quote_symbols,
                                     },
                                 )
                                 if non_live_mode and _runner_is_running(ctx.strategy_runner):
@@ -9131,15 +9244,31 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "reason": quote_error or "unknown",
                                     },
                                 )
-                            option_ticks_ready = bool(not {"atm_ce", "atm_pe"}.intersection(set(missing_hard)))
-                            futures_ready = "futures" not in set(missing_hard)
-                            atm_ce_ready = "atm_ce" not in set(missing_hard)
-                            atm_pe_ready = "atm_pe" not in set(missing_hard)
+                            missing_soft: list[str] = []
+                            if "futures" in set(missing_hard):
+                                missing_soft.append("futures")
+                                missing_hard = [item for item in missing_hard if item != "futures"]
+                                LOGGER.info(
+                                    "SOFT_READINESS_MISSING missing=futures action=continue_with_spot_option_context",
+                                    extra={"event": "SOFT_READINESS_MISSING", "missing": "futures", "action": "continue_with_spot_option_context"},
+                                )
+                            ready_ce = _best_ready_option(ctx, list(readiness_state.get("requirements", {}).get("options", []) or []), side="CE", min_bars=20)
+                            ready_pe = _best_ready_option(ctx, list(readiness_state.get("requirements", {}).get("options", []) or []), side="PE", min_bars=20)
+                            option_ticks_ready = bool(ready_ce is not None and ready_pe is not None)
+                            futures_ready = "futures" not in set(missing_soft)
+                            atm_ce_ready = ready_ce is not None
+                            atm_pe_ready = ready_pe is not None
+                            req_atm_ce = readiness_state.get("requirements", {}).get("atm_ce")
+                            req_atm_pe = readiness_state.get("requirements", {}).get("atm_pe")
+                            if ready_ce and req_atm_ce and ready_ce != req_atm_ce:
+                                LOGGER.info("ATM_CE_SUBSTITUTED_WITH_READY_OPTION atm_ce=%s ready_ce=%s", req_atm_ce, ready_ce)
+                            if ready_pe and req_atm_pe and ready_pe != req_atm_pe:
+                                LOGGER.info("ATM_PE_SUBSTITUTED_WITH_READY_OPTION atm_pe=%s ready_pe=%s", req_atm_pe, ready_pe)
                             runner_running = _runner_is_running(ctx.strategy_runner)
                             ctx.spot_ready = bool(spot_ready)
                             ctx.data_observation_ready = bool(spot_ready or ws_quote_proof or ws_ltp_proof)
                             ctx.evaluation_ready = bool(runner_running and len(getattr(ctx.strategy_runner, "_active_symbols", set()) or []) > 0 if ctx.strategy_runner is not None else False)
-                            ctx.data_hard_ready = bool(spot_ready and futures_ready and atm_ce_ready and atm_pe_ready)
+                            ctx.data_hard_ready = bool(spot_ready and atm_ce_ready and atm_pe_ready)
                             ctx.data_pipeline_ready = bool(hard_ready)
                             ctx.trading_ready = bool(ctx.data_hard_ready and mode == "LIVE" and runner_running)
                             if configured_runtime_mode in {"PAPER", "SHADOW"}:
@@ -9253,7 +9382,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 )
                             LOGGER.info(
                                 "Startup | configured_mode=%s | effective_mode=%s | live_orders_armed=%s | trading_ready=%s",
-                                configured_mode,
+                                configured_runtime_mode,
                                 ctx.readiness_mode,
                                 bool(getattr(ctx, "live_orders_armed", False)),
                                 bool(getattr(ctx, "trading_ready", False)),
@@ -9264,7 +9393,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ready_exc,
                                 exc_info=ready_exc,
                             )
-                            raise
+                            ctx.live_orders_armed = False
+                            ctx.trading_ready = False
+                            ctx.live_block_reason = "startup_pipeline_incomplete:" + ",".join(missing_hard if "missing_hard" in locals() else [])
+                            ctx.degraded_mode = True
+                            LOGGER.error(
+                                "STARTUP_PIPELINE_INCOMPLETE_CONTINUING mode=%s missing_hard=%s missing_soft=%s",
+                                configured_runtime_mode,
+                                (missing_hard if "missing_hard" in locals() else []),
+                                (missing_soft if "missing_soft" in locals() else []),
+                            )
                     if not _data_ready(ctx.market_data_manager):
                         LOGGER.debug("startup_tick_gate: waiting_for_live_ticks (expected at boot)")
 
