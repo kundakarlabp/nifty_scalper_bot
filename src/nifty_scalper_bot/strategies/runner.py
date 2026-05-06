@@ -309,7 +309,7 @@ class StrategyRunnerConfig:
     # Existing
     min_indicator_bars: int = 20
     max_trade_history: int = 100
-    fetch_history_on_startup: bool = True
+    fetch_history_on_startup: bool = False
 
     # ✅ REQUIRED FIX (missing fields)
     signal_cooldown_seconds: float = 3.0
@@ -1007,8 +1007,12 @@ class StrategyRunner:
         # BUG W4 FIX: _backfill_history() was scheduled immediately in runner.start(),
         # which races with core/app.py EngineWarmupTask. We only need the backfill task
         # as an emergency fallback if EngineWarmupTask fails.
+        emergency_backfill_enabled = self._coerce_bool(
+            os.getenv("RUNNER_ENABLE_EMERGENCY_BACKFILL"), default=False
+        )
         if (
             self._config.fetch_history_on_startup
+            and emergency_backfill_enabled
             and self._main_loop
             and not self._backfill_task_started
         ):
@@ -2830,18 +2834,21 @@ class StrategyRunner:
                 and symbol not in self._gap_repair_inflight
             ):
                 self._gap_repair_inflight.add(symbol)
-                asyncio.run_coroutine_threadsafe(
-                    self._refresh_gap_history_async(symbol),
-                    self._main_loop,
-                )
+                self._request_mdm_hydration(symbol, self._required_bars_for_symbol(symbol))
         return repaired
 
     async def _refresh_gap_history_async(self, symbol: str) -> None:
-        """Attempt async broker history refresh for repaired symbols. Args: symbol; Returns: none; Raises: none."""
+        """Refresh repaired symbol history from MDM cache only. Args: symbol. Returns: None. Raises: None."""
+        target = self._required_bars_for_symbol(symbol)
         try:
-            bars = await self._fetch_symbol_history(symbol, limit=32)
-            if bars:
-                self._write_history_cache(symbol, bars)
+            rows = self._get_mdm_bars(symbol, target)
+            if rows:
+                self._write_history_cache(symbol, rows)
+                for row in rows:
+                    with contextlib.suppress(Exception):
+                        self.ingest_historical_bar(row)
+            else:
+                self._request_mdm_hydration(symbol, target)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("gap_history_refresh_failed for %s: %s", symbol, exc)
         finally:
@@ -2860,10 +2867,7 @@ class StrategyRunner:
             "Condition met: historical_refresh_triggered",
             extra={"event": "historical_refresh_triggered", "symbol": symbol},
         )
-        asyncio.run_coroutine_threadsafe(
-            self._refresh_gap_history_async(symbol),
-            self._main_loop,
-        )
+        self._request_mdm_hydration(symbol, self._required_bars_for_symbol(symbol))
 
     def _emit_composite_reports(self) -> None:
         """Emit periodic system/strategy aggregate logs. Args: none; Returns: none; Raises: none."""
@@ -3090,7 +3094,7 @@ class StrategyRunner:
                 reason = "repeated_missing_candles" if recent_tick else "no_recent_tick_for_gap_assessment"
                 log_level = logging.INFO if is_option and recent_tick else logging.WARNING
                 log_throttled(
-                    log_level,
+                    self._logger,
                     f"soft_data_issue:{symbol}",
                     f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
                     interval_sec=60.0,
@@ -3849,8 +3853,23 @@ class StrategyRunner:
                     return tick
         if self._market_data and hasattr(self._market_data, "get_symbol_snapshot"):
             snap = self._market_data.get_symbol_snapshot("NSE:NIFTY")
-            if snap:
-                return {"symbol": "NSE:NIFTY", "ltp": snap.get("ltp") or snap.get("close"), "received_at": snap.get("received_at") or snap.get("timestamp"), "source": "market_data_snapshot"}
+            if snap and getattr(snap, "ltp", None):
+                tick_age = float(getattr(snap, "tick_age_s", 0.0) or 0.0)
+                return {
+                    "symbol": "NSE:NIFTY",
+                    "ltp": float(getattr(snap, "ltp")),
+                    "received_at": time.time() - tick_age,
+                    "source": getattr(snap, "source", "market_data_snapshot"),
+                }
+            if isinstance(snap, Mapping):
+                ltp = snap.get("ltp") or snap.get("close")
+                if ltp:
+                    return {
+                        "symbol": "NSE:NIFTY",
+                        "ltp": float(ltp),
+                        "received_at": snap.get("received_at") or snap.get("timestamp") or time.time(),
+                        "source": snap.get("source", "market_data_snapshot"),
+                    }
         if self._market_data and hasattr(self._market_data, "get_cached_ltp"):
             ltp = self._market_data.get_cached_ltp("NSE:NIFTY", max_age_seconds=300, require_ws=False)
             if ltp:
