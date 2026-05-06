@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -105,3 +107,77 @@ def test_get_spot_tick_alias_and_snapshot_fallback() -> None:
     )
     tick = r._get_spot_tick()
     assert tick and tick["symbol"] == "NSE:NIFTY" and tick["received_at"] == 20.0
+
+
+def test_update_symbol_hydration_soft_data_uses_runner_logger(monkeypatch) -> None:
+    r = _runner()
+    r._has_session_candle_gaps = lambda _s: True
+    r._session_gap_count = {'NSE:NIFTY': 2}
+    r._last_tick_time_by_symbol = {'NSE:NIFTY': 0.0}
+    captured = {}
+
+    def _capture(logger, *_args, **_kwargs):
+        captured['logger'] = logger
+
+    monkeypatch.setattr('nifty_scalper_bot.strategies.runner.log_throttled', _capture)
+    r.update_symbol_hydration('NSE:NIFTY', [1.0, 2.0, 3.0], {'NSE:NIFTY': {'vwap': 1.0, 'cum_volume': 1.0}})
+    assert captured['logger'] is r._logger
+
+
+def test_get_spot_tick_snapshot_object_fallback() -> None:
+    r = _runner()
+    snap = SimpleNamespace(ltp=25010.0, tick_age_s=1.5, source='snapshot_obj')
+    r._market_data = SimpleNamespace(get_latest_tick=lambda *_: None, get_symbol_snapshot=lambda _s: snap, get_cached_ltp=lambda *_a, **_k: None)
+    r._data_hub = SimpleNamespace(get_latest_tick=lambda *_: None, get_quote=lambda *_: None)
+    tick = r._get_spot_tick()
+    assert tick is not None
+    assert tick['symbol'] == 'NSE:NIFTY'
+    assert tick['ltp'] == 25010.0
+    assert tick['source'] == 'snapshot_obj'
+
+
+def test_repair_candle_gaps_requests_mdm_hydration() -> None:
+    r = _runner()
+    r._main_loop = None
+    r._gap_repair_inflight = set()
+    r._required_bars_for_symbol = lambda _s: 33
+    called = []
+    r._request_mdm_hydration = lambda symbol, target: called.append((symbol, target))
+    prev = SimpleNamespace(start=datetime(2026,1,1,9,15,tzinfo=timezone.utc), end=datetime(2026,1,1,9,15,59,tzinfo=timezone.utc), close=100.0)
+    curr = SimpleNamespace(start=datetime(2026,1,1,9,20,tzinfo=timezone.utc), end=datetime(2026,1,1,9,20,59,tzinfo=timezone.utc), close=101.0)
+    r._repair_candle_gap('NSE:NIFTY', prev, curr)
+    assert called == [('NSE:NIFTY', 33)]
+
+
+def test_refresh_history_if_due_requests_mdm_hydration() -> None:
+    r = _runner()
+    loop = asyncio.new_event_loop()
+    try:
+        r._main_loop = loop
+        r._last_history_refresh_by_symbol = {}
+        r._history_refresh_interval_seconds = 0.0
+        r._required_bars_for_symbol = lambda _s: 21
+        called = []
+        r._request_mdm_hydration = lambda symbol, target: called.append((symbol, target))
+        r._refresh_history_if_due('NSE:NIFTY')
+        assert called == [('NSE:NIFTY', 21)]
+    finally:
+        loop.close()
+
+
+def test_runner_emergency_backfill_disabled_by_default(monkeypatch) -> None:
+    r = _runner()
+    r._config = SimpleNamespace(fetch_history_on_startup=True)
+    r._backfill_task_started = False
+    r._main_loop = asyncio.new_event_loop()
+    r._subscribe_symbol = lambda *_: None
+    r._symbols = []
+    r._callbacks = {}
+    r._market_data = SimpleNamespace(start=lambda: None)
+    r._lock = type('L', (), {'__enter__': lambda s: None, '__exit__': lambda s,a,b,c: None})()
+    monkeypatch.delenv('RUNNER_ENABLE_EMERGENCY_BACKFILL', raising=False)
+    try:
+        r.start([])
+        assert r._backfill_task_started is False
+    finally:
+        r._main_loop.close()

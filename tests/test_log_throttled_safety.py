@@ -30,3 +30,9 @@ def test_no_invalid_log_throttled_calls() -> None:
             if is_target and len(node.args) > 4:
                 violations.append(f'{path}:{node.lineno}')
     assert not violations, f'Invalid log_throttled calls: {violations}'
+
+
+def test_log_throttled_invalid_logger_is_safe(caplog) -> None:
+    caplog.set_level(logging.INFO)
+    log_throttled(123, "bad_logger", "safe message", interval_sec=0.0)
+    assert "safe message" in caplog.text

@@ -309,8 +309,8 @@ class PaperFillEngine:
                 lot = int(self.resolver.lot_size_for_symbol(symbol))
                 return max(lot, 1)
             except Exception:
-                return 75
-        return 75
+                return 65
+        return 65
 
     def _consume_queue(self, quantity: int) -> int:
         depth = max(self._queue_depth, 0)

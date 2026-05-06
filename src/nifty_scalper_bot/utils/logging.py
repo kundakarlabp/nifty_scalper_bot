@@ -546,6 +546,8 @@ def log_throttled(
     exc_info: bool | BaseException | None = None,
 ) -> None:
     """Emit a log record at most once during the specified interval."""
+    if not isinstance(logger, logging.Logger):
+        logger = LOGGER
     logger.debug(
         "Entered log_throttled",
         extra={
