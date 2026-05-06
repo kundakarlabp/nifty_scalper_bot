@@ -7472,6 +7472,32 @@ class MarketDataManager:
     # -------------------------------------------------------------------------
     # ✅ "HUNTER-KILLER" FIX: Robust History Fetching
     # -------------------------------------------------------------------------
+
+    async def hydrate_symbol_history(
+        self,
+        symbol: str,
+        *,
+        interval: str = "minute",
+        days: int = 2,
+        max_bars: int = 300,
+        reason: str = "startup",
+    ) -> list[dict[str, Any]]:
+        """Hydrate cached OHLC history for a symbol. Args: symbol/interval/days/max_bars/reason. Returns: normalized rows. Raises: none."""
+        normalized = self._canonical_symbol(symbol)
+        rows = await self.fetch_history(normalized, interval, days)
+        rows = list(rows or [])[-max_bars:]
+        accepted = self.ingest_historical_ohlc(normalized, rows)
+        self.update_hydration_status(normalized, self.get_ohlc_bars(normalized))
+        self._logger.info(
+            "HYDRATION_MDM_COMPLETE symbol=%s rows=%d accepted=%d reason=%s",
+            normalized,
+            len(rows),
+            int(accepted),
+            reason,
+            extra={"event":"HYDRATION_MDM_COMPLETE","symbol":normalized,"rows":len(rows),"accepted":int(accepted),"reason":reason},
+        )
+        return rows
+
     async def fetch_history(
         self, symbol: str, interval: str, days: int = 3
     ) -> list[dict]:

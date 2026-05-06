@@ -7624,14 +7624,18 @@ async def startup_sequence(ctx: BotContext) -> None:
             async def _fetch_symbol(symbol: str) -> tuple[str, list[Any]]:
                 """Fetch historical records for one symbol. Args: symbol. Returns: symbol and raw records. Raises: Exception."""
                 records = await _maybe_await(
-                    ctx.market_data_manager.fetch_history(
+                    getattr(ctx.market_data_manager, "hydrate_symbol_history", ctx.market_data_manager.fetch_history)(
                         symbol,
-                        "minute",
-                        2,
+                        interval="minute",
+                        days=hydration_lookback_days,
+                        max_bars=hydration_max_bars,
+                        reason="startup",
                     )
                 )
-                if records and len(records) > hydration_max_bars:
-                    records = list(records)[-hydration_max_bars:]
+                if not hasattr(ctx.market_data_manager, "hydrate_symbol_history"):
+                    ctx.market_data_manager.ingest_historical_ohlc(symbol, records or [])
+                    if records and len(records) > hydration_max_bars:
+                        records = list(records)[-hydration_max_bars:]
                 record_count = len(records or [])
                 if record_count == 0:
                     LOGGER.error(
@@ -7689,38 +7693,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                     sym_token = active_symbol_tokens.get(sym)
                 except Exception:
                     sym_token = None
-                count = 0
+                mdm_bars = list(ctx.market_data_manager.get_ohlc_bars(sym, limit=hydration_max_bars) or [])
+                count = len(mdm_bars)
                 runner_ingested = 0
-                for row in records:
-                    try:
-                        if not isinstance(row, Mapping):
-                            continue
-                        bar_data = dict(row)
-                        bar_data["symbol"] = sym
-                        if ctx.market_data_manager is not None:
-                            ctx.market_data_manager.ingest_historical_bar(bar_data)
-                        if (
-                            getattr(ctx, "strategy_runner", None) is not None
-                            and hasattr(ctx.strategy_runner, "ingest_historical_bar")
-                        ):
-                            try:
-                                ctx.strategy_runner.ingest_historical_bar(bar_data)
-                                runner_ingested += 1
-                            except Exception as runner_ingest_exc:
-                                LOGGER.warning(
-                                    "startup_runner_hydration_ingest_failed symbol=%s err=%s",
-                                    sym,
-                                    runner_ingest_exc,
-                                    extra={
-                                        "event": "startup_runner_hydration_ingest_failed",
-                                        "symbol": sym,
-                                        "token": sym_token,
-                                    },
-                                )
-                        count += 1
-                    except Exception as candle_err:
-                        LOGGER.debug(f"Skipping bad candle for {sym}: {candle_err}")
-
+                for bar in mdm_bars:
+                    if getattr(ctx, "strategy_runner", None) is not None and hasattr(ctx.strategy_runner, "ingest_historical_bar"):
+                        try:
+                            ctx.strategy_runner.ingest_historical_bar({**dict(bar), "symbol": sym})
+                            runner_ingested += 1
+                        except Exception as runner_ingest_exc:
+                            LOGGER.warning("startup_runner_hydration_ingest_failed symbol=%s err=%s",sym,runner_ingest_exc)
+                LOGGER.info("RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d", sym, count, runner_ingested,extra={"event":"RUNNER_MDM_HYDRATION_SYNC","symbol":sym,"mdm_bars":count,"runner_ingested":runner_ingested})
                 hydrated_counts[sym] = count
                 LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
                 if getattr(ctx, "strategy_runner", None) is not None:
