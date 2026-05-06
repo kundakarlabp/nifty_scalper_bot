@@ -4206,22 +4206,43 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         try:
             lot = instrument_manager.get_lot_size(symbol)
             if lot and lot > 0:
+                if "NIFTY" in symbol.upper():
+                    LOGGER.info(
+                        "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=%s source=instrument_dump",
+                        int(lot),
+                        extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY", "lot_size": int(lot), "source": "instrument_dump"},
+                    )
                 return int(lot)
             # Fallback defaults
             sym_upper = symbol.upper()
             if "NIFTY" in sym_upper:
-                return 65
+                env_lot = int(getattr(settings.risk, "contract_lot_size", 75) or 75)
+                source = "env"
+                if env_lot <= 0:
+                    env_lot = 75
+                    source = "fallback"
+                LOGGER.info(
+                    "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=%s source=%s",
+                    env_lot,
+                    source,
+                    extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY", "lot_size": env_lot, "source": source},
+                )
+                return env_lot
             if "BANKNIFTY" in sym_upper:
                 return 15
             return 1
         except Exception:
             if "NIFTY" in symbol.upper():
-                return 65
+                LOGGER.info(
+                    "LOT_SIZE_RESOLVED underlying=NIFTY lot_size=75 source=fallback",
+                    extra={"event": "LOT_SIZE_RESOLVED", "underlying": "NIFTY", "lot_size": 75, "source": "fallback"},
+                )
+                return 75
             return 1
 
     # Always attach the provider
     risk_manager.set_lot_size_provider(_lot_size_lookup)
-    LOGGER.info("✅ Wired Lot Size Provider to Risk Manager (NIFTY=65)")
+    LOGGER.info("✅ Wired Lot Size Provider to Risk Manager")
 
     risk_state: RiskState | None = None
     try:

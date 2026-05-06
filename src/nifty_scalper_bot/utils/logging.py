@@ -578,6 +578,31 @@ def log_throttled(
         )
 
 
+def log_once_or_throttled(
+    logger: logging.Logger,
+    key: str,
+    msg: str,
+    *,
+    interval_sec: float = 60.0,
+    level: int = logging.INFO,
+    extra: Optional[dict[str, Any]] = None,
+    exc_info: bool | BaseException | None = None,
+) -> None:
+    """Emit once immediately and then at most once per interval. Args: logger/key/msg/interval/level/extra/exc_info. Returns: None. Raises: None."""
+    try:
+        log_throttled(
+            logger,
+            key,
+            msg,
+            interval_sec=interval_sec,
+            level=level,
+            extra=extra,
+            exc_info=exc_info,
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            logger.log(level, msg, extra=extra or {}, exc_info=exc_info)
+
 def log_state_change(
     logger: logging.Logger,
     key: str,
@@ -663,6 +688,7 @@ __all__ = [
     "get_tracer_logger",
     "log_state_change",
     "log_throttled",
+    "log_once_or_throttled",
     "setup_logging",
     "silence_third_party_loggers",
     "enable_business_logic_logging",

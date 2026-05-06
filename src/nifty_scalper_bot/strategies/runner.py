@@ -1849,7 +1849,21 @@ class StrategyRunner:
                 },
             )
             return True, None
-        loop.create_task(_job())
+        task = loop.create_task(_job(), name=f"signal_prepare:{signal.symbol}:{trace_id}")
+        def _on_done(done_task: asyncio.Task[None]) -> None:
+            """Handle async task completion. Args: done_task. Returns: None. Raises: None."""
+            try:
+                done_task.result()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "SIGNAL_PREPARATION_TASK_FAILED symbol=%s trace_id=%s error=%s",
+                    signal.symbol,
+                    trace_id,
+                    exc,
+                    extra={"event": "SIGNAL_PREPARATION_TASK_FAILED", "symbol": signal.symbol, "trace_id": trace_id, "error": str(exc)},
+                    exc_info=exc,
+                )
+        task.add_done_callback(_on_done)
         return True, "signal_preparation_scheduled"
 
     async def _prepare_signal_for_handling(
@@ -1959,9 +1973,6 @@ class StrategyRunner:
             bid = float(snapshot.bid) if snapshot.bid is not None and float(snapshot.bid) > 0 else 0.0
             ask = float(snapshot.ask) if snapshot.ask is not None and float(snapshot.ask) > 0 else 0.0
             has_bid_ask = bid > 0 and ask > 0
-            if not has_bid_ask:
-                bid = ltp
-                ask = ltp
             strike_match = re.search(r"(\d{5})(CE|PE)$", str(signal.symbol).upper())
             parsed_strike = int(strike_match.group(1)) if strike_match is not None else 0
             strike = int(metadata.get("strike") or parsed_strike or metadata.get("atm_strike") or 0)
@@ -1988,6 +1999,7 @@ class StrategyRunner:
                 "real_ticks_last_60s": real_ticks_last_60s,
                 "tradable_quote": bool(snapshot.tradable_quote and has_bid_ask),
                 "ltp_only_fallback": not has_bid_ask,
+                "quote_quality": "bid_ask" if has_bid_ask else "ltp_only",
                 "source": str(snapshot.source or "signal_snapshot"),
             }
         except Exception as exc:  # noqa: BLE001

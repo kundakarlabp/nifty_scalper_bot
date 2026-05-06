@@ -1028,11 +1028,24 @@ async def test_schedule_signal_preparation_schedules_when_loop_running() -> None
     runner._handle_signal = MagicMock(return_value=SignalExecutionResult(True, 'accepted'))  # type: ignore[method-assign]
     now = datetime.now(timezone.utc)
     scheduled, reason = runner._schedule_signal_preparation(signal, 101.0, now, 'trace-loop')
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
 
     assert scheduled is True
     assert reason == 'signal_preparation_scheduled'
     runner._handle_signal.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_schedule_signal_preparation_logs_task_failure() -> None:
+    runner = _build_runner()
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800CE', quantity=1, confidence=0.9, reason='x', stop_loss=90.0, take_profit=120.0, metadata={})
+    runner._prepare_signal_for_handling = AsyncMock(side_effect=RuntimeError('boom'))  # type: ignore[method-assign]
+    runner._handle_signal = MagicMock()  # type: ignore[method-assign]
+    errors: list[str] = []
+    runner._logger.error = lambda msg, *args, **kwargs: errors.append(str(msg))  # type: ignore[method-assign]
+    runner._schedule_signal_preparation(signal, 100.0, datetime.now(timezone.utc), 'trace-fail')
+    await asyncio.sleep(0.05)
+    assert any('SIGNAL_PREPARATION_TASK_FAILED' in msg for msg in errors)
 
 def test_runner_no_async_event_loop_fallback_in_runner_source() -> None:
     """Regression guard: async paths must not skip prep just because event loop exists."""
@@ -1066,6 +1079,22 @@ def test_build_single_candidate_from_signal_includes_tick_fields() -> None:
     assert candidate is not None
     assert candidate['tick_age_s'] == 0.0
     assert candidate['real_ticks_last_60s'] >= 1
+    assert candidate['quote_quality'] == 'bid_ask'
+
+
+def test_build_single_candidate_from_signal_does_not_fake_bid_ask() -> None:
+    runner = _build_runner()
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=374.95, bid=0.0, ask=0.0, tick_age_s=0.1, real_ticks_last_60s=3, tradable_quote=True, source='ws'
+    )
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26MAY24050PE', quantity=1, confidence=0.8, reason='x', stop_loss=300.0, take_profit=450.0, metadata={})
+    candidate = runner._build_single_candidate_from_signal(signal=signal, metadata={}, option_side='PE')
+    assert candidate is not None
+    assert candidate['bid'] == 0.0
+    assert candidate['ask'] == 0.0
+    assert candidate['ltp_only_fallback'] is True
+    assert candidate['quote_quality'] == 'ltp_only'
 
 
 def test_pre_order_rejection_logs_signal_execution_result() -> None:
