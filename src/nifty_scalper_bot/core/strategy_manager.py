@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import typing as t
 from abc import ABC, abstractmethod
@@ -2179,6 +2180,7 @@ class StrategyManager(_BaseStrategyManager):
         max_votes = max(1, int(getattr(app_settings, "MAX_STRATEGY_VOTES", 5)))
         disabled: list[str] = []
         empty: list[str] = []
+        no_vote_reason_counts: dict[str, int] = {}
         errors: list[str] = []
         disabled_strategies_snapshot = disabled
         evaluation_start = time.monotonic()
@@ -2210,6 +2212,15 @@ class StrategyManager(_BaseStrategyManager):
                 continue
             if base_signal is None:
                 empty.append(strategy.name)
+                reason = str(getattr(strategy, "last_no_vote_reason", "none") or "none")
+                no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
+                log_throttled(
+                    log,
+                    key=f"strategy_no_vote:{symbol}:{strategy.name}:{reason}",
+                    msg=f"STRATEGY_NO_VOTE strategy={strategy.name} symbol={symbol} reason={reason}",
+                    interval_sec=15.0,
+                    level=logging.INFO,
+                )
                 continue
             entry = score_map.get(strategy.name)
             adjusted = self._apply_weighted_confidence(base_signal, strategy.name, entry)
@@ -2253,6 +2264,7 @@ class StrategyManager(_BaseStrategyManager):
                     "missing_indicators": missing,
                     "volume": indicators.get("volume"),
                     "avg_volume": indicators.get("avg_volume"),
+                    "no_vote_reason_counts": no_vote_reason_counts,
                 },
             )
             self._record_no_signal_summary(
@@ -2357,6 +2369,7 @@ class StrategyManager(_BaseStrategyManager):
                 extra={
                     "event": "strategy_manager_no_combined_signal",
                     "symbol": symbol,
+                    "no_vote_reason_counts": no_vote_reason_counts,
                 },
             )
             _log_reject(
@@ -2477,10 +2490,42 @@ class StrategyManager(_BaseStrategyManager):
             return self._combine_signals([signal for signal, _ in signals])
         if len(winning) == 1:
             single_signal, single_vote = winning[0]
+            allow_single_vote_scalp = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            single_min_score = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_SCORE", "6.5") or "6.5")
+            single_min_confidence = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0.60") or "0.60")
+            require_selected_option = str(os.getenv("STRATEGY_SINGLE_VOTE_REQUIRE_SELECTED_OPTION", "true")).strip().lower() in {"1", "true", "yes", "on"}
+            single_max_spread = float(os.getenv("STRATEGY_SINGLE_VOTE_MAX_SPREAD_PCT", "10.0") or "10.0")
+            require_direction_score = str(os.getenv("STRATEGY_SINGLE_VOTE_REQUIRE_DIRECTION_SCORE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            min_direction_score = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_DIRECTION_SCORE", "6.0") or "6.0")
             if single_vote.score < 8.5:
+                metadata = dict(single_signal.metadata or {})
+                spread_pct_raw = metadata.get("spread_pct")
+                spread_pct = float(spread_pct_raw) if spread_pct_raw is not None else None
+                confidence_ok = float(single_signal.confidence or 0.0) >= single_min_confidence
+                score_ok = single_vote.score >= single_min_score
+                spread_ok = spread_pct is None or spread_pct <= single_max_spread
+                selected_ok = True
+                if require_selected_option:
+                    selected_ok = bool(metadata.get("candidate_selected") or metadata.get("is_selected_option"))
+                direction_score = float(metadata.get("direction_score") or 0.0)
+                direction_ok = (not require_direction_score) or direction_score >= min_direction_score
+                if allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok:
+                    metadata["consensus_stage"] = "single_vote_scalp_controlled"
+                    metadata["confirming_votes"] = [single_vote.strategy]
+                    metadata["strategy_score"] = single_vote.score
+                    metadata["risk_label"] = "single_strategy_signal"
+                    log.info(
+                        'STRATEGY_CONSENSUS side=%s score=%.2f votes=1 reason=single_vote_scalp_controlled',
+                        winning_side,
+                        single_vote.score,
+                        extra={'event': 'STRATEGY_CONSENSUS', 'side': winning_side, 'score': single_vote.score, 'votes': 1, 'reason': 'single_vote_scalp_controlled'},
+                    )
+                    return Signal(action='BUY', symbol=single_signal.symbol, quantity=single_signal.quantity, confidence=single_signal.confidence, reason=single_signal.reason, stop_loss=single_signal.stop_loss, take_profit=single_signal.take_profit, metadata=metadata)
                 log.info(
-                    'STRATEGY_CONSENSUS side=NO_TRADE score=%.2f votes=1 reason=single_vote_low_score',
+                    'STRATEGY_CONSENSUS side=NO_TRADE score=%.2f votes=1 reason=single_vote_low_score threshold=%.2f allow_single_vote_scalp=%s',
                     single_vote.score,
+                    single_min_score,
+                    allow_single_vote_scalp,
                     extra={
                         'event': 'STRATEGY_CONSENSUS',
                         'side': 'NO_TRADE',
