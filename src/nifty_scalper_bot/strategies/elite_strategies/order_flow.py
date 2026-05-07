@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
@@ -27,7 +28,7 @@ class OrderFlowStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
-            self.last_no_vote_reason = "none"
+            self._no_vote("stale_or_invalid_data")
             bid = float(indicators.get('bid') or 0.0)
             ask = float(indicators.get('ask') or 0.0)
             depth = indicators.get('depth') or {}
@@ -36,16 +37,12 @@ class OrderFlowStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
 
             if bid <= 0 or ask <= 0 or ask <= bid:
-                self.last_no_vote_reason = 'missing_depth'
-                self.last_no_vote_reason = 'weak_imbalance'
-                self.last_no_vote_reason = 'missing_depth'
+                self._no_vote('missing_bid_ask')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=missing_bid_ask')
                 return None
             spread_pct = float(indicators.get('spread_pct') or (((ask - bid) / ((ask + bid) / 2.0)) * 100.0))
             if spread_pct > 28.0:
-                self.last_no_vote_reason = 'missing_depth'
-                self.last_no_vote_reason = 'weak_imbalance'
-                self.last_no_vote_reason = 'missing_depth'
+                self._no_vote('wide_spread')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=wide_spread')
                 return None
 
@@ -55,11 +52,26 @@ class OrderFlowStrategy(EliteStrategy):
             total_bid = sum(float(level.get('quantity', 0.0)) for level in bids[:5]) if depth_available else 0.0
             total_ask = sum(float(level.get('quantity', 0.0)) for level in asks[:5]) if depth_available else 0.0
             if total_bid + total_ask <= 0:
-                self.last_no_vote_reason = 'missing_depth'
-                self.last_no_vote_reason = 'weak_imbalance'
-                self.last_no_vote_reason = 'missing_depth'
-                LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=depth_missing')
-                return None
+                allow_fallback = str(os.getenv('ORDERFLOW_ALLOW_LTP_TICK_FALLBACK', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
+                if not allow_fallback:
+                    self._no_vote('missing_depth')
+                    LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=depth_missing')
+                    return None
+                tick_direction = str(indicators.get('tick_direction') or '').upper()
+                side = 'CE' if tick_direction in {'UP', 'BUY'} else 'PE'
+                depth_imbalance = 0.0
+                fallback_score = 2.0 + (2.0 if spread_pct <= 12.0 else 0.0)
+                if direction in {'CE', 'PE'} and direction == side:
+                    fallback_score += 1.5
+                if tick_direction in {'UP', 'DOWN', 'BUY', 'SELL'}:
+                    fallback_score += 1.0
+                strategy_score = min(5.5, max(0.0, fallback_score))
+                if strategy_score < 4.0:
+                    self._no_vote('weak_tick_confirmation')
+                    return None
+                metadata = {'orderflow_depth_source': 'ltp_tick_fallback', 'risk_label': 'reduced_microstructure_confidence'}
+                metadata.update({'strategy': 'OrderFlow', 'side': side, 'direction_bias': side, 'strategy_score': strategy_score, 'spread_pct': round(spread_pct, 3), 'depth_imbalance': 0.0, 'tick_direction': tick_direction, 'invalidation_level': bid - 0.5 * atr if side == 'CE' else ask + 0.5 * atr})
+                return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=float(metadata['invalidation_level']), target=current_price + (1.8 * atr), quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
             side = 'CE' if depth_imbalance > 0 else 'PE'
 
@@ -83,7 +95,7 @@ class OrderFlowStrategy(EliteStrategy):
 
             strategy_score = max(0.0, min(10.0, score))
             if strategy_score < 4.0:
-                self.last_no_vote_reason = "low_score"
+                self._no_vote('low_score')
                 return None
             metadata = {
                 'strategy': 'OrderFlow',

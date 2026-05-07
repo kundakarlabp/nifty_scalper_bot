@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import typing as t
 from abc import ABC, abstractmethod
@@ -2504,6 +2505,7 @@ class StrategyManager(_BaseStrategyManager):
             single_min_score = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_SCORE", "6.5") or "6.5")
             single_min_confidence = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0.60") or "0.60")
             require_selected_option = str(os.getenv("STRATEGY_SINGLE_VOTE_REQUIRE_SELECTED_OPTION", "true")).strip().lower() in {"1", "true", "yes", "on"}
+            single_max_strike_distance = float(os.getenv("STRATEGY_SINGLE_VOTE_MAX_STRIKE_DISTANCE", "100") or "100")
             single_max_spread = float(os.getenv("STRATEGY_SINGLE_VOTE_MAX_SPREAD_PCT", "10.0") or "10.0")
             require_direction_score = str(os.getenv("STRATEGY_SINGLE_VOTE_REQUIRE_DIRECTION_SCORE", "false")).strip().lower() in {"1", "true", "yes", "on"}
             min_direction_score = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_DIRECTION_SCORE", "6.0") or "6.0")
@@ -2516,7 +2518,26 @@ class StrategyManager(_BaseStrategyManager):
                 spread_ok = spread_pct is None or spread_pct <= single_max_spread
                 selected_ok = True
                 if require_selected_option:
-                    selected_ok = bool(metadata.get("candidate_selected") or metadata.get("is_selected_option"))
+                    selected_marker = metadata.get("candidate_selected")
+                    if selected_marker is None:
+                        selected_marker = metadata.get("is_selected_option")
+                    if selected_marker is None:
+                        selected_ce = indicators.get("selected_ce")
+                        selected_pe = indicators.get("selected_pe")
+                        atm_strike = indicators.get("atm_strike")
+                        signal_strike = self._extract_strike_from_symbol(single_signal.symbol)
+                        if selected_ce or selected_pe or atm_strike:
+                            selected_ok = bool(single_signal.symbol in {selected_ce, selected_pe})
+                            if not selected_ok and signal_strike is not None and atm_strike is not None:
+                                try:
+                                    selected_ok = abs(float(signal_strike) - float(atm_strike)) <= single_max_strike_distance
+                                except (TypeError, ValueError):
+                                    selected_ok = False
+                        else:
+                            log.info("SINGLE_VOTE_SELECTED_CHECK_UNAVAILABLE")
+                            selected_ok = False
+                    else:
+                        selected_ok = bool(selected_marker)
                 direction_score = float(metadata.get("direction_score") or 0.0)
                 direction_ok = (not require_direction_score) or direction_score >= min_direction_score
                 if allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok:
@@ -2531,6 +2552,18 @@ class StrategyManager(_BaseStrategyManager):
                         extra={'event': 'STRATEGY_CONSENSUS', 'side': winning_side, 'score': single_vote.score, 'votes': 1, 'reason': 'single_vote_scalp_controlled'},
                     )
                     return Signal(action='BUY', symbol=single_signal.symbol, quantity=single_signal.quantity, confidence=single_signal.confidence, reason=single_signal.reason, stop_loss=single_signal.stop_loss, take_profit=single_signal.take_profit, metadata=metadata)
+                log.info(
+                    "SINGLE_VOTE_REJECTED strategy=%s score=%.2f score_ok=%s confidence=%.2f confidence_ok=%s selected_ok=%s spread_ok=%s direction_ok=%s allow_single_vote_scalp=%s",
+                    single_vote.strategy,
+                    single_vote.score,
+                    score_ok,
+                    float(single_signal.confidence or 0.0),
+                    confidence_ok,
+                    selected_ok,
+                    spread_ok,
+                    direction_ok,
+                    allow_single_vote_scalp,
+                )
                 log.info(
                     'STRATEGY_CONSENSUS side=NO_TRADE score=%.2f votes=1 reason=single_vote_low_score threshold=%.2f allow_single_vote_scalp=%s',
                     single_vote.score,
@@ -3248,6 +3281,21 @@ class StrategyManager(_BaseStrategyManager):
                 extra={"event": "strategy_metric_normalise_error"},
             )
             return {}
+
+
+    @staticmethod
+    def _extract_strike_from_symbol(symbol: str) -> int | None:
+        """Extract option strike from symbol. Args: symbol. Returns: strike/None. Raises: none."""
+        raw = str(symbol or "").strip().upper()
+        if ":" in raw:
+            raw = raw.split(":", 1)[1]
+        match = re.search(r"(\d{4,6})(CE|PE)$", raw.replace("-", "").replace("_", ""))
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
 
 
 __all__ = [

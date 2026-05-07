@@ -29,7 +29,7 @@ class RSIDivergenceStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
-            self.last_no_vote_reason = "none"
+            self._no_vote("stale_or_invalid_data")
             rsi = float(indicators.get('rsi') or 50.0)
             close = float(indicators.get('close') or current_price)
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
@@ -52,7 +52,7 @@ class RSIDivergenceStrategy(EliteStrategy):
             if not confirmation:
                 confirmation = (bullish_div and close > hist[-2][0]) or (bearish_div and close < hist[-2][0])
             if not confirmation:
-                self.last_no_vote_reason = 'no_confirmation'
+                self._no_vote('no_confirmation')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=RSIDivergence reason=no_structure_confirmation')
                 return None
 
@@ -72,7 +72,7 @@ class RSIDivergenceStrategy(EliteStrategy):
 
             strategy_score = max(0.0, min(10.0, score))
             if strategy_score < 3.5:
-                self.last_no_vote_reason = "low_score"
+                self._no_vote('low_score')
                 return None
             metadata = {
                 'strategy': 'RSIDivergence',

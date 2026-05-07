@@ -6776,6 +6776,18 @@ class StrategyRunner:
                         price=price,
                     )
                     try:
+                        indicators_ctx = self._indicator_engine.get_indicators(symbol)
+                        selected_ce = getattr(self, "_active_selected_ce", None)
+                        selected_pe = getattr(self, "_active_selected_pe", None)
+                        atm_strike = getattr(self, "_active_atm_strike", None)
+                        symbol_strike = self._extract_strike_from_symbol(symbol)
+                        indicators_ctx["selected_ce"] = selected_ce
+                        indicators_ctx["selected_pe"] = selected_pe
+                        indicators_ctx["atm_strike"] = atm_strike
+                        indicators_ctx["is_selected_option"] = symbol in {selected_ce, selected_pe}
+                        if symbol_strike is not None and atm_strike is not None:
+                            indicators_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
+                        self._indicator_engine.set_indicators(symbol, indicators_ctx)
                         # --- Objective 2: Block signals if market depth insufficient ---
                         if not self.validate_market_depth():
                             self._emit_runner_eval_decision(

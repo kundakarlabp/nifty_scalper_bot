@@ -27,7 +27,7 @@ class CPRBreakoutStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
-            self.last_no_vote_reason = "none"
+            self._no_vote("stale_or_invalid_data")
             cpr_bottom = float(indicators.get('bc') or 0.0)
             cpr_top = float(indicators.get('tc') or 0.0)
             pivot = float(indicators.get('pivot') or 0.0)
@@ -39,16 +39,14 @@ class CPRBreakoutStrategy(EliteStrategy):
             if min(cpr_bottom, cpr_top, pivot) <= 0 or cpr_top <= cpr_bottom:
                 return None
             if cpr_bottom <= current_price <= cpr_top:
-                self.last_no_vote_reason = 'inside_cpr'
-                self.last_no_vote_reason = 'nearest_level_too_close'
+                self._no_vote('inside_cpr')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=CPRBreakout reason=inside_cpr')
                 return None
 
             side = 'CE' if current_price > cpr_top else 'PE'
             nearest_level_distance = (r1 - current_price) if side == 'CE' and r1 > 0 else (current_price - s1) if side == 'PE' and s1 > 0 else atr
             if nearest_level_distance < 0.5 * atr:
-                self.last_no_vote_reason = 'inside_cpr'
-                self.last_no_vote_reason = 'nearest_level_too_close'
+                self._no_vote('nearby_level')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=CPRBreakout reason=nearby_level')
                 return None
 
