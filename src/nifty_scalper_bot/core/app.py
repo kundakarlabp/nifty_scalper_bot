@@ -6872,7 +6872,11 @@ async def _build_and_hydrate_live_basket_from_spot(
                 "is_loaded": is_loaded,
             },
         )
-        raise RuntimeError("instrument_manager_not_ready_for_live_basket")
+        return {
+            "deferred": True,
+            "reason": "instrument_manager_not_ready",
+            "symbol_count": 0,
+        }
     if ctx.market_data_manager is None:
         raise RuntimeError("market_data_manager_unavailable_for_live_basket")
     if ctx.broker_client is None:
