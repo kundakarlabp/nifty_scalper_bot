@@ -1966,7 +1966,11 @@ class BotContext:
     # startup pipeline.  When populated, downstream legacy hydration paths
     # must reuse this rather than rebuild with their own (potentially
     # synthetic) spot price.
-    active_trading_universe: dict[str, Any] | None = None
+    selected_ce: str | None = None
+    selected_pe: str | None = None
+    atm_ce_symbol: str | None = None
+    atm_pe_symbol: str | None = None
+    active_trading_universe: dict[str, Any] = field(default_factory=dict)
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
     message_bus_running: bool = False
@@ -6647,6 +6651,31 @@ def _best_hydrated_option(
     return best_symbol
 
 
+def _fresh_option_quote(
+    ctx: BotContext, symbol: str | None, *, max_age_s: float = 60.0
+) -> str | None:
+    """Return symbol when its quote is fresh. Args: ctx/symbol/max_age_s. Returns: symbol|None. Raises: none."""
+    if not symbol or ctx.market_data_manager is None:
+        return None
+    try:
+        snap = ctx.market_data_manager.get_symbol_snapshot(symbol)
+        ltp = float(getattr(snap, "ltp", 0.0) or 0.0)
+        age = float(getattr(snap, "tick_age_s", 9999.0) or 9999.0)
+    except Exception:
+        return None
+    return symbol if ltp > 0 and age <= max_age_s else None
+
+
+def _count_symbol_bars(ctx: BotContext, symbol: str | None) -> int:
+    """Count hydrated bars for symbol. Args: ctx/symbol. Returns: bars count. Raises: none."""
+    if not symbol or ctx.market_data_manager is None:
+        return 0
+    try:
+        return len(list(ctx.market_data_manager.get_ohlc_bars(symbol, limit=500) or []))
+    except Exception:
+        return 0
+
+
 def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str | None, str | None]:
     """Pick ATM CE/PE from basket fields/options. Args: basket. Returns: (ce, pe). Raises: none."""
     selected_ce = cast(str | None, basket.get("atm_ce") or basket.get("selected_ce"))
@@ -6924,17 +6953,30 @@ async def _build_and_hydrate_live_basket_from_spot(
         spot_token = int(ctx.broker_client.get_instrument_token(policy.nifty_internal_symbol))
     except Exception:  # noqa: BLE001
         pass
+    selected_ce = cast(str | None, basket.get("selected_ce") or basket.get("atm_ce"))
+    selected_pe = cast(str | None, basket.get("selected_pe") or basket.get("atm_pe"))
     ctx.active_trading_universe = {
         "spot_symbol": policy.nifty_internal_symbol,
         "spot_token": spot_token,
         "spot_ltp": float(spot_ltp),
         "symbols": list(targets),
         "tokens": [],
+        "atm_ce": basket.get("atm_ce"),
+        "atm_pe": basket.get("atm_pe"),
+        "selected_ce": selected_ce,
+        "selected_pe": selected_pe,
+        "ce_symbols": list(basket.get("ce_symbols", []) or []),
+        "pe_symbols": list(basket.get("pe_symbols", []) or []),
+        "option_symbols": list(basket.get("option_symbols", []) or []),
         "futures_symbol": basket["futures_symbol"],
         "atm_strike": basket["atm_strike"],
         "selected_at": datetime.now(timezone.utc).isoformat(),
         "source": "ws_spot_first_marketdata_policy",
     }
+    ctx.atm_ce_symbol = cast(str | None, basket.get("atm_ce"))
+    ctx.atm_pe_symbol = cast(str | None, basket.get("atm_pe"))
+    ctx.selected_ce = selected_ce
+    ctx.selected_pe = selected_pe
 
     tokens: list[int] = []
     for symbol in targets:
@@ -9356,15 +9398,29 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     "SOFT_READINESS_MISSING missing=futures action=continue_with_spot_option_context",
                                     extra={"event": "SOFT_READINESS_MISSING", "missing": "futures", "action": "continue_with_spot_option_context"},
                                 )
-                            option_symbols = list(readiness_state.get("requirements", {}).get("options", []) or [])
-                            quote_ce = _best_fresh_option(ctx, option_symbols, side="CE")
-                            quote_pe = _best_fresh_option(ctx, option_symbols, side="PE")
-                            hydrated_ce = _best_hydrated_option(ctx, option_symbols, side="CE", min_bars=20)
-                            hydrated_pe = _best_hydrated_option(ctx, option_symbols, side="PE", min_bars=20)
+                            basket_universe = cast(
+                                Mapping[str, Any],
+                                getattr(ctx, "active_trading_universe", {}) or {},
+                            )
+                            option_symbols = list(basket_universe.get("option_symbols", []) or [])
+                            selected_ce = cast(
+                                str | None,
+                                getattr(ctx, "selected_ce", None)
+                                or basket_universe.get("selected_ce"),
+                            )
+                            selected_pe = cast(
+                                str | None,
+                                getattr(ctx, "selected_pe", None)
+                                or basket_universe.get("selected_pe"),
+                            )
+                            quote_ce = _fresh_option_quote(ctx, selected_ce) if selected_ce else None
+                            quote_pe = _fresh_option_quote(ctx, selected_pe) if selected_pe else None
+                            hydrated_ce = _count_symbol_bars(ctx, selected_ce) if selected_ce else 0
+                            hydrated_pe = _count_symbol_bars(ctx, selected_pe) if selected_pe else 0
                             option_ticks_ready = bool(quote_ce is not None and quote_pe is not None)
                             futures_ready = "futures" not in set(missing_soft)
-                            atm_ce_ready = quote_ce is not None
-                            atm_pe_ready = quote_pe is not None
+                            atm_ce_ready = bool(selected_ce and (quote_ce is not None or hydrated_ce >= 3))
+                            atm_pe_ready = bool(selected_pe and (quote_pe is not None or hydrated_pe >= 3))
                             req_atm_ce = readiness_state.get("requirements", {}).get("atm_ce")
                             req_atm_pe = readiness_state.get("requirements", {}).get("atm_pe")
                             if quote_ce and req_atm_ce and quote_ce != req_atm_ce:
@@ -9383,18 +9439,21 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 runner_running
                                 and (bool(hydrated_ce) or bool(hydrated_pe) or enough_runner_symbols)
                             )
-                            ctx.data_hard_ready = bool(spot_ready and atm_ce_ready and atm_pe_ready)
+                            spot_ready_for_live = bool(spot_ready or ws_quote_for_gate or ws_ltp_proof)
+                            ctx.data_hard_ready = bool(
+                                spot_ready_for_live and atm_ce_ready and atm_pe_ready
+                            )
                             LOGGER.info(
                                 "OPTION_QUOTE_READY selected_ce=%s selected_pe=%s",
-                                ctx.selected_ce,
-                                ctx.selected_pe,
-                                extra={"event": "OPTION_QUOTE_READY", "selected_ce": ctx.selected_ce, "selected_pe": ctx.selected_pe},
+                                selected_ce,
+                                selected_pe,
+                                extra={"event": "OPTION_QUOTE_READY", "selected_ce": selected_ce, "selected_pe": selected_pe},
                             )
                             LOGGER.info(
                                 "OPTION_HISTORY_READY selected_ce=%s selected_pe=%s",
-                                ctx.selected_ce,
-                                ctx.selected_pe,
-                                extra={"event": "OPTION_HISTORY_READY", "selected_ce": ctx.selected_ce, "selected_pe": ctx.selected_pe},
+                                selected_ce,
+                                selected_pe,
+                                extra={"event": "OPTION_HISTORY_READY", "selected_ce": selected_ce, "selected_pe": selected_pe},
                             )
                             ctx.mdm_strict_hard_ready = bool(hard_ready)
                             ctx.data_pipeline_ready = bool(ctx.data_hard_ready)
