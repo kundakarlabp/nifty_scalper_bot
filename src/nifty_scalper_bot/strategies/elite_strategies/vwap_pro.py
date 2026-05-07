@@ -31,6 +31,7 @@ class VWAPProStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
+            self.last_no_vote_reason = "none"
             vwap = float(indicators.get('vwap') or indicators.get('exchange_vwap') or 0.0)
             atr = float(indicators.get('atr') or 0.0)
             close = float(indicators.get('close') or current_price)
@@ -44,6 +45,11 @@ class VWAPProStrategy(EliteStrategy):
             stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
 
             if current_price <= 0 or vwap <= 0:
+                self.last_no_vote_reason = 'missing_vwap'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'no_direction_alignment'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'weak_score'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=missing_vwap')
                 return None
 
@@ -51,12 +57,27 @@ class VWAPProStrategy(EliteStrategy):
             distance_pct = abs(current_price - vwap) / max(vwap, 1e-9)
             overextended = distance_pct > self._max_distance_pct
             if overextended:
+                self.last_no_vote_reason = 'missing_vwap'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'no_direction_alignment'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'weak_score'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=overextended')
                 return None
             if stale_data:
+                self.last_no_vote_reason = 'missing_vwap'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'no_direction_alignment'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'weak_score'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=stale_data')
                 return None
             if spread_pct > 28.0:
+                self.last_no_vote_reason = 'missing_vwap'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'no_direction_alignment'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'weak_score'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=wide_spread')
                 return None
 
@@ -107,6 +128,11 @@ class VWAPProStrategy(EliteStrategy):
                     reasons.append('direction_conflict')
 
             if score < 3.0:
+                self.last_no_vote_reason = 'missing_vwap'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'no_direction_alignment'
+                self.last_no_vote_reason = 'distance_outside_band'
+                self.last_no_vote_reason = 'weak_score'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=low_score')
                 return None
 

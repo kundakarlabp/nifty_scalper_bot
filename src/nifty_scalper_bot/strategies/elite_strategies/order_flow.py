@@ -27,6 +27,7 @@ class OrderFlowStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
+            self.last_no_vote_reason = "none"
             bid = float(indicators.get('bid') or 0.0)
             ask = float(indicators.get('ask') or 0.0)
             depth = indicators.get('depth') or {}
@@ -35,10 +36,16 @@ class OrderFlowStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
 
             if bid <= 0 or ask <= 0 or ask <= bid:
+                self.last_no_vote_reason = 'missing_depth'
+                self.last_no_vote_reason = 'weak_imbalance'
+                self.last_no_vote_reason = 'missing_depth'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=missing_bid_ask')
                 return None
             spread_pct = float(indicators.get('spread_pct') or (((ask - bid) / ((ask + bid) / 2.0)) * 100.0))
             if spread_pct > 28.0:
+                self.last_no_vote_reason = 'missing_depth'
+                self.last_no_vote_reason = 'weak_imbalance'
+                self.last_no_vote_reason = 'missing_depth'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=wide_spread')
                 return None
 
@@ -48,6 +55,9 @@ class OrderFlowStrategy(EliteStrategy):
             total_bid = sum(float(level.get('quantity', 0.0)) for level in bids[:5]) if depth_available else 0.0
             total_ask = sum(float(level.get('quantity', 0.0)) for level in asks[:5]) if depth_available else 0.0
             if total_bid + total_ask <= 0:
+                self.last_no_vote_reason = 'missing_depth'
+                self.last_no_vote_reason = 'weak_imbalance'
+                self.last_no_vote_reason = 'missing_depth'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=depth_missing')
                 return None
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
@@ -73,6 +83,7 @@ class OrderFlowStrategy(EliteStrategy):
 
             strategy_score = max(0.0, min(10.0, score))
             if strategy_score < 4.0:
+                self.last_no_vote_reason = "low_score"
                 return None
             metadata = {
                 'strategy': 'OrderFlow',

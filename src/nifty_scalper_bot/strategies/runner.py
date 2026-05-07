@@ -7196,11 +7196,34 @@ class StrategyRunner:
         is_momentum_active = 60 < rsi < 85
         if not (is_bullish_premium and is_momentum_active):
             return None
+        if _env_flag("PREMIUM_FALLBACK_ONLY_SELECTED_OR_NEAR_ATM", True):
+            max_strike_distance = float(
+                os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or "100"
+            )
+            selected_ce = normalize_symbol(str(getattr(self, "_active_selected_ce", "") or ""))
+            selected_pe = normalize_symbol(str(getattr(self, "_active_selected_pe", "") or ""))
+            atm_strike = float(getattr(self, "_active_atm_strike", 0.0) or 0.0)
+            strike = float(self._extract_strike_from_symbol(upper_symbol) or 0.0)
+            selected = upper_symbol in {selected_ce, selected_pe}
+            near_atm = bool(
+                atm_strike > 0
+                and strike > 0
+                and abs(strike - atm_strike) <= max_strike_distance
+            )
+            if not (selected or near_atm):
+                self._logger.info(
+                    "PREMIUM_SQUEEZE_SKIPPED reason=outside_selected_strike_window symbol=%s atm_strike=%s strike=%s max_distance=%s trace_id=%s",
+                    symbol,
+                    atm_strike,
+                    strike,
+                    max_strike_distance,
+                    trace_id,
+                )
+                return None
         sl_pct = self._vwap_sl_pct
         tp_pct = self._vwap_tp_pct
         calculated_sl = price * (1 - sl_pct / 100)
         calculated_tp = price * (1 + tp_pct / 100)
-        self._reason_last_signal_ts[f"{underlying}:premium_momentum_squeeze"] = now_epoch
         log_throttled(
             self._logger,
             f"premium_squeeze_signal_emitted:{symbol}",
@@ -7790,11 +7813,19 @@ class StrategyRunner:
                     )
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "premium_squeeze_cooldown")
-            if now_epoch - float(self._underlying_last_signal_ts.get(underlying, 0.0)) < self._underlying_signal_cooldown_seconds:
+            underlying_last_ts = float(self._underlying_last_signal_ts.get(underlying, 0.0))
+            reason_last_ts = float(self._reason_last_signal_ts.get(underlying_reason_key, 0.0))
+            underlying_age = now_epoch - underlying_last_ts
+            reason_age = now_epoch - reason_last_ts
+            self._logger.info("COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f allowed=%s trace_id=%s", base_symbol, underlying_reason_key, reason_age, self._reason_signal_cooldown_seconds, reason_age >= self._reason_signal_cooldown_seconds, trace_id)
+            self._logger.info("COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f allowed=%s trace_id=%s", base_symbol, underlying, underlying_age, self._underlying_signal_cooldown_seconds, underlying_age >= self._underlying_signal_cooldown_seconds, trace_id)
+            if underlying_age < self._underlying_signal_cooldown_seconds:
+                self._logger.info("COOLDOWN_REJECTED reason=underlying_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying, underlying_last_ts, now_epoch, underlying_age, self._underlying_signal_cooldown_seconds)
                 log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "underlying_cooldown")
-            if now_epoch - float(self._reason_last_signal_ts.get(underlying_reason_key, 0.0)) < self._reason_signal_cooldown_seconds:
+            if reason_age < self._reason_signal_cooldown_seconds:
+                self._logger.info("COOLDOWN_REJECTED reason=reason_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying_reason_key, reason_last_ts, now_epoch, reason_age, self._reason_signal_cooldown_seconds)
                 log_throttled(self._logger, f"runner_reason_cd_{reason_key}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "reason_cooldown"})
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "reason_cooldown")
@@ -7811,6 +7842,7 @@ class StrategyRunner:
                 in {"1", "true", "yes", "on"}
             )
             if is_live_mode and not bool(self._runtime_live_orders_armed):
+                self._logger.info("ORDER_PATH_BLOCKED reason=runtime_live_orders_not_armed symbol=%s trace_id=%s", base_symbol, trace_id)
                 self._logger.info(
                     "RUNNER_BLOCKED_RUNTIME_READINESS",
                     extra={
@@ -7825,6 +7857,7 @@ class StrategyRunner:
                 )
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "runtime_live_orders_not_armed")
+            self._logger.info("ORDER_PATH_ENTERED symbol=%s reason=%s live_orders_armed=%s trace_id=%s", base_symbol, reason_key, bool(self._runtime_live_orders_armed), trace_id)
             option_side = infer_option_side(signal.symbol, metadata)
             if is_live_mode and option_side == "UNKNOWN":
                 self._reset_execution_state(base_symbol)
@@ -8197,7 +8230,7 @@ class StrategyRunner:
             self._order_attempt_window.append(now_epoch)
             max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
             max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
-            min_depth_qty = int(os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0")) or "0")
+            min_depth_qty = int(float(os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0")) or 0))
             allow_market_entry = str(os.getenv("ALLOW_MARKET_ENTRY", "false")).strip().lower() in {"1", "true", "yes", "on"}
             plan = TradePlan(symbol=base_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry)
             order_id = self._order_manager.submit_trade_plan(plan)

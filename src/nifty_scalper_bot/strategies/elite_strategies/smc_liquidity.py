@@ -27,6 +27,7 @@ class SMCStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
+            self.last_no_vote_reason = "none"
             high = float(indicators.get('high') or current_price)
             low = float(indicators.get('low') or current_price)
             close = float(indicators.get('close') or current_price)
@@ -36,6 +37,9 @@ class SMCStrategy(EliteStrategy):
             stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
 
             if stale_data or current_price <= 0:
+                self.last_no_vote_reason = 'no_liquidity_sweep'
+                self.last_no_vote_reason = 'no_liquidity_sweep'
+                self.last_no_vote_reason = 'low_score'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=stale_or_invalid_data')
                 return None
 
@@ -44,6 +48,9 @@ class SMCStrategy(EliteStrategy):
             bullish_sweep = low < (open_price - 0.3 * atr) and close > open_price
             bearish_sweep = high > (open_price + 0.3 * atr) and close < open_price
             if not bullish_sweep and not bearish_sweep:
+                self.last_no_vote_reason = 'no_liquidity_sweep'
+                self.last_no_vote_reason = 'no_liquidity_sweep'
+                self.last_no_vote_reason = 'low_score'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=no_sweep')
                 return None
 
@@ -72,6 +79,9 @@ class SMCStrategy(EliteStrategy):
 
             strategy_score = max(0.0, min(10.0, score))
             if strategy_score < 4.0:
+                self.last_no_vote_reason = 'no_liquidity_sweep'
+                self.last_no_vote_reason = 'no_liquidity_sweep'
+                self.last_no_vote_reason = 'low_score'
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=low_quality')
                 return None
 
