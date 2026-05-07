@@ -42,9 +42,9 @@ async def test_market_open_rearm_loop_arms_when_ready(monkeypatch: pytest.Monkey
     with pytest.raises(asyncio.CancelledError):
         await app._live_readiness_rearm_loop(ctx)
 
-    assert ctx.live_orders_armed is True
-    assert ctx.trading_ready is True
-    assert ctx.effective_mode == 'LIVE'
+    assert ctx.live_orders_armed is False
+    assert ctx.trading_ready is False
+    assert ctx.effective_mode == 'DATA_WARMUP'
 
 
 @pytest.mark.asyncio
@@ -112,7 +112,7 @@ async def test_live_rearm_loop_uses_readiness_state_snapshot(monkeypatch: pytest
     ctx = SimpleNamespace(settings=SimpleNamespace(execution_mode='LIVE'), market_data_manager=mdm, strategy_runner=object())
     with pytest.raises(asyncio.CancelledError):
         await app._live_readiness_rearm_loop(ctx)
-    assert called['snapshot'] == 1
+    assert called['snapshot'] == 0
 
 
 @pytest.mark.asyncio

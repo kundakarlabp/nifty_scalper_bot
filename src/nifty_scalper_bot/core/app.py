@@ -55,6 +55,19 @@ LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 SYNC_LOCK = threading.Lock()
 instrument_cache_ready = threading.Event()
 
+
+def _as_bool(value: object, default: bool = False) -> bool:
+    """Coerce mixed readiness values to bool. Args: value/default. Returns: bool. Raises: none."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on", "live", "ready"}
+    return default
+
 async def _maybe_await(value: Any) -> Any:
     """Await possibly-awaitable values. Args: value. Returns: resolved value. Raises: none."""
     if inspect.isawaitable(value):
@@ -265,7 +278,17 @@ def _gate_runner_symbol_add(
         runner_bars = 0
     mdm_bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
     required = _symbol_history_requirement(ctx)
-    history_ready = runner_bars >= required
+    quote_ready = False
+    try:
+        quote_ready = bool(ctx.market_data_manager.get_symbol_snapshot(symbol))
+    except Exception:
+        quote_ready = False
+    history_ready = max(runner_bars, mdm_bars) >= required
+    add_ready = bool(quote_ready or history_ready)
+    if not add_ready:
+        pending_runner_symbols.add(symbol)
+        LOGGER.info("RUNNER_SYMBOL_DEFERRED_UNTIL_READY symbol=%s token=%s runner_bars=%d mdm_bars=%d required_bars=%d source=%s", symbol, token, runner_bars, mdm_bars, required, source)
+        return False
     ctx.strategy_runner.add_symbol(symbol)
     if ctx.data_hub is not None and ctx.strategy_runner is not None:
         canonical_symbol = ctx.data_hub._canonical_quote_symbol(symbol)
@@ -331,6 +354,7 @@ def _gate_runner_symbol_add(
         )
     except Exception:  # pragma: no cover - observability must never raise
         pass
+    LOGGER.info("RUNNER_SYMBOL_ADDED_AFTER_READY symbol=%s token=%s source=%s", symbol, token, source)
     return True
 
 
@@ -6446,6 +6470,7 @@ async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> No
             await result
         if _runner_is_running(runner):
             LOGGER.info("STRATEGY_RUNNER_STARTED reason=%s", reason, extra={"event": "STRATEGY_RUNNER_STARTED", "reason": reason})
+            await _recompute_and_push_runtime_readiness(ctx, reason="runner_started")
         else:
             LOGGER.warning("STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING reason=%s active_symbols=%d runner_state=%s", reason, len(getattr(runner, "_active_symbols", set()) or []), getattr(runner, "_runner_state", None), extra={"event":"STRATEGY_RUNNER_START_RETURNED_NOT_RUNNING","reason":reason,"active_symbols":len(getattr(runner, "_active_symbols", set()) or []),"runner_state":str(getattr(runner, "_runner_state", None))})
         return
@@ -6457,6 +6482,7 @@ async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> No
             reason,
             extra={"event": "STRATEGY_RUNNER_TASK_STARTED", "reason": reason},
         )
+        await _recompute_and_push_runtime_readiness(ctx, reason="runner_started")
         return
     LOGGER.warning("STRATEGY_RUNNER_START_SKIPPED reason=no_start_or_run_method")
 
@@ -6466,148 +6492,45 @@ async def _ensure_strategy_runner_started(ctx: BotContext, *, reason: str) -> No
 async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
     """Re-arm LIVE trading when market opens. Args: ctx. Returns: none. Raises: none."""
 
+    interval_seconds = 30.0
+    LOGGER.info("LIVE_READINESS_REARM_LOOP_STARTED")
     while True:
-        await asyncio.sleep(30)
-        configured_mode = str(
-            getattr(ctx.settings, "execution_mode", None)
-            or os.getenv("EXECUTION_MODE", "PAPER")
-        ).upper()
-        if configured_mode != "LIVE":
-            continue
         try:
-            market_open_now = get_market_state() == MarketState.OPEN
-        except Exception:
-            market_open_now = False
-        if not market_open_now:
-            continue
-        runner = getattr(ctx, "strategy_runner", None)
-        active_symbols = len(getattr(runner, "_active_symbols", set()) or [])
-        if active_symbols == 0:
-            try:
-                spot_ltp = await _wait_for_live_spot_or_raise(
-                    ctx,
-                    timeout=10.0,
-                    configured_mode=configured_mode,
-                )
-                await _build_and_hydrate_live_basket_from_spot(
-                    ctx,
-                    spot_ltp=float(spot_ltp),
-                    configured_mode=configured_mode,
-                    hydrate=False,
-                )
-                LOGGER.info(
-                    "LIVE_REARM_BASKET_BUILT spot_ltp=%.2f",
-                    float(spot_ltp),
-                    extra={
-                        "event": "LIVE_REARM_BASKET_BUILT",
-                        "spot_ltp": float(spot_ltp),
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                ctx.live_orders_armed = False
-                ctx.trading_ready = False
-                ctx.live_block_reason = f"live_rearm_basket_build_failed:{exc}"
-                LOGGER.warning(
-                    "LIVE_REARM_BASKET_BUILD_FAILED error=%s",
-                    exc,
-                    exc_info=True,
-                    extra={
-                        "event": "LIVE_REARM_BASKET_BUILD_FAILED",
-                        "error": str(exc),
-                    },
-                )
+            await asyncio.sleep(interval_seconds)
+            configured_mode = str(getattr(ctx.settings, "execution_mode", None) or os.getenv("EXECUTION_MODE", "PAPER")).upper()
+            if configured_mode != "LIVE":
                 continue
-        await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
-        readiness_state = {}
-        mdm = getattr(ctx, "market_data_manager", None)
-        wait_fn = getattr(mdm, "wait_until_ready", None)
-        if callable(wait_fn):
+            LOGGER.info("LIVE_READINESS_REARM_CHECK")
             try:
-                await _maybe_await(wait_fn(timeout=0.75))
-            except Exception as exc:
-                LOGGER.info(
-                    "LIVE_REARM_MDM_READY_REFRESH_WAIT error=%s",
-                    exc,
-                    extra={
-                        "event": "LIVE_REARM_MDM_READY_REFRESH_WAIT",
-                        "error": str(exc),
-                    },
-                )
-        snapshot_fn = getattr(mdm, "readiness_state_snapshot", None)
-        if callable(snapshot_fn):
-            readiness_state = snapshot_fn() or {}
-        else:
-            snapshot_fn = getattr(mdm, "readiness_snapshot", None)
-            readiness_state = snapshot_fn() or {} if callable(snapshot_fn) else {}
-        missing_hard = readiness_state.get("missing_hard") or []
-        spot_ready = bool(readiness_state.get("spot_ready"))
-        futures_ready = "futures" not in set(missing_hard)
-        atm_ce_ready = "atm_ce" not in set(missing_hard)
-        atm_pe_ready = "atm_pe" not in set(missing_hard)
-        data_hard_ready = bool(spot_ready and futures_ready and atm_ce_ready and atm_pe_ready)
-        quote_capability = _resolve_quote_capability(ctx)
-        quote_available = bool(quote_capability["available"])
-        ws_quote_proof_fn = getattr(mdm, "has_ws_tradable_quote", None)
-        ws_quote_proof = bool(ws_quote_proof_fn()) if callable(ws_quote_proof_fn) else False
-        ws_ltp_proof_fn = getattr(mdm, "has_fresh_ws_ltp", None)
-        ws_ltp_proof = bool(ws_ltp_proof_fn()) if callable(ws_ltp_proof_fn) else False
-        ws_quote_for_gate = bool(ws_quote_proof or ws_ltp_proof)
-        runner_running = _runner_is_running(ctx.strategy_runner)
-        if runner is not None and not bool(getattr(runner, "ready", False)):
-            live_ready_symbols: list[str] = []
-            min_required_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "3") or 3)
-            runner_required = int(getattr(runner, "_required_candles", 20) or 20)
-            for _sym in list(getattr(runner, "_active_symbols", set()) or []):
-                _bars = len(mdm.get_ohlc_bars(_sym) or []) if mdm is not None else 0
-                _required = (
-                    min_required_live_bars
-                    if str(_sym).startswith("NFO:")
-                    and (str(_sym).endswith("CE") or str(_sym).endswith("PE"))
-                    else runner_required
-                )
-                if _bars >= _required:
-                    live_ready_symbols.append(str(_sym))
-            if live_ready_symbols and hasattr(runner, "mark_ready"):
-                runner.mark_ready(live_ready_symbols)
-                LOGGER.info(
-                    "RUNNER_READY_PROMOTED_FROM_LIVE_BARS symbols=%s",
-                    live_ready_symbols,
-                    extra={
-                        "event": "RUNNER_READY_PROMOTED_FROM_LIVE_BARS",
-                        "symbols": live_ready_symbols,
-                    },
-                )
-                runner_running = _runner_is_running(ctx.strategy_runner)
-                missing_hard = readiness_state.get("missing_hard") or []
-                spot_ready = bool(readiness_state.get("spot_ready"))
-                futures_ready = "futures" not in set(missing_hard)
-                atm_ce_ready = "atm_ce" not in set(missing_hard)
-                atm_pe_ready = "atm_pe" not in set(missing_hard)
-                data_hard_ready = bool(
-                    spot_ready and futures_ready and atm_ce_ready and atm_pe_ready
-                )
-        armed, reasons = compute_live_readiness(
-            live_mode=True,
-            hard_ready=data_hard_ready,
-            quote_available=quote_available,
-            ws_quote_proof=ws_quote_for_gate,
-            market_open=market_open_now,
-            runner_running=runner_running,
-        )
-        if armed:
-            ctx.live_orders_armed = True
-            ctx.trading_ready = True
-            ctx.readiness_mode = "LIVE"
-            ctx.effective_mode = "LIVE"
-            ctx.live_block_reason = None
-            LOGGER.info("LIVE_TRADING_REARMED hard_ready=%s runner_running=%s ws_quote_proof=%s quote_available=%s", data_hard_ready, runner_running, ws_quote_for_gate, quote_available, extra={"event": "LIVE_TRADING_REARMED", "hard_ready": data_hard_ready, "runner_running": runner_running, "ws_quote_proof": ws_quote_for_gate, "quote_available": quote_available})
-        else:
-            ctx.live_orders_armed = False
-            ctx.trading_ready = False
-            ctx.readiness_mode = "DATA_WARMUP"
-            ctx.effective_mode = "DATA_WARMUP"
-            ctx.live_block_reason = ",".join(reasons)
-            LOGGER.info("LIVE_TRADING_REARM_WAIT reasons=%s", reasons, extra={"event": "LIVE_TRADING_REARM_WAIT", "reasons": reasons})
+                market_open_now = get_market_state() == MarketState.OPEN
+            except Exception:
+                market_open_now = False
+            if not market_open_now:
+                continue
+            runner = getattr(ctx, "strategy_runner", None)
+            active_symbols = len(getattr(runner, "_active_symbols", set()) or [])
+            if active_symbols == 0:
+                try:
+                    spot_ltp = await _wait_for_live_spot_or_raise(
+                        ctx,
+                        timeout=10.0,
+                        configured_mode=configured_mode,
+                    )
+                    await _build_and_hydrate_live_basket_from_spot(
+                        ctx,
+                        spot_ltp=float(spot_ltp),
+                        configured_mode=configured_mode,
+                        hydrate=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("LIVE_REARM_BASKET_BUILD_FAILED error=%s", exc, exc_info=True)
+            await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
+            await _recompute_and_push_runtime_readiness(ctx, reason="market_open_rearm_loop")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("LIVE_READINESS_REARM_LOOP_CRASHED")
+            await asyncio.sleep(interval_seconds)
 
 
 def _sync_mdm_bars_to_runner(ctx: BotContext, symbol: str, *, min_bars: int) -> int:
@@ -6710,6 +6633,105 @@ def _best_hydrated_option(
             best_count = bars_count
             best_symbol = sym
     return best_symbol
+
+
+def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str | None, str | None]:
+    """Pick ATM CE/PE from basket fields/options. Args: basket. Returns: (ce, pe). Raises: none."""
+    selected_ce = cast(str | None, basket.get("atm_ce") or basket.get("selected_ce"))
+    selected_pe = cast(str | None, basket.get("atm_pe") or basket.get("selected_pe"))
+    option_symbols = [str(s) for s in list(basket.get("option_symbols") or []) if s]
+    atm_raw = basket.get("atm_strike")
+    try:
+        atm_strike = int(float(atm_raw)) if atm_raw is not None else None
+    except Exception:
+        atm_strike = None
+    if selected_ce and selected_pe:
+        return selected_ce, selected_pe
+
+    def _extract_strike(symbol: str) -> int | None:
+        digits = ""
+        base = symbol[:-2] if symbol.endswith(("CE", "PE")) else symbol
+        for ch in reversed(base):
+            if ch.isdigit():
+                digits = ch + digits
+            elif digits:
+                break
+        return int(digits) if digits else None
+
+    ce_candidates = [s for s in option_symbols if s.endswith("CE")]
+    pe_candidates = [s for s in option_symbols if s.endswith("PE")]
+    if not selected_ce and ce_candidates:
+        selected_ce = min(
+            ce_candidates,
+            key=lambda s: abs((_extract_strike(s) or 0) - (atm_strike or (_extract_strike(s) or 0))),
+        )
+    if not selected_pe and pe_candidates:
+        selected_pe = min(
+            pe_candidates,
+            key=lambda s: abs((_extract_strike(s) or 0) - (atm_strike or (_extract_strike(s) or 0))),
+        )
+    return selected_ce, selected_pe
+
+
+async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
+    """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
+    basket = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
+    selected_ce, selected_pe = _pick_atm_option_symbols_from_basket(basket)
+    ctx.selected_ce = selected_ce
+    ctx.selected_pe = selected_pe
+    ctx.atm_ce_symbol = selected_ce
+    ctx.atm_pe_symbol = selected_pe
+    option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if s]
+    atm_strike = basket.get("atm_strike")
+    LOGGER.info("OPTION_SELECTION_FINAL selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d", selected_ce, selected_pe, atm_strike, len(option_symbols))
+
+    mdm = getattr(ctx, "market_data_manager", None)
+    spot_symbol = str(basket.get("spot_symbol") or "NSE:NIFTY")
+    def _bars(sym: str | None) -> int:
+        if not sym or mdm is None:
+            return 0
+        try:
+            return len(mdm.get_ohlc_bars(sym) or [])
+        except Exception:
+            return 0
+    def _quote(sym: str | None) -> bool:
+        if not sym or mdm is None:
+            return False
+        try:
+            return bool(mdm.get_symbol_snapshot(sym))
+        except Exception:
+            return False
+    spot_ready = _quote(spot_symbol) or _bars(spot_symbol) >= 1
+    ce_ready = bool(selected_ce) and (_quote(selected_ce) or _bars(selected_ce) >= 3)
+    pe_ready = bool(selected_pe) and (_quote(selected_pe) or _bars(selected_pe) >= 3)
+    full_basket_ready = all((_quote(s) or _bars(s) >= 20) for s in option_symbols if s.endswith(("CE", "PE")))
+    data_hard_ready = bool(spot_ready and ce_ready and pe_ready)
+    runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
+    evaluation_ready = bool(data_hard_ready and runner_running)
+    live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
+    broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
+    live_orders_armed = bool(live_mode and data_hard_ready and evaluation_ready and broker_ready)
+    ctx.data_hard_ready = data_hard_ready
+    ctx.evaluation_ready = evaluation_ready
+    ctx.live_orders_armed = live_orders_armed
+    ctx.trading_ready = live_orders_armed
+    ctx.readiness_mode = "LIVE" if live_orders_armed else "DATA_WARMUP"
+    ctx.effective_mode = ctx.readiness_mode
+    ctx.live_block_reason = None if live_orders_armed else "startup_pipeline_incomplete"
+    LOGGER.info("LIVE_READINESS_COMPUTED spot_ready=%s ce_ready=%s pe_ready=%s full_basket_ready=%s", spot_ready, ce_ready, pe_ready, full_basket_ready)
+    if (not selected_ce) or (not selected_pe):
+        LOGGER.warning("LIVE_BASKET_INVALID reason=atm_option_selection_failed")
+        ctx.live_orders_armed = False
+    if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, "set_runtime_readiness"):
+        ctx.strategy_runner.set_runtime_readiness(
+            data_hard_ready=_as_bool(ctx.data_hard_ready),
+            evaluation_ready=_as_bool(ctx.evaluation_ready),
+            live_orders_armed=_as_bool(ctx.live_orders_armed),
+            reason=str(ctx.live_block_reason or reason),
+        )
+    LOGGER.info("RUNTIME_READINESS_REARM_RESULT data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s", ctx.data_hard_ready, ctx.evaluation_ready, ctx.live_orders_armed, reason)
+    if ctx.live_orders_armed:
+        LOGGER.info("LIVE_TRADING_ARMED")
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
@@ -6756,15 +6778,9 @@ async def _deferred_basket_hydration_retry(
                 ctx,
                 reason="deferred_basket_hydration_success",
             )
-            if ctx.strategy_runner is not None and hasattr(
-                ctx.strategy_runner, "set_runtime_readiness"
-            ):
-                ctx.strategy_runner.set_runtime_readiness(
-                    data_hard_ready=bool(getattr(ctx, "data_hard_ready", False)),
-                    evaluation_ready=bool(getattr(ctx, "evaluation_ready", False)),
-                    live_orders_armed=bool(getattr(ctx, "live_orders_armed", False)),
-                    reason=str(getattr(ctx, "live_block_reason", None) or "LIVE"),
-                )
+            await _recompute_and_push_runtime_readiness(
+                ctx, reason="deferred_basket_hydration_success"
+            )
             LOGGER.info(
                 "DEFERRED_BASKET_RETRY_SUCCESS attempt=%d spot_ltp=%.2f",
                 attempt,

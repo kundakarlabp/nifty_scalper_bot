@@ -5914,6 +5914,21 @@ class StrategyRunner:
                     interval_sec=5.0,
                     level=logging.INFO,
                 )
+            elif is_live_mode and not bool(self._runtime_live_orders_armed):
+                log_throttled(
+                    self._logger,
+                    "runner_post_grace_blocked",
+                    "RUNNER_POST_GRACE_STILL_BLOCKED",
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "RUNNER_POST_GRACE_STILL_BLOCKED",
+                        "data_hard_ready": bool(self._runtime_data_hard_ready),
+                        "evaluation_ready": bool(self._runtime_evaluation_ready),
+                        "live_orders_armed": bool(self._runtime_live_orders_armed),
+                        "reason": self._runtime_readiness_reason,
+                    },
+                )
 
             phase = "phase4_bar_build"
             # =================================================================
@@ -6370,26 +6385,15 @@ class StrategyRunner:
                 or str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
                 in {"1", "true", "yes", "on"}
             )
-            if is_live_mode and self._market_data is not None:
-                readiness = getattr(
-                    self._market_data, "readiness_state_snapshot", lambda: {}
-                )()
-                hard_ready_fn = getattr(self._market_data, "hard_ready", None)
-                hard_ready = (
-                    bool(hard_ready_fn())
-                    if callable(hard_ready_fn)
-                    else bool(readiness.get("hard_ready"))
+            if is_live_mode and not bool(self._runtime_data_hard_ready):
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage="phase9",
+                    reason=str(self._runtime_readiness_reason or "runtime_data_not_ready"),
+                    allowed=False,
+                    trace_id=trace_id,
                 )
-                if not hard_ready:
-                    self._emit_runner_eval_decision(
-                        symbol=symbol,
-                        stage="phase9",
-                        reason="startup_pipeline_not_ready",
-                        allowed=False,
-                        trace_id=trace_id,
-                        readiness=readiness,
-                    )
-                    return
+                return
             upper_symbol = symbol.upper()
             is_index_symbol = (
                 upper_symbol.startswith("NSE:")
