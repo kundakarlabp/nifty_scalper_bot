@@ -912,11 +912,13 @@ class StrategyRunner:
 
     def start(self) -> None:
         """Start processing market data events."""
+        symbols: list[str] = []
         # Runner start follows readiness gates; execution is enabled by mark_ready.
-        with self._lock:
-            if self._running:
-                return
-            self._running = True
+        try:
+            with self._lock:
+                if self._running:
+                    return
+                self._running = True
             self._trading_paused = False
             if not isinstance(self._active_symbols, set):
                 raise RuntimeError("Invalid active symbols container type")
@@ -971,7 +973,7 @@ class StrategyRunner:
             for symbol in symbols:
                 self._symbol_states.setdefault(symbol, SymbolState.DISCOVERED)
                 self._data_phase.setdefault(symbol, "HYDRATION")
-            self._rate_limit_backoff_until_by_symbol = {}
+                self._rate_limit_backoff_until_by_symbol = {}
             # BUG W3 FIX: Do NOT wipe warmup accumulators when mark_ready() has
             # already promoted runner state to EXECUTION_ENABLED.  The call order
             # in startup_sequence is: hydrate → mark_ready() → start().  Wiping
@@ -998,47 +1000,56 @@ class StrategyRunner:
             # Always reset per-session rate limits (independent of warmup state).
 
         # Capture the loop if called from async context (optional safety)
-        try:
-            self._main_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
+            try:
+                self._main_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
 
         # self._market_data.start()
         # worker = threading.Thread(target=self._strategy_worker, daemon=True)
         # worker.start()
 
-        if self._data_hub is not None:
-            reset = getattr(self._data_hub, "reset_warmup", None)
-            if callable(reset):
-                reset()
+            if self._data_hub is not None:
+                reset = getattr(self._data_hub, "reset_warmup", None)
+                if callable(reset):
+                    reset()
 
-        for symbol in symbols:
-            self._subscribe_symbol(symbol)
+            for symbol in symbols:
+                self._subscribe_symbol(symbol)
 
-        self._logger.info("Strategy runner started with symbols: %s", symbols)
+            self._logger.info("Strategy runner started with symbols: %s", symbols)
 
-        # ✅ FIX: Launch Backfill Task (EMERGENCY FALLBACK ONLY)
-        # BUG W4 FIX: _backfill_history() was scheduled immediately in runner.start(),
-        # which races with core/app.py EngineWarmupTask. We only need the backfill task
-        # as an emergency fallback if EngineWarmupTask fails.
-        emergency_backfill_enabled = _env_bool(
-            "RUNNER_ENABLE_EMERGENCY_BACKFILL",
-            default=False,
-        )
-        if (
-            self._config.fetch_history_on_startup
-            and emergency_backfill_enabled
-            and self._main_loop
-            and not self._backfill_task_started
-        ):
-            self._backfill_task_started = True
+            # ✅ FIX: Launch Backfill Task (EMERGENCY FALLBACK ONLY)
+            # BUG W4 FIX: _backfill_history() was scheduled immediately in runner.start(),
+            # which races with core/app.py EngineWarmupTask. We only need the backfill task
+            # as an emergency fallback if EngineWarmupTask fails.
+            emergency_backfill_enabled = _env_bool(
+                "RUNNER_ENABLE_EMERGENCY_BACKFILL",
+                default=False,
+            )
+            if (
+                self._config.fetch_history_on_startup
+                and emergency_backfill_enabled
+                and self._main_loop
+                and not self._backfill_task_started
+            ):
+                self._backfill_task_started = True
 
-            async def _deferred_backfill() -> None:
-                # Fix: delay the fallback task by 60s so app.py startup_sequence always finishes
-                await asyncio.sleep(60.0)
-                await self._backfill_history()
+                async def _deferred_backfill() -> None:
+                    # Fix: delay the fallback task by 60s so app.py startup_sequence always finishes
+                    await asyncio.sleep(60.0)
+                    await self._backfill_history()
 
-            self._main_loop.create_task(_deferred_backfill())
+                self._main_loop.create_task(_deferred_backfill())
+            with self._lock:
+                self._runner_state = RunnerState.EXECUTION_ENABLED
+                self._running = True
+        except Exception as e:
+            with self._lock:
+                self._running = False
+                self._runner_state = RunnerState.ERROR
+            self._logger.error("Failure in StrategyRunner.start: %s", e)
+            raise
 
     def stop(self) -> None:
         """Stop event processing and unsubscribe from market data."""
@@ -5512,6 +5523,11 @@ class StrategyRunner:
         )
         phase = "entry"
         try:
+            is_live_mode = (
+                str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
+                or str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
             # =================================================================
             # PHASE -1: BRACKET MANAGER TICK FORWARDING (MUST be before ANY return)
             # =================================================================
@@ -6391,11 +6407,6 @@ class StrategyRunner:
                         "tick_price": price,
                     },
                 )
-            is_live_mode = (
-                str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
-                or str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
-                in {"1", "true", "yes", "on"}
-            )
             if is_live_mode and not bool(self._runtime_data_hard_ready):
                 self._emit_runner_eval_decision(
                     symbol=symbol,
