@@ -2057,9 +2057,20 @@ class StrategyManager(_BaseStrategyManager):
                 avg_volume = self._sm_last_valid_avg_vol.get(symbol, avg_volume)
         except (TypeError, ValueError):
             pass
+        is_nifty_context_symbol = symbol in {"NSE:NIFTY", "NIFTY"}
         try:
             if vwap is None or float(vwap) <= 0.0:
-                invalid_reason = "vwap_zero_or_invalid"
+                if is_nifty_context_symbol and (volume is None or float(volume) <= 0.0):
+                    log.info(
+                        "CONTEXT_VWAP_UNAVAILABLE_NON_FATAL symbol=%s",
+                        symbol,
+                        extra={
+                            "event": "CONTEXT_VWAP_UNAVAILABLE_NON_FATAL",
+                            "symbol": symbol,
+                        },
+                    )
+                else:
+                    invalid_reason = "vwap_zero_or_invalid"
             elif avg_volume is None or float(avg_volume) <= 0.0:
                 # ✅ FIX #2b: avg_volume=0 is transient (options with no live bars yet).
                 # Delegate to individual strategies which have their own grace periods.
@@ -2083,7 +2094,6 @@ class StrategyManager(_BaseStrategyManager):
             self._observability_counters["signals_blocked_by_risk"] += 1
             count = self._symbol_invalid_counts.get(symbol, 0) + 1
             self._symbol_invalid_counts[symbol] = count
-            is_nifty_context_symbol = symbol in {"NSE:NIFTY", "NIFTY"}
             if invalid_reason == "vwap_zero_or_invalid" and is_nifty_context_symbol:
                 log.info(
                     "CONTEXT_SYMBOL_INVALID_NOT_SUSPENDED symbol=%s reason=%s",

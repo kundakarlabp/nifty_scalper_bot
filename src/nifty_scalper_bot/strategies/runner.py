@@ -5027,10 +5027,41 @@ class StrategyRunner:
 
     def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
         """Validate regime gate for strategy. Args: strategy, regime; Returns: bool; Raises: none."""
-        normalized = strategy.strip().lower()
-        if normalized in {"vwap_pro", "vwappro"}:
-            return regime == MarketRegime.TREND
-        return True
+        if not _env_bool("RUNNER_ENABLE_REGIME_GATE", True):
+            self._logger.debug(
+                "REGIME_GATE_BYPASSED strategy=%s regime=%s reason=disabled",
+                strategy or "unknown",
+                regime.value,
+                extra={"event": "REGIME_GATE_BYPASSED"},
+            )
+            return True
+        normalized = (strategy or "").strip().lower()
+        strategy_env_map = {
+            "vwap_pro": "RUNNER_VWAP_ALLOWED_REGIMES",
+            "vwappro": "RUNNER_VWAP_ALLOWED_REGIMES",
+            "premium_momentum": "RUNNER_PREMIUM_SQUEEZE_ALLOWED_REGIMES",
+            "premium_momentum_squeeze": "RUNNER_PREMIUM_SQUEEZE_ALLOWED_REGIMES",
+            "orb_pro": "RUNNER_ORB_ALLOWED_REGIMES",
+            "orbpro": "RUNNER_ORB_ALLOWED_REGIMES",
+        }
+        env_name = strategy_env_map.get(normalized)
+        default_allowed = "TREND,NORMAL,HIGH_VOLATILITY"
+        if env_name == "RUNNER_VWAP_ALLOWED_REGIMES":
+            default_allowed = "TREND,NORMAL"
+        allowed_csv = os.getenv(env_name or "", default_allowed) if env_name else default_allowed
+        allowed = {item.strip().upper() for item in allowed_csv.split(",") if item.strip()}
+        regime_name = regime.value.upper()
+        allowed_for_regime = regime_name in allowed
+        self._logger.info(
+            "REGIME_GATE_DECISION strategy=%s regime=%s allowed=%s allowed_regimes=%s env=%s",
+            strategy or "unknown",
+            regime.value,
+            allowed_for_regime,
+            sorted(allowed),
+            env_name or "default",
+            extra={"event": "REGIME_GATE_DECISION"},
+        )
+        return allowed_for_regime
 
     def _strategy_slots_available(self) -> bool:
         """Return True when active strategy slots are available for new entries."""
@@ -6234,6 +6265,7 @@ class StrategyRunner:
 
                 # 8B. PREMIUM MOMENTUM SQUEEZE (Shift Brain to Options)
                 if generated_signal is None and self._indicator_engine.has_min_bars(symbol, 20):
+                    phase = "phase8_premium_squeeze"
                     generated_signal = self._maybe_generate_premium_squeeze_signal(
                         symbol,
                         price,
@@ -6248,6 +6280,7 @@ class StrategyRunner:
                     and state.vwap > 0
                     and "FUT" not in symbol.upper()
                 ):
+                    phase = "phase8_vwap_crossover"
                     prev_ltp = (
                         _extract_float(state.last_tick, "ltp", "last_price")
                         if state.last_tick
@@ -6328,6 +6361,7 @@ class StrategyRunner:
             # =================================================================
 
             self._eval_counter = getattr(self, "_eval_counter", 0) + 1
+            phase = "phase9_strategy_manager"
             # Visible INFO trace so Railway logs confirm PHASE 9 is reached
             log_throttled(
                 self._logger,
@@ -6883,6 +6917,7 @@ class StrategyRunner:
             # =================================================================
 
             if signal and signal.action != "HOLD":
+                phase = "phase10_signal_execution"
                 self._last_strategy_versions[symbol] = current_version
                 signal_strategy = str((signal.metadata or {}).get("strategy") or "")
                 current_regime = self._compute_regime_snapshot(symbol)
@@ -6890,13 +6925,35 @@ class StrategyRunner:
                     signal_strategy, current_regime
                 ):
                     self._regime_block_counter += 1
+                    allowed_env = os.getenv("RUNNER_VWAP_ALLOWED_REGIMES", "TREND,NORMAL")
+                    if signal_strategy.strip().lower() in {"premium_momentum", "premium_momentum_squeeze"}:
+                        allowed_env = os.getenv(
+                            "RUNNER_PREMIUM_SQUEEZE_ALLOWED_REGIMES",
+                            "TREND,NORMAL,HIGH_VOLATILITY",
+                        )
+                    elif signal_strategy.strip().lower() in {"orb_pro", "orbpro"}:
+                        allowed_env = os.getenv(
+                            "RUNNER_ORB_ALLOWED_REGIMES",
+                            "TREND,NORMAL,HIGH_VOLATILITY",
+                        )
                     self._logger.info(
-                        "Strategy skipped due to detected market regime",
+                        "REGIME_GATE_REJECTED symbol=%s strategy=%s regime=%s allowed_regimes=%s side=%s score=%.2f trace_id=%s",
+                        symbol,
+                        signal_strategy or "unknown",
+                        current_regime.value,
+                        allowed_env,
+                        signal.action,
+                        float(signal.confidence or 0.0),
+                        trace_id,
                         extra={
-                            "event": "regime_skip",
+                            "event": "REGIME_GATE_REJECTED",
                             "symbol": symbol,
                             "strategy": signal_strategy or "unknown",
                             "regime": current_regime.value,
+                            "allowed_regimes": allowed_env,
+                            "side": signal.action,
+                            "score": float(signal.confidence or 0.0),
+                            "trace_id": trace_id,
                         },
                     )
                     return
@@ -8417,6 +8474,23 @@ class StrategyRunner:
                 return "NIFTY"
             return prefix
         return compact
+
+    @staticmethod
+    def _extract_strike_from_symbol(symbol: str) -> int | None:
+        """Extract option strike. Args: symbol. Returns: strike or None. Raises: none."""
+        raw = str(symbol or "").strip().upper()
+        if not raw:
+            return None
+        if ":" in raw:
+            raw = raw.split(":", 1)[1]
+        raw = raw.replace("_", "").replace("-", "").replace(" ", "")
+        match = re.search(r"(\d{4,6})(CE|PE)$", raw)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
 
     def _stale_tick_threshold_for_symbol(self, symbol: str) -> float:
         """Return configured stale threshold for symbol type."""
