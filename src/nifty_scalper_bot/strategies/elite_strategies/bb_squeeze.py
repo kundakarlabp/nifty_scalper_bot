@@ -27,7 +27,7 @@ class BBSqueezeStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
-            self.last_no_vote_reason = "none"
+            self._no_vote("stale_or_invalid_data")
             upper = float(indicators.get('bollinger_upper') or 0.0)
             lower = float(indicators.get('bollinger_lower') or 0.0)
             mid = float(indicators.get('bollinger_middle') or 0.0)
@@ -48,14 +48,12 @@ class BBSqueezeStrategy(EliteStrategy):
 
             breakout_side = 'CE' if close > upper else 'PE' if close < lower else 'UNKNOWN'
             if breakout_side == 'UNKNOWN':
-                self.last_no_vote_reason = 'no_breakout'
-                self.last_no_vote_reason = 'weak_expansion'
+                self._no_vote('no_breakout')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=BBSqueeze reason=no_breakout')
                 return None
             expansion_confirmed = abs(close - open_price) >= 0.35 * atr
             if not expansion_confirmed:
-                self.last_no_vote_reason = 'no_breakout'
-                self.last_no_vote_reason = 'weak_expansion'
+                self._no_vote('weak_expansion')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=BBSqueeze reason=no_expansion')
                 return None
 

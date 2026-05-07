@@ -27,7 +27,7 @@ class ORBProStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
-            self.last_no_vote_reason = "none"
+            self._no_vote("stale_or_invalid_data")
             or_complete = bool(indicators.get('orb_ready'))
             orb_high = float(indicators.get('orb_high') or 0.0)
             orb_low = float(indicators.get('orb_low') or 0.0)
@@ -40,17 +40,13 @@ class ORBProStrategy(EliteStrategy):
             regime = str(indicators.get('regime') or '').upper()
 
             if not or_complete:
-                self.last_no_vote_reason = 'orb_not_ready'
-                self.last_no_vote_reason = 'no_breakout'
-                self.last_no_vote_reason = 'wick_only_breakout'
+                self._no_vote('orb_not_ready')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=opening_range_incomplete')
                 return None
             if orb_high <= orb_low:
                 return None
             if regime in {'CHOPPY'}:
-                self.last_no_vote_reason = 'orb_not_ready'
-                self.last_no_vote_reason = 'no_breakout'
-                self.last_no_vote_reason = 'wick_only_breakout'
+                self._no_vote('invalid_orb_levels')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=choppy_regime')
                 return None
 
@@ -61,9 +57,7 @@ class ORBProStrategy(EliteStrategy):
             candle_range = max(abs(float(indicators.get('high') or close) - float(indicators.get('low') or close)), 1e-9)
             breakout_body_pct = abs(close - open_price) / candle_range
             if breakout_body_pct < 0.35:
-                self.last_no_vote_reason = 'orb_not_ready'
-                self.last_no_vote_reason = 'no_breakout'
-                self.last_no_vote_reason = 'wick_only_breakout'
+                self._no_vote('wick_only_breakout')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=wick_only_breakout')
                 return None
 

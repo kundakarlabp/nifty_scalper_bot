@@ -27,7 +27,7 @@ class SMCStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
-            self.last_no_vote_reason = "none"
+            self._no_vote("stale_or_invalid_data")
             high = float(indicators.get('high') or current_price)
             low = float(indicators.get('low') or current_price)
             close = float(indicators.get('close') or current_price)
@@ -37,9 +37,7 @@ class SMCStrategy(EliteStrategy):
             stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
 
             if stale_data or current_price <= 0:
-                self.last_no_vote_reason = 'no_liquidity_sweep'
-                self.last_no_vote_reason = 'no_liquidity_sweep'
-                self.last_no_vote_reason = 'low_score'
+                self._no_vote('no_liquidity_sweep')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=stale_or_invalid_data')
                 return None
 

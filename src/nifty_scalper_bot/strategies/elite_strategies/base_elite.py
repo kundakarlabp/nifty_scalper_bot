@@ -242,6 +242,11 @@ class EliteStrategy(Strategy):
 
         return None
 
+
+    def _no_vote(self, reason: str) -> None:
+        """Record a single no-vote reason. Args: reason. Returns: None. Raises: none."""
+        self.last_no_vote_reason = reason
+
     def _evaluate_signal(
         self, 
         symbol: str = "", 
