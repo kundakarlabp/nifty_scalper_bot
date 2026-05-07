@@ -6756,6 +6756,15 @@ async def _deferred_basket_hydration_retry(
                 ctx,
                 reason="deferred_basket_hydration_success",
             )
+            if ctx.strategy_runner is not None and hasattr(
+                ctx.strategy_runner, "set_runtime_readiness"
+            ):
+                ctx.strategy_runner.set_runtime_readiness(
+                    data_hard_ready=bool(getattr(ctx, "data_hard_ready", False)),
+                    evaluation_ready=bool(getattr(ctx, "evaluation_ready", False)),
+                    live_orders_armed=bool(getattr(ctx, "live_orders_armed", False)),
+                    reason=str(getattr(ctx, "live_block_reason", None) or "LIVE"),
+                )
             LOGGER.info(
                 "DEFERRED_BASKET_RETRY_SUCCESS attempt=%d spot_ltp=%.2f",
                 attempt,
@@ -6800,15 +6809,27 @@ async def _build_and_hydrate_live_basket_from_spot(
     del configured_mode
     if float(spot_ltp) <= 0:
         raise RuntimeError("spot_ltp must be positive for live basket hydration")
+    LOGGER.info(
+        "LIVE_BASKET_BUILD_STARTED spot_ltp=%.2f hydrate=%s",
+        float(spot_ltp),
+        bool(hydrate),
+        extra={"event": "LIVE_BASKET_BUILD_STARTED", "spot_ltp": float(spot_ltp), "hydrate": bool(hydrate)},
+    )
     if ctx.instrument_manager is None or not ctx.instrument_manager.is_loaded():
-        LOGGER.info(
-            "LIVE_BASKET_BUILD_DEFERRED reason=instrument_manager_not_ready",
+        instrument_manager = getattr(ctx, "instrument_manager", None)
+        is_loaded = bool(instrument_manager.is_loaded()) if instrument_manager is not None and hasattr(instrument_manager, "is_loaded") else False
+        LOGGER.error(
+            "LIVE_BASKET_BUILD_BLOCKED reason=instrument_manager_not_ready type=%s is_loaded=%s",
+            type(instrument_manager).__name__ if instrument_manager is not None else "NoneType",
+            is_loaded,
             extra={
-                "event": "LIVE_BASKET_BUILD_DEFERRED",
+                "event": "LIVE_BASKET_BUILD_BLOCKED",
                 "reason": "instrument_manager_not_ready",
+                "instrument_manager_type": type(instrument_manager).__name__ if instrument_manager is not None else "NoneType",
+                "is_loaded": is_loaded,
             },
         )
-        return {"deferred": True, "reason": "instrument_manager_not_ready"}
+        raise RuntimeError("instrument_manager_not_ready_for_live_basket")
     if ctx.market_data_manager is None:
         raise RuntimeError("market_data_manager_unavailable_for_live_basket")
     if ctx.broker_client is None:
@@ -6981,6 +7002,11 @@ async def _build_and_hydrate_live_basket_from_spot(
         flushed_result = flush_pending()
         if inspect.isawaitable(flushed_result):
             await flushed_result
+    LOGGER.info(
+        "LIVE_BASKET_BUILD_SUCCESS symbols=%s",
+        list(targets),
+        extra={"event": "LIVE_BASKET_BUILD_SUCCESS", "symbols": list(targets)},
+    )
     return basket
 
 
@@ -9328,15 +9354,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 and configured_runtime_mode == "LIVE"
                                 and runner_running
                             )
-                            if ctx.strategy_runner is not None and hasattr(
-                                ctx.strategy_runner, "set_runtime_readiness"
-                            ):
-                                ctx.strategy_runner.set_runtime_readiness(
-                                    data_hard_ready=ctx.data_hard_ready,
-                                    evaluation_ready=ctx.evaluation_ready,
-                                    live_orders_armed=ctx.live_orders_armed,
-                                    reason=ctx.live_block_reason,
-                                )
                             if configured_runtime_mode in {"PAPER", "SHADOW"}:
                                 ctx.live_orders_armed = False
                                 if ctx.strategy_runner is not None:
@@ -9434,6 +9451,30 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ",".join(data_warmup_reasons) if data_warmup_reasons else None
                             )
                             ctx.live_block_reason = data_warmup_reason
+                            runtime_reason = "LIVE" if (live_mode and armed) else ctx.live_block_reason
+                            if ctx.strategy_runner is not None and hasattr(
+                                ctx.strategy_runner, "set_runtime_readiness"
+                            ):
+                                ctx.strategy_runner.set_runtime_readiness(
+                                    data_hard_ready=bool(ctx.data_hard_ready),
+                                    evaluation_ready=bool(ctx.evaluation_ready),
+                                    live_orders_armed=bool(ctx.live_orders_armed),
+                                    reason=runtime_reason,
+                                )
+                                LOGGER.info(
+                                    "RUNTIME_READINESS_PUSHED data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s",
+                                    bool(ctx.data_hard_ready),
+                                    bool(ctx.evaluation_ready),
+                                    bool(ctx.live_orders_armed),
+                                    runtime_reason,
+                                    extra={
+                                        "event": "RUNTIME_READINESS_PUSHED",
+                                        "data_hard_ready": bool(ctx.data_hard_ready),
+                                        "evaluation_ready": bool(ctx.evaluation_ready),
+                                        "live_orders_armed": bool(ctx.live_orders_armed),
+                                        "reason": runtime_reason,
+                                    },
+                                )
                             ctx.market_session_state = session_state_str
                             ctx.quote_api_available = quote_available
                             ctx.quote_api_error = quote_error

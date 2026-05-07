@@ -170,6 +170,50 @@ def test_premium_squeeze_does_not_self_suppress_on_first_execution() -> None:
     assert result.reason == 'order_submitted'
     assert runner._premium_squeeze_last_signal_ts.get('NIFTY', 0.0) > 0.0
 
+
+def test_live_entry_uses_runtime_readiness_not_mdm_hard_ready(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_data_hard_ready = True
+    runner._runtime_live_orders_armed = True
+    class _BadMarketData:
+        def hard_ready(self):
+            raise AssertionError('hard_ready should not be called')
+    runner._market_data = _BadMarketData()
+    runner._order_manager.submit_trade_plan = MagicMock(return_value='order-1')
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800CE', quantity=1, confidence=0.9, reason='test', stop_loss=100.0, take_profit=120.0, metadata={'strategy_score': 7, 'option_score': 7, 'data_score': 7, 'rr_score': 7})
+    result = runner._handle_entry_signal_inner(signal, 'NFO:NIFTY26APR23800CE', 'NFO:NIFTY26APR23800CE', 110.0, datetime.now(timezone.utc), trace_id='runtime-ready')
+    assert result.accepted is True
+
+
+def test_trade_plan_uses_env_preflight_values(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('ORDER_MAX_QUOTE_AGE_MS', '65000')
+    monkeypatch.setenv('SPREAD_MAX_PCT', '12.5')
+    monkeypatch.setenv('MIN_DEPTH_QTY', '25')
+    monkeypatch.setenv('ALLOW_MARKET_ENTRY', 'true')
+    captured = {}
+    def _submit(plan):
+        captured['plan'] = plan
+        return 'order-2'
+    runner._order_manager.submit_trade_plan = _submit
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800CE', quantity=1, confidence=0.9, reason='test', stop_loss=100.0, take_profit=120.0, metadata={'strategy_score': 7, 'option_score': 7, 'data_score': 7, 'rr_score': 7})
+    runner._handle_entry_signal_inner(signal, 'NFO:NIFTY26APR23800CE', 'NFO:NIFTY26APR23800CE', 110.0, datetime.now(timezone.utc), trace_id='preflight')
+    plan = captured['plan']
+    assert plan.max_quote_age_ms == 65000
+    assert plan.max_spread_pct == 12.5
+    assert plan.min_depth_qty == 25
+    assert plan.allow_market_entry is True
+
+
+def test_atr_fallback_used_for_insufficient_bars() -> None:
+    runner = _build_runner()
+    runner._required_candles = 20
+    runner._data_hub = SimpleNamespace(get_ohlc_bars=lambda _symbol: [])
+    runner._market_data = None
+    atr = runner._get_atr_with_fallback('NFO:NIFTY26APR23800CE', {}, 100.0)
+    assert atr > 0
+
 def test_stale_thresholds_are_instrument_specific() -> None:
     runner = _build_runner()
     runner._option_stale_tick_seconds = 900.0

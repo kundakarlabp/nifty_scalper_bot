@@ -7170,7 +7170,6 @@ class StrategyRunner:
         tp_pct = self._vwap_tp_pct
         calculated_sl = price * (1 - sl_pct / 100)
         calculated_tp = price * (1 + tp_pct / 100)
-        self._premium_squeeze_last_signal_ts[underlying] = now_epoch
         self._reason_last_signal_ts[f"{underlying}:premium_momentum_squeeze"] = now_epoch
         log_throttled(
             self._logger,
@@ -7240,26 +7239,28 @@ class StrategyRunner:
             str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
             in {"1", "true", "yes", "on"}
         )
-        if is_live_mode and self._market_data is not None:
-            readiness = getattr(
-                self._market_data, "readiness_state_snapshot", lambda: {}
-            )()
-            hard_ready_fn = getattr(self._market_data, "hard_ready", None)
-            hard_ready = (
-                bool(hard_ready_fn())
-                if callable(hard_ready_fn)
-                else bool(readiness.get("hard_ready"))
+        if is_live_mode and not bool(self._runtime_data_hard_ready):
+            self._logger.info(
+                "RUNNER_BLOCKED_RUNTIME_READINESS",
+                extra={
+                    "event": "RUNNER_BLOCKED_RUNTIME_READINESS",
+                    "stage": "handle_signal",
+                    "runtime_data_hard_ready": bool(self._runtime_data_hard_ready),
+                    "runtime_evaluation_ready": bool(self._runtime_evaluation_ready),
+                    "runtime_live_orders_armed": bool(self._runtime_live_orders_armed),
+                    "runtime_readiness_reason": self._runtime_readiness_reason,
+                    "trace_id": trace_id,
+                },
             )
-            if not hard_ready:
-                self._emit_runner_eval_decision(
-                    symbol=self._normalize_symbol(signal.symbol),
-                    stage="handle_signal",
-                    reason="startup_pipeline_not_ready",
-                    allowed=False,
-                    trace_id=trace_id,
-                    readiness=readiness,
-                )
-                return SignalExecutionResult(False, "startup_pipeline_not_ready")
+            self._emit_runner_eval_decision(
+                symbol=self._normalize_symbol(signal.symbol),
+                stage="handle_signal",
+                reason=str(self._runtime_readiness_reason or "runtime_data_not_ready"),
+                allowed=False,
+                trace_id=trace_id,
+                readiness={},
+            )
+            return SignalExecutionResult(False, "runtime_data_not_ready")
         self._logger.info(
             "RUNNER_SIGNAL_DECISION",
             extra={
@@ -7779,19 +7780,21 @@ class StrategyRunner:
                 str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
                 in {"1", "true", "yes", "on"}
             )
-            if is_live_mode and self._market_data is not None:
-                readiness = getattr(
-                    self._market_data, "readiness_state_snapshot", lambda: {}
-                )()
-                hard_ready_fn = getattr(self._market_data, "hard_ready", None)
-                hard_ready = (
-                    bool(hard_ready_fn())
-                    if callable(hard_ready_fn)
-                    else bool(readiness.get("hard_ready"))
+            if is_live_mode and not bool(self._runtime_live_orders_armed):
+                self._logger.info(
+                    "RUNNER_BLOCKED_RUNTIME_READINESS",
+                    extra={
+                        "event": "RUNNER_BLOCKED_RUNTIME_READINESS",
+                        "stage": "entry",
+                        "runtime_data_hard_ready": bool(self._runtime_data_hard_ready),
+                        "runtime_evaluation_ready": bool(self._runtime_evaluation_ready),
+                        "runtime_live_orders_armed": bool(self._runtime_live_orders_armed),
+                        "runtime_readiness_reason": self._runtime_readiness_reason,
+                        "trace_id": trace_id,
+                    },
                 )
-                if not hard_ready:
-                    self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "startup_pipeline_not_ready")
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(False, "runtime_live_orders_not_armed")
             option_side = infer_option_side(signal.symbol, metadata)
             if is_live_mode and option_side == "UNKNOWN":
                 self._reset_execution_state(base_symbol)
@@ -8162,7 +8165,11 @@ class StrategyRunner:
             )
 
             self._order_attempt_window.append(now_epoch)
-            plan = TradePlan(symbol=base_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=5000, max_spread_pct=5.0, min_depth_qty=150, allow_market_entry=False)
+            max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
+            max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
+            min_depth_qty = int(os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0")) or "0")
+            allow_market_entry = str(os.getenv("ALLOW_MARKET_ENTRY", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            plan = TradePlan(symbol=base_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry)
             order_id = self._order_manager.submit_trade_plan(plan)
 
             if order_id:
@@ -8174,7 +8181,6 @@ class StrategyRunner:
                 self._reason_last_signal_ts[underlying_reason_key] = now_epoch
                 if reason_key == "premium_momentum_squeeze":
                     self._premium_squeeze_last_signal_ts[underlying] = now_epoch
-                self._order_attempt_window.append(now_epoch)
                 try:
                     self._record_trade(
                         base_symbol,
@@ -8219,7 +8225,16 @@ class StrategyRunner:
         _bars_source = self._data_hub or self._market_data
         bars = _bars_source.get_ohlc_bars(symbol) if _bars_source else []
         if len(bars) < self._required_candles:
-            raise RuntimeError("ATR unavailable due to insufficient data")
+            fallback_atr = max(float(current_price) * 0.015, 1.0)
+            self._logger.warning(
+                "ATR_FALLBACK_USED symbol=%s atr=%.4f reason=insufficient_bars bars=%d required=%d",
+                symbol,
+                fallback_atr,
+                len(bars),
+                int(self._required_candles),
+                extra={"event": "ATR_FALLBACK_USED", "symbol": symbol, "atr": fallback_atr, "bars": len(bars), "required": int(self._required_candles), "reason": "insufficient_bars"},
+            )
+            return fallback_atr
 
         atr_val = 0.0
         source = "unknown"
@@ -8277,7 +8292,14 @@ class StrategyRunner:
                             pass
 
         if atr_val <= 0:
-            raise RuntimeError("ATR unavailable due to insufficient data")
+            fallback_atr = max(float(current_price) * 0.015, 1.0)
+            self._logger.warning(
+                "ATR_FALLBACK_USED symbol=%s atr=%.4f reason=atr_unavailable",
+                symbol,
+                fallback_atr,
+                extra={"event": "ATR_FALLBACK_USED", "symbol": symbol, "atr": fallback_atr, "reason": "atr_unavailable"},
+            )
+            return fallback_atr
 
         spread = 0.0
         try:
