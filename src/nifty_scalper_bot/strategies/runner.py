@@ -6978,7 +6978,11 @@ class StrategyRunner:
                 return
         except Exception as e:
             self._logger.error(
-                "RUNNER_ON_TICK_ERROR",
+                "RUNNER_ON_TICK_ERROR symbol=%s phase=%s error_type=%s error=%s",
+                symbol,
+                phase,
+                type(e).__name__,
+                str(e),
                 extra={
                     "event": "RUNNER_ON_TICK_ERROR",
                     "symbol": symbol,
