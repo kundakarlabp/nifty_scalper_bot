@@ -313,10 +313,7 @@ def _gate_runner_symbol_add(
                     "token": token,
                 },
             )
-    if history_ready:
-        pending_runner_symbols.discard(symbol)
-    else:
-        pending_runner_symbols.add(symbol)
+    pending_runner_symbols.discard(symbol)
     LOGGER.info(
         "RUNNER_SYMBOL_STATUS symbol=%s token=%s added_to_runner=%s runner_bars=%d mdm_bars=%d required_bars=%d history_ready=%s source=%s reason=%s",
         symbol,
@@ -6524,12 +6521,27 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                     )
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning("LIVE_REARM_BASKET_BUILD_FAILED error=%s", exc, exc_info=True)
-            await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
-            await _recompute_and_push_runtime_readiness(ctx, reason="market_open_rearm_loop")
+            try:
+                await _ensure_strategy_runner_started(ctx, reason="market_open_rearm_loop")
+            except Exception as exc:
+                LOGGER.exception("LIVE_REARM_RUNNER_START_FAILED error_type=%s error=%s", type(exc).__name__, str(exc))
+            try:
+                await _recompute_and_push_runtime_readiness(ctx, reason="market_open_rearm_loop")
+            except Exception as exc:
+                LOGGER.exception("LIVE_REARM_READINESS_PUSH_FAILED error_type=%s error=%s", type(exc).__name__, str(exc))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            LOGGER.exception("LIVE_READINESS_REARM_LOOP_CRASHED")
+        except Exception as exc:
+            LOGGER.exception(
+                "LIVE_READINESS_REARM_LOOP_CRASHED error_type=%s error=%s",
+                type(exc).__name__,
+                str(exc),
+                extra={
+                    "event": "LIVE_READINESS_REARM_LOOP_CRASHED",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
             await asyncio.sleep(interval_seconds)
 
 
@@ -6639,7 +6651,11 @@ def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str
     """Pick ATM CE/PE from basket fields/options. Args: basket. Returns: (ce, pe). Raises: none."""
     selected_ce = cast(str | None, basket.get("atm_ce") or basket.get("selected_ce"))
     selected_pe = cast(str | None, basket.get("atm_pe") or basket.get("selected_pe"))
-    option_symbols = [str(s) for s in list(basket.get("option_symbols") or []) if s]
+    option_symbols = [
+        str(s)
+        for s in list(basket.get("option_symbols") or basket.get("symbols") or [])
+        if str(s).endswith(("CE", "PE"))
+    ]
     atm_raw = basket.get("atm_strike")
     try:
         atm_strike = int(float(atm_raw)) if atm_raw is not None else None
@@ -6702,8 +6718,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         except Exception:
             return False
     spot_ready = _quote(spot_symbol) or _bars(spot_symbol) >= 1
-    ce_ready = bool(selected_ce) and (_quote(selected_ce) or _bars(selected_ce) >= 3)
-    pe_ready = bool(selected_pe) and (_quote(selected_pe) or _bars(selected_pe) >= 3)
+    option_min_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "3") or 3)
+    ce_ready = bool(selected_ce) and (_quote(selected_ce) or _bars(selected_ce) >= option_min_live_bars)
+    pe_ready = bool(selected_pe) and (_quote(selected_pe) or _bars(selected_pe) >= option_min_live_bars)
     full_basket_ready = all((_quote(s) or _bars(s) >= 20) for s in option_symbols if s.endswith(("CE", "PE")))
     data_hard_ready = bool(spot_ready and ce_ready and pe_ready)
     runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
@@ -6718,7 +6735,17 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ctx.readiness_mode = "LIVE" if live_orders_armed else "DATA_WARMUP"
     ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = None if live_orders_armed else "startup_pipeline_incomplete"
-    LOGGER.info("LIVE_READINESS_COMPUTED spot_ready=%s ce_ready=%s pe_ready=%s full_basket_ready=%s", spot_ready, ce_ready, pe_ready, full_basket_ready)
+    LOGGER.info(
+        "LIVE_READINESS_COMPUTED spot_ready=%s ce_ready=%s pe_ready=%s full_basket_ready=%s selected_ce=%s selected_pe=%s ce_bars=%s pe_bars=%s",
+        spot_ready,
+        ce_ready,
+        pe_ready,
+        full_basket_ready,
+        selected_ce,
+        selected_pe,
+        _bars(selected_ce),
+        _bars(selected_pe),
+    )
     if (not selected_ce) or (not selected_pe):
         LOGGER.warning("LIVE_BASKET_INVALID reason=atm_option_selection_failed")
         ctx.live_orders_armed = False
@@ -6990,7 +7017,7 @@ async def _build_and_hydrate_live_basket_from_spot(
         )
     )
     runner = getattr(ctx, "strategy_runner", None)
-    if runner is not None:
+    if hydrate and runner is not None:
         for symbol in ready_symbols:
             try:
                 runner.add_symbol(symbol)
@@ -7999,9 +8026,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                             "required": min_required_bars,
                         },
                     )
-            pending_runner_symbols: set[str] = set(skipped_symbols)
+            pending_runner_symbols: set[str] = set()
+            for sym in skipped_symbols:
+                pending_runner_symbols.add(sym)
             if runner is not None:
-                for sym in readiness_symbols:
+                for sym in ready_symbols:
                     try:
                         runner.add_symbol(sym)
                     except Exception as e:
@@ -9353,15 +9382,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                             ctx.data_hard_ready = bool(spot_ready and atm_ce_ready and atm_pe_ready)
                             LOGGER.info(
                                 "OPTION_QUOTE_READY selected_ce=%s selected_pe=%s",
-                                quote_ce,
-                                quote_pe,
-                                extra={"event": "OPTION_QUOTE_READY", "selected_ce": quote_ce, "selected_pe": quote_pe},
+                                ctx.selected_ce,
+                                ctx.selected_pe,
+                                extra={"event": "OPTION_QUOTE_READY", "selected_ce": ctx.selected_ce, "selected_pe": ctx.selected_pe},
                             )
                             LOGGER.info(
                                 "OPTION_HISTORY_READY selected_ce=%s selected_pe=%s",
-                                hydrated_ce,
-                                hydrated_pe,
-                                extra={"event": "OPTION_HISTORY_READY", "selected_ce": hydrated_ce, "selected_pe": hydrated_pe},
+                                ctx.selected_ce,
+                                ctx.selected_pe,
+                                extra={"event": "OPTION_HISTORY_READY", "selected_ce": ctx.selected_ce, "selected_pe": ctx.selected_pe},
                             )
                             ctx.mdm_strict_hard_ready = bool(hard_ready)
                             ctx.data_pipeline_ready = bool(ctx.data_hard_ready)

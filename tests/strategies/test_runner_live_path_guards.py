@@ -1174,3 +1174,16 @@ def test_fallback_candidate_reaches_order_request_path() -> None:
     assert result.accepted is True
     assert 'ORDER_QTY_NORMALIZED' in emitted
     assert 'RUNNER_ORDER_REQUEST' in emitted
+
+def test_runner_on_tick_error_log_includes_error_type_phase(caplog):
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+    import logging
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = logging.getLogger("runner-test-err")
+    runner._logger.setLevel(logging.INFO)
+    runner._bracket_manager = None
+    runner._position_manager = None
+    runner._on_tick = StrategyRunner._on_tick.__get__(runner, StrategyRunner)
+    with caplog.at_level(logging.ERROR):
+        runner._on_tick("NFO:X", {"ltp": "bad"})
+    assert "RUNNER_ON_TICK_ERROR" in caplog.text
