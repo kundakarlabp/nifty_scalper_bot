@@ -153,6 +153,16 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return bool(default)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read env var as bool. Args: name/default. Returns: bool. Raises: none."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
 )
@@ -1011,8 +1021,9 @@ class StrategyRunner:
         # BUG W4 FIX: _backfill_history() was scheduled immediately in runner.start(),
         # which races with core/app.py EngineWarmupTask. We only need the backfill task
         # as an emergency fallback if EngineWarmupTask fails.
-        emergency_backfill_enabled = self._coerce_bool(
-            os.getenv("RUNNER_ENABLE_EMERGENCY_BACKFILL"), default=False
+        emergency_backfill_enabled = _env_bool(
+            "RUNNER_ENABLE_EMERGENCY_BACKFILL",
+            default=False,
         )
         if (
             self._config.fetch_history_on_startup
@@ -6976,19 +6987,19 @@ class StrategyRunner:
                         extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": symbol, "accepted": False, "reason": prepare_reason, "order_id": None, "trace_id": trace_id},
                     )
                 return
-        except Exception as e:
+        except Exception as exc:
             self._logger.error(
                 "RUNNER_ON_TICK_ERROR symbol=%s phase=%s error_type=%s error=%s",
                 symbol,
                 phase,
-                type(e).__name__,
-                str(e),
+                type(exc).__name__,
+                str(exc),
                 extra={
                     "event": "RUNNER_ON_TICK_ERROR",
                     "symbol": symbol,
                     "phase": phase,
-                    "error_type": type(e).__name__,
-                    "error": str(e),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
                 },
                 exc_info=True,
             )
