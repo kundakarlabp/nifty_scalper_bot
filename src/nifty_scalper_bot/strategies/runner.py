@@ -522,6 +522,7 @@ class StrategyRunner:
             self._logger.error(f"❌ Failed to create 'data/' directory: {e}")
         self._data_hub = data_hub
         self.datahub = datahub or data_hub
+        self._datahub_registered_symbols: set[str] = set()
         self._strike_selector = strike_selector
         self._bracket_manager = bracket_manager
         self._symbol_source: MarketDataManager | None = None
@@ -2349,6 +2350,12 @@ class StrategyRunner:
 
     def _subscribe_symbol(self, symbol: str) -> None:
         """Subscribe to tick updates for a symbol."""
+        normalized_symbol = normalize_symbol(symbol)
+        if self._data_hub is not None:
+            if normalized_symbol not in self._datahub_registered_symbols:
+                self._data_hub.subscribe_ticks(symbol, self.on_datahub_tick)
+                self._datahub_registered_symbols.add(normalized_symbol)
+            return
         callback = self._callbacks.get(symbol)
         callback_already_registered = callback is not None
         if callback is None:
@@ -2451,6 +2458,11 @@ class StrategyRunner:
         self._safe_subscribe(
             symbol, callback, callback_already_registered=callback_already_registered
         )
+
+    def has_datahub_subscription(self, symbol: str, token: int | None = None) -> bool:
+        """Check whether DataHub callback is already registered. Args: symbol/token. Returns: bool. Raises: none."""
+        _ = token
+        return normalize_symbol(symbol) in self._datahub_registered_symbols
 
     def _safe_subscribe(
         self,
@@ -5337,15 +5349,26 @@ class StrategyRunner:
                         fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
                         if (spot_bars < self._context_required_bars or fut_bars < self._context_required_bars) and self._should_log_throttled(f"opt_ctx_cold:{symbol}", 120.0):
                             self._logger.warning("OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d", symbol, spot_bars, fut_bars, self._context_required_bars)
-                    strict_for_all = _env_bool(
-                        "OPTION_STRICT_HISTORY_FOR_ALL_STRATEGIES", False
-                    )
+                    strict_for_all = _env_bool("OPTION_STRICT_HISTORY_FOR_ALL_STRATEGIES", False)
                     tick_is_fresh = self._is_option_symbol_tick_fresh(symbol)
+                    selected_symbols = {
+                        normalize_symbol(sym)
+                        for sym in (self._active_selected_ce, self._active_selected_pe)
+                        if sym
+                    }
+                    is_selected_option = normalize_symbol(symbol) in selected_symbols
+                    option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or "1")
+                    spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
+                    fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY"), "")
+                    fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
+                    context_ready = spot_bars >= self._context_required_bars and fut_bars >= self._context_required_bars
                     soft_pass = (
                         self._is_tradable_symbol(symbol)
                         and not strict_for_all
-                        and history_count >= 1
+                        and is_selected_option
+                        and history_count >= option_eval_min_live_bars
                         and tick_is_fresh
+                        and context_ready
                     )
                     if soft_pass:
                         if self._should_log_throttled(f"opt_soft_pass:{symbol}", 60.0):
@@ -6863,21 +6886,17 @@ class StrategyRunner:
                         atm_strike = getattr(self, "_active_atm_strike", None)
                         symbol_strike = self._extract_strike_from_symbol(symbol)
                         normalized_symbol = normalize_symbol(symbol)
-                        selected_set = {
-                            normalize_symbol(item)
-                            for item in [selected_ce, selected_pe]
-                            if item
+                        selected_set = {normalize_symbol(item) for item in [selected_ce, selected_pe] if item}
+                        runtime_ctx: dict[str, Any] = {
+                            "selected_ce": selected_ce,
+                            "selected_pe": selected_pe,
+                            "atm_strike": atm_strike,
+                            "is_selected_option": normalized_symbol in selected_set,
                         }
-                        indicators_ctx["selected_ce"] = selected_ce
-                        indicators_ctx["selected_pe"] = selected_pe
-                        indicators_ctx["atm_strike"] = atm_strike
-                        indicators_ctx["is_selected_option"] = (
-                            normalized_symbol in selected_set
-                        )
                         if symbol_strike is not None and atm_strike is not None:
-                            indicators_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
-                        if hasattr(self._indicator_engine, "set_indicators"):
-                            self._indicator_engine.set_indicators(symbol, indicators_ctx)
+                            runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
+                        if hasattr(self._indicator_engine, "set_runtime_context"):
+                            self._indicator_engine.set_runtime_context(symbol, runtime_ctx)
                         elif self._should_log_throttled(
                             "indicator_ctx_missing_setter", 60.0
                         ):
