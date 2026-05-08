@@ -234,6 +234,22 @@ def nearest_available_strike(spot: float, strikes: Sequence[float]) -> int:
     return min(valid, key=lambda strike: (abs(strike - float(spot)), strike))
 
 
+def _is_selected_trade_symbol(ctx: Any, symbol: str) -> bool:
+    """Check if symbol is one of the selected execution symbols. Args: ctx/symbol. Returns: bool. Raises: none."""
+    normalized_symbol = canonical(symbol)
+    selected_symbols = {
+        canonical(value)
+        for value in (
+            getattr(ctx, "selected_ce", None),
+            getattr(ctx, "selected_pe", None),
+            getattr(ctx, "atm_ce_symbol", None),
+            getattr(ctx, "atm_pe_symbol", None),
+        )
+        if value
+    }
+    return normalized_symbol in selected_symbols
+
+
 def prioritize_startup_hydration_symbols(
     symbols: Sequence[str],
     atm_ce: str | None,
@@ -283,7 +299,33 @@ def _gate_runner_symbol_add(
         quote_ready = bool(ctx.market_data_manager.get_symbol_snapshot(symbol))
     except Exception:
         quote_ready = False
-    history_ready = max(runner_bars, mdm_bars) >= required
+    if runner_bars < required and mdm_bars >= required:
+        hydrate_fn = getattr(ctx.strategy_runner, "_hydrate_from_mdm_cache", None)
+        if callable(hydrate_fn):
+            LOGGER.info(
+                "RUNNER_HYDRATION_SYNC_ATTEMPT symbol=%s mdm_bars=%d before_runner_bars=%d",
+                symbol,
+                mdm_bars,
+                runner_bars,
+            )
+            try:
+                hydrate_fn(symbol)
+            except Exception:
+                LOGGER.exception("RUNNER_HYDRATION_SYNC_EXCEPTION symbol=%s", symbol)
+            try:
+                runner_engine = getattr(ctx.strategy_runner, "_indicator_engine", None)
+                if runner_engine is not None:
+                    runner_bars = len(runner_engine.get_history(symbol) or [])
+            except Exception:
+                runner_bars = 0
+            LOGGER.info(
+                "RUNNER_HYDRATION_SYNC_RESULT symbol=%s after_runner_bars=%d required=%d history_ready=%s",
+                symbol,
+                runner_bars,
+                required,
+                runner_bars >= required,
+            )
+    history_ready = runner_bars >= required
     add_ready = bool(quote_ready or history_ready)
     if not add_ready:
         pending_runner_symbols.add(symbol)
@@ -292,27 +334,10 @@ def _gate_runner_symbol_add(
     ctx.strategy_runner.add_symbol(symbol)
     if ctx.data_hub is not None and ctx.strategy_runner is not None:
         canonical_symbol = ctx.data_hub._canonical_quote_symbol(symbol)
-        subscription_key = f"{canonical_symbol}|{token or ''}"
-        if subscription_key not in ctx.datahub_runner_subscriptions:
-            _subscribe_ticks_force_live_compat(
-                ctx.data_hub,
-                canonical_symbol,
-                ctx.strategy_runner.on_datahub_tick,
-                token=token,
-            )
-            ctx.datahub_runner_subscriptions.add(subscription_key)
+        if hasattr(ctx.strategy_runner, "has_datahub_subscription") and ctx.strategy_runner.has_datahub_subscription(symbol, token):
+            ctx.datahub_runner_subscriptions.add(f"{canonical_symbol}|{token or ''}")
             if token is not None:
                 ctx.datahub_runner_subscriptions.add(f"TOKEN:{int(token)}")
-            LOGGER.info(
-                "DATAHUB_RUNNER_CALLBACK_REGISTERED symbol=%s token=%s",
-                canonical_symbol,
-                token,
-                extra={
-                    "event": "DATAHUB_RUNNER_CALLBACK_REGISTERED",
-                    "symbol": canonical_symbol,
-                    "token": token,
-                },
-            )
     pending_runner_symbols.discard(symbol)
     LOGGER.info(
         "RUNNER_SYMBOL_STATUS symbol=%s token=%s added_to_runner=%s runner_bars=%d mdm_bars=%d required_bars=%d history_ready=%s source=%s reason=%s",
@@ -324,7 +349,7 @@ def _gate_runner_symbol_add(
         required,
         history_ready,
         source,
-        "history_ready" if history_ready else "history_pending_runner_added",
+        "history_ready" if history_ready else ("quote_ready_history_pending" if quote_ready else "hydration_failed"),
         extra={
             "event": "RUNNER_SYMBOL_STATUS",
             "symbol": symbol,
@@ -335,7 +360,7 @@ def _gate_runner_symbol_add(
             "required_bars": required,
             "history_ready": history_ready,
             "source": source,
-            "reason": "history_ready" if history_ready else "history_pending_runner_added",
+            "reason": "history_ready" if history_ready else ("quote_ready_history_pending" if quote_ready else "hydration_failed"),
         },
     )
     try:
@@ -343,7 +368,7 @@ def _gate_runner_symbol_add(
             ctx,
             symbol=symbol,
             token=token,
-            selected=True,
+            selected=_is_selected_trade_symbol(ctx, symbol),
             hydrated_bars=runner_bars,
             runner_added=True,
             source=source,
@@ -6749,16 +6774,38 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         except Exception:
             return False
     spot_ready = _quote(spot_symbol) or _bars(spot_symbol) >= 1
-    option_min_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "3") or 3)
-    ce_ready = bool(selected_ce) and (_quote(selected_ce) or _bars(selected_ce) >= option_min_live_bars)
-    pe_ready = bool(selected_pe) and (_quote(selected_pe) or _bars(selected_pe) >= option_min_live_bars)
+    option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or 1)
+    option_execution_min_bars = int(os.getenv("OPTION_EXECUTION_MIN_BARS", "5") or 5)
+    context_execution_min_bars = int(os.getenv("CONTEXT_EXECUTION_MIN_BARS", "50") or 50)
+    ce_bars = _bars(selected_ce)
+    pe_bars = _bars(selected_pe)
+    ce_quote_fresh = _quote(selected_ce)
+    pe_quote_fresh = _quote(selected_pe)
+    ce_eval_ready = bool(selected_ce) and (ce_quote_fresh or ce_bars >= option_eval_min_live_bars)
+    pe_eval_ready = bool(selected_pe) and (pe_quote_fresh or pe_bars >= option_eval_min_live_bars)
+    ce_exec_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_execution_min_bars
+    pe_exec_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_execution_min_bars
+    futures_symbol = str(basket.get("futures_symbol") or "")
+    fut_bars = _bars(futures_symbol)
+    spot_bars = _bars(spot_symbol)
+    spot_quote_fresh = _quote(spot_symbol)
+    context_exec_ready = spot_bars >= context_execution_min_bars or (
+        spot_quote_fresh and fut_bars >= context_execution_min_bars
+    )
     full_basket_ready = all((_quote(s) or _bars(s) >= 20) for s in option_symbols if s.endswith(("CE", "PE")))
-    data_hard_ready = bool(spot_ready and ce_ready and pe_ready)
+    data_hard_ready = bool(spot_ready and ce_eval_ready and pe_eval_ready)
     runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
     evaluation_ready = bool(data_hard_ready and runner_running)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
     broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
-    live_orders_armed = bool(live_mode and data_hard_ready and evaluation_ready and broker_ready)
+    live_orders_armed = bool(
+        live_mode
+        and evaluation_ready
+        and ce_exec_ready
+        and pe_exec_ready
+        and context_exec_ready
+        and broker_ready
+    )
     ctx.data_hard_ready = data_hard_ready
     ctx.evaluation_ready = evaluation_ready
     ctx.live_orders_armed = live_orders_armed
@@ -6767,15 +6814,17 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = None if live_orders_armed else "startup_pipeline_incomplete"
     LOGGER.info(
-        "LIVE_READINESS_COMPUTED spot_ready=%s ce_ready=%s pe_ready=%s full_basket_ready=%s selected_ce=%s selected_pe=%s ce_bars=%s pe_bars=%s",
+        "LIVE_READINESS_COMPUTED spot_ready=%s ce_eval_ready=%s pe_eval_ready=%s ce_exec_ready=%s pe_exec_ready=%s full_basket_ready=%s selected_ce=%s selected_pe=%s ce_bars=%s pe_bars=%s",
         spot_ready,
-        ce_ready,
-        pe_ready,
+        ce_eval_ready,
+        pe_eval_ready,
+        ce_exec_ready,
+        pe_exec_ready,
         full_basket_ready,
         selected_ce,
         selected_pe,
-        _bars(selected_ce),
-        _bars(selected_pe),
+        ce_bars,
+        pe_bars,
     )
     if (not selected_ce) or (not selected_pe):
         LOGGER.warning("LIVE_BASKET_INVALID reason=atm_option_selection_failed")
@@ -6797,6 +6846,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     LOGGER.info("RUNTIME_READINESS_REARM_RESULT data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s", ctx.data_hard_ready, ctx.evaluation_ready, ctx.live_orders_armed, reason)
     if ctx.live_orders_armed:
         LOGGER.info("LIVE_TRADING_ARMED")
+    elif ce_bars < option_execution_min_bars or pe_bars < option_execution_min_bars:
+        LOGGER.info("LIVE_TRADING_NOT_ARMED reason=selected_option_history_insufficient")
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
@@ -9064,7 +9115,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         ctx,
                                         symbol=_sym,
                                         token=_tok,
-                                        selected=True,
+                                        selected=_is_selected_trade_symbol(ctx, sym),
                                         hydrated_bars=(
                                             len(
                                                 ctx.market_data_manager.get_ohlc_bars(

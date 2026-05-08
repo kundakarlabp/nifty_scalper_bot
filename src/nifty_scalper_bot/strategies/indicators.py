@@ -202,8 +202,8 @@ class IndicatorEngine:
         self._lock = threading.RLock()
         self._logger = get_logger(__name__)
 
-    def set_indicators(self, symbol: str, indicators: Mapping[str, Any]) -> None:
-        """Store runtime context keys only. Args: symbol, indicators. Returns: None. Raises: Exception."""
+    def set_runtime_context(self, symbol: str, context: Mapping[str, Any]) -> None:
+        """Store runtime context. Args: symbol, context. Returns: None. Raises: Exception."""
         try:
             if not symbol:
                 return
@@ -217,14 +217,18 @@ class IndicatorEngine:
                 "option_role",
             }
             with self._lock:
-                context = self._runtime_context.setdefault(symbol, {})
-                for key, value in dict(indicators).items():
+                symbol_context = self._runtime_context.setdefault(symbol, {})
+                for key, value in dict(context).items():
                     if key in allowed_context_keys:
-                        context[key] = value
+                        symbol_context[key] = value
                 self._cache.pop(symbol, None)
         except Exception as e:
-            self._logger.error("Failure in IndicatorEngine.set_indicators: %s", e)
+            self._logger.error("Failure in IndicatorEngine.set_runtime_context: %s", e)
             raise
+
+    def set_indicators(self, symbol: str, indicators: Mapping[str, Any]) -> None:
+        """Backward-compatible alias for runtime context setter. Args: symbol, indicators. Returns: None. Raises: Exception."""
+        self.set_runtime_context(symbol, indicators)
 
     def get_runtime_context(self, symbol: str) -> dict[str, Any]:
         """Fetch runtime context. Args: symbol. Returns: context copy. Raises: Exception."""
@@ -233,6 +237,18 @@ class IndicatorEngine:
                 return dict(self._runtime_context.get(symbol, {}))
         except Exception as e:
             self._logger.error("Failure in IndicatorEngine.get_runtime_context: %s", e)
+            raise
+
+    def clear_runtime_context(self, symbol: str | None = None) -> None:
+        """Clear runtime context for one/all symbols. Args: symbol. Returns: None. Raises: Exception."""
+        try:
+            with self._lock:
+                if symbol is None:
+                    self._runtime_context.clear()
+                else:
+                    self._runtime_context.pop(symbol, None)
+        except Exception as e:
+            self._logger.error("Failure in IndicatorEngine.clear_runtime_context: %s", e)
             raise
 
     def update_price(
