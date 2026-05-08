@@ -79,6 +79,8 @@ def test_single_vote_scalp_enabled_allows_valid_near_atm_vote(monkeypatch) -> No
         indicators={'atm_strike': 25000, 'strike_distance_from_atm': 50, 'selected_ce': None, 'selected_pe': None},
     )
     assert combined is not None
+    assert combined.metadata is not None
+    assert combined.metadata.get('consensus_stage') == 'single_vote_scalp_controlled'
 
 
 def test_single_vote_scalp_disabled_rejects_single_vote(monkeypatch) -> None:

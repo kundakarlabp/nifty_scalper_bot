@@ -588,6 +588,7 @@ class StrategyRunner:
         self._underlying_last_signal_ts: dict[str, float] = {}
         self._reason_last_signal_ts: dict[str, float] = {}
         self._premium_squeeze_last_signal_ts: dict[str, float] = {}
+        self._signal_reject_cooldown_ts: dict[str, float] = {}
         self._order_attempt_window: Deque[float] = deque()
         self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "60") or 60))
         self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "120") or 120))
@@ -3489,6 +3490,48 @@ class StrategyRunner:
             },
         )
 
+        direction_score = 7.0
+        momentum_window_active = 65.0 <= float(rsi) <= 82.0
+        premium_above_vwap = bool(price > vwap)
+        premium_above_ema = bool(ema is not None and price > ema)
+        if premium_above_vwap and premium_above_ema:
+            direction_score += 1.0
+        if momentum_window_active:
+            direction_score += 1.0
+        strategy_score = 6.5
+        if is_momentum_active:
+            strategy_score += 1.0
+        if premium_above_vwap:
+            strategy_score += 1.0
+        risk = max(price - calculated_sl, 0.0)
+        reward = max(calculated_tp - price, 0.0)
+        rr_score = 6.0
+        if risk > 0 and reward > 0:
+            rr_score = max(0.0, min(10.0, (reward / risk) * 5.0))
+        history_count = int(getattr(self, "_runner_history_count", 0) or 0)
+        required_history = int(getattr(self, "_warmup_bars_required", 50) or 50)
+        tick_age_seconds = float(getattr(self, "_last_spot_tick_age_seconds", 999.0) or 999.0)
+        if history_count >= required_history and tick_age_seconds <= 1.5:
+            data_score = 10.0
+        elif history_count >= required_history and tick_age_seconds <= 5.0:
+            data_score = 9.0
+        else:
+            data_score = 8.0
+        self._logger.info(
+            "PREMIUM_SQUEEZE_SCORE_COMPONENTS symbol=%s direction_score=%.2f strategy_score=%.2f rr_score=%.2f data_score=%.2f momentum_window_active=%s premium_above_vwap=%s premium_above_ema=%s history_count=%s required_history=%s tick_age_seconds=%.2f trace_id=%s",
+            symbol,
+            direction_score,
+            strategy_score,
+            rr_score,
+            data_score,
+            momentum_window_active,
+            premium_above_vwap,
+            premium_above_ema,
+            history_count,
+            required_history,
+            tick_age_seconds,
+            trace_id,
+        )
         return Signal(
             action=signal.action,
             symbol=signal.symbol,
@@ -7490,19 +7533,19 @@ class StrategyRunner:
             stop_loss=calculated_sl,
             take_profit=calculated_tp,
             metadata={
-                "strategy": "premium_momentum",
+                "strategy": "premium_momentum_squeeze",
                 "vwap": vwap,
                 "rsi": rsi,
                 "tag": "premium_squeeze",
                 "feature": "premium_momentum_squeeze",
                 "strategy_name": "premium_momentum_squeeze",
-                "direction_score": 7.0,
-                "strategy_score": 7.0,
-                "setup_quality": 7.0,
+                "direction_score": direction_score,
+                "strategy_score": strategy_score,
+                "setup_quality": strategy_score,
                 "confidence": 0.72,
-                "option_score": 6.0,
-                "data_score": 6.0,
-                "rr_score": 6.0,
+                "option_score": 6.5,
+                "data_score": data_score,
+                "rr_score": rr_score,
             },
         )
 
@@ -8038,6 +8081,12 @@ class StrategyRunner:
             underlying = self._extract_underlying(base_symbol) or base_symbol
             reason_key = str(signal.reason or "unknown")
             underlying_reason_key = f"{underlying}:{reason_key}"
+            reject_cooldown_key = f"{base_symbol}:{reason_key}:score_below_threshold"
+            reject_last_ts = self._signal_reject_cooldown_ts.get(reject_cooldown_key)
+            if reject_last_ts is not None and (now_epoch - float(reject_last_ts)) < 60.0:
+                self._logger.info("SIGNAL_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s trace_id=%s", base_symbol, "score_below_threshold", trace_id)
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(False, "score_below_threshold_reject_cooldown")
             if reason_key == "premium_momentum_squeeze":
                 upper_symbol = (trade_symbol or base_symbol).upper()
                 if ("CE" not in upper_symbol and "PE" not in upper_symbol) or "FUT" in upper_symbol:
@@ -8063,18 +8112,18 @@ class StrategyRunner:
                     )
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "premium_squeeze_cooldown")
-            underlying_last_ts = float(self._underlying_last_signal_ts.get(underlying, 0.0))
-            reason_last_ts = float(self._reason_last_signal_ts.get(underlying_reason_key, 0.0))
-            underlying_age = now_epoch - underlying_last_ts
-            reason_age = now_epoch - reason_last_ts
-            self._logger.info("COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f allowed=%s trace_id=%s", base_symbol, underlying_reason_key, reason_age, self._reason_signal_cooldown_seconds, reason_age >= self._reason_signal_cooldown_seconds, trace_id)
-            self._logger.info("COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f allowed=%s trace_id=%s", base_symbol, underlying, underlying_age, self._underlying_signal_cooldown_seconds, underlying_age >= self._underlying_signal_cooldown_seconds, trace_id)
-            if underlying_age < self._underlying_signal_cooldown_seconds:
+            underlying_last_ts = self._underlying_last_signal_ts.get(underlying)
+            reason_last_ts = self._reason_last_signal_ts.get(underlying_reason_key)
+            underlying_age = None if underlying_last_ts is None else now_epoch - float(underlying_last_ts)
+            reason_age = None if reason_last_ts is None else now_epoch - float(reason_last_ts)
+            self._logger.info("COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying_reason_key, f"{reason_age:.2f}" if reason_age is not None else None, self._reason_signal_cooldown_seconds, True if reason_age is None else reason_age >= self._reason_signal_cooldown_seconds, "first_trade_for_key" if reason_age is None else "cooldown_elapsed", trace_id)
+            self._logger.info("COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying, f"{underlying_age:.2f}" if underlying_age is not None else None, self._underlying_signal_cooldown_seconds, True if underlying_age is None else underlying_age >= self._underlying_signal_cooldown_seconds, "first_trade_for_key" if underlying_age is None else "cooldown_elapsed", trace_id)
+            if underlying_age is not None and underlying_age < self._underlying_signal_cooldown_seconds:
                 self._logger.info("COOLDOWN_REJECTED reason=underlying_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying, underlying_last_ts, now_epoch, underlying_age, self._underlying_signal_cooldown_seconds)
                 log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "underlying_cooldown")
-            if reason_age < self._reason_signal_cooldown_seconds:
+            if reason_age is not None and reason_age < self._reason_signal_cooldown_seconds:
                 self._logger.info("COOLDOWN_REJECTED reason=reason_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying_reason_key, reason_last_ts, now_epoch, reason_age, self._reason_signal_cooldown_seconds)
                 log_throttled(self._logger, f"runner_reason_cd_{reason_key}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "reason_cooldown"})
                 self._reset_execution_state(base_symbol)
@@ -8200,8 +8249,12 @@ class StrategyRunner:
                         take_profit=candidate.target or signal.take_profit,
                         metadata=metadata,
                     )
-                metadata["option_score"] = candidate.score
-                metadata["data_score"] = candidate.data_quality_score
+                metadata["option_score"] = max(float(metadata.get("option_score", 0.0) or 0.0), float(candidate.score or 0.0))
+                metadata["data_score"] = max(float(metadata.get("data_score", 0.0) or 0.0), float(candidate.data_quality_score or 0.0))
+                metadata["rr_score"] = max(float(metadata.get("rr_score", 0.0) or 0.0), min(10.0, float(candidate.rr or 0.0) * 5.0))
+                if str(candidate.side or "").upper() == option_side:
+                    metadata["direction_score"] = max(float(metadata.get("direction_score", 0.0) or 0.0), 7.5)
+                metadata["strategy_score"] = max(float(metadata.get("strategy_score", 0.0) or 0.0), float(candidate.score or 0.0) - 0.5)
                 metadata["spread_pct"] = candidate.spread_pct
                 metadata["candidate_score"] = candidate.score
                 metadata["candidate_selected"] = True
@@ -8327,6 +8380,7 @@ class StrategyRunner:
                 option_score=float(metadata.get("option_score", 0.0) or 0.0),
                 data_score=float(metadata.get("data_score", 0.0) or 0.0),
                 rr_score=float(metadata.get("rr_score", 0.0) or 0.0),
+                strategy_name=reason_key or metadata.get("strategy_name") or metadata.get("strategy"),
             )
             final_confidence = max(0.0, min(1.0, quality.final_score / 10.0))
             self._logger.info(
@@ -8369,6 +8423,7 @@ class StrategyRunner:
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "final_score_required")
             if not quality.allowed:
+                self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
                 self._reset_execution_state(base_symbol)
                 return self._reject_signal_execution(
                     symbol=base_symbol,

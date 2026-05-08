@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
@@ -18,6 +19,8 @@ class CPRBreakoutStrategy(EliteStrategy):
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
+        self._require_valid_levels = str(os.getenv('CPR_REQUIRE_VALID_LEVELS', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        self._invalid_levels_logged = False
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicators set. Raises: Exception."""
@@ -36,8 +39,10 @@ class CPRBreakoutStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
             direction = str(indicators.get('direction_bias') or '').upper()
 
-            if min(cpr_bottom, cpr_top, pivot) <= 0 or cpr_top <= cpr_bottom:
-                self._no_vote('invalid_cpr_levels')
+            if self._require_valid_levels and (min(cpr_bottom, cpr_top, pivot) <= 0 or cpr_top <= cpr_bottom):
+                if not self._invalid_levels_logged:
+                    self._no_vote('invalid_cpr_levels')
+                    self._invalid_levels_logged = True
                 return None
             if cpr_bottom <= current_price <= cpr_top:
                 self._no_vote('inside_cpr')

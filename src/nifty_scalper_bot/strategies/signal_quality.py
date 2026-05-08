@@ -46,9 +46,14 @@ def missing_score_components(metadata: dict[str, object] | None) -> list[str]:
     return [key for key in REQUIRED_SCORE_COMPONENTS if payload.get(key) is None]
 
 
-def _mode_threshold() -> float:
+def _mode_threshold(strategy_name: str | None = None) -> float:
     mode = (os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
+    strategy_key = str(strategy_name or '').strip().lower()
     if mode == 'LIVE':
+        if strategy_key in {'premium_momentum', 'premium_momentum_squeeze'}:
+            return float(
+                os.getenv('SIGNAL_MIN_SCORE_LIVE_PREMIUM_SQUEEZE', '7.4') or 7.4
+            )
         return float(os.getenv('SIGNAL_MIN_SCORE_LIVE', '8.0') or 8.0)
     if mode in {'PAPER', 'DRY_RUN'}:
         return float(os.getenv('SIGNAL_MIN_SCORE_PAPER', '6.5') or 6.5)
@@ -62,6 +67,7 @@ def score_signal_quality(
     option_score: float,
     data_score: float,
     rr_score: float,
+    strategy_name: str | None = None,
 ) -> SignalQualityScore:
     """Args: normalized components. Returns: weighted quality score. Raises: none."""
     direction = max(0.0, min(10.0, float(direction_score)))
@@ -77,7 +83,7 @@ def score_signal_quality(
         + 0.15 * data
         + 0.10 * rr
     )
-    threshold = _mode_threshold()
+    threshold = _mode_threshold(strategy_name=strategy_name)
     reasons: list[str] = []
     if final < threshold:
         reasons.append('score_below_threshold')
@@ -92,5 +98,5 @@ def score_signal_quality(
         rr_score=rr,
         allowed=(final >= threshold and direction >= 6.0),
         reasons=reasons,
-        components={'threshold': threshold},
+        components={'threshold': threshold, 'strategy_name': strategy_name or ''},
     )
