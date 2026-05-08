@@ -2502,6 +2502,9 @@ class StrategyManager(_BaseStrategyManager):
         if len(winning) == 1:
             single_signal, single_vote = winning[0]
             allow_single_vote_scalp = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            scalper_mode = str(os.getenv("SCALPER_MODE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            vwap_single_min_score = float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE", "5.5") or "5.5")
+            vwap_single_min_confidence = float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE", "0.45") or "0.45")
             single_min_score = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_SCORE", "6.5") or "6.5")
             single_min_confidence = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0.60") or "0.60")
             require_selected_option = str(os.getenv("STRATEGY_SINGLE_VOTE_REQUIRE_SELECTED_OPTION", "true")).strip().lower() in {"1", "true", "yes", "on"}
@@ -2550,7 +2553,18 @@ class StrategyManager(_BaseStrategyManager):
                             selected_ok = False
             direction_score = float(metadata.get("direction_score") or 0.0)
             direction_ok = (not require_direction_score) or direction_score >= min_direction_score
-            if allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok:
+            is_vwap = str(single_vote.strategy or "").strip().lower() == "vwappro"
+            vwap_scalper_allowed = (
+                scalper_mode
+                and is_vwap
+                and single_vote.score >= vwap_single_min_score
+                and float(single_signal.confidence or 0.0) >= vwap_single_min_confidence
+                and selected_ok
+                and spread_ok
+                and direction_ok
+            )
+            generic_single_allowed = allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok
+            if generic_single_allowed or vwap_scalper_allowed:
                 metadata["consensus_stage"] = "single_vote_scalp_controlled"
                 metadata["confirming_votes"] = [single_vote.strategy]
                 metadata["strategy_score"] = single_vote.score

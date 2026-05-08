@@ -3490,48 +3490,6 @@ class StrategyRunner:
             },
         )
 
-        direction_score = 7.0
-        momentum_window_active = 65.0 <= float(rsi) <= 82.0
-        premium_above_vwap = bool(price > vwap)
-        premium_above_ema = bool(ema is not None and price > ema)
-        if premium_above_vwap and premium_above_ema:
-            direction_score += 1.0
-        if momentum_window_active:
-            direction_score += 1.0
-        strategy_score = 6.5
-        if is_momentum_active:
-            strategy_score += 1.0
-        if premium_above_vwap:
-            strategy_score += 1.0
-        risk = max(price - calculated_sl, 0.0)
-        reward = max(calculated_tp - price, 0.0)
-        rr_score = 6.0
-        if risk > 0 and reward > 0:
-            rr_score = max(0.0, min(10.0, (reward / risk) * 5.0))
-        history_count = int(getattr(self, "_runner_history_count", 0) or 0)
-        required_history = int(getattr(self, "_warmup_bars_required", 50) or 50)
-        tick_age_seconds = float(getattr(self, "_last_spot_tick_age_seconds", 999.0) or 999.0)
-        if history_count >= required_history and tick_age_seconds <= 1.5:
-            data_score = 10.0
-        elif history_count >= required_history and tick_age_seconds <= 5.0:
-            data_score = 9.0
-        else:
-            data_score = 8.0
-        self._logger.info(
-            "PREMIUM_SQUEEZE_SCORE_COMPONENTS symbol=%s direction_score=%.2f strategy_score=%.2f rr_score=%.2f data_score=%.2f momentum_window_active=%s premium_above_vwap=%s premium_above_ema=%s history_count=%s required_history=%s tick_age_seconds=%.2f trace_id=%s",
-            symbol,
-            direction_score,
-            strategy_score,
-            rr_score,
-            data_score,
-            momentum_window_active,
-            premium_above_vwap,
-            premium_above_ema,
-            history_count,
-            required_history,
-            tick_age_seconds,
-            trace_id,
-        )
         return Signal(
             action=signal.action,
             symbol=signal.symbol,
@@ -6413,11 +6371,27 @@ class StrategyRunner:
                 # 8B. PREMIUM MOMENTUM SQUEEZE (Shift Brain to Options)
                 if generated_signal is None and self._indicator_engine.has_min_bars(symbol, 20):
                     phase = "phase8_premium_squeeze"
-                    generated_signal = self._maybe_generate_premium_squeeze_signal(
-                        symbol,
-                        price,
-                        trace_id=trace_id,
-                    )
+                    try:
+                        generated_signal = self._maybe_generate_premium_squeeze_signal(
+                            symbol,
+                            price,
+                            trace_id=trace_id,
+                        )
+                    except Exception as exc:
+                        self._logger.exception(
+                            "PREMIUM_SQUEEZE_ERROR symbol=%s error_type=%s error=%s trace_id=%s",
+                            symbol,
+                            type(exc).__name__,
+                            exc,
+                            trace_id,
+                            extra={
+                                "event": "PREMIUM_SQUEEZE_ERROR",
+                                "symbol": symbol,
+                                "trace_id": trace_id,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                        generated_signal = None
 
                 # 8C. VWAP CROSSOVER (Requires VWAP > 0)
                 if (
@@ -7446,6 +7420,9 @@ class StrategyRunner:
         is_momentum_active = 60 < rsi < 85
         if not (is_bullish_premium and is_momentum_active):
             return None
+        selected = False
+        near_atm = False
+        in_active_universe = False
         if _env_flag("PREMIUM_FALLBACK_ONLY_SELECTED_OR_NEAR_ATM", True):
             max_strike_distance = float(
                 os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or "100"
@@ -7524,6 +7501,69 @@ class StrategyRunner:
             interval_sec=60.0,
             level=logging.INFO,
         )
+        # --- Premium squeeze quality components: local to this function ---
+        direction_score = 7.0
+        strategy_score = 6.5
+        option_score = 6.5
+        data_score = 6.5
+        rr_score = 6.0
+
+        price_above_vwap = False
+        price_above_ema = False
+        momentum_window_active = False
+        selected_or_near_atm = bool(selected or near_atm)
+
+        try:
+            price_above_vwap = bool(float(price) > float(vwap))
+        except (TypeError, ValueError):
+            price_above_vwap = False
+
+        try:
+            price_above_ema = bool(ema is not None and float(price) > float(ema))
+        except (TypeError, ValueError):
+            price_above_ema = False
+
+        try:
+            momentum_window_active = 65.0 <= float(rsi) <= 82.0
+        except (TypeError, ValueError):
+            momentum_window_active = False
+
+        if price_above_vwap and price_above_ema:
+            direction_score += 1.0
+        if momentum_window_active:
+            direction_score += 1.0
+
+        if momentum_window_active:
+            strategy_score += 1.0
+        if price_above_vwap:
+            strategy_score += 1.0
+
+        if selected_or_near_atm:
+            option_score = max(option_score, 7.5)
+        elif in_active_universe:
+            option_score = max(option_score, 7.0)
+
+        try:
+            history_count = len(self._indicator_engine.get_history(symbol))
+        except Exception:
+            history_count = 0
+
+        required_history = int(getattr(self, "_warmup_bars_required", 20) or 20)
+        if history_count >= required_history:
+            data_score = 9.0
+        elif history_count >= 5:
+            data_score = 8.0
+
+        risk = max(float(price) - float(calculated_sl), 0.0)
+        reward = max(float(calculated_tp) - float(price), 0.0)
+        if risk > 0 and reward > 0:
+            rr_score = max(0.0, min(10.0, (reward / risk) * 5.0))
+
+        direction_score = max(0.0, min(10.0, direction_score))
+        strategy_score = max(0.0, min(10.0, strategy_score))
+        option_score = max(0.0, min(10.0, option_score))
+        data_score = max(0.0, min(10.0, data_score))
+        rr_score = max(0.0, min(10.0, rr_score))
         return Signal(
             action="BUY",
             symbol=symbol,
@@ -7543,7 +7583,7 @@ class StrategyRunner:
                 "strategy_score": strategy_score,
                 "setup_quality": strategy_score,
                 "confidence": 0.72,
-                "option_score": 6.5,
+                "option_score": option_score,
                 "data_score": data_score,
                 "rr_score": rr_score,
             },
@@ -8083,7 +8123,7 @@ class StrategyRunner:
             underlying_reason_key = f"{underlying}:{reason_key}"
             reject_cooldown_key = f"{base_symbol}:{reason_key}:score_below_threshold"
             reject_last_ts = self._signal_reject_cooldown_ts.get(reject_cooldown_key)
-            if reject_last_ts is not None and (now_epoch - float(reject_last_ts)) < 60.0:
+            if reject_last_ts is not None and (now_epoch - float(reject_last_ts)) < float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "60") or "60"):
                 self._logger.info("SIGNAL_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s trace_id=%s", base_symbol, "score_below_threshold", trace_id)
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "score_below_threshold_reject_cooldown")
@@ -8374,17 +8414,25 @@ class StrategyRunner:
                     reason="missing_signal_score_components",
                     details={"missing": missing_components},
                 )
+            resolved_strategy_name = (
+                metadata.get("strategy_name")
+                or metadata.get("strategy")
+                or getattr(signal, "reason", None)
+                or reason_key
+            )
             quality = score_signal_quality(
                 direction_score=float(metadata.get("direction_score", 0.0) or 0.0),
                 strategy_score=float(metadata.get("strategy_score", 0.0) or 0.0),
                 option_score=float(metadata.get("option_score", 0.0) or 0.0),
                 data_score=float(metadata.get("data_score", 0.0) or 0.0),
                 rr_score=float(metadata.get("rr_score", 0.0) or 0.0),
-                strategy_name=reason_key or metadata.get("strategy_name") or metadata.get("strategy"),
+                strategy_name=str(resolved_strategy_name or ""),
             )
             final_confidence = max(0.0, min(1.0, quality.final_score / 10.0))
             self._logger.info(
-                "SIGNAL_SCORE final=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
+                "SIGNAL_SCORE strategy_name=%s threshold=%.2f final=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
+                str(quality.components.get("strategy_name", "")),
+                float(quality.components.get("threshold", 0.0) or 0.0),
                 quality.final_score,
                 quality.direction_score,
                 quality.strategy_score,
@@ -8423,6 +8471,16 @@ class StrategyRunner:
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "final_score_required")
             if not quality.allowed:
+                delta = quality.final_score - float(quality.components.get("threshold", 0.0) or 0.0)
+                self._logger.info(
+                    "SIGNAL_SCORE_REJECTED symbol=%s strategy_name=%s final=%.2f threshold=%.2f delta=%.2f components=%s",
+                    base_symbol,
+                    quality.components.get("strategy_name", ""),
+                    quality.final_score,
+                    float(quality.components.get("threshold", 0.0) or 0.0),
+                    delta,
+                    quality.components,
+                )
                 self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
                 self._reset_execution_state(base_symbol)
                 return self._reject_signal_execution(
