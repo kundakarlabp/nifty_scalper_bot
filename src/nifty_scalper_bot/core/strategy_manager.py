@@ -2509,15 +2509,14 @@ class StrategyManager(_BaseStrategyManager):
             single_max_spread = float(os.getenv("STRATEGY_SINGLE_VOTE_MAX_SPREAD_PCT", "10.0") or "10.0")
             require_direction_score = str(os.getenv("STRATEGY_SINGLE_VOTE_REQUIRE_DIRECTION_SCORE", "false")).strip().lower() in {"1", "true", "yes", "on"}
             min_direction_score = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_DIRECTION_SCORE", "6.0") or "6.0")
-            if single_vote.score < 8.5:
-                metadata = dict(single_signal.metadata or {})
-                spread_pct_raw = metadata.get("spread_pct")
-                spread_pct = float(spread_pct_raw) if spread_pct_raw is not None else None
-                confidence_ok = float(single_signal.confidence or 0.0) >= single_min_confidence
-                score_ok = single_vote.score >= single_min_score
-                spread_ok = spread_pct is None or spread_pct <= single_max_spread
-                selected_ok = True
-                if require_selected_option:
+            metadata = dict(single_signal.metadata or {})
+            spread_pct_raw = metadata.get("spread_pct")
+            spread_pct = float(spread_pct_raw) if spread_pct_raw is not None else None
+            confidence_ok = float(single_signal.confidence or 0.0) >= single_min_confidence
+            score_ok = single_vote.score >= single_min_score
+            spread_ok = spread_pct is None or spread_pct <= single_max_spread
+            selected_ok = True
+            if require_selected_option:
                     selected_marker = metadata.get("candidate_selected")
                     if selected_marker is None:
                         selected_marker = metadata.get("is_selected_option")
@@ -2549,33 +2548,33 @@ class StrategyManager(_BaseStrategyManager):
                                 atm_strike,
                             )
                             selected_ok = False
-                direction_score = float(metadata.get("direction_score") or 0.0)
-                direction_ok = (not require_direction_score) or direction_score >= min_direction_score
-                if allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok:
-                    metadata["consensus_stage"] = "single_vote_scalp_controlled"
-                    metadata["confirming_votes"] = [single_vote.strategy]
-                    metadata["strategy_score"] = single_vote.score
-                    metadata["risk_label"] = "single_strategy_signal"
-                    log.info(
-                        'STRATEGY_CONSENSUS side=%s score=%.2f votes=1 reason=single_vote_scalp_controlled',
-                        winning_side,
-                        single_vote.score,
-                        extra={'event': 'STRATEGY_CONSENSUS', 'side': winning_side, 'score': single_vote.score, 'votes': 1, 'reason': 'single_vote_scalp_controlled'},
-                    )
-                    return Signal(action='BUY', symbol=single_signal.symbol, quantity=single_signal.quantity, confidence=single_signal.confidence, reason=single_signal.reason, stop_loss=single_signal.stop_loss, take_profit=single_signal.take_profit, metadata=metadata)
+            direction_score = float(metadata.get("direction_score") or 0.0)
+            direction_ok = (not require_direction_score) or direction_score >= min_direction_score
+            if allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok:
+                metadata["consensus_stage"] = "single_vote_scalp_controlled"
+                metadata["confirming_votes"] = [single_vote.strategy]
+                metadata["strategy_score"] = single_vote.score
+                metadata["risk_label"] = "single_strategy_signal"
                 log.info(
-                    "SINGLE_VOTE_REJECTED strategy=%s score=%.2f score_ok=%s confidence=%.2f confidence_ok=%s selected_ok=%s spread_ok=%s direction_ok=%s allow_single_vote_scalp=%s",
-                    single_vote.strategy,
+                    'STRATEGY_CONSENSUS side=%s score=%.2f votes=1 reason=single_vote_scalp_controlled',
+                    winning_side,
                     single_vote.score,
-                    score_ok,
-                    float(single_signal.confidence or 0.0),
-                    confidence_ok,
-                    selected_ok,
-                    spread_ok,
-                    direction_ok,
-                    allow_single_vote_scalp,
+                    extra={'event': 'STRATEGY_CONSENSUS', 'side': winning_side, 'score': single_vote.score, 'votes': 1, 'reason': 'single_vote_scalp_controlled'},
                 )
-                log.info(
+                return Signal(action='BUY', symbol=single_signal.symbol, quantity=single_signal.quantity, confidence=single_signal.confidence, reason=single_signal.reason, stop_loss=single_signal.stop_loss, take_profit=single_signal.take_profit, metadata=metadata)
+            log.info(
+                "SINGLE_VOTE_REJECTED strategy=%s score=%.2f score_ok=%s confidence=%.2f confidence_ok=%s selected_ok=%s spread_ok=%s direction_ok=%s allow_single_vote_scalp=%s",
+                single_vote.strategy,
+                single_vote.score,
+                score_ok,
+                float(single_signal.confidence or 0.0),
+                confidence_ok,
+                selected_ok,
+                spread_ok,
+                direction_ok,
+                allow_single_vote_scalp,
+            )
+            log.info(
                     'STRATEGY_CONSENSUS side=NO_TRADE score=%.2f votes=1 reason=single_vote_low_score threshold=%.2f allow_single_vote_scalp=%s',
                     single_vote.score,
                     single_min_score,
@@ -2589,7 +2588,7 @@ class StrategyManager(_BaseStrategyManager):
                         'reason': 'single_vote_low_score',
                     },
                 )
-                return None
+            return None
             metadata = dict(single_signal.metadata or {})
             metadata['strategy_score'] = round(
                 max(float(metadata.get('strategy_score') or 0.0), single_vote.score),

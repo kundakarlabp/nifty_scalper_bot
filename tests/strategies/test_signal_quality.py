@@ -38,3 +38,19 @@ def test_infer_option_side_detects_ce_and_pe() -> None:
 
 def test_infer_option_side_unknown_uses_metadata() -> None:
     assert infer_option_side('NSE:NIFTY', {'direction_bias': 'PE'}) == 'PE'
+
+
+def test_premium_squeeze_live_threshold_passes_at_7_45(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('SIGNAL_MIN_SCORE_LIVE_PREMIUM_SQUEEZE', '7.4')
+    result = score_signal_quality(direction_score=7.0, strategy_score=7.0, option_score=8.0, data_score=8.0, rr_score=8.5, strategy_name='premium_momentum_squeeze')
+    assert result.final_score == 7.45
+    assert result.allowed is True
+
+
+def test_non_premium_live_threshold_remains_8(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('SIGNAL_MIN_SCORE_LIVE', '8.0')
+    result = score_signal_quality(direction_score=7.0, strategy_score=7.0, option_score=8.0, data_score=8.0, rr_score=8.5, strategy_name='vwap_pro')
+    assert result.final_score == 7.45
+    assert result.allowed is False

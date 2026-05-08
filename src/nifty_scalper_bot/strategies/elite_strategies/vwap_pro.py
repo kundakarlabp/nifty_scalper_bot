@@ -22,6 +22,7 @@ class VWAPProStrategy(EliteStrategy):
         self._allow_pullback = str(os.getenv('VWAP_ALLOW_PULLBACK_ENTRY', '1')).lower() in {'1', 'true', 'yes', 'on'}
         self._slack_atr_mult = float(os.getenv('VWAP_SLACK_ATR_MULT', '1.5') or 1.5)
         self._max_distance_pct = float(os.getenv('VWAP_MAX_OPTION_DISTANCE_PCT', '0.18') or 0.18)
+        self._max_atr_distance_mult = float(os.getenv('VWAP_MAX_ATR_DISTANCE_MULT', '1.5') or 1.5)
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicators set. Raises: Exception."""
@@ -51,7 +52,8 @@ class VWAPProStrategy(EliteStrategy):
 
             required_data_present = bool(vwap > 0 and atr >= 0)
             distance_pct = abs(current_price - vwap) / max(vwap, 1e-9)
-            overextended = distance_pct > self._max_distance_pct
+            allowed_distance = max(self._max_distance_pct, self._max_atr_distance_mult * atr / max(vwap, 1e-9))
+            overextended = distance_pct > allowed_distance
             if overextended:
                 self._no_vote('distance_outside_band')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=overextended')
@@ -132,6 +134,7 @@ class VWAPProStrategy(EliteStrategy):
                 'rejection_reasons': [],
                 'vwap': vwap,
                 'distance_pct': round(distance_pct, 4),
+                'allowed_distance_pct': round(allowed_distance, 4),
                 'atr': atr_safe,
                 'pullback_flag': pullback_flag,
                 'trend_alignment': trend_alignment,

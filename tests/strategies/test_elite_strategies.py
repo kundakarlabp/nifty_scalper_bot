@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.strategies.elite_strategies.builder import (
@@ -166,3 +167,15 @@ def test_registry_loads_all_modules() -> None:
         strategy = load_strategy_module(module)
         assert strategy is not None
         assert hasattr(strategy, "name")
+
+
+def test_orderflow_ltp_fallback() -> None:
+    source = Path('src/nifty_scalper_bot/strategies/elite_strategies/order_flow.py').read_text(encoding='utf-8')
+    assert 'ltp_only_orderflow_reduced_confidence' in source
+    assert 'ORDERFLOW_ALLOW_LTP_TICK_FALLBACK' in source
+
+
+def test_vwap_atr_distance_tolerance() -> None:
+    source = Path('src/nifty_scalper_bot/strategies/elite_strategies/vwap_pro.py').read_text(encoding='utf-8')
+    assert 'VWAP_MAX_ATR_DISTANCE_MULT' in source
+    assert 'allowed_distance = max(' in source
