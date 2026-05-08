@@ -596,6 +596,10 @@ class StrategyRunner:
         self._runtime_evaluation_ready = False
         self._runtime_live_orders_armed = False
         self._runtime_readiness_reason: str | None = None
+        self._active_selected_ce: str | None = None
+        self._active_selected_pe: str | None = None
+        self._active_atm_strike: int | None = None
+        self._active_option_symbols: set[str] = set()
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
@@ -1862,6 +1866,36 @@ class StrategyRunner:
         task.add_done_callback(_on_done)
         return True, "signal_preparation_scheduled"
 
+    def set_active_option_context(
+        self,
+        *,
+        selected_ce: str | None = None,
+        selected_pe: str | None = None,
+        atm_strike: int | float | str | None = None,
+        option_symbols: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> None:
+        """Set active option context. Args: selected_ce/selected_pe/atm_strike/option_symbols. Returns: none. Raises: none."""
+        selected_ce_norm = normalize_symbol(str(selected_ce)) if selected_ce else None
+        selected_pe_norm = normalize_symbol(str(selected_pe)) if selected_pe else None
+        atm_value = None
+        if atm_strike not in (None, ""):
+            try:
+                atm_value = int(float(atm_strike))
+            except (TypeError, ValueError):
+                atm_value = None
+        self._active_selected_ce = selected_ce_norm
+        self._active_selected_pe = selected_pe_norm
+        self._active_atm_strike = atm_value
+        self._active_option_symbols = {normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym}
+        self._logger.info(
+            "RUNNER_ACTIVE_OPTION_CONTEXT selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d",
+            self._active_selected_ce,
+            self._active_selected_pe,
+            self._active_atm_strike,
+            len(self._active_option_symbols),
+            extra={"event": "RUNNER_ACTIVE_OPTION_CONTEXT", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "atm_strike": self._active_atm_strike, "option_count": len(self._active_option_symbols)},
+        )
+
     def set_runtime_readiness(
         self,
         *,
@@ -1869,12 +1903,18 @@ class StrategyRunner:
         evaluation_ready: bool,
         live_orders_armed: bool,
         reason: str | None = None,
+        selected_ce: str | None = None,
+        selected_pe: str | None = None,
+        atm_strike: int | float | str | None = None,
+        option_symbols: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> None:
         """Set app-level runtime readiness flags. Args: flags/reason. Returns: none. Raises: none."""
         self._runtime_data_hard_ready = bool(data_hard_ready)
         self._runtime_evaluation_ready = bool(evaluation_ready)
         self._runtime_live_orders_armed = bool(live_orders_armed)
         self._runtime_readiness_reason = reason
+        if any(value is not None for value in (selected_ce, selected_pe, atm_strike, option_symbols)):
+            self.set_active_option_context(selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=atm_strike, option_symbols=option_symbols)
 
     async def _prepare_signal_for_handling(
         self,
@@ -6784,7 +6824,7 @@ class StrategyRunner:
                         indicators_ctx["selected_ce"] = selected_ce
                         indicators_ctx["selected_pe"] = selected_pe
                         indicators_ctx["atm_strike"] = atm_strike
-                        indicators_ctx["is_selected_option"] = symbol in {selected_ce, selected_pe}
+                        indicators_ctx["is_selected_option"] = normalize_symbol(symbol) in {selected_ce, selected_pe}
                         if symbol_strike is not None and atm_strike is not None:
                             indicators_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
                         self._indicator_engine.set_indicators(symbol, indicators_ctx)
@@ -6834,8 +6874,16 @@ class StrategyRunner:
                             }
                         )
                         self._last_strategy_versions[symbol] = current_version
-                    except Exception:
-                        self._logger.exception("Signal evaluation failure")
+                    except Exception as exc:
+                        self._logger.exception(
+                            "SIGNAL_EVALUATION_FAILURE symbol=%s phase=%s error_type=%s error=%s trace_id=%s",
+                            symbol,
+                            "phase9",
+                            type(exc).__name__,
+                            str(exc),
+                            trace_id,
+                            extra={"event": "SIGNAL_EVALUATION_FAILURE", "symbol": symbol, "phase": "phase9", "error_type": type(exc).__name__, "error": str(exc), "trace_id": trace_id},
+                        )
                         signal = None
                     self._strategy_window_symbols.add(symbol)
                     if signal is not None:
@@ -7269,21 +7317,35 @@ class StrategyRunner:
             max_strike_distance = float(
                 os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or "100"
             )
-            selected_ce = normalize_symbol(str(getattr(self, "_active_selected_ce", "") or ""))
-            selected_pe = normalize_symbol(str(getattr(self, "_active_selected_pe", "") or ""))
-            atm_strike = float(getattr(self, "_active_atm_strike", 0.0) or 0.0)
-            strike = float(self._extract_strike_from_symbol(upper_symbol) or 0.0)
-            selected = upper_symbol in {selected_ce, selected_pe}
+            selected_ce = self._active_selected_ce
+            selected_pe = self._active_selected_pe
+            atm_strike = self._active_atm_strike
+            strike_value = self._extract_strike_from_symbol(symbol)
+            inds = self._indicator_engine.get_indicators(symbol)
+            recovered_atm = inds.get("atm_strike") if isinstance(inds, dict) else None
+            if atm_strike in (None, 0) and recovered_atm not in (None, ""):
+                try:
+                    atm_strike = int(float(recovered_atm))
+                except (TypeError, ValueError):
+                    atm_strike = atm_strike
+            if (atm_strike in (None, 0)) and not selected_ce and not selected_pe:
+                self._logger.info("PREMIUM_SQUEEZE_SKIPPED reason=missing_active_option_context symbol=%s trace_id=%s", symbol, trace_id)
+                return None
+            strike = float(strike_value or 0.0)
+            atm_strike_float = float(atm_strike or 0.0)
+            selected = normalize_symbol(symbol) in {selected_ce, selected_pe}
             near_atm = bool(
                 atm_strike > 0
                 and strike > 0
-                and abs(strike - atm_strike) <= max_strike_distance
+                and abs(strike - atm_strike_float) <= max_strike_distance
             )
             if not (selected or near_atm):
                 self._logger.info(
-                    "PREMIUM_SQUEEZE_SKIPPED reason=outside_selected_strike_window symbol=%s atm_strike=%s strike=%s max_distance=%s trace_id=%s",
+                    "PREMIUM_SQUEEZE_SKIPPED reason=outside_selected_strike_window symbol=%s selected_ce=%s selected_pe=%s atm_strike=%s strike=%s max_distance=%s trace_id=%s",
                     symbol,
-                    atm_strike,
+                    selected_ce,
+                    selected_pe,
+                    atm_strike_float,
                     strike,
                     max_strike_distance,
                     trace_id,

@@ -38,6 +38,7 @@ class RSIDivergenceStrategy(EliteStrategy):
             hist = self._history.setdefault(symbol, deque(maxlen=10))
             hist.append((close, rsi))
             if len(hist) < 4:
+                self._no_vote('insufficient_history')
                 return None
 
             p1, r1 = hist[-4]
@@ -45,6 +46,7 @@ class RSIDivergenceStrategy(EliteStrategy):
             bullish_div = p2 < p1 and r2 > r1
             bearish_div = p2 > p1 and r2 < r1
             if not bullish_div and not bearish_div:
+                self._no_vote('no_divergence')
                 return None
 
             side = 'CE' if bullish_div else 'PE'

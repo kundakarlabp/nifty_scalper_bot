@@ -6722,6 +6722,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
     basket = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
     selected_ce, selected_pe = _pick_atm_option_symbols_from_basket(basket)
+    selected_ce = getattr(ctx, "selected_ce", None) or selected_ce or basket.get("selected_ce") or basket.get("atm_ce")
+    selected_pe = getattr(ctx, "selected_pe", None) or selected_pe or basket.get("selected_pe") or basket.get("atm_pe")
     ctx.selected_ce = selected_ce
     ctx.selected_pe = selected_pe
     ctx.atm_ce_symbol = selected_ce
@@ -6778,13 +6780,20 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     if (not selected_ce) or (not selected_pe):
         LOGGER.warning("LIVE_BASKET_INVALID reason=atm_option_selection_failed")
         ctx.live_orders_armed = False
-    if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, "set_runtime_readiness"):
-        ctx.strategy_runner.set_runtime_readiness(
-            data_hard_ready=_as_bool(ctx.data_hard_ready),
-            evaluation_ready=_as_bool(ctx.evaluation_ready),
-            live_orders_armed=_as_bool(ctx.live_orders_armed),
-            reason=str(ctx.live_block_reason or reason),
-        )
+    if ctx.strategy_runner is not None:
+        if hasattr(ctx.strategy_runner, "set_active_option_context"):
+            ctx.strategy_runner.set_active_option_context(selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=atm_strike, option_symbols=option_symbols)
+        if hasattr(ctx.strategy_runner, "set_runtime_readiness"):
+            ctx.strategy_runner.set_runtime_readiness(
+                data_hard_ready=_as_bool(ctx.data_hard_ready),
+                evaluation_ready=_as_bool(ctx.evaluation_ready),
+                live_orders_armed=_as_bool(ctx.live_orders_armed),
+                reason=str(ctx.live_block_reason or reason),
+                selected_ce=selected_ce,
+                selected_pe=selected_pe,
+                atm_strike=atm_strike,
+                option_symbols=option_symbols,
+            )
     LOGGER.info("RUNTIME_READINESS_REARM_RESULT data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s", ctx.data_hard_ready, ctx.evaluation_ready, ctx.live_orders_armed, reason)
     if ctx.live_orders_armed:
         LOGGER.info("LIVE_TRADING_ARMED")
@@ -6977,6 +6986,13 @@ async def _build_and_hydrate_live_basket_from_spot(
     ctx.atm_pe_symbol = cast(str | None, basket.get("atm_pe"))
     ctx.selected_ce = selected_ce
     ctx.selected_pe = selected_pe
+    if getattr(ctx, "strategy_runner", None) is not None and hasattr(ctx.strategy_runner, "set_active_option_context"):
+        ctx.strategy_runner.set_active_option_context(
+            selected_ce=selected_ce,
+            selected_pe=selected_pe,
+            atm_strike=basket.get("atm_strike"),
+            option_symbols=list(basket.get("option_symbols", []) or []),
+        )
 
     tokens: list[int] = []
     for symbol in targets:
@@ -7990,7 +8006,7 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             active_option_symbols = select_active_option_symbols(
                 option_symbols=basket.get("option_symbols", []) or [],
-                atm=basket.get("atm"),
+                atm=basket.get("atm_strike"),
                 max_active=int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "6")),
             )
             readiness_symbols = list(dict.fromkeys([
@@ -9563,11 +9579,22 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if ctx.strategy_runner is not None and hasattr(
                                 ctx.strategy_runner, "set_runtime_readiness"
                             ):
+                                _basket = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
+                                _selected_ce = getattr(ctx, "selected_ce", None) or _basket.get("selected_ce") or _basket.get("atm_ce")
+                                _selected_pe = getattr(ctx, "selected_pe", None) or _basket.get("selected_pe") or _basket.get("atm_pe")
+                                _atm_strike = _basket.get("atm_strike")
+                                _option_symbols = list(_basket.get("option_symbols") or _basket.get("symbols") or [])
+                                if hasattr(ctx.strategy_runner, "set_active_option_context"):
+                                    ctx.strategy_runner.set_active_option_context(selected_ce=cast(str | None, _selected_ce), selected_pe=cast(str | None, _selected_pe), atm_strike=_atm_strike, option_symbols=_option_symbols)
                                 ctx.strategy_runner.set_runtime_readiness(
                                     data_hard_ready=bool(ctx.data_hard_ready),
                                     evaluation_ready=bool(ctx.evaluation_ready),
                                     live_orders_armed=bool(ctx.live_orders_armed),
                                     reason=runtime_reason,
+                                    selected_ce=cast(str | None, _selected_ce),
+                                    selected_pe=cast(str | None, _selected_pe),
+                                    atm_strike=_atm_strike,
+                                    option_symbols=_option_symbols,
                                 )
                                 LOGGER.info(
                                     "RUNTIME_READINESS_PUSHED data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s",

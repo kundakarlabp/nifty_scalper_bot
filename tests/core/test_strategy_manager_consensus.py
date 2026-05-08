@@ -51,3 +51,44 @@ def test_single_high_score_vote_returns_preliminary_consensus() -> None:
     assert combined is not None
     assert combined.metadata is not None
     assert combined.metadata.get('consensus_stage') == 'preliminary_single_high_conviction'
+
+
+def test_strategy_manager_single_vote_uses_indicator_selected_context(monkeypatch) -> None:
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    vote = StrategyVote(strategy='SMC', side='CE', score=6.8, confidence=0.8, reasons=[], metadata={})
+    combined = manager._combine_strategy_votes(
+        symbol='NIFTY',
+        signals=[(signal, vote)],
+        indicators={'selected_ce': 'NFO:NIFTY25000CE', 'selected_pe': 'NFO:NIFTY25000PE', 'atm_strike': 25000, 'strike_distance_from_atm': 0},
+    )
+    assert combined is not None
+    assert combined.metadata is not None
+    assert combined.metadata.get('consensus_stage') == 'single_vote_scalp_controlled'
+
+
+def test_single_vote_scalp_enabled_allows_valid_near_atm_vote(monkeypatch) -> None:
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    vote = StrategyVote(strategy='VWAPPro', side='CE', score=6.6, confidence=0.7, reasons=[], metadata={})
+    combined = manager._combine_strategy_votes(
+        symbol='NIFTY',
+        signals=[(signal, vote)],
+        indicators={'atm_strike': 25000, 'strike_distance_from_atm': 50, 'selected_ce': None, 'selected_pe': None},
+    )
+    assert combined is not None
+
+
+def test_single_vote_scalp_disabled_rejects_single_vote(monkeypatch) -> None:
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'false')
+    manager = _manager_stub()
+    signal = _make_signal()
+    vote = StrategyVote(strategy='VWAPPro', side='CE', score=7.5, confidence=0.8, reasons=[], metadata={})
+    combined = manager._combine_strategy_votes(
+        symbol='NIFTY',
+        signals=[(signal, vote)],
+        indicators={'selected_ce': 'NFO:NIFTY25000CE', 'selected_pe': 'NFO:NIFTY25000PE', 'atm_strike': 25000},
+    )
+    assert combined is None

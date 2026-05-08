@@ -44,14 +44,16 @@ class ORBProStrategy(EliteStrategy):
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=opening_range_incomplete')
                 return None
             if orb_high <= orb_low:
+                self._no_vote('invalid_orb_levels')
                 return None
             if regime in {'CHOPPY'}:
-                self._no_vote('invalid_orb_levels')
+                self._no_vote('choppy_regime')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=ORBPro reason=choppy_regime')
                 return None
 
             breakout_side = 'CE' if close > orb_high else 'PE' if close < orb_low else 'UNKNOWN'
             if breakout_side == 'UNKNOWN':
+                self._no_vote('no_breakout')
                 return None
 
             candle_range = max(abs(float(indicators.get('high') or close) - float(indicators.get('low') or close)), 1e-9)

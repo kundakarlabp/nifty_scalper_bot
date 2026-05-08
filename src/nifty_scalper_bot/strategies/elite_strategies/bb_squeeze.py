@@ -39,11 +39,13 @@ class BBSqueezeStrategy(EliteStrategy):
             avg_vol = float(indicators.get('avg_volume') or 0.0)
 
             if min(upper, lower, mid) <= 0 or upper <= lower:
+                self._no_vote('invalid_bb_levels')
                 return None
             bb_width = (upper - lower) / mid
             squeeze_threshold = float(getattr(self._cfg, 'squeeze_threshold_pct', 0.5)) / 100.0
             squeeze_detected = bb_width <= max(squeeze_threshold, 0.008)
             if not squeeze_detected:
+                self._no_vote('no_squeeze')
                 return None
 
             breakout_side = 'CE' if close > upper else 'PE' if close < lower else 'UNKNOWN'

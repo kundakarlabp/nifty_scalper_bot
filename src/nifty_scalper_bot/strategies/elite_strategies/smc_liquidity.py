@@ -46,9 +46,7 @@ class SMCStrategy(EliteStrategy):
             bullish_sweep = low < (open_price - 0.3 * atr) and close > open_price
             bearish_sweep = high > (open_price + 0.3 * atr) and close < open_price
             if not bullish_sweep and not bearish_sweep:
-                self.last_no_vote_reason = 'no_liquidity_sweep'
-                self.last_no_vote_reason = 'no_liquidity_sweep'
-                self.last_no_vote_reason = 'low_score'
+                self._no_vote('no_liquidity_sweep')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=no_sweep')
                 return None
 
@@ -77,9 +75,7 @@ class SMCStrategy(EliteStrategy):
 
             strategy_score = max(0.0, min(10.0, score))
             if strategy_score < 4.0:
-                self.last_no_vote_reason = 'no_liquidity_sweep'
-                self.last_no_vote_reason = 'no_liquidity_sweep'
-                self.last_no_vote_reason = 'low_score'
+                self._no_vote('no_liquidity_sweep')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=low_quality')
                 return None
 
