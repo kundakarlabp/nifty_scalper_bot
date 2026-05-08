@@ -6743,12 +6743,51 @@ def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str
     return selected_ce, selected_pe
 
 
+async def _ensure_selected_options_hydrated(
+    ctx: BotContext, selected_ce: str | None, selected_pe: str | None, required_bars: int, reason: str
+) -> None:
+    """Ensure selected options have required bars in MDM and runner. Args: ctx/symbols/required_bars/reason. Returns: none. Raises: none."""
+    mdm = getattr(ctx, "market_data_manager", None)
+    runner = getattr(ctx, "strategy_runner", None)
+    if mdm is None:
+        return
+    for sym in (selected_ce, selected_pe):
+        if not sym:
+            continue
+        before_mdm_bars = len(mdm.get_ohlc_bars(sym) or [])
+        before_runner_bars = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
+        if before_mdm_bars >= required_bars and before_runner_bars >= required_bars:
+            continue
+        await mdm.hydrate_symbol_history(sym, interval="minute", days=_history_lookback_days(required_bars), max_bars=required_bars, reason=f"{reason}_selected_option_force_hydration")
+        bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
+        for row in bars:
+            if not isinstance(row, Mapping):
+                continue
+            bar_data = dict(row)
+            bar_data["symbol"] = sym
+            if runner is not None and hasattr(runner, "ingest_historical_bar"):
+                runner.ingest_historical_bar(bar_data)
+        mdm.update_hydration_status(sym, mdm.get_ohlc_bars(sym))
+        after_mdm_bars = len(mdm.get_ohlc_bars(sym) or [])
+        after_runner_bars = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
+        LOGGER.info(
+            "SELECTED_OPTION_FORCE_HYDRATION_RESULT symbol=%s before_mdm_bars=%d after_mdm_bars=%d before_runner_bars=%d after_runner_bars=%d required_bars=%d",
+            sym, before_mdm_bars, after_mdm_bars, before_runner_bars, after_runner_bars, required_bars,
+        )
+
+
 async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
     """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
     basket = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
     selected_ce, selected_pe = _pick_atm_option_symbols_from_basket(basket)
-    selected_ce = getattr(ctx, "selected_ce", None) or selected_ce or basket.get("selected_ce") or basket.get("atm_ce")
-    selected_pe = getattr(ctx, "selected_pe", None) or selected_pe or basket.get("selected_pe") or basket.get("atm_pe")
+    old_ce = getattr(ctx, "selected_ce", None)
+    old_pe = getattr(ctx, "selected_pe", None)
+    selected_ce = selected_ce or basket.get("selected_ce") or basket.get("atm_ce") or old_ce
+    selected_pe = selected_pe or basket.get("selected_pe") or basket.get("atm_pe") or old_pe
+    LOGGER.info(
+        "SELECTED_OPTION_CONTEXT_REFRESH old_ce=%s old_pe=%s new_ce=%s new_pe=%s atm_strike=%s source=%s",
+        old_ce, old_pe, selected_ce, selected_pe, basket.get("atm_strike"), reason,
+    )
     ctx.selected_ce = selected_ce
     ctx.selected_pe = selected_pe
     ctx.atm_ce_symbol = selected_ce
@@ -6766,6 +6805,18 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
             return len(mdm.get_ohlc_bars(sym) or [])
         except Exception:
             return 0
+    def _readiness_bars(sym: str | None) -> tuple[int, int, int]:
+        if not sym:
+            return 0, 0, 0
+        mdm_bars = _bars(sym)
+        runner_bars = 0
+        runner = getattr(ctx, "strategy_runner", None)
+        if runner is not None and hasattr(runner, "_indicator_engine"):
+            try:
+                runner_bars = len(runner._indicator_engine.get_history(sym) or [])
+            except Exception:
+                runner_bars = 0
+        return min(mdm_bars, runner_bars), mdm_bars, runner_bars
     def _quote(sym: str | None) -> bool:
         if not sym or mdm is None:
             return False
@@ -6777,8 +6828,11 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or 1)
     option_execution_min_bars = int(os.getenv("OPTION_EXECUTION_MIN_BARS", "5") or 5)
     context_execution_min_bars = int(os.getenv("CONTEXT_EXECUTION_MIN_BARS", "50") or 50)
-    ce_bars = _bars(selected_ce)
-    pe_bars = _bars(selected_pe)
+    await _ensure_selected_options_hydrated(
+        ctx, selected_ce, selected_pe, option_execution_min_bars, reason
+    )
+    ce_bars, ce_mdm_bars, ce_runner_bars = _readiness_bars(selected_ce)
+    pe_bars, pe_mdm_bars, pe_runner_bars = _readiness_bars(selected_pe)
     ce_quote_fresh = _quote(selected_ce)
     pe_quote_fresh = _quote(selected_pe)
     ce_eval_ready = bool(selected_ce) and (ce_quote_fresh or ce_bars >= option_eval_min_live_bars)
@@ -6814,7 +6868,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = None if live_orders_armed else "startup_pipeline_incomplete"
     LOGGER.info(
-        "LIVE_READINESS_COMPUTED spot_ready=%s ce_eval_ready=%s pe_eval_ready=%s ce_exec_ready=%s pe_exec_ready=%s full_basket_ready=%s selected_ce=%s selected_pe=%s ce_bars=%s pe_bars=%s",
+        "LIVE_READINESS_COMPUTED spot_ready=%s ce_eval_ready=%s pe_eval_ready=%s ce_exec_ready=%s pe_exec_ready=%s full_basket_ready=%s selected_ce=%s selected_pe=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s",
         spot_ready,
         ce_eval_ready,
         pe_eval_ready,
@@ -6823,8 +6877,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         full_basket_ready,
         selected_ce,
         selected_pe,
-        ce_bars,
-        pe_bars,
+        ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars,
     )
     if (not selected_ce) or (not selected_pe):
         LOGGER.warning("LIVE_BASKET_INVALID reason=atm_option_selection_failed")

@@ -8175,6 +8175,26 @@ class StrategyRunner:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "max_order_attempts_per_minute")
             metadata = dict(signal.metadata or {})
+            quality = None
+            def _trace(stop_reason: str, executor_called: bool = False, risk_allowed: bool = False) -> None:
+                self._logger.info(
+                    "TRADING_PATH_TRACE symbol=%s strategy_name=%s live_orders_armed=%s selected_or_near_atm=%s history_bars_effective=%s signal_generated=%s consensus_side=%s quality_final=%s quality_threshold=%s quality_allowed=%s candidate_selected=%s candidate_snapshots_present=%s risk_allowed=%s executor_called=%s stop_reason=%s",
+                    signal.symbol,
+                    metadata.get("strategy_name") or metadata.get("strategy") or signal.reason,
+                    bool(self._runtime_live_orders_armed),
+                    bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")),
+                    metadata.get("history_bars_effective"),
+                    True,
+                    infer_option_side(signal.symbol, metadata),
+                    getattr(quality, "final_score", None),
+                    (quality.components.get("threshold") if quality is not None else None),
+                    (quality.allowed if quality is not None else None),
+                    bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")),
+                    isinstance(metadata.get("candidate_snapshots"), list) and bool(metadata.get("candidate_snapshots")),
+                    risk_allowed,
+                    executor_called,
+                    stop_reason,
+                )
             mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
             is_live_mode = mode == "LIVE" or (
                 str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
@@ -8195,11 +8215,13 @@ class StrategyRunner:
                     },
                 )
                 self._reset_execution_state(base_symbol)
+                _trace("runtime_live_orders_not_armed")
                 return SignalExecutionResult(False, "runtime_live_orders_not_armed")
             self._logger.info("ORDER_PATH_ENTERED symbol=%s reason=%s live_orders_armed=%s trace_id=%s", base_symbol, reason_key, bool(self._runtime_live_orders_armed), trace_id)
             option_side = infer_option_side(signal.symbol, metadata)
             if is_live_mode and option_side == "UNKNOWN":
                 self._reset_execution_state(base_symbol)
+                _trace("unknown_option_side")
                 return SignalExecutionResult(False, "unknown_option_side")
             candidate_snapshots_obj = metadata.get("candidate_snapshots")
             is_directional_option = option_side in {"CE", "PE"}
@@ -8213,12 +8235,25 @@ class StrategyRunner:
                     reason="candidate_refresh_pending",
                 )
             if is_live_mode and is_directional_option and not candidate_snapshots_obj:
-                self._reset_execution_state(base_symbol)
-                return self._reject_signal_execution(
-                    symbol=base_symbol,
-                    trace_id=trace_id,
-                    reason="missing_candidate_snapshots",
-                )
+                signal_symbol = normalize_symbol(signal.symbol)
+                selected_ce = normalize_symbol(str(metadata.get("selected_ce") or self._selected_ce_symbol or ""))
+                selected_pe = normalize_symbol(str(metadata.get("selected_pe") or self._selected_pe_symbol or ""))
+                quote = self.get_quote(signal.symbol)
+                quote_fresh = bool(isinstance(quote, dict) and quote.get("ltp"))
+                selected_or_near = signal_symbol in {selected_ce, selected_pe} or bool(metadata.get("is_selected_option"))
+                sl_ok = signal.stop_loss is not None and signal.take_profit is not None
+                if selected_or_near and quote_fresh and sl_ok and bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")):
+                    metadata["quote_usable_for_order_plan"] = True
+                    metadata["candidate_selected"] = True
+                    metadata["candidate_symbol"] = signal.symbol
+                else:
+                    self._reset_execution_state(base_symbol)
+                    _trace("missing_candidate_snapshots")
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="missing_candidate_snapshots",
+                    )
             if isinstance(candidate_snapshots_obj, list):
                 atm_strike = int(metadata.get("atm_strike") or 0)
                 if atm_strike <= 0:

@@ -301,14 +301,16 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     side = str(metadata.get("side") or infer_option_side(signal.symbol, metadata)).upper()
     if signal.action == "HOLD" and side not in {"CE", "PE"}:
         side = "NO_TRADE"
-    score_candidate = float(metadata.get('strategy_score') or 0.0)
-    score = float(signal.confidence or 0.0) * 10.0
-    if score <= 0.0:
-        score = score_candidate
+    score_candidate = float(metadata.get("strategy_score") or metadata.get("setup_quality") or 0.0)
+    confidence_score = float(signal.confidence or 0.0) * 10.0
+    score = max(score_candidate, confidence_score)
     reason = str(signal.reason or '').strip()
     metadata.setdefault("strategy", strategy_name)
     metadata.setdefault("required_data_present", True)
     metadata.setdefault("setup_quality", score_candidate)
+    metadata["vote_score_raw_strategy"] = score_candidate
+    metadata["vote_score_from_confidence"] = confidence_score
+    metadata["vote_score"] = score
     metadata.setdefault("score_reasons", [reason] if reason else [])
     return StrategyVote(
         strategy=strategy_name,
@@ -2515,8 +2517,11 @@ class StrategyManager(_BaseStrategyManager):
             metadata = dict(single_signal.metadata or {})
             spread_pct_raw = metadata.get("spread_pct")
             spread_pct = float(spread_pct_raw) if spread_pct_raw is not None else None
-            confidence_ok = float(single_signal.confidence or 0.0) >= single_min_confidence
-            score_ok = single_vote.score >= single_min_score
+            is_vwap = str(single_vote.strategy or "").strip().lower() == "vwappro"
+            effective_score_threshold = vwap_single_min_score if (scalper_mode and is_vwap) else single_min_score
+            effective_conf_threshold = vwap_single_min_confidence if (scalper_mode and is_vwap) else single_min_confidence
+            confidence_ok = float(single_signal.confidence or 0.0) >= effective_conf_threshold
+            score_ok = single_vote.score >= effective_score_threshold
             spread_ok = spread_pct is None or spread_pct <= single_max_spread
             selected_ok = True
             if require_selected_option:
@@ -2553,7 +2558,6 @@ class StrategyManager(_BaseStrategyManager):
                             selected_ok = False
             direction_score = float(metadata.get("direction_score") or 0.0)
             direction_ok = (not require_direction_score) or direction_score >= min_direction_score
-            is_vwap = str(single_vote.strategy or "").strip().lower() == "vwappro"
             vwap_scalper_allowed = (
                 scalper_mode
                 and is_vwap
@@ -2564,10 +2568,21 @@ class StrategyManager(_BaseStrategyManager):
                 and direction_ok
             )
             generic_single_allowed = allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok
+            log.info(
+                "SINGLE_VOTE_DECISION strategy=%s score=%.2f threshold=%.2f confidence=%.2f confidence_threshold=%.2f selected_ok=%s scalper_mode=%s",
+                single_vote.strategy, single_vote.score, effective_score_threshold, float(single_signal.confidence or 0.0), effective_conf_threshold, selected_ok, scalper_mode,
+            )
             if generic_single_allowed or vwap_scalper_allowed:
                 metadata["consensus_stage"] = "single_vote_scalp_controlled"
                 metadata["confirming_votes"] = [single_vote.strategy]
                 metadata["strategy_score"] = single_vote.score
+                metadata.setdefault("direction_score", float(metadata.get("direction_score") or single_vote.score))
+                metadata.setdefault("option_score", float(metadata.get("option_score") or single_vote.score))
+                metadata.setdefault("data_score", float(metadata.get("data_score") or single_vote.score))
+                metadata.setdefault("rr_score", float(metadata.get("rr_score") or single_vote.score))
+                metadata["strategy_name"] = single_vote.strategy
+                if metadata.get("candidate_selected") is None and metadata.get("is_selected_option") is not None:
+                    metadata["candidate_selected"] = bool(metadata.get("is_selected_option"))
                 metadata["risk_label"] = "single_strategy_signal"
                 log.info(
                     'STRATEGY_CONSENSUS side=%s score=%.2f votes=1 reason=single_vote_scalp_controlled',
@@ -2883,11 +2898,12 @@ class StrategyManager(_BaseStrategyManager):
             {
                 "strategy_weight": weight,
                 "strategy_allocation": score_entry.allocation,
-                "strategy_score": score_entry.score,
+                "adaptive_strategy_score": score_entry.score,
                 "strategy_manual_allocation": score_entry.manual_allocation,
                 "strategy_regime_bias": score_entry.regime_bias,
             }
         )
+        base_metadata.setdefault("strategy_score", score_entry.score)
         return Signal(
             action=signal.action,
             symbol=signal.symbol,
