@@ -197,9 +197,43 @@ class IndicatorEngine:
         """Initialize indicator engine."""
         self._histories: Dict[str, PriceHistory] = {}
         self._cache: Dict[str, Dict[str, tuple[Any, datetime]]] = {}
+        self._runtime_context: Dict[str, Dict[str, Any]] = {}
         self._last_valid_vwap: Dict[str, float] = {}
         self._lock = threading.RLock()
         self._logger = get_logger(__name__)
+
+    def set_indicators(self, symbol: str, indicators: Mapping[str, Any]) -> None:
+        """Store runtime context keys only. Args: symbol, indicators. Returns: None. Raises: Exception."""
+        try:
+            if not symbol:
+                return
+            allowed_context_keys = {
+                "selected_ce",
+                "selected_pe",
+                "atm_strike",
+                "is_selected_option",
+                "strike_distance_from_atm",
+                "selected_side",
+                "option_role",
+            }
+            with self._lock:
+                context = self._runtime_context.setdefault(symbol, {})
+                for key, value in dict(indicators).items():
+                    if key in allowed_context_keys:
+                        context[key] = value
+                self._cache.pop(symbol, None)
+        except Exception as e:
+            self._logger.error("Failure in IndicatorEngine.set_indicators: %s", e)
+            raise
+
+    def get_runtime_context(self, symbol: str) -> dict[str, Any]:
+        """Fetch runtime context. Args: symbol. Returns: context copy. Raises: Exception."""
+        try:
+            with self._lock:
+                return dict(self._runtime_context.get(symbol, {}))
+        except Exception as e:
+            self._logger.error("Failure in IndicatorEngine.get_runtime_context: %s", e)
+            raise
 
     def update_price(
         self,
@@ -464,6 +498,9 @@ class IndicatorEngine:
                 key = str(name)
                 if key in indicators:
                     requested[key] = indicators[key]
+            context = self._runtime_context.get(symbol, {})
+            for key, value in context.items():
+                requested.setdefault(key, value)
             return requested
         except Exception as e:
             LOGGER.error(

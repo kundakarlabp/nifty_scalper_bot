@@ -5067,6 +5067,18 @@ class StrategyRunner:
 
     def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
         """Validate regime gate for strategy. Args: strategy, regime; Returns: bool; Raises: none."""
+        def _canonical_regime_name(value: str) -> str:
+            """Normalize regime aliases. Args: value. Returns: canonical name. Raises: none."""
+            normalized_value = str(value or "").strip().upper()
+            aliases = {
+                "VOLATILE": "HIGH_VOLATILITY",
+                "HIGHVOL": "HIGH_VOLATILITY",
+                "HIGH_VOL": "HIGH_VOLATILITY",
+                "TRENDING": "TREND",
+                "RANGING": "RANGE",
+            }
+            return aliases.get(normalized_value, normalized_value)
+
         if not _env_bool("RUNNER_ENABLE_REGIME_GATE", True):
             self._logger.debug(
                 "REGIME_GATE_BYPASSED strategy=%s regime=%s reason=disabled",
@@ -5089,10 +5101,14 @@ class StrategyRunner:
         if env_name == "RUNNER_VWAP_ALLOWED_REGIMES":
             default_allowed = "TREND,NORMAL"
         allowed_csv = os.getenv(env_name or "", default_allowed) if env_name else default_allowed
-        allowed = {item.strip().upper() for item in allowed_csv.split(",") if item.strip()}
-        regime_name = regime.value.upper()
+        allowed = {
+            _canonical_regime_name(item)
+            for item in allowed_csv.split(",")
+            if item.strip()
+        }
+        regime_name = _canonical_regime_name(regime.value)
         allowed_for_regime = regime_name in allowed
-        self._logger.info(
+        self._logger.debug(
             "REGIME_GATE_DECISION strategy=%s regime=%s allowed=%s allowed_regimes=%s env=%s",
             strategy or "unknown",
             regime.value,
@@ -5289,7 +5305,7 @@ class StrategyRunner:
                 return False
             required_bars = self._required_bars_for_symbol(symbol)
             if self._is_tradable_symbol(symbol):
-                min_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "3"))
+                min_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "1"))
                 capped_required = max(1, min(required_bars, min_live_bars))
                 if capped_required != required_bars:
                     self._logger.info(
@@ -5321,6 +5337,31 @@ class StrategyRunner:
                         fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
                         if (spot_bars < self._context_required_bars or fut_bars < self._context_required_bars) and self._should_log_throttled(f"opt_ctx_cold:{symbol}", 120.0):
                             self._logger.warning("OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d", symbol, spot_bars, fut_bars, self._context_required_bars)
+                    strict_for_all = _env_bool(
+                        "OPTION_STRICT_HISTORY_FOR_ALL_STRATEGIES", False
+                    )
+                    tick_is_fresh = self._is_option_symbol_tick_fresh(symbol)
+                    soft_pass = (
+                        self._is_tradable_symbol(symbol)
+                        and not strict_for_all
+                        and history_count >= 1
+                        and tick_is_fresh
+                    )
+                    if soft_pass:
+                        if self._should_log_throttled(f"opt_soft_pass:{symbol}", 60.0):
+                            self._logger.info(
+                                "OPTION_HISTORY_SOFT_PASS symbol=%s bars=%d required=%d reason=fresh_tick_scalping_mode",
+                                symbol,
+                                history_count,
+                                required_bars,
+                                extra={
+                                    "event": "OPTION_HISTORY_SOFT_PASS",
+                                    "symbol": symbol,
+                                    "bars": history_count,
+                                    "required": required_bars,
+                                },
+                            )
+                        return True
                     if self._should_log_throttled(
                         f"eval_block_cold_history:{symbol}", 120.0
                     ):
@@ -6821,15 +6862,36 @@ class StrategyRunner:
                         selected_pe = getattr(self, "_active_selected_pe", None)
                         atm_strike = getattr(self, "_active_atm_strike", None)
                         symbol_strike = self._extract_strike_from_symbol(symbol)
+                        normalized_symbol = normalize_symbol(symbol)
+                        selected_set = {
+                            normalize_symbol(item)
+                            for item in [selected_ce, selected_pe]
+                            if item
+                        }
                         indicators_ctx["selected_ce"] = selected_ce
                         indicators_ctx["selected_pe"] = selected_pe
                         indicators_ctx["atm_strike"] = atm_strike
-                        indicators_ctx["is_selected_option"] = normalize_symbol(symbol) in {selected_ce, selected_pe}
+                        indicators_ctx["is_selected_option"] = (
+                            normalized_symbol in selected_set
+                        )
                         if symbol_strike is not None and atm_strike is not None:
                             indicators_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
-                        self._indicator_engine.set_indicators(symbol, indicators_ctx)
-                        # --- Objective 2: Block signals if market depth insufficient ---
-                        if not self.validate_market_depth():
+                        if hasattr(self._indicator_engine, "set_indicators"):
+                            self._indicator_engine.set_indicators(symbol, indicators_ctx)
+                        elif self._should_log_throttled(
+                            "indicator_ctx_missing_setter", 60.0
+                        ):
+                            self._logger.warning(
+                                "INDICATOR_CONTEXT_SETTER_MISSING symbol=%s engine=%s",
+                                symbol,
+                                type(self._indicator_engine).__name__,
+                            )
+                        require_depth_for_signal = (
+                            os.getenv("EXECUTION_MODE", "PAPER").strip().upper() == "LIVE"
+                            and _env_bool("REQUIRE_MARKET_DEPTH_FOR_SIGNAL", False)
+                        )
+                        market_depth_ok = self.validate_market_depth()
+                        if not market_depth_ok and require_depth_for_signal:
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
                                 stage="phase9",
@@ -6838,6 +6900,15 @@ class StrategyRunner:
                                 trace_id=trace_id,
                             )
                             return
+                        if not market_depth_ok:
+                            log_throttled(
+                                self._logger,
+                                f"market_depth_soft_fail:{symbol}",
+                                "MARKET_DEPTH_SOFT_FAIL_SIGNAL_CONTINUES",
+                                interval_sec=60.0,
+                                level=logging.INFO,
+                                extra={"event": "MARKET_DEPTH_SOFT_FAIL_SIGNAL_CONTINUES", "symbol": symbol},
+                            )
 
                         signal = self._strategy_manager.generate_signal(
                             symbol,
@@ -7320,6 +7391,30 @@ class StrategyRunner:
             selected_ce = self._active_selected_ce
             selected_pe = self._active_selected_pe
             atm_strike = self._active_atm_strike
+            active_option_symbols = {
+                normalize_symbol(option_symbol)
+                for option_symbol in getattr(self, "_active_option_symbols", set())
+                if option_symbol
+            }
+            normalized_selected_ce = normalize_symbol(selected_ce) if selected_ce else ""
+            normalized_selected_pe = normalize_symbol(selected_pe) if selected_pe else ""
+            normalized_symbol = normalize_symbol(symbol)
+            if not (normalized_selected_ce or normalized_selected_pe) and active_option_symbols and atm_strike:
+                selected_candidates = [
+                    item for item in active_option_symbols if self._extract_strike_from_symbol(item)
+                ]
+                ce_candidates = [item for item in selected_candidates if item.endswith("CE")]
+                pe_candidates = [item for item in selected_candidates if item.endswith("PE")]
+                if ce_candidates:
+                    normalized_selected_ce = min(
+                        ce_candidates,
+                        key=lambda item: abs(float(self._extract_strike_from_symbol(item) or 0) - float(atm_strike)),
+                    )
+                if pe_candidates:
+                    normalized_selected_pe = min(
+                        pe_candidates,
+                        key=lambda item: abs(float(self._extract_strike_from_symbol(item) or 0) - float(atm_strike)),
+                    )
             strike_value = self._extract_strike_from_symbol(symbol)
             inds = self._indicator_engine.get_indicators(symbol)
             recovered_atm = inds.get("atm_strike") if isinstance(inds, dict) else None
@@ -7333,18 +7428,23 @@ class StrategyRunner:
                 return None
             strike = float(strike_value or 0.0)
             atm_strike_float = float(atm_strike or 0.0)
-            selected = normalize_symbol(symbol) in {selected_ce, selected_pe}
+            selected = normalized_symbol in {
+                normalized_selected_ce,
+                normalized_selected_pe,
+            }
             near_atm = bool(
                 atm_strike > 0
                 and strike > 0
                 and abs(strike - atm_strike_float) <= max_strike_distance
             )
-            if not (selected or near_atm):
-                self._logger.info(
+            in_active_universe = normalized_symbol in active_option_symbols
+            if not (selected or near_atm or in_active_universe):
+                if self._should_log_throttled(f"premium_outside_window:{normalized_symbol}", 60.0):
+                    self._logger.info(
                     "PREMIUM_SQUEEZE_SKIPPED reason=outside_selected_strike_window symbol=%s selected_ce=%s selected_pe=%s atm_strike=%s strike=%s max_distance=%s trace_id=%s",
                     symbol,
-                    selected_ce,
-                    selected_pe,
+                    normalized_selected_ce,
+                    normalized_selected_pe,
                     atm_strike_float,
                     strike,
                     max_strike_distance,
