@@ -2521,23 +2521,34 @@ class StrategyManager(_BaseStrategyManager):
                     selected_marker = metadata.get("candidate_selected")
                     if selected_marker is None:
                         selected_marker = metadata.get("is_selected_option")
-                    if selected_marker is None:
-                        selected_ce = indicators.get("selected_ce")
-                        selected_pe = indicators.get("selected_pe")
+                    if selected_marker is not None:
+                        selected_ok = bool(selected_marker)
+                    else:
+                        selected_ce = normalize_symbol(str(indicators.get("selected_ce") or ""))
+                        selected_pe = normalize_symbol(str(indicators.get("selected_pe") or ""))
                         atm_strike = indicators.get("atm_strike")
+                        strike_distance = indicators.get("strike_distance_from_atm")
+                        signal_symbol_norm = normalize_symbol(single_signal.symbol)
                         signal_strike = self._extract_strike_from_symbol(single_signal.symbol)
-                        if selected_ce or selected_pe or atm_strike:
-                            selected_ok = bool(single_signal.symbol in {selected_ce, selected_pe})
-                            if not selected_ok and signal_strike is not None and atm_strike is not None:
+                        if selected_ce or selected_pe or atm_strike not in (None, ""):
+                            selected_ok = signal_symbol_norm in {selected_ce, selected_pe}
+                            if not selected_ok:
                                 try:
-                                    selected_ok = abs(float(signal_strike) - float(atm_strike)) <= single_max_strike_distance
+                                    if strike_distance is not None:
+                                        selected_ok = float(strike_distance) <= single_max_strike_distance
+                                    elif signal_strike is not None and atm_strike not in (None, ""):
+                                        selected_ok = abs(float(signal_strike) - float(atm_strike)) <= single_max_strike_distance
                                 except (TypeError, ValueError):
                                     selected_ok = False
                         else:
-                            log.info("SINGLE_VOTE_SELECTED_CHECK_UNAVAILABLE")
+                            log.info(
+                                "SINGLE_VOTE_SELECTED_CHECK_UNAVAILABLE symbol=%s selected_ce=%s selected_pe=%s atm_strike=%s",
+                                single_signal.symbol,
+                                selected_ce,
+                                selected_pe,
+                                atm_strike,
+                            )
                             selected_ok = False
-                    else:
-                        selected_ok = bool(selected_marker)
                 direction_score = float(metadata.get("direction_score") or 0.0)
                 direction_ok = (not require_direction_score) or direction_score >= min_direction_score
                 if allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok:

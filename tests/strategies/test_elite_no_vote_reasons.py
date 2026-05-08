@@ -48,3 +48,17 @@ def test_no_vote_reasons_not_none_for_all_strategy_return_none_paths() -> None:
         assert signal is None
         reason = getattr(strategy, 'last_no_vote_reason', None)
         assert reason not in (None, '', 'none')
+
+
+
+def test_orderflow_missing_depth_no_vote_by_default(monkeypatch) -> None:
+    monkeypatch.delenv('ORDERFLOW_ALLOW_LTP_TICK_FALLBACK', raising=False)
+    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(), _DummyIndicatorEngine())
+    signal = strategy.generate_signal(
+        symbol='NFO:NIFTY26MAY24350CE',
+        indicators={'bid': 100.0, 'ask': 101.0, 'depth': {'buy': [], 'sell': []}, 'atr': 2.0},
+        current_price=100.5,
+        position=None,
+    )
+    assert signal is None
+    assert getattr(strategy, 'last_no_vote_reason', None) == 'missing_depth'

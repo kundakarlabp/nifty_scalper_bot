@@ -37,6 +37,7 @@ class CPRBreakoutStrategy(EliteStrategy):
             direction = str(indicators.get('direction_bias') or '').upper()
 
             if min(cpr_bottom, cpr_top, pivot) <= 0 or cpr_top <= cpr_bottom:
+                self._no_vote('invalid_cpr_levels')
                 return None
             if cpr_bottom <= current_price <= cpr_top:
                 self._no_vote('inside_cpr')
