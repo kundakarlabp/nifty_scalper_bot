@@ -29,6 +29,8 @@ class CPRBreakoutStrategy(EliteStrategy):
     def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
+        if str(os.getenv('ENABLE_CPR_STRATEGY', 'false')).strip().lower() not in {'1','true','yes','on'}:
+            return None
         try:
             self._no_vote("stale_or_invalid_data")
             cpr_bottom = float(indicators.get('bc') or 0.0)
