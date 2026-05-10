@@ -14,6 +14,8 @@ class VWAPProStrategy(EliteStrategy):
     """VWAP continuation/pullback strategy emitting scored strategy votes."""
 
     MIN_BARS_REQUIRED = 10
+    ROLE = 'trigger'
+    TRIGGER_KEY = 'vwap_pro'
 
     def __init__(self, config: VWAPProStrategyConfig, indicator_engine: Any) -> None:
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
@@ -43,8 +45,6 @@ class VWAPProStrategy(EliteStrategy):
             avg_vol = float(indicators.get('avg_volume') or 0.0)
             spread_pct = float(indicators.get('spread_pct') or 0.0)
             direction = str(indicators.get('direction_bias') or '').upper()
-            stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
-
             if current_price <= 0 or vwap <= 0:
                 self._no_vote('missing_vwap')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=missing_vwap')
@@ -62,24 +62,28 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote('stale_data')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=stale_data')
                 return None
-            if spread_pct > 28.0:
+            max_spread_pct = 12.0 if str(os.getenv('EXECUTION_MODE','SHADOW')).strip().upper() == 'LIVE' else 28.0
+            max_data_age = 45.0 if str(os.getenv('EXECUTION_MODE','SHADOW')).strip().upper() == 'LIVE' else 120.0
+            stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > max_data_age
+
+            if spread_pct > max_spread_pct:
                 self._no_vote('wide_spread')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=wide_spread')
                 return None
 
             score = 0.0
             reasons: list[str] = []
-            side = 'UNKNOWN'
+            contract_side = 'UNKNOWN'
             trend_alignment = False
             pullback_flag = False
             continuation_confirmed = False
 
             if current_price >= vwap:
-                side = 'CE'
+                contract_side = 'CE'
                 score += 2.0
                 reasons.append('above_or_below_vwap:above')
             else:
-                side = 'PE'
+                contract_side = 'PE'
                 score += 2.0
                 reasons.append('above_or_below_vwap:below')
 
@@ -92,7 +96,7 @@ class VWAPProStrategy(EliteStrategy):
 
             reclaim_long = low <= (vwap - (atr_safe * self._slack_atr_mult * 0.2)) and close >= vwap
             reclaim_short = high >= (vwap + (atr_safe * self._slack_atr_mult * 0.2)) and close <= vwap
-            if self._allow_pullback and ((side == 'CE' and reclaim_long) or (side == 'PE' and reclaim_short)):
+            if self._allow_pullback and ((contract_side == 'CE' and reclaim_long) or (contract_side == 'PE' and reclaim_short)):
                 pullback_flag = True
                 score += 1.0
                 reasons.append('pullback_reclaim')
@@ -105,7 +109,7 @@ class VWAPProStrategy(EliteStrategy):
                 score += 1.0
 
             if direction in {'CE', 'PE'}:
-                trend_alignment = direction == side
+                trend_alignment = direction == contract_side
                 if trend_alignment:
                     score += 2.0
                     reasons.append('trend_alignment')
@@ -122,8 +126,8 @@ class VWAPProStrategy(EliteStrategy):
             confidence = max(0.1, min(0.85, strategy_score / 10.0))
             metadata = {
                 'strategy': 'VWAPPro',
-                'side': side,
-                'direction_bias': side,
+                'side': contract_side,
+                'direction_bias': contract_side,
                 'strategy_score': strategy_score,
                 'score_reasons': reasons,
                 'setup_type': 'continuation_pullback',
@@ -139,15 +143,18 @@ class VWAPProStrategy(EliteStrategy):
                 'pullback_flag': pullback_flag,
                 'trend_alignment': trend_alignment,
                 'continuation_confirmed': continuation_confirmed,
-                'invalidation_level': (vwap - atr_safe) if side == 'CE' else (vwap + atr_safe),
+                'setup_invalidation_premium': current_price - atr_safe,
+                'premium_stop_distance': atr_safe,
+                'premium_target_rr': 2.0,
+                'setup_invalidation_underlying': (vwap - atr_safe) if contract_side == 'CE' else (vwap + atr_safe),
             }
-            LOGGER.info('STRATEGY_VOTE strategy=VWAPPro side=%s score=%.2f', side, strategy_score)
+            LOGGER.info('STRATEGY_VOTE strategy=VWAPPro side=%s score=%.2f', contract_side, strategy_score)
             return EliteSignal(
                 symbol=symbol,
                 signal='BUY',
                 confidence=confidence,
                 entry_price=current_price,
-                stop_loss=float(metadata['invalidation_level']),
+                stop_loss=current_price - atr_safe,
                 target=current_price + (atr_safe * 2.0),
                 quantity=self._cfg.quantity or 1,
                 strategy_name='VWAPPro',

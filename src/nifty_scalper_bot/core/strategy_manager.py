@@ -303,7 +303,7 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
         side = "NO_TRADE"
     score_candidate = float(metadata.get("strategy_score") or metadata.get("setup_quality") or 0.0)
     confidence_score = float(signal.confidence or 0.0) * 10.0
-    score = max(score_candidate, confidence_score)
+    score = score_candidate
     reason = str(signal.reason or '').strip()
     metadata.setdefault("strategy", strategy_name)
     metadata.setdefault("required_data_present", True)
@@ -1056,13 +1056,11 @@ class StrategyManager(_BaseStrategyManager):
         self._symbol_invalid_counts: dict[str, int] = {}
         self._symbol_temporarily_ineligible: dict[str, str] = {}
         self._symbol_invalid_threshold = 10  # ✅ FIX #2a: Raised from 3→10; options have legitimate data gaps at open/reconnect
-        required: set[str] = set()
-        for strategy in strategies:
-            required.update(strategy.get_required_indicators())
-        required.update(
-            {"volume", "avg_volume", "minutes_since_open", "minutes_until_close"}
-        )
-        self._required_indicators: set[str] = required
+        self._required_indicators: set[str] = {"volume", "avg_volume", "minutes_since_open", "minutes_until_close"}
+        self._strategy_required_indicators: dict[str, set[str]] = {
+            getattr(strategy, "name", strategy.__class__.__name__): set(strategy.get_required_indicators())
+            for strategy in strategies
+        }
 
     def record_trade_result(
         self,
@@ -2476,211 +2474,40 @@ class StrategyManager(_BaseStrategyManager):
         indicators: t.Mapping[str, t.Any],
     ) -> Signal | None:
         """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
+        del symbol, indicators
         if not signals:
             return None
-        by_side: dict[str, list[tuple[Signal, StrategyVote]]] = {
-            'CE': [],
-            'PE': [],
-            'UNKNOWN': [],
-        }
+        trigger_votes: list[tuple[Signal, StrategyVote]] = []
+        context_votes: list[tuple[Signal, StrategyVote]] = []
         for signal, vote in signals:
-            if signal.action in {'CLOSE_LONG', 'CLOSE_SHORT'}:
+            if signal.action in {"CLOSE_LONG", "CLOSE_SHORT"}:
                 return signal
-            by_side.setdefault(vote.side, []).append((signal, vote))
-        ce_votes = by_side.get('CE', [])
-        pe_votes = by_side.get('PE', [])
-        conflict = bool(ce_votes and pe_votes)
-        if conflict:
-            log.info(
-                'STRATEGY_CONSENSUS side=NO_TRADE score=0.00 votes=%s conflict=True',
-                len(ce_votes) + len(pe_votes),
-                extra={'event': 'STRATEGY_CONSENSUS', 'side': 'NO_TRADE', 'score': 0.0, 'votes': len(ce_votes) + len(pe_votes), 'conflict': True},
-            )
+            role = str((vote.metadata or {}).get("role") or "trigger").lower()
+            if role == "context":
+                context_votes.append((signal, vote))
+            else:
+                trigger_votes.append((signal, vote))
+        if not trigger_votes:
             return None
-        winning_side = 'CE' if len(ce_votes) >= len(pe_votes) else 'PE'
-        winning = ce_votes if winning_side == 'CE' else pe_votes
-        if not winning:
-            return self._combine_signals([signal for signal, _ in signals])
-        if len(winning) == 1:
-            single_signal, single_vote = winning[0]
-            allow_single_vote_scalp = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).strip().lower() in {"1", "true", "yes", "on"}
-            scalper_mode = str(os.getenv("SCALPER_MODE", "false")).strip().lower() in {"1", "true", "yes", "on"}
-            vwap_single_min_score = float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE", "5.5") or "5.5")
-            vwap_single_min_confidence = float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE", "0.45") or "0.45")
-            single_min_score = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_SCORE", "6.5") or "6.5")
-            single_min_confidence = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0.60") or "0.60")
-            require_selected_option = str(os.getenv("STRATEGY_SINGLE_VOTE_REQUIRE_SELECTED_OPTION", "true")).strip().lower() in {"1", "true", "yes", "on"}
-            single_max_strike_distance = float(os.getenv("STRATEGY_SINGLE_VOTE_MAX_STRIKE_DISTANCE", "100") or "100")
-            single_max_spread = float(os.getenv("STRATEGY_SINGLE_VOTE_MAX_SPREAD_PCT", "10.0") or "10.0")
-            require_direction_score = str(os.getenv("STRATEGY_SINGLE_VOTE_REQUIRE_DIRECTION_SCORE", "false")).strip().lower() in {"1", "true", "yes", "on"}
-            min_direction_score = float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_DIRECTION_SCORE", "6.0") or "6.0")
-            metadata = dict(single_signal.metadata or {})
-            spread_pct_raw = metadata.get("spread_pct")
-            spread_pct = float(spread_pct_raw) if spread_pct_raw is not None else None
-            is_vwap = str(single_vote.strategy or "").strip().lower() == "vwappro"
-            effective_score_threshold = vwap_single_min_score if (scalper_mode and is_vwap) else single_min_score
-            effective_conf_threshold = vwap_single_min_confidence if (scalper_mode and is_vwap) else single_min_confidence
-            confidence_ok = float(single_signal.confidence or 0.0) >= effective_conf_threshold
-            score_ok = single_vote.score >= effective_score_threshold
-            spread_ok = spread_pct is None or spread_pct <= single_max_spread
-            selected_ok = True
-            if require_selected_option:
-                    selected_marker = metadata.get("candidate_selected")
-                    if selected_marker is None:
-                        selected_marker = metadata.get("is_selected_option")
-                    if selected_marker is not None:
-                        selected_ok = bool(selected_marker)
-                    else:
-                        selected_ce = normalize_symbol(str(indicators.get("selected_ce") or ""))
-                        selected_pe = normalize_symbol(str(indicators.get("selected_pe") or ""))
-                        atm_strike = indicators.get("atm_strike")
-                        strike_distance = indicators.get("strike_distance_from_atm")
-                        signal_symbol_norm = normalize_symbol(single_signal.symbol)
-                        signal_strike = self._extract_strike_from_symbol(single_signal.symbol)
-                        if selected_ce or selected_pe or atm_strike not in (None, ""):
-                            selected_ok = signal_symbol_norm in {selected_ce, selected_pe}
-                            if not selected_ok:
-                                try:
-                                    if strike_distance is not None:
-                                        selected_ok = float(strike_distance) <= single_max_strike_distance
-                                    elif signal_strike is not None and atm_strike not in (None, ""):
-                                        selected_ok = abs(float(signal_strike) - float(atm_strike)) <= single_max_strike_distance
-                                except (TypeError, ValueError):
-                                    selected_ok = False
-                        else:
-                            log.info(
-                                "SINGLE_VOTE_SELECTED_CHECK_UNAVAILABLE symbol=%s selected_ce=%s selected_pe=%s atm_strike=%s",
-                                single_signal.symbol,
-                                selected_ce,
-                                selected_pe,
-                                atm_strike,
-                            )
-                            selected_ok = False
-            direction_score = float(metadata.get("direction_score") or 0.0)
-            direction_ok = (not require_direction_score) or direction_score >= min_direction_score
-            vwap_scalper_allowed = (
-                scalper_mode
-                and is_vwap
-                and single_vote.score >= vwap_single_min_score
-                and float(single_signal.confidence or 0.0) >= vwap_single_min_confidence
-                and selected_ok
-                and spread_ok
-                and direction_ok
-            )
-            generic_single_allowed = allow_single_vote_scalp and score_ok and confidence_ok and spread_ok and selected_ok and direction_ok
-            log.info(
-                "SINGLE_VOTE_DECISION strategy=%s score=%.2f threshold=%.2f confidence=%.2f confidence_threshold=%.2f selected_ok=%s scalper_mode=%s",
-                single_vote.strategy, single_vote.score, effective_score_threshold, float(single_signal.confidence or 0.0), effective_conf_threshold, selected_ok, scalper_mode,
-            )
-            if generic_single_allowed or vwap_scalper_allowed:
-                metadata["consensus_stage"] = "single_vote_scalp_controlled"
-                metadata["confirming_votes"] = [single_vote.strategy]
-                metadata["strategy_score"] = single_vote.score
-                metadata.setdefault("direction_score", float(metadata.get("direction_score") or single_vote.score))
-                metadata.setdefault("option_score", float(metadata.get("option_score") or single_vote.score))
-                metadata.setdefault("data_score", float(metadata.get("data_score") or single_vote.score))
-                metadata.setdefault("rr_score", float(metadata.get("rr_score") or single_vote.score))
-                metadata["strategy_name"] = single_vote.strategy
-                if metadata.get("candidate_selected") is None and metadata.get("is_selected_option") is not None:
-                    metadata["candidate_selected"] = bool(metadata.get("is_selected_option"))
-                metadata["risk_label"] = "single_strategy_signal"
-                log.info(
-                    'STRATEGY_CONSENSUS side=%s score=%.2f votes=1 reason=single_vote_scalp_controlled',
-                    winning_side,
-                    single_vote.score,
-                    extra={'event': 'STRATEGY_CONSENSUS', 'side': winning_side, 'score': single_vote.score, 'votes': 1, 'reason': 'single_vote_scalp_controlled'},
-                )
-                return Signal(action='BUY', symbol=single_signal.symbol, quantity=single_signal.quantity, confidence=single_signal.confidence, reason=single_signal.reason, stop_loss=single_signal.stop_loss, take_profit=single_signal.take_profit, metadata=metadata)
-            log.info(
-                "SINGLE_VOTE_REJECTED strategy=%s score=%.2f score_ok=%s confidence=%.2f confidence_ok=%s selected_ok=%s spread_ok=%s direction_ok=%s allow_single_vote_scalp=%s",
-                single_vote.strategy,
-                single_vote.score,
-                score_ok,
-                float(single_signal.confidence or 0.0),
-                confidence_ok,
-                selected_ok,
-                spread_ok,
-                direction_ok,
-                allow_single_vote_scalp,
-            )
-            log.info(
-                    'STRATEGY_CONSENSUS side=NO_TRADE score=%.2f votes=1 reason=single_vote_low_score threshold=%.2f allow_single_vote_scalp=%s',
-                    single_vote.score,
-                    single_min_score,
-                    allow_single_vote_scalp,
-                    extra={
-                        'event': 'STRATEGY_CONSENSUS',
-                        'side': 'NO_TRADE',
-                        'score': single_vote.score,
-                        'votes': 1,
-                        'conflict': False,
-                        'reason': 'single_vote_low_score',
-                    },
-                )
+        best_signal, best_vote = max(trigger_votes, key=lambda pair: pair[1].score)
+        threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
+        final_score = float(best_vote.score)
+        vetoed = False
+        same_side_context = [v for _, v in context_votes if v.side == best_vote.side]
+        opposite_context = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
+        if same_side_context:
+            final_score = min(10.0, final_score + max(v.score for v in same_side_context) * 0.2)
+        if opposite_context and max(v.score for v in opposite_context) >= 8.0:
+            vetoed = True
+        if vetoed or final_score < threshold:
             return None
-            metadata = dict(single_signal.metadata or {})
-            metadata['strategy_score'] = round(
-                max(float(metadata.get('strategy_score') or 0.0), single_vote.score),
-                3,
-            )
-            metadata['confirming_votes'] = [single_vote.strategy]
-            metadata['direction_bias'] = winning_side
-            metadata['consensus_stage'] = 'preliminary_single_high_conviction'
-            log.info(
-                'STRATEGY_CONSENSUS side=%s score=%.2f votes=1 conflict=False reason=single_vote_high_conviction',
-                winning_side,
-                single_vote.score,
-                extra={
-                    'event': 'STRATEGY_CONSENSUS',
-                    'side': winning_side,
-                    'score': single_vote.score,
-                    'votes': 1,
-                    'conflict': False,
-                    'reason': 'single_vote_high_conviction',
-                },
-            )
-            return Signal(
-                action='BUY',
-                symbol=single_signal.symbol,
-                quantity=single_signal.quantity,
-                confidence=single_signal.confidence,
-                reason=single_signal.reason,
-                stop_loss=single_signal.stop_loss,
-                take_profit=single_signal.take_profit,
-                metadata=metadata,
-            )
-        direction_score = float(indicators.get('direction_score') or 0.0)
-        data_score = float(indicators.get('data_score') or 0.0)
-        option_score = float(indicators.get('option_score') or 0.0)
-        high_conviction = max(vote.score for _, vote in winning) >= 8.5
-        enough_confirmations = len(winning) >= 2 or (
-            high_conviction
-            and direction_score >= 7.5
-            and data_score >= 7.0
-            and option_score >= 7.0
-        )
-        if not enough_confirmations:
-            log.info(
-                'STRATEGY_CONSENSUS side=NO_TRADE score=0.00 votes=%s conflict=False',
-                len(winning),
-                extra={'event': 'STRATEGY_CONSENSUS', 'side': 'NO_TRADE', 'score': 0.0, 'votes': len(winning), 'conflict': False},
-            )
-            return None
-        best_signal, _ = max(winning, key=lambda pair: pair[1].score)
-        strategy_score = sum(vote.score for _, vote in winning) / max(len(winning), 1)
         metadata = dict(best_signal.metadata or {})
-        metadata['strategy_score'] = round(max(float(metadata.get('strategy_score') or 0.0), strategy_score), 3)
-        metadata['confirming_votes'] = [vote.strategy for _, vote in winning]
-        metadata['direction_bias'] = winning_side
-        log.info(
-            'STRATEGY_CONSENSUS side=%s score=%.2f votes=%s conflict=False',
-            winning_side,
-            strategy_score,
-            len(winning),
-            extra={'event': 'STRATEGY_CONSENSUS', 'side': winning_side, 'score': strategy_score, 'votes': len(winning), 'conflict': False},
-        )
+        metadata["strategy_score"] = round(final_score, 3)
+        metadata["confirming_votes"] = [best_vote.strategy] + [v.strategy for v in same_side_context]
+        metadata["direction_bias"] = best_vote.side
+        metadata["confidence"] = float(best_vote.confidence)
         return Signal(
-            action='BUY',
+            action="BUY",
             symbol=best_signal.symbol,
             quantity=best_signal.quantity,
             confidence=best_signal.confidence,
