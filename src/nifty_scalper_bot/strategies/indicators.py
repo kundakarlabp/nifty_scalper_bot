@@ -12,7 +12,7 @@ from datetime import datetime, time, timedelta, timezone
 import logging
 import os
 import threading
-from typing import Any, Callable, Deque, Dict, Iterable, Mapping, Sequence
+from typing import Any, Callable, Deque, Dict, Iterable, Literal, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -202,12 +202,15 @@ class IndicatorEngine:
         self._lock = threading.RLock()
         self._logger = get_logger(__name__)
 
-    def set_runtime_context(self, symbol: str, context: Mapping[str, Any]) -> None:
+    def set_runtime_context(self, symbol: str, context: Mapping[str, Any], *, merge: bool = True) -> None:
         """Store runtime context. Args: symbol, context. Returns: None. Raises: Exception."""
         try:
             if not symbol:
                 return
             allowed_context_keys = {
+                "contract_side", "underlying", "spot_symbol", "spot_price",
+                "futures_symbol", "futures_price", "quote_age_s", "spread_pct",
+                "bid", "ask",
                 "selected_ce",
                 "selected_pe",
                 "atm_strike",
@@ -217,10 +220,11 @@ class IndicatorEngine:
                 "option_role",
             }
             with self._lock:
-                symbol_context = self._runtime_context.setdefault(symbol, {})
+                symbol_context = self._runtime_context.setdefault(symbol, {}) if merge else {}
                 for key, value in dict(context).items():
                     if key in allowed_context_keys:
                         symbol_context[key] = value
+                self._runtime_context[symbol] = symbol_context
                 self._cache.pop(symbol, None)
         except Exception as e:
             self._logger.error("Failure in IndicatorEngine.set_runtime_context: %s", e)
@@ -230,11 +234,11 @@ class IndicatorEngine:
         """Backward-compatible alias for runtime context setter. Args: symbol, indicators. Returns: None. Raises: Exception."""
         self.set_runtime_context(symbol, indicators)
 
-    def get_runtime_context(self, symbol: str) -> dict[str, Any]:
+    def get_runtime_context(self, symbol: str, default: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Fetch runtime context. Args: symbol. Returns: context copy. Raises: Exception."""
         try:
             with self._lock:
-                return dict(self._runtime_context.get(symbol, {}))
+                return dict(self._runtime_context.get(symbol, dict(default or {})))
         except Exception as e:
             self._logger.error("Failure in IndicatorEngine.get_runtime_context: %s", e)
             raise
@@ -325,13 +329,23 @@ class IndicatorEngine:
             )
             raise
 
+
+    def ingest_historical_bar(self, symbol: str, bar: Mapping[str, Any]) -> int:
+        """Args: symbol/bar mapping. Returns: new history count. Raises: Exception."""
+        try:
+            self.ingest_bar(symbol, bar)
+            return self.history_count(symbol)
+        except Exception as e:
+            self._logger.error("Failure in IndicatorEngine.ingest_historical_bar: %s", e)
+            raise
+
     def history_count(self, symbol: str) -> int:
         """Return symbol history length. Args: symbol. Returns: count. Raises: none."""
         with self._lock:
             history = self._histories.get(symbol)
             return len(history) if history is not None else 0
 
-    def get_history(self, symbol: str, count: int | None = None) -> list[float]:
+    def get_history(self, symbol: str, count: int | None = None, *, field: Literal["close", "bars"] = "close") -> list[Any]:
         """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
         LOGGER.debug(
             "Entered IndicatorEngine.get_history",
@@ -375,16 +389,30 @@ class IndicatorEngine:
                             },
                         )
                     return []
-                closes = history.get_closes(count)
+                if field == "bars":
+                    opens = history.get_opens(count)
+                    highs = history.get_highs(count)
+                    lows = history.get_lows(count)
+                    closes = history.get_closes(count)
+                    volumes = history.get_volumes(count)
+                    timestamps = history.get_timestamps(count)
+                    complete = history.get_completeness(count)
+                    provisional = history.get_provisional_flags(count)
+                    bars = [
+                        {"open": o, "high": h, "low": l, "close": c, "volume": v, "timestamp": ts, "is_complete": ic, "is_provisional": ip}
+                        for o, h, l, c, v, ts, ic, ip in zip(opens, highs, lows, closes, volumes, timestamps, complete, provisional)
+                    ]
+                else:
+                    bars = history.get_closes(count)
             LOGGER.debug(
                 "Condition met: indicator_history_resolved",
                 extra={
                     "event": "indicator_engine_history_resolved",
                     "symbol": symbol,
-                    "bars": len(closes),
+                    "bars": len(bars),
                 },
             )
-            return closes
+            return bars
         except Exception as e:  # noqa: BLE001
             LOGGER.error("Failure in IndicatorEngine.get_history: %s", e, exc_info=True)
             return []
