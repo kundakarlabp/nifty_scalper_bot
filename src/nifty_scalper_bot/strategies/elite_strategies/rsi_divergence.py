@@ -37,7 +37,7 @@ class RSIDivergenceStrategy(EliteStrategy):
             direction = str(indicators.get('direction_bias') or '').upper()
             hist = self._history.setdefault(symbol, deque(maxlen=10))
             hist.append((close, rsi))
-            if len(hist) < 4:
+            if len(hist) < 6:
                 self._no_vote('insufficient_history')
                 return None
 
@@ -78,9 +78,17 @@ class RSIDivergenceStrategy(EliteStrategy):
                 return None
             metadata = {
                 'strategy': 'RSIDivergence',
+                'strategy_name': 'RSIDivergence',
+                'role': 'trigger',
+                'signal_family': 'directional_trigger',
+                'trade_side': side,
                 'side': side,
                 'direction_bias': side,
+                'preliminary_only': True,
+                'requires_runner_final_score': True,
+                'direction_score': strategy_score,
                 'strategy_score': strategy_score,
+                'data_score': 8.0,
                 'setup_quality': strategy_score,
                 'setup_type': 'rsi_reversal',
                 'required_data_present': True,
@@ -93,7 +101,9 @@ class RSIDivergenceStrategy(EliteStrategy):
                 'confirmation_candle': confirmation,
                 'trend_regime': regime,
                 'reversal_quality': round(strategy_score / 10.0, 3),
-                'invalidation_level': p2 - atr if side == 'CE' else p2 + atr,
+                'underlying_invalidation_level': p2 - atr if side == 'CE' else p2 + atr,
+                'premium_stop_distance': max(0.9 * atr, current_price * 0.02, 1.0),
+                'premium_target_rr': 2.0,
             }
             LOGGER.info('STRATEGY_VOTE strategy=RSIDivergence side=%s score=%.2f', side, strategy_score)
             return EliteSignal(
@@ -101,8 +111,8 @@ class RSIDivergenceStrategy(EliteStrategy):
                 signal='BUY',
                 confidence=max(0.1, min(0.82, strategy_score / 10.0)),
                 entry_price=current_price,
-                stop_loss=float(metadata['invalidation_level']),
-                target=current_price + (2.0 * atr),
+                stop_loss=None,
+                target=None,
                 quantity=self._cfg.quantity or 1,
                 strategy_name='RSIDivergence',
                 metadata=metadata,

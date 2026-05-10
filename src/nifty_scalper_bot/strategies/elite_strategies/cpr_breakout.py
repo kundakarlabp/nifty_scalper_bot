@@ -29,10 +29,11 @@ class CPRBreakoutStrategy(EliteStrategy):
     def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
-        if str(os.getenv('ENABLE_CPR_STRATEGY', 'false')).strip().lower() not in {'1','true','yes','on'}:
-            return None
         try:
             self._no_vote("stale_or_invalid_data")
+            if symbol.upper().endswith(('CE', 'PE')) and not indicators.get('source_symbol'):
+                self._no_vote('invalid_price_domain')
+                return None
             cpr_bottom = float(indicators.get('bc') or 0.0)
             cpr_top = float(indicators.get('tc') or 0.0)
             pivot = float(indicators.get('pivot') or 0.0)
@@ -77,9 +78,17 @@ class CPRBreakoutStrategy(EliteStrategy):
             strategy_score = max(0.0, min(10.0, score))
             metadata = {
                 'strategy': 'CPRBreakout',
+                'strategy_name': 'CPRBreakout',
+                'role': 'trigger',
+                'signal_family': 'directional_trigger',
+                'trade_side': side,
                 'side': side,
                 'direction_bias': side,
+                'preliminary_only': True,
+                'requires_runner_final_score': True,
+                'direction_score': strategy_score,
                 'strategy_score': strategy_score,
+                'data_score': 8.0,
                 'setup_quality': strategy_score,
                 'setup_type': 'cpr_breakout',
                 'required_data_present': True,
@@ -93,7 +102,9 @@ class CPRBreakoutStrategy(EliteStrategy):
                 'relation_to_cpr': 'above' if side == 'CE' else 'below',
                 'breakout_quality': round(breakout_quality, 3),
                 'nearest_level_distance': round(nearest_level_distance, 3),
-                'invalidation_level': cpr_bottom if side == 'CE' else cpr_top,
+                'underlying_invalidation_level': cpr_bottom if side == 'CE' else cpr_top,
+                'premium_stop_distance': max(atr * 0.9, current_price * 0.02, 1.0),
+                'premium_target_rr': 2.0,
             }
             LOGGER.info('STRATEGY_VOTE strategy=CPRBreakout side=%s score=%.2f', side, strategy_score)
             return EliteSignal(
@@ -101,8 +112,8 @@ class CPRBreakoutStrategy(EliteStrategy):
                 signal='BUY',
                 confidence=max(0.1, min(0.88, strategy_score / 10.0)),
                 entry_price=current_price,
-                stop_loss=float(metadata['invalidation_level']),
-                target=current_price + (2.0 * atr),
+                stop_loss=None,
+                target=None,
                 quantity=self._cfg.quantity or 1,
                 strategy_name='CPRBreakout',
                 metadata=metadata,

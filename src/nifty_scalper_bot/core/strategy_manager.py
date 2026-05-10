@@ -298,26 +298,29 @@ class StrategyVote:
 def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     """Args: signal + strategy name. Returns: normalized vote. Raises: none."""
     metadata = dict(signal.metadata or {})
-    side = str(metadata.get("side") or infer_option_side(signal.symbol, metadata)).upper()
+    side = str(metadata.get("trade_side") or metadata.get("side") or infer_option_side(signal.symbol, metadata)).upper()
     if signal.action == "HOLD" and side not in {"CE", "PE"}:
         side = "NO_TRADE"
     score_candidate = float(metadata.get("strategy_score") or metadata.get("setup_quality") or 0.0)
     confidence_score = float(signal.confidence or 0.0) * 10.0
     score = score_candidate
     reason = str(signal.reason or '').strip()
+    reason_list = list(metadata.get("score_reasons") or [])
+    if reason and reason not in reason_list:
+        reason_list.append(reason)
     metadata.setdefault("strategy", strategy_name)
     metadata.setdefault("required_data_present", True)
     metadata.setdefault("setup_quality", score_candidate)
     metadata["vote_score_raw_strategy"] = score_candidate
     metadata["vote_score_from_confidence"] = confidence_score
     metadata["vote_score"] = score
-    metadata.setdefault("score_reasons", [reason] if reason else [])
+    metadata["score_reasons"] = reason_list
     return StrategyVote(
         strategy=strategy_name,
         side=side if side in {'CE', 'PE', 'NO_TRADE'} else 'UNKNOWN',
         score=max(0.0, min(10.0, score)),
         confidence=max(0.0, min(1.0, float(signal.confidence or 0.0))),
-        reasons=[reason] if reason else [],
+        reasons=reason_list,
         metadata=metadata,
     )
 
@@ -2491,6 +2494,9 @@ class StrategyManager(_BaseStrategyManager):
             return None
         best_signal, best_vote = max(trigger_votes, key=lambda pair: pair[1].score)
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
+        single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
+        single_scalp_min = float(os.getenv("STRATEGY_SINGLE_VOTE_SCALP_MIN", "6.6") or "6.6")
+        allow_scalp_single = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
         final_score = float(best_vote.score)
         vetoed = False
         same_side_context = [v for _, v in context_votes if v.side == best_vote.side]
@@ -2499,6 +2505,17 @@ class StrategyManager(_BaseStrategyManager):
             final_score = min(10.0, final_score + max(v.score for v in same_side_context) * 0.2)
         if opposite_context and max(v.score for v in opposite_context) >= 8.0:
             vetoed = True
+        if len(trigger_votes) == 1:
+            selected_option = bool((best_signal.metadata or {}).get("is_selected_option"))
+            near_atm = float((best_signal.metadata or {}).get("strike_distance_from_atm") or 999.0) <= 50.0
+            if best_vote.score >= single_high:
+                metadata_stage = "preliminary_single_high_conviction"
+            elif allow_scalp_single and best_vote.score >= single_scalp_min and (selected_option or near_atm) and not vetoed:
+                metadata_stage = "single_vote_scalp_controlled"
+            else:
+                return None
+        else:
+            metadata_stage = "multi_vote_confirmed"
         if vetoed or final_score < threshold:
             return None
         metadata = dict(best_signal.metadata or {})
@@ -2506,6 +2523,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata["confirming_votes"] = [best_vote.strategy] + [v.strategy for v in same_side_context]
         metadata["direction_bias"] = best_vote.side
         metadata["confidence"] = float(best_vote.confidence)
+        metadata["consensus_stage"] = metadata_stage
         return Signal(
             action="BUY",
             symbol=best_signal.symbol,
@@ -2720,7 +2738,7 @@ class StrategyManager(_BaseStrategyManager):
                 metadata={**base_metadata, "strategy_weight": 1.0},
             )
         weight = max(self._score_floor, min(score_entry.weight, self._score_ceiling))
-        confidence = self._bounded_confidence(signal.confidence * weight)
+        weighted_confidence_hint = self._bounded_confidence(signal.confidence * weight)
         base_metadata.update(
             {
                 "strategy_weight": weight,
@@ -2728,6 +2746,7 @@ class StrategyManager(_BaseStrategyManager):
                 "adaptive_strategy_score": score_entry.score,
                 "strategy_manual_allocation": score_entry.manual_allocation,
                 "strategy_regime_bias": score_entry.regime_bias,
+                "weighted_confidence_hint": weighted_confidence_hint,
             }
         )
         base_metadata.setdefault("strategy_score", score_entry.score)
@@ -2735,7 +2754,7 @@ class StrategyManager(_BaseStrategyManager):
             action=signal.action,
             symbol=signal.symbol,
             quantity=signal.quantity,
-            confidence=confidence,
+            confidence=signal.confidence,
             reason=signal.reason,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
