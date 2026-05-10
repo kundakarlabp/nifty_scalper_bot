@@ -298,12 +298,20 @@ class StrategyVote:
 def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     """Args: signal + strategy name. Returns: normalized vote. Raises: none."""
     metadata = dict(signal.metadata or {})
-    side = str(metadata.get("trade_side") or metadata.get("side") or infer_option_side(signal.symbol, metadata)).upper()
+    symbol_side = infer_option_side(signal.symbol, metadata)
+    metadata_side = str(metadata.get("trade_side") or metadata.get("side") or "").upper()
+    if symbol_side in {"CE", "PE"}:
+        if metadata_side in {"CE", "PE"} and metadata_side != symbol_side:
+            metadata["side_conflict"] = True
+            metadata["side_from_metadata"] = metadata_side
+        side = symbol_side
+    else:
+        side = metadata_side or symbol_side
     if signal.action == "HOLD" and side not in {"CE", "PE"}:
         side = "NO_TRADE"
     score_candidate = float(metadata.get("strategy_score") or metadata.get("setup_quality") or 0.0)
     confidence_score = float(signal.confidence or 0.0) * 10.0
-    score = score_candidate
+    score = max(score_candidate, confidence_score)
     reason = str(signal.reason or '').strip()
     reason_list = list(metadata.get("score_reasons") or [])
     if reason and reason not in reason_list:
@@ -313,7 +321,7 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     metadata.setdefault("setup_quality", score_candidate)
     metadata["vote_score_raw_strategy"] = score_candidate
     metadata["vote_score_from_confidence"] = confidence_score
-    metadata["vote_score"] = score
+    metadata["vote_score"] = max(0.0, min(10.0, score))
     metadata["score_reasons"] = reason_list
     return StrategyVote(
         strategy=strategy_name,
@@ -2582,7 +2590,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             metadata = dict(vote.metadata or {})
             metadata["regime_weight"] = weight
-            metadata["strategy_score"] = weighted_score
+            metadata["regime_weighted_vote_score"] = weighted_score
             return StrategyVote(
                 strategy=vote.strategy,
                 side=vote.side,

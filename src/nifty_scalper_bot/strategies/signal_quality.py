@@ -53,11 +53,23 @@ def normalize_strategy_name(strategy_name: str | None) -> str:
     """Args: strategy_name. Returns: canonical strategy key. Raises: none."""
     raw = str(strategy_name or "").strip().lower().replace(" ", "_").replace("-", "_")
     aliases = {
+        "smc": "smc_lite",
+        "smc_liquidity": "smc_lite",
+        "smc_lite": "smc_lite",
+        "smc_liquidity_sweep_lite": "smc_lite",
         "premium_momentum": "premium_squeeze",
         "premium_momentum_squeeze": "premium_squeeze",
         "premium_squeeze": "premium_squeeze",
         "rsidivergence": "rsi_divergence",
         "rsi_divergence": "rsi_divergence",
+        "cprbreakout": "cpr_breakout",
+        "cpr_breakout": "cpr_breakout",
+        "bbsqueeze": "bb_squeeze",
+        "bb_squeeze": "bb_squeeze",
+        "orderflow": "order_flow",
+        "order_flow": "order_flow",
+        "orbpro": "orb_pro",
+        "orb_pro": "orb_pro",
         "vwappro": "vwap_pro",
         "vwap_pro": "vwap_pro",
     }
@@ -73,8 +85,11 @@ def trigger_threshold(strategy_name: str | None, mode: str | None = None) -> flo
         'vwap_pro': (7.5, 6.5, 'TRIGGER_VWAP_PRO_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_VWAP_PRO'),
         'premium_squeeze': (7.4, 6.4, 'TRIGGER_PREMIUM_SQUEEZE_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_PREMIUM_SQUEEZE'),
         'rsi_divergence': (7.6, 6.6, 'TRIGGER_RSI_DIVERGENCE_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_RSI_DIVERGENCE'),
-        'smc_liquidity_sweep_lite': (7.0, 6.0, 'TRIGGER_SMC_LIVE_MIN', None),
         'smc_lite': (7.0, 6.0, 'TRIGGER_SMC_LIVE_MIN', None),
+        'cpr_breakout': (7.2, 6.2, 'TRIGGER_CPR_BREAKOUT_LIVE_MIN', None),
+        'bb_squeeze': (7.3, 6.3, 'TRIGGER_BB_SQUEEZE_LIVE_MIN', None),
+        'order_flow': (7.1, 6.1, 'TRIGGER_ORDER_FLOW_LIVE_MIN', None),
+        'orb_pro': (7.4, 6.4, 'TRIGGER_ORB_PRO_LIVE_MIN', None),
     }
     live_default, paper_default, primary_env, legacy_env = defaults.get(strategy_key, (8.0, 6.5, 'SIGNAL_MIN_SCORE_LIVE', None))
     default_value = live_default if is_live else paper_default

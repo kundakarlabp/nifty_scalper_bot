@@ -5,6 +5,7 @@ from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
+from nifty_scalper_bot.strategies.signal_quality import infer_option_side
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -73,19 +74,26 @@ class VWAPProStrategy(EliteStrategy):
 
             score = 0.0
             reasons: list[str] = []
-            contract_side = 'UNKNOWN'
+            contract_side = infer_option_side(symbol, indicators)
             trend_alignment = False
             pullback_flag = False
             continuation_confirmed = False
 
-            if current_price >= vwap:
-                contract_side = 'CE'
+            if contract_side not in {'CE', 'PE'}:
+                fallback_side = str(indicators.get('direction_bias') or '').upper()
+                if fallback_side in {'CE', 'PE'}:
+                    contract_side = fallback_side
+                else:
+                    self._no_vote('unknown_contract_side')
+                    LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=unknown_contract_side')
+                    return None
+            premium_above_vwap = current_price >= vwap
+            if contract_side == 'CE' and premium_above_vwap:
                 score += 2.0
-                reasons.append('above_or_below_vwap:above')
-            else:
-                contract_side = 'PE'
+                reasons.append('ce_premium_above_vwap')
+            if contract_side == 'PE' and not premium_above_vwap:
                 score += 2.0
-                reasons.append('above_or_below_vwap:below')
+                reasons.append('pe_premium_below_vwap')
 
             candle_body = abs(close - open_price)
             atr_safe = max(atr, current_price * 0.01, 1.0)
@@ -131,6 +139,8 @@ class VWAPProStrategy(EliteStrategy):
                 'signal_family': 'directional_trigger',
                 'trade_side': contract_side,
                 'side': contract_side,
+                'contract_side': contract_side,
+                'premium_above_vwap': premium_above_vwap,
                 'direction_bias': contract_side,
                 'preliminary_only': True,
                 'requires_runner_final_score': True,
