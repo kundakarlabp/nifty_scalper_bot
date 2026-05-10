@@ -28,6 +28,9 @@ class BBSqueezeStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
+            if symbol.upper().endswith(('CE', 'PE')) and not indicators.get('source_symbol'):
+                self._no_vote('invalid_price_domain')
+                return None
             upper = float(indicators.get('bollinger_upper') or 0.0)
             lower = float(indicators.get('bollinger_lower') or 0.0)
             mid = float(indicators.get('bollinger_middle') or 0.0)
@@ -75,9 +78,17 @@ class BBSqueezeStrategy(EliteStrategy):
             strategy_score = max(0.0, min(10.0, score))
             metadata = {
                 'strategy': 'BBSqueeze',
+                'strategy_name': 'BBSqueeze',
+                'role': 'trigger',
+                'signal_family': 'directional_trigger',
+                'trade_side': breakout_side,
                 'side': breakout_side,
                 'direction_bias': breakout_side,
+                'preliminary_only': True,
+                'requires_runner_final_score': True,
+                'direction_score': strategy_score,
                 'strategy_score': strategy_score,
+                'data_score': 8.0,
                 'setup_quality': strategy_score,
                 'setup_type': 'squeeze_expansion_breakout',
                 'required_data_present': True,
@@ -91,7 +102,9 @@ class BBSqueezeStrategy(EliteStrategy):
                 'expansion_confirmed': expansion_confirmed,
                 'breakout_side': breakout_side,
                 'momentum_confirmed': momentum_confirmed,
-                'invalidation_level': mid,
+                'underlying_invalidation_level': mid,
+                'premium_stop_distance': max(atr * 0.9, current_price * 0.02, 1.0),
+                'premium_target_rr': 2.0,
             }
             LOGGER.info('STRATEGY_VOTE strategy=BBSqueeze side=%s score=%.2f', breakout_side, strategy_score)
             return EliteSignal(
@@ -99,8 +112,8 @@ class BBSqueezeStrategy(EliteStrategy):
                 signal='BUY',
                 confidence=max(0.1, min(0.9, strategy_score / 10.0)),
                 entry_price=current_price,
-                stop_loss=mid,
-                target=current_price + (2.0 * atr),
+                stop_loss=None,
+                target=None,
                 quantity=self._cfg.quantity or 1,
                 strategy_name='BBSqueeze',
                 metadata=metadata,

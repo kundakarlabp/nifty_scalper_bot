@@ -70,12 +70,13 @@ def trigger_threshold(strategy_name: str | None, mode: str | None = None) -> flo
     strategy_key = normalize_strategy_name(strategy_name)
     is_live = effective_mode == 'LIVE'
     defaults = {
-        'vwap_pro': (7.2, 6.2, 'TRIGGER_VWAP_PRO_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_VWAP_PRO'),
+        'vwap_pro': (7.5, 6.5, 'TRIGGER_VWAP_PRO_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_VWAP_PRO'),
         'premium_squeeze': (7.4, 6.4, 'TRIGGER_PREMIUM_SQUEEZE_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_PREMIUM_SQUEEZE'),
+        'rsi_divergence': (7.6, 6.6, 'TRIGGER_RSI_DIVERGENCE_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_RSI_DIVERGENCE'),
         'smc_liquidity_sweep_lite': (7.0, 6.0, 'TRIGGER_SMC_LIVE_MIN', None),
         'smc_lite': (7.0, 6.0, 'TRIGGER_SMC_LIVE_MIN', None),
     }
-    live_default, paper_default, primary_env, legacy_env = defaults.get(strategy_key, (7.2, 6.2, 'SIGNAL_MIN_SCORE_LIVE', None))
+    live_default, paper_default, primary_env, legacy_env = defaults.get(strategy_key, (8.0, 6.5, 'SIGNAL_MIN_SCORE_LIVE', None))
     default_value = live_default if is_live else paper_default
     value = os.getenv(primary_env)
     if value is None and legacy_env:
@@ -110,22 +111,6 @@ def compute_final_execution_score(*, trigger_score: float, context_score_effecti
     """Args: score parts. Returns: final execution score 0..10. Raises: none."""
     score = 0.45 * float(trigger_score) + 0.15 * float(context_score_effective) + 0.20 * float(candidate_score) + 0.10 * float(data_score) + 0.10 * float(rr_score)
     return max(0.0, min(10.0, round(score, 3)))
-
-def _mode_threshold(strategy_name: str | None = None) -> float:
-    mode = (os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
-    strategy_key = normalize_strategy_name(strategy_name)
-    if mode == 'LIVE':
-        if strategy_key == 'premium_squeeze':
-            return float(os.getenv('SIGNAL_MIN_SCORE_LIVE_PREMIUM_SQUEEZE', '7.4') or 7.4)
-        if strategy_key == 'rsi_divergence':
-            return float(os.getenv('SIGNAL_MIN_SCORE_LIVE_RSI_DIVERGENCE', '7.6') or 7.6)
-        if strategy_key == 'vwap_pro':
-            return float(os.getenv('SIGNAL_MIN_SCORE_LIVE_VWAP_PRO', '7.5') or 7.5)
-        return float(os.getenv('SIGNAL_MIN_SCORE_LIVE', '8.0') or 8.0)
-    if mode in {'PAPER', 'DRY_RUN'}:
-        return float(os.getenv('SIGNAL_MIN_SCORE_PAPER', '6.5') or 6.5)
-    return float(os.getenv('SIGNAL_MIN_SCORE_SHADOW', '6.5') or 6.5)
-
 
 def score_signal_quality(
     *,

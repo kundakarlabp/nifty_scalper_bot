@@ -51,6 +51,8 @@ class VWAPProStrategy(EliteStrategy):
                 return None
 
             required_data_present = bool(vwap > 0 and atr >= 0)
+            max_data_age = 45.0 if str(os.getenv('EXECUTION_MODE','SHADOW')).strip().upper() == 'LIVE' else 120.0
+            stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > max_data_age
             distance_pct = abs(current_price - vwap) / max(vwap, 1e-9)
             allowed_distance = max(self._max_distance_pct, self._max_atr_distance_mult * atr / max(vwap, 1e-9))
             overextended = distance_pct > allowed_distance
@@ -63,8 +65,6 @@ class VWAPProStrategy(EliteStrategy):
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=stale_data')
                 return None
             max_spread_pct = 12.0 if str(os.getenv('EXECUTION_MODE','SHADOW')).strip().upper() == 'LIVE' else 28.0
-            max_data_age = 45.0 if str(os.getenv('EXECUTION_MODE','SHADOW')).strip().upper() == 'LIVE' else 120.0
-            stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > max_data_age
 
             if spread_pct > max_spread_pct:
                 self._no_vote('wide_spread')
@@ -126,9 +126,17 @@ class VWAPProStrategy(EliteStrategy):
             confidence = max(0.1, min(0.85, strategy_score / 10.0))
             metadata = {
                 'strategy': 'VWAPPro',
+                'strategy_name': 'VWAPPro',
+                'role': 'trigger',
+                'signal_family': 'directional_trigger',
+                'trade_side': contract_side,
                 'side': contract_side,
                 'direction_bias': contract_side,
+                'preliminary_only': True,
+                'requires_runner_final_score': True,
+                'direction_score': strategy_score,
                 'strategy_score': strategy_score,
+                'data_score': 8.0 if not stale_data else 3.0,
                 'score_reasons': reasons,
                 'setup_type': 'continuation_pullback',
                 'setup_quality': strategy_score,
@@ -146,7 +154,7 @@ class VWAPProStrategy(EliteStrategy):
                 'setup_invalidation_premium': current_price - atr_safe,
                 'premium_stop_distance': atr_safe,
                 'premium_target_rr': 2.0,
-                'setup_invalidation_underlying': (vwap - atr_safe) if contract_side == 'CE' else (vwap + atr_safe),
+                'underlying_invalidation_level': (vwap - atr_safe) if contract_side == 'CE' else (vwap + atr_safe),
             }
             LOGGER.info('STRATEGY_VOTE strategy=VWAPPro side=%s score=%.2f', contract_side, strategy_score)
             return EliteSignal(
@@ -154,8 +162,8 @@ class VWAPProStrategy(EliteStrategy):
                 signal='BUY',
                 confidence=confidence,
                 entry_price=current_price,
-                stop_loss=current_price - atr_safe,
-                target=current_price + (atr_safe * 2.0),
+                stop_loss=None,
+                target=None,
                 quantity=self._cfg.quantity or 1,
                 strategy_name='VWAPPro',
                 metadata=metadata,
