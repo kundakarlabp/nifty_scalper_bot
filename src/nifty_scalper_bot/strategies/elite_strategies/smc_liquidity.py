@@ -13,6 +13,8 @@ class SMCStrategy(EliteStrategy):
     """SMC liquidity sweep strategy producing structured votes only."""
 
     MIN_BARS_REQUIRED = 15
+    ROLE = 'trigger'
+    TRIGGER_KEY = 'smc_lite'
 
     def __init__(self, config: SMCStrategyConfig, indicator_engine: Any) -> None:
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
@@ -50,7 +52,7 @@ class SMCStrategy(EliteStrategy):
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=no_sweep')
                 return None
 
-            side = 'CE' if bullish_sweep else 'PE'
+            contract_side = 'CE' if bullish_sweep else 'PE'
             sweep_level = low if bullish_sweep else high
             structure_confirmed = bool(indicators.get('bos_confirmed') or indicators.get('choch_confirmed') or displacement_score >= 0.6)
             retest_confirmed = bool(indicators.get('retest_confirmed') or indicators.get('mitigation_confirmed'))
@@ -66,7 +68,7 @@ class SMCStrategy(EliteStrategy):
             if retest_confirmed:
                 score += 1.0
                 reasons.append('retest_mitigation')
-            if direction in {'CE', 'PE'} and direction == side:
+            if direction in {'CE', 'PE'} and direction == contract_side:
                 score += 2.0
                 reasons.append('direction_alignment')
             if displacement_score >= 0.9:
@@ -79,15 +81,14 @@ class SMCStrategy(EliteStrategy):
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=low_quality')
                 return None
 
-            invalidation_level = sweep_level - 0.2 * atr if side == 'CE' else sweep_level + 0.2 * atr
             metadata = {
                 'strategy': 'SMC',
-                'side': side,
-                'direction_bias': side,
+                'side': contract_side,
+                'direction_bias': contract_side,
                 'strategy_score': strategy_score,
                 'score_reasons': reasons,
                 'setup_quality': strategy_score,
-                'setup_type': 'liquidity_sweep_reclaim',
+                'setup_type': 'liquidity_sweep_retest',
                 'required_data_present': True,
                 'stale_data_used': stale_data,
                 'candidate_symbol': symbol,
@@ -96,16 +97,18 @@ class SMCStrategy(EliteStrategy):
                 'displacement_score': round(displacement_score, 3),
                 'structure_confirmed': structure_confirmed,
                 'retest_confirmed': retest_confirmed,
-                'invalidation_level': invalidation_level,
+                'setup_invalidation_level': sweep_level,
+                'premium_stop_distance': max(atr * 0.9, current_price * 0.02, 1.0),
+                'premium_target_rr': 2.0,
             }
-            LOGGER.info('STRATEGY_VOTE strategy=SMC side=%s score=%.2f', side, strategy_score)
+            LOGGER.info('STRATEGY_VOTE strategy=SMC side=%s score=%.2f', contract_side, strategy_score)
             return EliteSignal(
                 symbol=symbol,
                 signal='BUY',
                 confidence=max(0.1, min(0.88, strategy_score / 10.0)),
                 entry_price=current_price,
-                stop_loss=invalidation_level,
-                target=current_price + (2.0 * atr),
+                stop_loss=current_price - max(atr * 0.9, current_price * 0.02, 1.0),
+                target=current_price + max(atr * 0.9, current_price * 0.02, 1.0) * 2.0,
                 quantity=self._cfg.quantity or 1,
                 strategy_name='SMC',
                 metadata=metadata,

@@ -1753,6 +1753,11 @@ class StrategyRunner:
                         "bid_ask_source": snap.bid_ask_source,
                         "tradable_quote": snap.tradable_quote,
                         "refresh_pending": symbol_refresh_pending,
+                        "atr_option": float(getattr(snap, "atr_option", 0.0) or 0.0),
+                        "history_bars": int(getattr(snap, "history_bars", 0) or 0),
+                        "data_quality_score": float(getattr(snap, "data_quality_score", 0.0) or 0.0),
+                        "quote_quality": "bid_ask" if bool(snap.tradable_quote) else "ltp_only",
+                        "effective_bars": int(getattr(snap, "effective_bars", 0) or 0),
                     }
                 )
             no_valid_candidates = not any(
@@ -2047,6 +2052,10 @@ class StrategyRunner:
                 "ltp_only_fallback": not has_bid_ask,
                 "quote_quality": "bid_ask" if has_bid_ask else "ltp_only",
                 "source": str(snapshot.source or "signal_snapshot"),
+                "atr_option": float(metadata.get("atr", 0.0) or 0.0),
+                "history_bars": int(metadata.get("history_bars", 0) or 0),
+                "data_quality_score": float(metadata.get("data_quality_score", 0.0) or 0.0),
+                "effective_bars": int(metadata.get("effective_bars", metadata.get("history_bars", 0)) or 0),
             }
         except Exception as exc:  # noqa: BLE001
             self._logger.error("Failure in _build_single_candidate_from_signal: %s", exc, exc_info=exc)
@@ -3501,7 +3510,7 @@ class StrategyRunner:
             metadata=updated_metadata,
         )
 
-    def _correct_sl_tp_for_position_side(
+    def _validate_long_option_geometry(
         self,
         signal: Signal,
         entry_price: float,
@@ -5371,21 +5380,6 @@ class StrategyRunner:
                         and tick_is_fresh
                         and context_ready
                     )
-                    if soft_pass:
-                        if self._should_log_throttled(f"opt_soft_pass:{symbol}", 60.0):
-                            self._logger.info(
-                                "OPTION_HISTORY_SOFT_PASS symbol=%s bars=%d required=%d reason=fresh_tick_scalping_mode",
-                                symbol,
-                                history_count,
-                                required_bars,
-                                extra={
-                                    "event": "OPTION_HISTORY_SOFT_PASS",
-                                    "symbol": symbol,
-                                    "bars": history_count,
-                                    "required": required_bars,
-                                },
-                            )
-                        return True
                     if self._should_log_throttled(
                         f"eval_block_cold_history:{symbol}", 120.0
                     ):
@@ -6368,8 +6362,9 @@ class StrategyRunner:
                     )
                     self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
 
-                # 8B. PREMIUM MOMENTUM SQUEEZE (Shift Brain to Options)
-                if generated_signal is None and self._indicator_engine.has_min_bars(symbol, 20):
+                # 8B. PREMIUM MOMENTUM SQUEEZE (disabled in runner by default)
+                premium_squeeze_enabled = str(os.getenv("RUNNER_ENABLE_PREMIUM_SQUEEZE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+                if generated_signal is None and premium_squeeze_enabled and self._indicator_engine.has_min_bars(symbol, 20):
                     phase = "phase8_premium_squeeze"
                     try:
                         generated_signal = self._maybe_generate_premium_squeeze_signal(
@@ -6394,8 +6389,9 @@ class StrategyRunner:
                         generated_signal = None
 
                 # 8C. VWAP CROSSOVER (Requires VWAP > 0)
+                runner_vwap_crossover_enabled = str(os.getenv("RUNNER_ENABLE_LEGACY_VWAP_CROSSOVER", "false")).strip().lower() in {"1", "true", "yes", "on"}
                 if (
-                    self._vwap_crossover_enabled
+                    runner_vwap_crossover_enabled and self._vwap_crossover_enabled
                     and generated_signal is None
                     and state.vwap
                     and state.vwap > 0
@@ -8242,18 +8238,13 @@ class StrategyRunner:
                 quote_fresh = bool(isinstance(quote, dict) and quote.get("ltp"))
                 selected_or_near = signal_symbol in {selected_ce, selected_pe} or bool(metadata.get("is_selected_option"))
                 sl_ok = signal.stop_loss is not None and signal.take_profit is not None
-                if selected_or_near and quote_fresh and sl_ok and bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")):
-                    metadata["quote_usable_for_order_plan"] = True
-                    metadata["candidate_selected"] = True
-                    metadata["candidate_symbol"] = signal.symbol
-                else:
-                    self._reset_execution_state(base_symbol)
-                    _trace("missing_candidate_snapshots")
-                    return self._reject_signal_execution(
-                        symbol=base_symbol,
-                        trace_id=trace_id,
-                        reason="missing_candidate_snapshots",
-                    )
+                self._reset_execution_state(base_symbol)
+                _trace("missing_candidate_snapshots")
+                return self._reject_signal_execution(
+                    symbol=base_symbol,
+                    trace_id=trace_id,
+                    reason="missing_candidate_snapshots",
+                )
             if isinstance(candidate_snapshots_obj, list):
                 atm_strike = int(metadata.get("atm_strike") or 0)
                 if atm_strike <= 0:
