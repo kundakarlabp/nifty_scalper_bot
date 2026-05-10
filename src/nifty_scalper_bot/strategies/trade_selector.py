@@ -40,11 +40,14 @@ class TradeCandidate:
 
 
 class TradeCandidateSelector:
-    def __init__(self, *, quality_mode: str = 'normal', option_strike_window_each_side: int = 2, min_option_premium: float = 80.0, max_option_premium: float = float(os.getenv('MAX_OPTION_PREMIUM', '650'))) -> None:
+    def __init__(self, *, quality_mode: str = 'normal', option_strike_window_each_side: int = 2, min_option_premium: float = 80.0, max_option_premium: float = float(os.getenv('MAX_OPTION_PREMIUM', '650')), max_tick_age_s: float | None = None, max_option_spread_pct: float | None = None, require_real_ticks_last_60s: int | None = None) -> None:
         self.quality_mode = quality_mode
         self.option_strike_window_each_side = option_strike_window_each_side
         self.min_option_premium = min_option_premium
         self.max_option_premium = max_option_premium
+        self.max_tick_age_s = max_tick_age_s
+        self.max_option_spread_pct = max_option_spread_pct
+        self.require_real_ticks_last_60s = require_real_ticks_last_60s
 
     def _limits(self) -> tuple[float, float, int]:
         if self.quality_mode == 'strict':
@@ -55,6 +58,12 @@ class TradeCandidateSelector:
 
     def select_ranked_candidates(self, *, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]]) -> list[TradeCandidate]:
         max_spread, max_age, min_ticks = self._limits()
+        if self.max_option_spread_pct is not None:
+            max_spread = float(self.max_option_spread_pct)
+        if self.max_tick_age_s is not None:
+            max_age = float(self.max_tick_age_s)
+        if self.require_real_ticks_last_60s is not None:
+            min_ticks = int(self.require_real_ticks_last_60s)
         allow_ltp_only = os.getenv('ALLOW_LTP_ONLY_CANDIDATE', 'true').lower() in {'1', 'true', 'yes', 'on'}
         ranked: list[TradeCandidate] = []
         rejects = {'side_mismatch': 0, 'atm_distance': 0, 'missing_bid_ask': 0, 'premium_out_of_range': 0, 'spread_too_wide': 0, 'tick_stale': 0, 'insufficient_ticks': 0, 'invalid_rr': 0}
@@ -133,6 +142,32 @@ class TradeCandidateSelector:
     def select_best_candidate(self, *, underlying: str, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]]) -> TradeCandidate | None:
         ranked = self.select_ranked_candidates(direction_bias=direction_bias, atm_strike=atm_strike, snapshots=snapshots)
         return ranked[0] if ranked else None
+
+
+    def evaluate_data_quality(self, snapshot: dict[str, Any]) -> DataQualityResult:
+        """Args: snapshot. Returns: data quality result. Raises: none."""
+        max_spread, max_age, min_ticks = self._limits()
+        reasons: list[str] = []
+        score = 10.0
+        tick_age = self._f(snapshot.get('tick_age_s'))
+        if tick_age is None or tick_age > max_age:
+            reasons.append('tick_stale')
+            score -= 4.0
+        bid, ask = self._f(snapshot.get('bid')), self._f(snapshot.get('ask'))
+        if (bid or 0) <= 0 or (ask or 0) <= 0:
+            reasons.append('missing_bid_ask')
+            score -= 3.0
+        else:
+            mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
+            spread_pct = ((ask or 0.0) - (bid or 0.0)) / mid if mid > 0 else 1.0
+            if spread_pct > max_spread:
+                reasons.append('spread_too_wide')
+                score -= 3.0
+        real_ticks = int(snapshot.get('real_ticks_last_60s') or 0)
+        if real_ticks < min_ticks:
+            reasons.append('insufficient_ticks')
+            score -= 2.0
+        return DataQualityResult(allowed=not reasons, score=max(0.0, score), reasons=reasons or ['data_quality_ok'])
 
     @staticmethod
     def _f(v: Any) -> float | None:

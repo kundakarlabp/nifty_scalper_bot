@@ -293,7 +293,7 @@ def _gate_runner_symbol_add(
     except Exception:
         runner_bars = 0
     mdm_bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
-    required = _symbol_history_requirement(ctx)
+    required = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1")) or 1)
     quote_ready = False
     try:
         quote_ready = bool(ctx.market_data_manager.get_symbol_snapshot(symbol))
@@ -325,8 +325,10 @@ def _gate_runner_symbol_add(
                 required,
                 runner_bars >= required,
             )
-    history_ready = runner_bars >= required
-    add_ready = bool(quote_ready or history_ready)
+    effective_bars = min(mdm_bars, runner_bars)
+    is_option = symbol.endswith(("CE", "PE"))
+    history_ready = effective_bars >= required
+    add_ready = bool(history_ready if is_option else (quote_ready or mdm_bars >= 1))
     if not add_ready:
         pending_runner_symbols.add(symbol)
         LOGGER.info("RUNNER_SYMBOL_DEFERRED_UNTIL_READY symbol=%s token=%s runner_bars=%d mdm_bars=%d required_bars=%d source=%s", symbol, token, runner_bars, mdm_bars, required, source)
@@ -6825,9 +6827,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         except Exception:
             return False
     spot_ready = _quote(spot_symbol) or _bars(spot_symbol) >= 1
-    option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or 1)
-    option_execution_min_bars = int(os.getenv("OPTION_EXECUTION_MIN_BARS", "5") or 5)
-    context_execution_min_bars = int(os.getenv("CONTEXT_EXECUTION_MIN_BARS", "50") or 50)
+    option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1")) or 1)
+    option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "5")) or 5)
+    context_execution_min_bars = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
     await _ensure_selected_options_hydrated(
         ctx, selected_ce, selected_pe, option_execution_min_bars, reason
     )
@@ -6835,8 +6837,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     pe_bars, pe_mdm_bars, pe_runner_bars = _readiness_bars(selected_pe)
     ce_quote_fresh = _quote(selected_ce)
     pe_quote_fresh = _quote(selected_pe)
-    ce_eval_ready = bool(selected_ce) and (ce_quote_fresh or ce_bars >= option_eval_min_live_bars)
-    pe_eval_ready = bool(selected_pe) and (pe_quote_fresh or pe_bars >= option_eval_min_live_bars)
+    ce_eval_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_eval_min_live_bars
+    pe_eval_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_eval_min_live_bars
     ce_exec_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_execution_min_bars
     pe_exec_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_execution_min_bars
     futures_symbol = str(basket.get("futures_symbol") or "")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Literal
 
 REQUIRED_SCORE_COMPONENTS: tuple[str, ...] = (
     'direction_score',
@@ -62,6 +63,54 @@ def normalize_strategy_name(strategy_name: str | None) -> str:
     }
     return aliases.get(raw, raw)
 
+
+def trigger_threshold(strategy_name: str | None, mode: str | None = None) -> float:
+    """Args: strategy_name/mode. Returns: trigger threshold. Raises: none."""
+    effective_mode = str(mode or os.getenv('EXECUTION_MODE', 'SHADOW')).strip().upper()
+    strategy_key = normalize_strategy_name(strategy_name)
+    is_live = effective_mode == 'LIVE'
+    defaults = {
+        'vwap_pro': (7.2, 6.2, 'TRIGGER_VWAP_PRO_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_VWAP_PRO'),
+        'premium_squeeze': (7.4, 6.4, 'TRIGGER_PREMIUM_SQUEEZE_LIVE_MIN', 'SIGNAL_MIN_SCORE_LIVE_PREMIUM_SQUEEZE'),
+        'smc_liquidity_sweep_lite': (7.0, 6.0, 'TRIGGER_SMC_LIVE_MIN', None),
+        'smc_lite': (7.0, 6.0, 'TRIGGER_SMC_LIVE_MIN', None),
+    }
+    live_default, paper_default, primary_env, legacy_env = defaults.get(strategy_key, (7.2, 6.2, 'SIGNAL_MIN_SCORE_LIVE', None))
+    default_value = live_default if is_live else paper_default
+    value = os.getenv(primary_env)
+    if value is None and legacy_env:
+        value = os.getenv(legacy_env)
+    return float(value or default_value)
+
+
+def context_boost_cap(strategy_name: str | None = None) -> float:
+    """Args: strategy_name. Returns: absolute context boost cap. Raises: none."""
+    _ = strategy_name
+    return float(os.getenv('CONTEXT_BOOST_CAP', '1.25') or 1.25)
+
+
+def rejection_cooldown(reason_family: str) -> int:
+    """Args: reason_family. Returns: cooldown seconds. Raises: none."""
+    family = str(reason_family or 'score').strip().lower()
+    default_map = {'score': 60, 'candidate': 20, 'spread': 15, 'stale': 10, 'risk': 120, 'infra': 5}
+    return int(float(os.getenv(f'SIGNAL_REJECT_COOLDOWN_{family.upper()}_SECONDS', str(default_map.get(family, 60))) or default_map.get(family, 60)))
+
+
+def compute_context_boost(context_scores: list[float], *, strategy_name: str | None = None) -> float:
+    """Args: context scores list. Returns: bounded context boost. Raises: none."""
+    if not context_scores:
+        return 0.0
+    mean_centered = sum(float(s) - 5.0 for s in context_scores) / float(len(context_scores))
+    boost = mean_centered / 2.5
+    cap = context_boost_cap(strategy_name)
+    return max(-cap, min(cap, boost))
+
+
+def compute_final_execution_score(*, trigger_score: float, context_score_effective: float, candidate_score: float, data_score: float, rr_score: float) -> float:
+    """Args: score parts. Returns: final execution score 0..10. Raises: none."""
+    score = 0.45 * float(trigger_score) + 0.15 * float(context_score_effective) + 0.20 * float(candidate_score) + 0.10 * float(data_score) + 0.10 * float(rr_score)
+    return max(0.0, min(10.0, round(score, 3)))
+
 def _mode_threshold(strategy_name: str | None = None) -> float:
     mode = (os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
     strategy_key = normalize_strategy_name(strategy_name)
@@ -102,7 +151,7 @@ def score_signal_quality(
         + 0.10 * rr
     )
     normalized_strategy_name = normalize_strategy_name(strategy_name)
-    threshold = _mode_threshold(strategy_name=normalized_strategy_name)
+    threshold = trigger_threshold(strategy_name=normalized_strategy_name)
     reasons: list[str] = []
     if final < threshold:
         reasons.append('score_below_threshold')
