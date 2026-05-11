@@ -4,6 +4,7 @@ from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
+from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -52,7 +53,15 @@ class SMCStrategy(EliteStrategy):
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=no_sweep')
                 return None
 
-            contract_side = 'CE' if bullish_sweep else 'PE'
+            contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
+            if option_premium_domain:
+                premium_reversal = bool(bullish_sweep or indicators.get('premium_reclaim') or indicators.get('bullish_reversal'))
+                if not premium_reversal:
+                    self._no_vote('premium_not_reversing_up')
+                    return None
+                side = contract_side
+            else:
+                side = 'CE' if bullish_sweep else 'PE'
             sweep_level = low if bullish_sweep else high
             structure_confirmed = bool(indicators.get('bos_confirmed') or indicators.get('choch_confirmed') or displacement_score >= 0.6)
             retest_confirmed = bool(indicators.get('retest_confirmed') or indicators.get('mitigation_confirmed'))
@@ -68,7 +77,7 @@ class SMCStrategy(EliteStrategy):
             if retest_confirmed:
                 score += 1.0
                 reasons.append('retest_mitigation')
-            if direction in {'CE', 'PE'} and direction == contract_side:
+            if direction in {'CE', 'PE'} and direction == side:
                 score += 2.0
                 reasons.append('direction_alignment')
             if displacement_score >= 0.9:
@@ -86,9 +95,10 @@ class SMCStrategy(EliteStrategy):
                 'strategy_name': 'SMC',
                 'role': 'trigger',
                 'signal_family': 'directional_trigger',
-                'trade_side': contract_side,
-                'side': contract_side,
-                'direction_bias': contract_side,
+                'trade_side': side,
+                'side': side,
+                'direction_bias': side,
+                'source_domain': 'option_premium' if option_premium_domain else 'underlying_price',
                 'preliminary_only': True,
                 'requires_runner_final_score': True,
                 'direction_score': strategy_score,
@@ -106,10 +116,10 @@ class SMCStrategy(EliteStrategy):
                 'structure_confirmed': structure_confirmed,
                 'retest_confirmed': retest_confirmed,
                 'underlying_invalidation_level': sweep_level,
-                'premium_stop_distance': max(atr * 0.9, current_price * 0.02, 1.0),
+                'premium_stop_distance': max(atr * 1.2, current_price * 0.025, 1.0),
                 'premium_target_rr': 2.0,
             }
-            LOGGER.info('STRATEGY_VOTE strategy=SMC side=%s score=%.2f', contract_side, strategy_score)
+            LOGGER.info('STRATEGY_VOTE strategy=SMC side=%s score=%.2f', side, strategy_score)
             return EliteSignal(
                 symbol=symbol,
                 signal='BUY',

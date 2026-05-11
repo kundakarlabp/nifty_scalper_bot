@@ -2028,7 +2028,7 @@ class StrategyRunner:
             parsed_strike = int(strike_match.group(1)) if strike_match is not None else 0
             strike = int(metadata.get("strike") or parsed_strike or metadata.get("atm_strike") or 0)
             atm_strike = int(metadata.get("atm_strike") or strike)
-            spread_pct = ((ask - bid) / ltp) if has_bid_ask and ltp > 0 else None
+            spread_pct = ((ask - bid) / ltp * 100.0) if has_bid_ask and ltp > 0 else None
             tick_age_raw = getattr(snapshot, "tick_age_s", None)
             tick_age_s = float(tick_age_raw) if tick_age_raw is not None else 0.0
             tick_age_s = max(0.0, tick_age_s)
@@ -8050,7 +8050,8 @@ class StrategyRunner:
                 "RUNNER_SIGNAL_DECISION",
                 extra={
                     "event": "RUNNER_SIGNAL_DECISION",
-                    "symbol": base_symbol,
+                    "symbol": order_symbol,
+                "underlying_symbol": base_symbol,
                     "action": action,
                     "proceed_to_order": False,
                     "reason": "strike_selector_none",
@@ -8534,7 +8535,26 @@ class StrategyRunner:
                 metadata["stop_loss"] = signal.stop_loss
                 metadata["take_profit"] = signal.take_profit
             except Exception as materialize_exc:
-                self._logger.error("Failure in materialize option trade plan: %s", materialize_exc)
+                self._logger.exception(
+                    "TRADE_PLAN_MATERIALIZATION_FAILED symbol=%s trace_id=%s error=%s",
+                    base_symbol,
+                    trace_id,
+                    materialize_exc,
+                    extra={
+                        "event": "TRADE_PLAN_MATERIALIZATION_FAILED",
+                        "symbol": base_symbol,
+                        "trace_id": trace_id,
+                        "error_type": type(materialize_exc).__name__,
+                    },
+                )
+                self._reset_execution_state(base_symbol)
+                _trace("trade_plan_materialization_failed")
+                return self._reject_signal_execution(
+                    symbol=base_symbol,
+                    trace_id=trace_id,
+                    reason="trade_plan_materialization_failed",
+                    details={"error": str(materialize_exc)},
+                )
             if metadata.get("rr_score") is None:
                 rr_score = quality_hint
                 try:
@@ -8786,7 +8806,8 @@ class StrategyRunner:
             max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
             min_depth_qty = int(float(os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0")) or 0))
             allow_market_entry = str(os.getenv("ALLOW_MARKET_ENTRY", "false")).strip().lower() in {"1", "true", "yes", "on"}
-            plan = TradePlan(symbol=base_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry)
+            order_symbol = trade_symbol or signal.symbol or base_symbol
+            plan = TradePlan(symbol=order_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry)
             order_id = self._order_manager.submit_trade_plan(plan)
 
             if order_id:

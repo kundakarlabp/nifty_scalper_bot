@@ -5,6 +5,7 @@ from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import RSIDivergenceStrategyConfig
+from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -49,7 +50,14 @@ class RSIDivergenceStrategy(EliteStrategy):
                 self._no_vote('no_divergence')
                 return None
 
-            side = 'CE' if bullish_div else 'PE'
+            contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
+            if option_premium_domain:
+                if not bullish_div:
+                    self._no_vote('premium_no_bullish_divergence')
+                    return None
+                side = contract_side
+            else:
+                side = 'CE' if bullish_div else 'PE'
             confirmation = bool(indicators.get('confirmation_candle'))
             if not confirmation:
                 confirmation = (bullish_div and close > hist[-2][0]) or (bearish_div and close < hist[-2][0])
@@ -81,8 +89,8 @@ class RSIDivergenceStrategy(EliteStrategy):
             metadata = {
                 'strategy': 'RSIDivergence',
                 'strategy_name': 'RSIDivergence',
-                'role': 'trigger',
-                'source_domain': source_domain,
+                'role': 'context',
+                'source_domain': 'option_premium' if option_premium_domain else source_domain,
                 'signal_family': 'directional_trigger',
                 'trade_side': side,
                 'side': side,
@@ -104,9 +112,9 @@ class RSIDivergenceStrategy(EliteStrategy):
                 'confirmation_candle': confirmation,
                 'trend_regime': regime,
                 'reversal_quality': round(strategy_score / 10.0, 3),
-                'underlying_invalidation_level': p2 - atr if side == 'CE' else p2 + atr,
-                'premium_stop_distance': max(0.9 * atr, current_price * 0.02, 1.0),
-                'premium_target_rr': 2.0,
+                'context_score': strategy_score,
+                'premium_stop_distance': max(atr * 1.0, current_price * 0.02, 1.0),
+                'premium_target_rr': 1.8,
             }
             LOGGER.info('STRATEGY_VOTE strategy=RSIDivergence side=%s score=%.2f', side, strategy_score)
             return EliteSignal(

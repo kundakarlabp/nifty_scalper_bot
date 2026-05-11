@@ -68,7 +68,14 @@ class OrderFlowStrategy(EliteStrategy):
                     self._no_vote('spread_unavailable_for_ltp_fallback')
                     return None
                 tick_direction = str(indicators.get('tick_direction') or '').upper()
-                side = contract_side if option_premium_domain else ('CE' if tick_direction in {'UP', 'BUY'} else 'PE')
+                if option_premium_domain:
+                    side = contract_side
+                    positive_flow = tick_direction in {'UP', 'BUY'}
+                    if not positive_flow:
+                        self._no_vote('premium_flow_not_supportive')
+                        return None
+                else:
+                    side = 'CE' if tick_direction in {'UP', 'BUY'} else 'PE'
                 depth_imbalance = 0.0
                 fallback_score = 2.0 + (2.0 if spread_pct <= 12.0 else 0.0)
                 if direction in {'CE', 'PE'} and direction == side:
@@ -80,8 +87,8 @@ class OrderFlowStrategy(EliteStrategy):
                     self._no_vote('weak_tick_confirmation')
                     return None
                 metadata = {'orderflow_depth_source': 'ltp_tick_fallback', 'risk_label': 'ltp_only_orderflow_reduced_confidence'}
-                metadata.update({'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'context', 'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'direction_bias': side, 'strategy_score': strategy_score, 'spread_pct': round(spread_pct, 3), 'depth_imbalance': 0.0, 'tick_direction': tick_direction, 'invalidation_level': bid - 0.5 * atr if side == 'CE' else ask + 0.5 * atr})
-                return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=float(metadata['invalidation_level']), target=current_price + (1.8 * atr), quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
+                metadata.update({'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'context', 'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'direction_bias': side, 'strategy_score': strategy_score, 'spread_pct': round(spread_pct, 3), 'depth_imbalance': 0.0, 'tick_direction': tick_direction, 'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0), 'premium_target_rr': 1.8})
+                return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.55, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
             side = contract_side if option_premium_domain else ('CE' if depth_imbalance > 0 else 'PE')
             if option_premium_domain and depth_imbalance <= 0 and tick_direction not in {'UP', 'BUY'}:
@@ -96,7 +103,11 @@ class OrderFlowStrategy(EliteStrategy):
             if abs(depth_imbalance) >= 0.15:
                 score += 2.0
                 reasons.append('depth_imbalance')
-            if (side == 'CE' and tick_direction in {'UP', 'BUY'}) or (side == 'PE' and tick_direction in {'DOWN', 'SELL'}):
+            if option_premium_domain:
+                aligned = tick_direction in {'UP', 'BUY'}
+            else:
+                aligned = ((side == 'CE' and tick_direction in {'UP', 'BUY'}) or (side == 'PE' and tick_direction in {'DOWN', 'SELL'}))
+            if aligned:
                 score += 2.0
                 reasons.append('tick_direction_alignment')
             if direction in {'CE', 'PE'} and direction == side:
@@ -132,7 +143,8 @@ class OrderFlowStrategy(EliteStrategy):
                 'depth_imbalance': round(depth_imbalance, 4),
                 'tick_direction': tick_direction,
                 'liquidity_ok': spread_pct <= 12.0,
-                'invalidation_level': bid - 0.5 * atr if side == 'CE' else ask + 0.5 * atr,
+                'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0),
+                'premium_target_rr': 1.8,
             }
             LOGGER.info('STRATEGY_VOTE strategy=OrderFlow side=%s score=%.2f', side, strategy_score)
             return EliteSignal(
@@ -140,8 +152,8 @@ class OrderFlowStrategy(EliteStrategy):
                 signal='BUY',
                 confidence=max(0.1, min(0.85, strategy_score / 10.0)),
                 entry_price=current_price,
-                stop_loss=float(metadata['invalidation_level']),
-                target=current_price + (1.8 * atr),
+                stop_loss=None,
+                target=None,
                 quantity=self._cfg.quantity or 1,
                 strategy_name='OrderFlow',
                 metadata=metadata,
