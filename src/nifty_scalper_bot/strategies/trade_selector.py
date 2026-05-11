@@ -64,7 +64,7 @@ class TradeCandidateSelector:
             max_age = float(self.max_tick_age_s)
         if self.require_real_ticks_last_60s is not None:
             min_ticks = int(self.require_real_ticks_last_60s)
-        allow_ltp_only = os.getenv('ALLOW_LTP_ONLY_CANDIDATE', 'true').lower() in {'1', 'true', 'yes', 'on'}
+        allow_ltp_only = os.getenv('ALLOW_LTP_ONLY_CANDIDATE', 'false').lower() in {'1', 'true', 'yes', 'on'}
         ranked: list[TradeCandidate] = []
         rejects = {'side_mismatch': 0, 'atm_distance': 0, 'missing_bid_ask': 0, 'premium_out_of_range': 0, 'spread_too_wide': 0, 'tick_stale': 0, 'insufficient_ticks': 0, 'invalid_rr': 0}
         ltp_only_used = 0
@@ -107,7 +107,9 @@ class TradeCandidateSelector:
                 entry = ask if (ask or 0.0) > 0 else ltp
                 score_penalty = 0.0
             else:
-                ltp_only_flag = bool(s.get('ltp_only_fallback'))
+                ltp_only_flag = bool(s.get('ltp_only_fallback')) or (
+                    str(s.get('quote_quality') or '').lower() == 'ltp_only'
+                )
                 if not (allow_ltp_only and ltp_only_flag):
                     rejects['missing_bid_ask'] += 1
                     continue

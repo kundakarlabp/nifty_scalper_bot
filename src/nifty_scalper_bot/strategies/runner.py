@@ -1769,6 +1769,12 @@ class StrategyRunner:
                         "history_bars": int(getattr(snap, "history_bars", 0) or 0),
                         "data_quality_score": float(getattr(snap, "data_quality_score", 0.0) or 0.0),
                         "quote_quality": "bid_ask" if bool(snap.tradable_quote) else "ltp_only",
+                        "ltp_only_fallback": bool(
+                            snap.ltp is not None
+                            and float(snap.ltp) > 0
+                            and not bool(snap.tradable_quote)
+                            and not symbol_refresh_pending
+                        ),
                         "effective_bars": int(getattr(snap, "effective_bars", 0) or 0),
                     }
                 )
@@ -8487,10 +8493,14 @@ class StrategyRunner:
                 metadata["tradable_quote"] = bool(
                     (selected_snapshot or {}).get("tradable_quote")
                 )
+                allow_ltp_live_plan = _env_flag(
+                    "ALLOW_LTP_ONLY_LIVE_ORDER_PLAN", default=False
+                )
                 metadata["quote_usable_for_order_plan"] = bool(
                     (selected_snapshot or {}).get("tradable_quote")
                     or (
-                        (selected_snapshot or {}).get("ltp_only_fallback")
+                        allow_ltp_live_plan
+                        and (selected_snapshot or {}).get("ltp_only_fallback")
                         and candidate.entry_price
                         and candidate.stop_loss
                         and candidate.target
