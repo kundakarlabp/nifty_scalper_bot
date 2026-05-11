@@ -250,13 +250,33 @@ def _is_selected_trade_symbol(ctx: Any, symbol: str) -> bool:
     return normalized_symbol in selected_symbols
 
 
+
+
+def build_active_trading_basket_symbols(ctx: Any, basket: Mapping[str, object]) -> list[str]:
+    """Build deterministic active basket. Args: ctx,basket. Returns: ordered symbols. Raises: none."""
+    max_active_options = max(2, int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "6") or 6))
+    spot = str(basket.get("spot_symbol") or "NSE:NIFTY")
+    fut = str(basket.get("futures_symbol") or "")
+    selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "")
+    selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "")
+    option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if str(s).endswith(("CE","PE"))]
+    option_symbols = list(dict.fromkeys(option_symbols))
+    core = [s for s in (selected_ce, selected_pe) if s]
+    nearby = [s for s in option_symbols if s not in core]
+    selected_options = (core + nearby)[:max_active_options]
+    ordered = [s for s in (spot, fut, *selected_options) if s]
+    out = list(dict.fromkeys(ordered))
+    LOGGER.info("ACTIVE_TRADING_BASKET_SELECTED count=%d selected_ce=%s selected_pe=%s symbols=%s", len(out), selected_ce or None, selected_pe or None, out)
+    return out
+
+
 def prioritize_startup_hydration_symbols(
     symbols: Sequence[str],
     atm_ce: str | None,
     atm_pe: str | None,
     futures_symbol: str | None,
 ) -> list[str]:
-    """Prioritize startup symbols. Args: symbols/atm/futures. Returns: <=4 symbols. Raises: none."""
+    """Prioritize startup symbols. Args: symbols/atm/futures. Returns: ordered symbols. Raises: none."""
     priority = ["NSE:NIFTY"]
     if futures_symbol:
         priority.append(futures_symbol)
@@ -270,7 +290,7 @@ def prioritize_startup_hydration_symbols(
     for sym in priority:
         if sym and sym in known and sym not in out:
             out.append(sym)
-    return out[:4]
+    return out
 
 
 def _gate_runner_symbol_add(
@@ -7947,12 +7967,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 symbols_to_hydrate.append(_sym)
             atm_ce = next((s for s in targets if s.endswith("CE")), None)
             atm_pe = next((s for s in targets if s.endswith("PE")), None)
-            symbols_to_hydrate = prioritize_startup_hydration_symbols(
-                symbols_to_hydrate,
-                atm_ce=atm_ce,
-                atm_pe=atm_pe,
-                futures_symbol=future_symbol if future_symbol in symbols_to_hydrate else None,
-            )
+            symbols_to_hydrate = build_active_trading_basket_symbols(ctx, basket)
             LOGGER.info(
                 "HYDRATION_PLAN_STARTUP symbols=%d bars_target=%d lookback_days=%d",
                 len(symbols_to_hydrate),

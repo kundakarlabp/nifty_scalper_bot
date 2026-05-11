@@ -39,7 +39,7 @@ class OrderFlowStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
 
             if bid <= 0 or ask <= 0 or ask <= bid:
-                self._no_vote('missing_bid_ask')
+                self._no_vote('ltp_only_no_depth' if not depth else 'missing_bid_ask')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=missing_bid_ask')
                 return None
             spread_pct = float(indicators.get('spread_pct') or (((ask - bid) / ((ask + bid) / 2.0)) * 100.0))
