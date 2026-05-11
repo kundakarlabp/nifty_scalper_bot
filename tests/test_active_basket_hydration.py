@@ -1,4 +1,4 @@
-from nifty_scalper_bot.core.app import build_active_trading_basket_symbols
+from nifty_scalper_bot.core.active_basket import build_active_trading_basket_symbols
 
 
 def test_active_basket_includes_selected_options_first() -> None:
