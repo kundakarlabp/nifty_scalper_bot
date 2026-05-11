@@ -28,6 +28,20 @@ _MARKET_CLOSE = time(hour=15, minute=30)
 
 LOGGER = get_logger(__name__)
 
+_FEATURE_CAPABILITIES: dict[str, bool] = {
+    'vwap': True,
+    'bollinger': True,
+    'orb_levels': True,
+    'cpr_levels': False,
+    'structure_flags': False,
+    'order_book_depth': True,
+}
+
+
+def supports_feature(name: str) -> bool:
+    """Args: name. Returns: feature support status. Raises: none."""
+    return bool(_FEATURE_CAPABILITIES.get(str(name).strip().lower(), False))
+
 
 class PriceHistory:
     """Store OHLCV data efficiently.
@@ -1733,12 +1747,4 @@ class IndicatorEngine:
 
     def supports_feature(self, feature_name: str) -> bool:
         """Args: feature_name. Returns: support flag. Raises: none."""
-        capability_map = {
-            "cpr_levels": False,
-            "structure_flags": False,
-            "orb_levels": True,
-            "bollinger": True,
-            "order_book_depth": True,
-            "vwap": True,
-        }
-        return bool(capability_map.get(str(feature_name).strip().lower(), False))
+        return supports_feature(feature_name)
