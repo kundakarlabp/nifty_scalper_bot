@@ -5279,6 +5279,64 @@ class StrategyRunner:
         value = str(symbol or "").upper()
         return value.startswith("NFO:NIFTY") and (value.endswith("CE") or value.endswith("PE"))
 
+    def _is_tradable_option_symbol(self, symbol: str) -> bool:
+        """Compatibility alias for option-tradability checks."""
+        return self._is_tradable_symbol(symbol)
+
+    def get_quote(self, symbol: str) -> dict[str, Any] | None:
+        """Return freshest normalized quote available from DataHub/MDM."""
+        normalized = normalize_symbol(symbol)
+        for source in (self._data_hub, self._market_data):
+            if source is None:
+                continue
+            for name in ("get_quote", "get_symbol_snapshot", "get_latest_tick"):
+                fn = getattr(source, name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    raw = fn(normalized)
+                except Exception:
+                    continue
+                if raw is None:
+                    continue
+                if isinstance(raw, Mapping):
+                    payload = dict(raw)
+                else:
+                    payload = {
+                        "ltp": getattr(raw, "ltp", None) or getattr(raw, "last_price", None) or getattr(raw, "price", None),
+                        "bid": getattr(raw, "bid", None) or getattr(raw, "best_bid", None),
+                        "ask": getattr(raw, "ask", None) or getattr(raw, "best_ask", None),
+                        "tick_age_s": getattr(raw, "tick_age_s", None),
+                        "ts_ns": getattr(raw, "ts_ns", None),
+                    }
+                ltp = _extract_float(payload, "ltp", "last_price", "price", "close")
+                if ltp is not None and ltp > 0:
+                    return payload
+        return None
+
+    def _is_option_symbol_tick_fresh(self, symbol: str, *, max_age_s: float | None = None) -> bool:
+        """Freshness guard for selected option soft-pass and live execution readiness."""
+        if not self._is_tradable_symbol(symbol):
+            return False
+        limit = float(max_age_s or os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0)
+        quote = self.get_quote(symbol)
+        if isinstance(quote, Mapping):
+            age = _extract_float(quote, "tick_age_s", "age_s")
+            if age is not None:
+                return age <= limit
+        for source in (self._market_data, self._data_hub):
+            if source is None:
+                continue
+            fn = getattr(source, "time_since_last_tick", None)
+            if callable(fn):
+                try:
+                    age = fn(symbol)
+                except Exception:
+                    continue
+                if age is not None:
+                    return float(age) <= limit
+        return False
+
     def _is_context_symbol(self, symbol: str) -> bool:
         """Return True when symbol is a context-only spot/futures instrument. Args: symbol. Returns: bool. Raises: none."""
         value = str(symbol or "").upper()
@@ -7560,11 +7618,19 @@ class StrategyRunner:
         option_score = max(0.0, min(10.0, option_score))
         data_score = max(0.0, min(10.0, data_score))
         rr_score = max(0.0, min(10.0, rr_score))
+        premium_rr = (float(calculated_tp) - float(price)) / max(float(price) - float(calculated_sl), 1e-9)
+        confidence = max(
+            0.55,
+            min(
+                0.85,
+                (direction_score + strategy_score + option_score + data_score + rr_score) / 50.0,
+            ),
+        )
         return Signal(
             action="BUY",
             symbol=symbol,
             quantity=1,
-            confidence=0.72,
+            confidence=confidence,
             reason="premium_momentum_squeeze",
             stop_loss=calculated_sl,
             take_profit=calculated_tp,
@@ -7575,15 +7641,85 @@ class StrategyRunner:
                 "tag": "premium_squeeze",
                 "feature": "premium_momentum_squeeze",
                 "strategy_name": "premium_momentum_squeeze",
+                "is_selected_option": bool(selected),
+                "strike_distance_from_atm": abs(strike - atm_strike_float) if strike > 0 and atm_strike_float > 0 else None,
+                "premium_stop_distance": max(float(price) - float(calculated_sl), 0.0),
+                "premium_target_rr": premium_rr,
                 "direction_score": direction_score,
                 "strategy_score": strategy_score,
                 "setup_quality": strategy_score,
-                "confidence": 0.72,
+                "confidence": confidence,
                 "option_score": option_score,
                 "data_score": data_score,
                 "rr_score": rr_score,
             },
         )
+
+    def _materialize_option_trade_plan(
+        self,
+        signal: Signal,
+        *,
+        execution_price: float,
+        atr: float,
+        entry_side: OrderSide,
+    ) -> Signal:
+        """Build final long-option SL/TP from metadata, then normalize geometry."""
+        metadata = dict(signal.metadata or {})
+        entry_price = float(execution_price or metadata.get("entry_price") or metadata.get("price") or 0.0)
+        if entry_price <= 0:
+            return signal
+
+        def _to_float(value: Any) -> float | None:
+            try:
+                return None if value is None else float(value)
+            except (TypeError, ValueError):
+                return None
+
+        stop_loss = _to_float(signal.stop_loss)
+        take_profit = _to_float(signal.take_profit)
+        rr = _to_float(metadata.get("premium_target_rr")) or 2.0
+        stop_distance = _to_float(metadata.get("premium_stop_distance"))
+        explicit_stop = _to_float(metadata.get("setup_invalidation_premium")) or _to_float(metadata.get("premium_stop_price"))
+        plan_source = "existing_signal_levels"
+        if stop_loss is None or stop_loss <= 0 or take_profit is None or take_profit <= 0:
+            if metadata.get("premium_stop_pct") is not None:
+                signal = self._apply_premium_targets(signal, premium=entry_price, entry_side=entry_side)
+                stop_loss = _to_float(signal.stop_loss)
+                take_profit = _to_float(signal.take_profit)
+                plan_source = "premium_stop_pct"
+            else:
+                distance = stop_distance if stop_distance is not None and stop_distance > 0 else max(atr * 1.2, entry_price * 0.02, 1.0)
+                if explicit_stop is not None and explicit_stop > 0 and str(entry_side).upper() == "BUY":
+                    stop_loss = explicit_stop
+                    plan_source = "explicit_premium_stop"
+                else:
+                    stop_loss = entry_price - distance
+                    plan_source = "premium_stop_distance"
+                risk = max(entry_price - float(stop_loss), max(atr * 0.8, 1.0))
+                take_profit = entry_price + risk * rr
+            signal = dataclasses.replace(
+                signal,
+                stop_loss=float(stop_loss) if stop_loss is not None else None,
+                take_profit=float(take_profit) if take_profit is not None else None,
+                metadata={**metadata, "entry_price": entry_price, "option_trade_plan_source": plan_source},
+            )
+        signal = self._validate_long_option_geometry(signal=signal, entry_price=entry_price, entry_side=entry_side, atr=atr)
+        signal = self._anchor_sl_tp_to_execution(signal=signal, signal_price=entry_price, execution_price=entry_price, entry_side=entry_side, atr=atr)
+        final_md = dict(signal.metadata or {})
+        final_md["entry_price"] = entry_price
+        final_md["stop_loss"] = signal.stop_loss
+        final_md["take_profit"] = signal.take_profit
+        final_md["materialized_trade_plan"] = True
+        final_md["option_trade_plan_source"] = final_md.get("option_trade_plan_source", plan_source)
+        self._logger.info(
+            "OPTION_TRADE_PLAN_MATERIALIZED symbol=%s entry=%.2f sl=%s tp=%s source=%s",
+            signal.symbol,
+            entry_price,
+            signal.stop_loss,
+            signal.take_profit,
+            final_md.get("option_trade_plan_source"),
+        )
+        return dataclasses.replace(signal, metadata=final_md)
 
     def _handle_signal(
         self,
@@ -8234,17 +8370,30 @@ class StrategyRunner:
                 signal_symbol = normalize_symbol(signal.symbol)
                 selected_ce = normalize_symbol(str(metadata.get("selected_ce") or self._selected_ce_symbol or ""))
                 selected_pe = normalize_symbol(str(metadata.get("selected_pe") or self._selected_pe_symbol or ""))
-                quote = self.get_quote(signal.symbol)
-                quote_fresh = bool(isinstance(quote, dict) and quote.get("ltp"))
-                selected_or_near = signal_symbol in {selected_ce, selected_pe} or bool(metadata.get("is_selected_option"))
-                sl_ok = signal.stop_loss is not None and signal.take_profit is not None
-                self._reset_execution_state(base_symbol)
-                _trace("missing_candidate_snapshots")
-                return self._reject_signal_execution(
-                    symbol=base_symbol,
-                    trace_id=trace_id,
-                    reason="missing_candidate_snapshots",
+                strike_distance = float(metadata.get("strike_distance_from_atm") or 999.0)
+                selected_or_near = (
+                    signal_symbol in {selected_ce, selected_pe}
+                    or bool(metadata.get("is_selected_option"))
+                    or strike_distance <= float(os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100)
                 )
+                quote_fresh = self._is_option_symbol_tick_fresh(
+                    signal.symbol,
+                    max_age_s=float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0,
+                )
+                sl_ok = signal.stop_loss is not None and signal.take_profit is not None
+                if selected_or_near and quote_fresh and sl_ok:
+                    metadata["candidate_selected"] = True
+                    metadata["candidate_symbol"] = signal.symbol
+                    metadata["quote_usable_for_order_plan"] = True
+                    signal = dataclasses.replace(signal, metadata=metadata)
+                else:
+                    self._reset_execution_state(base_symbol)
+                    _trace("missing_candidate_snapshots")
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="missing_candidate_snapshots",
+                    )
             if isinstance(candidate_snapshots_obj, list):
                 atm_strike = int(metadata.get("atm_strike") or 0)
                 if atm_strike <= 0:
@@ -8366,7 +8515,7 @@ class StrategyRunner:
             )
             metadata.setdefault(
                 "option_score",
-                float(metadata.get("option_quality", quality_hint) or quality_hint),
+                float(metadata.get("option_quality", 5.5) or 5.5),
             )
             metadata.setdefault(
                 "data_score",
@@ -8428,6 +8577,7 @@ class StrategyRunner:
                         },
                     )
                     self._reset_execution_state(base_symbol)
+                    _trace("final_score_required")
                     return SignalExecutionResult(False, "final_score_required")
             missing_components = missing_score_components(metadata)
             if missing_components and reason_key == "premium_momentum_squeeze":
@@ -8509,6 +8659,7 @@ class StrategyRunner:
                         },
                     )
                     self._reset_execution_state(base_symbol)
+                    _trace("final_score_required")
                     return SignalExecutionResult(False, "final_score_required")
             if not quality.allowed:
                 delta = quality.final_score - float(quality.components.get("threshold", 0.0) or 0.0)

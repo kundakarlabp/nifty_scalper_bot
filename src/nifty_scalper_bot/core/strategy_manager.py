@@ -2503,7 +2503,6 @@ class StrategyManager(_BaseStrategyManager):
         best_signal, best_vote = max(trigger_votes, key=lambda pair: pair[1].score)
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
         single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
-        single_scalp_min = float(os.getenv("STRATEGY_SINGLE_VOTE_SCALP_MIN", "6.6") or "6.6")
         allow_scalp_single = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
         final_score = float(best_vote.score)
         vetoed = False
@@ -2516,9 +2515,23 @@ class StrategyManager(_BaseStrategyManager):
         if len(trigger_votes) == 1:
             selected_option = bool((best_signal.metadata or {}).get("is_selected_option"))
             near_atm = float((best_signal.metadata or {}).get("strike_distance_from_atm") or 999.0) <= 50.0
+            score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
+            score_ok = best_vote.score >= score_min
+            conf_ok = best_vote.confidence >= conf_min
+            selected_ok = selected_option or near_atm
+            log.info(
+                "SINGLE_VOTE_DECISION strategy=%s score=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
+                best_vote.strategy,
+                best_vote.score,
+                score_min,
+                best_vote.confidence,
+                conf_min,
+                selected_ok,
+                vetoed,
+            )
             if best_vote.score >= single_high:
                 metadata_stage = "preliminary_single_high_conviction"
-            elif allow_scalp_single and best_vote.score >= single_scalp_min and (selected_option or near_atm) and not vetoed:
+            elif allow_scalp_single and score_ok and conf_ok and selected_ok and not vetoed:
                 metadata_stage = "single_vote_scalp_controlled"
             else:
                 return None
@@ -2527,6 +2540,8 @@ class StrategyManager(_BaseStrategyManager):
         if vetoed or final_score < threshold:
             return None
         metadata = dict(best_signal.metadata or {})
+        metadata.setdefault("trigger_strategy_score", metadata.get("strategy_score"))
+        metadata["consensus_score"] = round(final_score, 3)
         metadata["strategy_score"] = round(final_score, 3)
         metadata["confirming_votes"] = [best_vote.strategy] + [v.strategy for v in same_side_context]
         metadata["direction_bias"] = best_vote.side
@@ -2566,6 +2581,19 @@ class StrategyManager(_BaseStrategyManager):
         except Exception as exc:  # noqa: BLE001
             log.error("Failure in StrategyManager._extract_regime_scale: %s", exc)
             return 1.0
+
+    def _single_vote_thresholds(self, strategy_name: str) -> tuple[float, float]:
+        """Args: strategy_name. Returns: score/conf thresholds. Raises: none."""
+        key = str(strategy_name or "").strip().lower().replace(" ", "_")
+        if key in {"vwappro", "vwap_pro"}:
+            return (
+                float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE", "5.8") or "5.8"),
+                float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE", "0.45") or "0.45"),
+            )
+        return (
+            float(os.getenv("STRATEGY_SINGLE_VOTE_SCALP_MIN", "6.6") or "6.6"),
+            float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0.60") or "0.60"),
+        )
 
     def _apply_regime_vote_weight(
         self, *, vote: StrategyVote, regime_name: str | None
