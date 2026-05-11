@@ -5,6 +5,7 @@ from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import OrderFlowStrategyConfig
+from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -34,6 +35,7 @@ class OrderFlowStrategy(EliteStrategy):
             depth = indicators.get('depth') or {}
             tick_direction = str(indicators.get('tick_direction') or '').upper()
             direction = str(indicators.get('direction_bias') or '').upper()
+            contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
 
             if bid <= 0 or ask <= 0 or ask <= bid:
@@ -66,7 +68,7 @@ class OrderFlowStrategy(EliteStrategy):
                     self._no_vote('spread_unavailable_for_ltp_fallback')
                     return None
                 tick_direction = str(indicators.get('tick_direction') or '').upper()
-                side = 'CE' if tick_direction in {'UP', 'BUY'} else 'PE'
+                side = contract_side if option_premium_domain else ('CE' if tick_direction in {'UP', 'BUY'} else 'PE')
                 depth_imbalance = 0.0
                 fallback_score = 2.0 + (2.0 if spread_pct <= 12.0 else 0.0)
                 if direction in {'CE', 'PE'} and direction == side:
@@ -81,7 +83,10 @@ class OrderFlowStrategy(EliteStrategy):
                 metadata.update({'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'context', 'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'direction_bias': side, 'strategy_score': strategy_score, 'spread_pct': round(spread_pct, 3), 'depth_imbalance': 0.0, 'tick_direction': tick_direction, 'invalidation_level': bid - 0.5 * atr if side == 'CE' else ask + 0.5 * atr})
                 return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=float(metadata['invalidation_level']), target=current_price + (1.8 * atr), quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
-            side = 'CE' if depth_imbalance > 0 else 'PE'
+            side = contract_side if option_premium_domain else ('CE' if depth_imbalance > 0 else 'PE')
+            if option_premium_domain and depth_imbalance <= 0 and tick_direction not in {'UP', 'BUY'}:
+                self._no_vote('negative_premium_flow')
+                return None
 
             score = 0.0
             reasons: list[str] = []
