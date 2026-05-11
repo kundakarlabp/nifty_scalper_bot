@@ -5,7 +5,7 @@ from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
-from nifty_scalper_bot.strategies.signal_quality import infer_option_side
+from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -74,7 +74,7 @@ class VWAPProStrategy(EliteStrategy):
 
             score = 0.0
             reasons: list[str] = []
-            contract_side = infer_option_side(symbol, indicators)
+            contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
             trend_alignment = False
             pullback_flag = False
             continuation_confirmed = False
@@ -87,6 +87,9 @@ class VWAPProStrategy(EliteStrategy):
                     self._no_vote('unknown_contract_side')
                     LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=unknown_contract_side')
                     return None
+            if not option_premium_domain:
+                self._no_vote('invalid_price_domain')
+                return None
             premium_above_vwap = current_price >= vwap
             if premium_above_vwap:
                 score += 2.0
@@ -96,17 +99,17 @@ class VWAPProStrategy(EliteStrategy):
             atr_safe = max(atr, current_price * 0.01, 1.0)
             continuation_confirmed = candle_body >= (0.35 * atr_safe)
             if continuation_confirmed:
-                score += 2.0
-                reasons.append('continuation_confirmed')
+                score += 1.5
+                reasons.append('premium_continuation')
 
             reclaim_from_below = low <= (vwap - (atr_safe * self._slack_atr_mult * 0.2)) and close >= vwap
             if self._allow_pullback and reclaim_from_below:
                 pullback_flag = True
-                score += 1.0
-                reasons.append('premium_reclaim')
+                score += 1.5
+                reasons.append('premium_reclaim_vwap')
 
             if distance_pct <= self._max_distance_pct * 0.7:
-                score += 2.0
+                score += 1.0
                 reasons.append('not_overextended')
 
             if avg_vol > 0 and vol >= 0.6 * avg_vol:
@@ -121,13 +124,13 @@ class VWAPProStrategy(EliteStrategy):
                     score -= 2.0
                     reasons.append('direction_conflict')
 
-            if score < 3.0:
+            if score < 5.5:
                 self._no_vote('weak_score')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=low_score')
                 return None
 
             strategy_score = max(0.0, min(10.0, score))
-            confidence = max(0.1, min(0.85, strategy_score / 10.0))
+            confidence = max(0.45, min(0.85, strategy_score / 10.0))
             metadata = {
                 'strategy': 'VWAPPro',
                 'strategy_name': 'VWAPPro',
