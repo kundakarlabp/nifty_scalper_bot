@@ -80,6 +80,7 @@ class CPRBreakoutStrategy(EliteStrategy):
                 'strategy': 'CPRBreakout',
                 'strategy_name': 'CPRBreakout',
                 'role': 'trigger',
+                'requires_feature_set': 'cpr_levels',
                 'signal_family': 'directional_trigger',
                 'trade_side': side,
                 'side': side,

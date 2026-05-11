@@ -8372,6 +8372,20 @@ class StrategyRunner:
                 "data_score",
                 float(metadata.get("data_quality", quality_hint) or quality_hint),
             )
+            atr_for_plan = max(float(metadata.get("atr", 0.0) or 0.0), 1.0)
+            try:
+                signal = self._materialize_option_trade_plan(
+                    signal,
+                    execution_price=float(trade_price or 0.0),
+                    atr=atr_for_plan,
+                    entry_side=str(signal.action or "BUY"),
+                )
+                metadata = dict(signal.metadata or metadata)
+                metadata["entry_price"] = float(trade_price or metadata.get("entry_price") or 0.0)
+                metadata["stop_loss"] = signal.stop_loss
+                metadata["take_profit"] = signal.take_profit
+            except Exception as materialize_exc:
+                self._logger.error("Failure in materialize option trade plan: %s", materialize_exc)
             if metadata.get("rr_score") is None:
                 rr_score = quality_hint
                 try:
