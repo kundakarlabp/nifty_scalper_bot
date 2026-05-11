@@ -355,6 +355,10 @@ class StrikeSelector:
         self._contract_cache = {}  # {symbol: (timestamp, contract_details)}
         self._cache_ttl_seconds = 1
         self._deterministic_resolver: OptionResolver | None = None
+        self._locked_ce: SelectedContract | None = None
+        self._locked_pe: SelectedContract | None = None
+        self._locked_spot: float | None = None
+        self._locked_at: datetime | None = None
 
     @property
     def settings(self) -> "SelectorSettings":
@@ -474,11 +478,33 @@ class StrikeSelector:
             LOGGER.info("Condition met: selector_missing_option_type")
             return None
 
+        sticky_seconds = int(getattr(self._selector_settings, "option_sticky_seconds", 120) or 120)
+        min_move = float(getattr(self._selector_settings, "option_reselection_min_move", 80.0) or 80.0)
+        force_reselect_after = int(getattr(self._selector_settings, "option_force_reselect_after_seconds", 300) or 300)
+        now = self._clock()
+        locked = self._locked_ce if requested_option_type == "CE" else self._locked_pe
+        if locked is not None and self._locked_spot is not None and self._locked_at is not None:
+            move = abs(float(underlying_price) - float(self._locked_spot))
+            age = (now - self._locked_at).total_seconds()
+            if move < min_move and age < sticky_seconds:
+                LOGGER.info("OPTION_STICKY_LOCK_ACTIVE symbol=%s move=%.2f age_s=%.1f", locked.symbol, move, age)
+                return locked
+            if move < min_move and age < force_reselect_after:
+                LOGGER.info("OPTION_RESELECTION_SKIPPED_SMALL_MOVE move=%.2f age_s=%.1f threshold=%.2f", move, age, min_move)
+                return locked
+            LOGGER.info("OPTION_RESELECTION_TRIGGERED move=%.2f age_s=%.1f", move, age)
+
         deterministic = self._resolve_deterministic_contract(
             option_type=requested_option_type,
             underlying_price=underlying_price,
         )
         if deterministic is not None:
+            if requested_option_type == "CE":
+                self._locked_ce = deterministic
+            else:
+                self._locked_pe = deterministic
+            self._locked_spot = float(underlying_price)
+            self._locked_at = now
             return deterministic
 
         # --- TRACE 1: FETCH CHAIN ---

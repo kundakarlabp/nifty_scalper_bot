@@ -2508,8 +2508,12 @@ class StrategyManager(_BaseStrategyManager):
         vetoed = False
         same_side_context = [v for _, v in context_votes if v.side == best_vote.side]
         opposite_context = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
-        if same_side_context:
-            final_score = min(10.0, final_score + max(v.score for v in same_side_context) * 0.2)
+        positive_context = sum(float(v.score) for v in same_side_context)
+        negative_context = sum(float(v.score) for v in opposite_context)
+        final_score = float(best_vote.score)
+        final_score += min(1.5, 0.45 * positive_context)
+        final_score -= min(1.5, 0.60 * negative_context)
+        final_score = max(0.0, min(10.0, final_score))
         if opposite_context and max(v.score for v in opposite_context) >= 8.0:
             vetoed = True
         if len(trigger_votes) == 1:
