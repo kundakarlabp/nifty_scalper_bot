@@ -6818,7 +6818,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
                 runner_bars = len(runner._indicator_engine.get_history(sym) or [])
             except Exception:
                 runner_bars = 0
-        return min(mdm_bars, runner_bars), mdm_bars, runner_bars
+        effective_bars = min(mdm_bars, runner_bars)
+        LOGGER.info("SELECTED_OPTION_HYDRATION_SYNC_CHECK symbol=%s mdm_bars=%s runner_bars=%s effective_bars=%s", sym, mdm_bars, runner_bars, effective_bars)
+        return effective_bars, mdm_bars, runner_bars
     def _quote(sym: str | None) -> bool:
         if not sym or mdm is None:
             return False
