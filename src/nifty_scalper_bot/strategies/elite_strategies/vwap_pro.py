@@ -83,6 +83,14 @@ class VWAPProStrategy(EliteStrategy):
                 fallback_side = str(indicators.get('direction_bias') or '').upper()
                 if fallback_side in {'CE', 'PE'}:
                     contract_side = fallback_side
+                elif symbol.upper().endswith('CE'):
+                    contract_side = 'CE'
+                    score -= 1.0
+                    reasons.append('symbol_side_fallback')
+                elif symbol.upper().endswith('PE'):
+                    contract_side = 'PE'
+                    score -= 1.0
+                    reasons.append('symbol_side_fallback')
                 else:
                     self._no_vote('unknown_contract_side')
                     LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=unknown_contract_side')
@@ -126,7 +134,20 @@ class VWAPProStrategy(EliteStrategy):
 
             if score < 5.5:
                 self._no_vote('weak_score')
-                LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=low_score')
+                LOGGER.info(
+                    'STRATEGY_NO_VOTE strategy=VWAPPro reason=weak_score score=%.2f direction=%s contract_side=%s current_price=%.2f vwap=%.2f distance_pct=%.4f atr=%.2f volume=%.2f avg_volume=%.2f trend_alignment=%s pullback_flag=%s',
+                    score,
+                    direction,
+                    contract_side,
+                    current_price,
+                    vwap,
+                    distance_pct,
+                    atr_safe,
+                    vol,
+                    avg_vol,
+                    trend_alignment,
+                    pullback_flag,
+                )
                 return None
 
             strategy_score = max(0.0, min(10.0, score))

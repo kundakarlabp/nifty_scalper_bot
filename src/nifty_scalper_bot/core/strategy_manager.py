@@ -2206,6 +2206,10 @@ class StrategyManager(_BaseStrategyManager):
         errors: list[str] = []
         disabled_strategies_snapshot = disabled
         evaluation_start = time.monotonic()
+        symbol_upper = symbol.upper()
+        symbol_is_option = bool(re.search(r"(CE|PE)$", symbol_upper))
+        symbol_is_future = symbol_upper.endswith("FUT")
+        direction_bias = str(indicators.get("direction_bias") or "").upper()
         for strategy in self._strategies:
             if strategy.name in self._disabled_strategies:
                 disabled.append(strategy.name)
@@ -2216,6 +2220,37 @@ class StrategyManager(_BaseStrategyManager):
                         "strategy": strategy.name,
                         "symbol": symbol,
                     },
+                )
+                continue
+            strategy_name = str(getattr(strategy, "name", "") or "")
+            if strategy_name in {"VWAPPro", "OrderFlow"} and (
+                (symbol_is_future or not symbol_is_option)
+                and direction_bias not in {"CE", "PE"}
+            ):
+                no_vote_reason_counts["context_symbol_skipped_for_option_strategy"] = (
+                    no_vote_reason_counts.get(
+                        "context_symbol_skipped_for_option_strategy", 0
+                    )
+                    + 1
+                )
+                log_throttled(
+                    log,
+                    key=f"strategy_domain_skip:{symbol}:{strategy_name}",
+                    msg=(
+                        "STRATEGY_NO_VOTE strategy=%s symbol=%s "
+                        "reason=context_symbol_skipped_for_option_strategy"
+                    ),
+                    args=(strategy_name, symbol),
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                )
+                continue
+            if strategy_name == "BBSqueeze" and symbol_is_option:
+                no_vote_reason_counts["context_symbol_skipped_for_underlying_strategy"] = (
+                    no_vote_reason_counts.get(
+                        "context_symbol_skipped_for_underlying_strategy", 0
+                    )
+                    + 1
                 )
                 continue
             try:

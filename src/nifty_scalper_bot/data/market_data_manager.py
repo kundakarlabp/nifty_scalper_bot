@@ -4625,7 +4625,8 @@ class MarketDataManager:
         # StrategyRunner's per-symbol callbacks) were registered in _subscribers
         # but NEVER called from the WS path — _store_tick only cached the tick.
         # _emit_tick is the correct call; it was defined but never invoked.
-        tick_dict = tick.to_dict()
+        tick_dict = {**to_json_safe(dict(raw)), **tick.to_dict()}
+        tick_dict["symbol"] = symbol
         tick_dict["timestamp"] = pd.to_datetime(
             tick_dict["timestamp"], utc=True, errors="coerce"
         ).isoformat()
@@ -4639,12 +4640,8 @@ class MarketDataManager:
         tick_dict["received_at"] = raw.get("received_at", time.time())
         if raw.get("exchange_timestamp") is not None:
             tick_dict["exchange_timestamp"] = raw.get("exchange_timestamp")
-        if raw.get("volume_traded") is not None:
-            tick_dict["volume_traded"] = raw.get("volume_traded")
-        if raw.get("volume_traded_today") is not None:
-            tick_dict["volume_traded_today"] = raw.get("volume_traded_today")
-        if raw.get("oi") is not None:
-            tick_dict["oi"] = raw.get("oi")
+        if raw.get("depth") is not None:
+            tick_dict["depth"] = raw.get("depth")
 
         # Structured Logging for tick received (Objective 6)
         try:
@@ -6973,14 +6970,45 @@ class MarketDataManager:
             if pd.isna(ts):
                 ts = pd.Timestamp.utcnow()
             ts_py = ts.to_pydatetime().astimezone(timezone.utc)
+            bid = _coerce_float(
+                raw.get("bid")
+                or raw.get("best_bid")
+                or raw.get("buy_price")
+                or raw.get("best_bid_price")
+            )
+            ask = _coerce_float(
+                raw.get("ask")
+                or raw.get("best_ask")
+                or raw.get("sell_price")
+                or raw.get("best_ask_price")
+            )
+            depth_obj = raw.get("depth") if isinstance(raw.get("depth"), Mapping) else None
+            bid_ask_source = "missing"
+            if bid is not None and ask is not None:
+                bid_ask_source = "ws_full"
+            elif depth_obj:
+                buy_levels = depth_obj.get("buy") if isinstance(depth_obj, Mapping) else None
+                sell_levels = depth_obj.get("sell") if isinstance(depth_obj, Mapping) else None
+                if isinstance(buy_levels, list) and buy_levels:
+                    bid = _coerce_float((buy_levels[0] or {}).get("price"))
+                if isinstance(sell_levels, list) and sell_levels:
+                    ask = _coerce_float((sell_levels[0] or {}).get("price"))
+                bid_ask_source = "market_depth"
+            tradable_quote = bool(
+                bid is not None and ask is not None and bid > 0 and ask > bid
+            )
             return {
                 "symbol": self._canonical_symbol(symbol),
                 "token": token,
                 "ltp": ltp,
-                "bid": _coerce_float(raw.get("bid")),
-                "ask": _coerce_float(raw.get("ask")),
+                "bid": bid,
+                "ask": ask,
                 "volume": _coerce_int(raw.get("volume") or raw.get("volume_traded") or raw.get("volume_traded_today")),
                 "oi": _coerce_int(raw.get("oi")),
+                "depth": depth_obj,
+                "depth_available": bool(depth_obj),
+                "bid_ask_source": bid_ask_source,
+                "tradable_quote": tradable_quote,
                 "timestamp": ts_py,
                 "source": "poll" if str(source).lower() == "poll" else "ws",
             }
