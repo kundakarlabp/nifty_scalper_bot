@@ -26,6 +26,16 @@ def infer_option_side(symbol: str, metadata: dict[str, object] | None = None) ->
     return str(payload.get('direction_bias', 'UNKNOWN')).upper()
 
 
+def resolve_signal_domain(symbol: str, metadata: dict[str, object] | None = None) -> tuple[str, bool, bool]:
+    """Return (contract_side, option_premium_domain, underlying_domain)."""
+    payload = dict(metadata or {})
+    contract_side = infer_option_side(symbol, payload)
+    source_symbol = str(payload.get("source_symbol") or "").strip().upper()
+    option_symbol = str(symbol or "").upper().endswith(("CE", "PE"))
+    option_premium_domain = bool(option_symbol and not source_symbol)
+    underlying_domain = bool(source_symbol)
+    return contract_side, option_premium_domain, underlying_domain
+
 @dataclass(slots=True)
 class SignalQualityScore:
     """Args: score components. Returns: normalized score object. Raises: none."""

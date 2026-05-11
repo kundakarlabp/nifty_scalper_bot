@@ -7,13 +7,93 @@ from enum import Enum
 from typing import Any, Callable, TypeVar
 from dataclasses import dataclass
 
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    before_sleep_log
-)
+try:
+    from tenacity import (
+        retry,
+        stop_after_attempt,
+        wait_exponential,
+        retry_if_exception_type,
+        before_sleep_log,
+    )
+except ImportError:  # dependency-free fallback for clean envs
+    import asyncio
+    import time
+
+    def stop_after_attempt(attempts: int) -> int:
+        return int(attempts)
+
+    def wait_exponential(*, multiplier: float = 1.0, min: float = 1.0, max: float = 10.0):
+        return (float(multiplier), float(min), float(max))
+
+    def retry_if_exception_type(exc_types):
+        return exc_types
+
+    def before_sleep_log(logger, level):
+        def _before_sleep(retry_state) -> None:
+            try:
+                logger.log(
+                    level,
+                    "ROBUST_PROVIDER_RETRY_FALLBACK attempt=%s",
+                    getattr(retry_state, "attempt_number", None),
+                )
+            except Exception:
+                pass
+
+        return _before_sleep
+
+    def retry(*, stop=3, wait=(1.0, 1.0, 10.0), retry=Exception, before_sleep=None):
+        attempts = int(stop if isinstance(stop, int) else 3)
+        exc_types = retry if isinstance(retry, tuple) else (retry,)
+
+        def decorator(fn):
+            if asyncio.iscoroutinefunction(fn):
+                async def _wrapped(*args, **kwargs):
+                    mult, min_wait, max_wait = wait
+                    for attempt in range(1, attempts + 1):
+                        try:
+                            return await fn(*args, **kwargs)
+                        except exc_types as exc:
+                            if attempt >= attempts:
+                                raise
+                            if before_sleep:
+                                try:
+                                    state = type(
+                                        "RetryState",
+                                        (),
+                                        {"attempt_number": attempt, "fn": fn, "exception": exc},
+                                    )()
+                                    before_sleep(state)
+                                except Exception:
+                                    pass
+                            delay = min(max_wait, max(min_wait, mult * (2 ** (attempt - 1))))
+                            await asyncio.sleep(delay)
+
+                return _wrapped
+
+            def _wrapped(*args, **kwargs):
+                mult, min_wait, max_wait = wait
+                for attempt in range(1, attempts + 1):
+                    try:
+                        return fn(*args, **kwargs)
+                    except exc_types as exc:
+                        if attempt >= attempts:
+                            raise
+                        if before_sleep:
+                            try:
+                                state = type(
+                                    "RetryState",
+                                    (),
+                                    {"attempt_number": attempt, "fn": fn, "exception": exc},
+                                )()
+                                before_sleep(state)
+                            except Exception:
+                                pass
+                        delay = min(max_wait, max(min_wait, mult * (2 ** (attempt - 1))))
+                        time.sleep(delay)
+
+            return _wrapped
+
+        return decorator
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar('T')

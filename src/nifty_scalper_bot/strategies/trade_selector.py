@@ -51,10 +51,10 @@ class TradeCandidateSelector:
 
     def _limits(self) -> tuple[float, float, int]:
         if self.quality_mode == 'strict':
-            return 0.03, 5.0, 2
+            return 3.0, 5.0, 2
         if self.quality_mode == 'loose':
-            return 0.07, 15.0, 1
-        return 0.05, 10.0, 1
+            return 7.0, 15.0, 1
+        return 5.0, 10.0, 1
 
     def select_ranked_candidates(self, *, direction_bias: str, atm_strike: int, snapshots: list[dict[str, Any]]) -> list[TradeCandidate]:
         max_spread, max_age, min_ticks = self._limits()
@@ -100,7 +100,7 @@ class TradeCandidateSelector:
             spread_pct: float | None = None
             if has_bid_ask:
                 mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
-                spread_pct = ((ask or 0.0) - (bid or 0.0)) / mid if mid > 0 else 1.0
+                spread_pct = (((ask or 0.0) - (bid or 0.0)) / mid * 100.0) if mid > 0 else 100.0
                 if spread_pct > max_spread:
                     rejects['spread_too_wide'] += 1
                     continue
@@ -129,7 +129,9 @@ class TradeCandidateSelector:
             liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct * 100.0)
             micro = min(10.0, real_ticks * 3.0)
             score = 6.0 + liquidity * 0.2 + micro * 0.2 - atm_distance * 0.5 - score_penalty
-            ranked.append(TradeCandidate(symbol=symbol, side=side, score=score, reasons=reasons, spread_pct=spread_pct, tick_age_s=tick_age_s, premium=premium, atm_distance=atm_distance, data_quality_score=10.0, entry_price=entry, stop_loss=sl, target=target, rr=rr, liquidity_score=liquidity, microstructure_score=micro, final_score=score))
+            dq = self.evaluate_data_quality(s)
+            final = max(0.0, min(10.0, 0.7 * score + 0.3 * dq.score))
+            ranked.append(TradeCandidate(symbol=symbol, side=side, score=final, reasons=reasons, spread_pct=spread_pct, tick_age_s=tick_age_s, premium=premium, atm_distance=atm_distance, data_quality_score=dq.score, entry_price=entry, stop_loss=sl, target=target, rr=rr, liquidity_score=liquidity, microstructure_score=micro, final_score=final))
         sorted_ranked = sorted(ranked, key=lambda c: c.final_score or 0.0, reverse=True)
         key = f'candidate_summary_empty:{direction_bias}:{atm_strike}'
         event_extra = {'event': 'CANDIDATE_SELECTION_SUMMARY', 'direction': direction_bias, 'atm': atm_strike, 'total': len(snapshots), 'ranked': len(sorted_ranked), 'rejects': rejects, 'ltp_only_used': ltp_only_used}
@@ -159,7 +161,7 @@ class TradeCandidateSelector:
             score -= 3.0
         else:
             mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
-            spread_pct = ((ask or 0.0) - (bid or 0.0)) / mid if mid > 0 else 1.0
+            spread_pct = (((ask or 0.0) - (bid or 0.0)) / mid * 100.0) if mid > 0 else 100.0
             if spread_pct > max_spread:
                 reasons.append('spread_too_wide')
                 score -= 3.0
