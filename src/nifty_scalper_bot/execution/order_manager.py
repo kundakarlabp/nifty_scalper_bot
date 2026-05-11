@@ -2710,10 +2710,19 @@ class OrderManager:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
         # Use dynamic resolution with a safe fallback to reject mismatched quantities.
+        exec_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
         try:
             _lot = self._lot_size_for_symbol(symbol)
-        except Exception:
-            _lot = 65  # current NIFTY lot size as safe fallback
+        except Exception as exc:
+            if exec_mode == "LIVE":
+                self._logger.error("LIVE_ORDER_REJECTED symbol=%s reason=lot_size_unresolved error=%s", symbol, exc)
+                return None
+            fallback_lot = int(float(os.getenv("PAPER_LOT_FALLBACK", "0") or 0))
+            if fallback_lot <= 0:
+                self._logger.error("PAPER_ORDER_REJECTED symbol=%s reason=lot_size_unresolved error=%s", symbol, exc)
+                return None
+            _lot = fallback_lot
+            self._logger.warning("PAPER_LOT_FALLBACK_USED symbol=%s lot=%s", symbol, _lot)
         if _lot > 0 and quantity % _lot != 0:
             self._logger.error(
                 f"🛑 INVALID QTY: {quantity} is not a multiple of {_lot} (lot size for {symbol}). Order aborted."

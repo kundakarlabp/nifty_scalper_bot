@@ -1729,3 +1729,16 @@ class IndicatorEngine:
         except Exception as e:
             self._logger.error("Failure in IndicatorEngine.get_latest_price: %s", e)
             return None
+
+
+    def supports_feature(self, feature_name: str) -> bool:
+        """Args: feature_name. Returns: support flag. Raises: none."""
+        capability_map = {
+            "cpr_levels": False,
+            "structure_flags": False,
+            "orb_levels": True,
+            "bollinger": True,
+            "order_book_depth": True,
+            "vwap": True,
+        }
+        return bool(capability_map.get(str(feature_name).strip().lower(), False))

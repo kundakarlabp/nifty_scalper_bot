@@ -88,12 +88,9 @@ class VWAPProStrategy(EliteStrategy):
                     LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=unknown_contract_side')
                     return None
             premium_above_vwap = current_price >= vwap
-            if contract_side == 'CE' and premium_above_vwap:
+            if premium_above_vwap:
                 score += 2.0
-                reasons.append('ce_premium_above_vwap')
-            if contract_side == 'PE' and not premium_above_vwap:
-                score += 2.0
-                reasons.append('pe_premium_below_vwap')
+                reasons.append('premium_above_vwap')
 
             candle_body = abs(close - open_price)
             atr_safe = max(atr, current_price * 0.01, 1.0)
@@ -102,12 +99,11 @@ class VWAPProStrategy(EliteStrategy):
                 score += 2.0
                 reasons.append('continuation_confirmed')
 
-            reclaim_long = low <= (vwap - (atr_safe * self._slack_atr_mult * 0.2)) and close >= vwap
-            reclaim_short = high >= (vwap + (atr_safe * self._slack_atr_mult * 0.2)) and close <= vwap
-            if self._allow_pullback and ((contract_side == 'CE' and reclaim_long) or (contract_side == 'PE' and reclaim_short)):
+            reclaim_from_below = low <= (vwap - (atr_safe * self._slack_atr_mult * 0.2)) and close >= vwap
+            if self._allow_pullback and reclaim_from_below:
                 pullback_flag = True
                 score += 1.0
-                reasons.append('pullback_reclaim')
+                reasons.append('premium_reclaim')
 
             if distance_pct <= self._max_distance_pct * 0.7:
                 score += 2.0
@@ -136,6 +132,7 @@ class VWAPProStrategy(EliteStrategy):
                 'strategy': 'VWAPPro',
                 'strategy_name': 'VWAPPro',
                 'role': 'trigger',
+                'source_domain': 'option_premium',
                 'signal_family': 'directional_trigger',
                 'trade_side': contract_side,
                 'side': contract_side,

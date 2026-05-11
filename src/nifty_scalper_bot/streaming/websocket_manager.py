@@ -13,7 +13,10 @@ from enum import Enum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from kiteconnect import KiteTicker
+try:
+    from kiteconnect import KiteTicker
+except Exception:  # pragma: no cover - optional dependency guard
+    KiteTicker = None  # type: ignore[assignment]
 
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger
@@ -186,6 +189,12 @@ class WebSocketManager:
 
         self._fallback_start_callback = on_start
         self._fallback_stop_callback = on_stop
+
+    def _build_ticker(self) -> KiteTicker:
+        """Args: none; Returns: KiteTicker instance; Raises: RuntimeError."""
+        if KiteTicker is None:
+            raise RuntimeError("kiteconnect is not installed")
+        return KiteTicker(self._api_key, self._access_token, reconnect=False)
 
     @property
     def ticker(self) -> KiteTicker:

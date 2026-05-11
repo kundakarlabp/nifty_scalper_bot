@@ -28,8 +28,9 @@ from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-_DIRECT_DIRECTIONAL = {'smc', 'vwap', 'cpr', 'order_flow', 'bb_squeeze', 'orb'}
-_CONTEXT_ONLY = {'oi_max_pain'}
+_PRODUCTION_DIRECTIONAL = {'smc', 'vwap', 'order_flow', 'bb_squeeze', 'orb'}
+_CONTEXT_ONLY = {'oi_max_pain', 'order_flow'}
+_DISABLED_UNTIL_FEATURE_COMPLETE = {'cpr', 'rsi_div'}
 _EXPIRY_ONLY = {'gamma_scalping', 'tuesday_gamma_buyer'}
 _THETA_ONLY = {'straddle'}
 
@@ -94,9 +95,18 @@ def build_elite_strategies(
                 if field_name in _EXPIRY_ONLY or field_name in _THETA_ONLY:
                     disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                     continue
+                if field_name not in _PRODUCTION_DIRECTIONAL and field_name not in _CONTEXT_ONLY:
+                    disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                    continue
+                if field_name in _DISABLED_UNTIL_FEATURE_COMPLETE:
+                    if field_name == 'cpr' and str(os.getenv('ENABLE_CPR_EXPERIMENTAL', 'false')).strip().lower() not in {'1','true','yes','on'}:
+                        disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                        continue
+                    if field_name == 'rsi_div' and str(os.getenv('ENABLE_RSI_DIVERGENCE_EXPERIMENTAL', 'false')).strip().lower() not in {'1','true','yes','on'}:
+                        disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                        continue
                 if field_name in _CONTEXT_ONLY:
                     context_names.append(strategy_cls.__name__.replace('Strategy', ''))
-                    continue
             if field_name in _EXPIRY_ONLY and not (
                 strategy_mode == 'expiry_gamma' and allow_expiry_gamma
             ):

@@ -76,10 +76,13 @@ class RSIDivergenceStrategy(EliteStrategy):
             if strategy_score < 3.5:
                 self._no_vote('low_score')
                 return None
+            source_symbol = str(indicators.get('source_symbol') or '').strip()
+            source_domain = 'underlying_price' if source_symbol else 'option_premium'
             metadata = {
                 'strategy': 'RSIDivergence',
                 'strategy_name': 'RSIDivergence',
                 'role': 'trigger',
+                'source_domain': source_domain,
                 'signal_family': 'directional_trigger',
                 'trade_side': side,
                 'side': side,

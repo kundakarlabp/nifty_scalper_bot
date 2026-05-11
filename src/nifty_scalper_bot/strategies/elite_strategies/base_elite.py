@@ -168,6 +168,14 @@ class EliteStrategy(Strategy):
             )
 
             if elite_signal:
+                min_conf = max(0.0, min(float(self._config.min_confidence) / 100.0, 1.0))
+                if float(elite_signal.confidence) < min_conf:
+                    self._no_vote('below_strategy_min_confidence')
+                    LOGGER.info(
+                        'Condition met: below strategy min confidence',
+                        extra={'event': 'elite_strategy_below_min_conf', 'strategy': self.name},
+                    )
+                    return None
                 LOGGER.info(
                     'Condition met: elite signal generated',
                     extra={'event': 'elite_strategy_signal', 'strategy': self.name},
@@ -250,7 +258,7 @@ class EliteStrategy(Strategy):
     def _evaluate_signal(
         self, 
         symbol: str = "", 
-        indicators: Dict[str, Any] = {}, 
+        indicators: Dict[str, Any] | None = None, 
         current_price: float = 0.0, 
         position: Any | None = None
     ) -> EliteSignal | None:
@@ -266,6 +274,7 @@ class EliteStrategy(Strategy):
         self._signals_generated += 1
 
         # 1. Consolidate all extra data into metadata
+        canonical_reason = elite_signal.strategy_name or self.name
         metadata = elite_signal.metadata.copy()
         metadata.update({
             "strategy": self.name,
@@ -283,7 +292,7 @@ class EliteStrategy(Strategy):
             action=elite_signal.signal,
             symbol=elite_signal.symbol,
             confidence=elite_signal.confidence,
-            reason=f"{self.name} Signal",  # Map 'tag' to mandatory 'reason' field
+            reason=canonical_reason,
             quantity=elite_signal.quantity,       # <--- Added mandatory arg
             stop_loss=elite_signal.stop_loss,     # <--- Added mandatory arg
             take_profit=elite_signal.target,
