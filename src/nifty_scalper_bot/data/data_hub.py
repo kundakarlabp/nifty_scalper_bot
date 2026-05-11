@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import sqrt
 
 import pandas as pd
@@ -146,6 +146,7 @@ class DataHub:
         self._iv_cache: Dict[str, float] = {}
         self._oi_cache: Dict[str, float] = {}
         self._greeks_cache: Dict[str, dict[str, float]] = {}
+        self._warm_symbol_cache: dict[str, datetime] = {}
 
         self._clock = kwargs.get("clock") or time.time
         self._now = kwargs.get("clock") or time.time
@@ -1474,6 +1475,21 @@ class DataHub:
             return None
         return float(spot) * float(iv) * sqrt(float(days) / 365.0)
 
+
+    def _touch_warm_symbol_cache(self, symbol: str) -> None:
+        """Track recently hydrated option symbols. Args: symbol. Returns: None. Raises: none."""
+        normalized = self._canonical_quote_symbol(symbol)
+        self._warm_symbol_cache[normalized] = datetime.now(timezone.utc)
+        max_size = int(os.getenv("OPTION_HISTORY_WARM_CACHE_SIZE", "5") or "5")
+        stale_before = datetime.now(timezone.utc) - timedelta(minutes=15)
+        stale = [sym for sym, ts in self._warm_symbol_cache.items() if ts < stale_before]
+        for sym in stale:
+            self._warm_symbol_cache.pop(sym, None)
+        if len(self._warm_symbol_cache) > max_size:
+            ordered = sorted(self._warm_symbol_cache.items(), key=lambda item: item[1])
+            for sym, _ in ordered[:-max_size]:
+                self._warm_symbol_cache.pop(sym, None)
+
     async def hydrate_symbol_history(
         self,
         symbol: str,
@@ -1486,13 +1502,16 @@ class DataHub:
         """Delegate symbol hydration to MDM. Args: symbol/interval/days/max_bars/reason. Returns: rows. Raises: none."""
         mdm_fn = getattr(self._mdm, "hydrate_symbol_history", None)
         if callable(mdm_fn):
-            return await mdm_fn(
+            rows = await mdm_fn(
                 symbol,
                 interval=interval,
                 days=days,
                 max_bars=max_bars,
                 reason=reason,
             )
+            if rows:
+                self._touch_warm_symbol_cache(symbol)
+            return rows
         rows = await self.fetch_history(symbol, interval, days)
         return list(rows or [])[-max_bars:]
 

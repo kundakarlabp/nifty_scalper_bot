@@ -59,6 +59,11 @@ from nifty_scalper_bot.utils.errors import ConfigurationError
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+OPTION_STICKY_SECONDS: int = 120
+OPTION_RESELECTION_MIN_MOVE: float = 80.0
+OPTION_FORCE_RESELECT_AFTER_SECONDS: int = 300
+OPTION_HISTORY_WARM_CACHE_SIZE: int = 5
+
 
 
 def _ensure_env_loaded_before_settings() -> None:

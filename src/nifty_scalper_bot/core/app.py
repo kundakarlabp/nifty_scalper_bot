@@ -2000,6 +2000,8 @@ class BotContext:
     active_trading_universe: dict[str, Any] = field(default_factory=dict)
     message_bus_tick_subscribed: bool = False
     datahub_runner_subscriptions: set[str] = field(default_factory=set)
+    execution_locked_symbols: set[str] = field(default_factory=set)
+    execution_lock_timestamps: dict[str, datetime] = field(default_factory=dict)
     message_bus_running: bool = False
     deferred_basket_retry_started: bool = False
     deferred_basket_retry_task: asyncio.Task[Any] | None = None
@@ -6794,6 +6796,11 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ctx.selected_pe = selected_pe
     ctx.atm_ce_symbol = selected_ce
     ctx.atm_pe_symbol = selected_pe
+    now_utc = datetime.now(timezone.utc)
+    for _sym in (selected_ce, selected_pe):
+        if _sym:
+            ctx.execution_locked_symbols.add(_sym)
+            ctx.execution_lock_timestamps[_sym] = now_utc
     option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if s]
     atm_strike = basket.get("atm_strike")
     LOGGER.info("OPTION_SELECTION_FINAL selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d", selected_ce, selected_pe, atm_strike, len(option_symbols))
@@ -9113,6 +9120,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
 
                         for sym in drop_symbols:
+                            lock_ts = ctx.execution_lock_timestamps.get(sym)
+                            lock_age_s = (datetime.now(timezone.utc) - lock_ts).total_seconds() if lock_ts is not None else None
+                            sticky_seconds = int(os.getenv("OPTION_STICKY_SECONDS", "120") or "120")
+                            if sym in ctx.execution_locked_symbols and (lock_age_s is None or lock_age_s < sticky_seconds):
+                                LOGGER.info("EXECUTION_UNIVERSE_STICKY_KEEP symbol=%s lock_age_s=%s", sym, lock_age_s)
+                                continue
+                            ctx.execution_locked_symbols.discard(sym)
+                            ctx.execution_lock_timestamps.pop(sym, None)
                             removed_from_mdm = False
                             removed_from_datahub = False
                             removed_from_runner = False

@@ -747,6 +747,8 @@ class StrategyRunner:
         # STEP 5: counter for "invalid data" drops — never silently discarded
         self._invalid_data_skip_counter: int = 0
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
+        self._recent_history_cache: dict[str, list[OneMinuteBar]] = {}
+        self._restored_from_cache_symbols: set[str] = set()
         self._hydration_ready_streak: dict[str, int] = {}
         self._frozen_universe: set[str] = set()
         self._vwap_state: dict[str, dict[str, Any]] = {}
@@ -1180,6 +1182,11 @@ class StrategyRunner:
         if running:
             self._subscribe_symbol(normalized)
 
+        cached = self._recent_history_cache.get(normalized) or []
+        if cached:
+            self._symbol_history[normalized] = list(cached)
+            self._restored_from_cache_symbols.add(normalized)
+            self._logger.info("RUNNER_HISTORY_CACHE_RESTORED symbol=%s bars=%d", normalized, len(cached))
         self._hydrate_from_mdm_cache(normalized)
 
         self._logger.info("Tracking symbol %s", normalized)
@@ -1428,6 +1435,11 @@ class StrategyRunner:
                 return
 
             state.active = False
+            history = list(self._symbol_history.get(normalized) or [])
+            if history:
+                keep = max(self._context_required_bars, self._option_required_bars)
+                self._recent_history_cache[normalized] = history[-keep:]
+                self._logger.info("RUNNER_HISTORY_CACHE_PRESERVED symbol=%s bars=%d", normalized, len(self._recent_history_cache[normalized]))
             self._active_symbols.discard(normalized)
             self._tracked_symbols.discard(normalized)
             self._live_symbols.discard(normalized)
@@ -5384,25 +5396,13 @@ class StrategyRunner:
                 )
                 return False
             required_bars = self._required_bars_for_symbol(symbol)
-            if self._is_tradable_symbol(symbol):
-                min_live_bars = int(os.getenv("OPTION_MIN_LIVE_BARS", "1"))
-                capped_required = max(1, min(required_bars, min_live_bars))
-                if capped_required != required_bars:
-                    self._logger.info(
-                        "OPTION_LIVE_BARS_REQUIREMENT_CAPPED symbol=%s required=%d capped_required=%d",
-                        symbol,
-                        required_bars,
-                        capped_required,
-                        extra={
-                            "event": "OPTION_LIVE_BARS_REQUIREMENT_CAPPED",
-                            "symbol": symbol,
-                            "required": required_bars,
-                            "capped_required": capped_required,
-                        },
-                    )
-                    required_bars = capped_required
+            option_execution_min_bars = int(os.getenv("OPTION_EXECUTION_MIN_BARS", "5") or "5")
+            required_bars = max(required_bars, option_execution_min_bars)
+            history_count = len(self._indicator_engine.get_history(symbol) or [])
+            restored_from_cache = symbol in self._restored_from_cache_symbols
+            if restored_from_cache and history_count >= required_bars:
+                return True
             if not self._indicator_engine.has_min_bars(symbol, required_bars):
-                history_count = len(self._indicator_engine.get_history(symbol) or [])
                 if history_count < required_bars:
                     if self._is_context_symbol(symbol):
                         if symbol == "NSE:NIFTY" and self._should_log_throttled(f"spot_cold:{symbol}", 120.0):
