@@ -2223,10 +2223,7 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             strategy_name = str(getattr(strategy, "name", "") or "")
-            if strategy_name in {"VWAPPro", "OrderFlow"} and (
-                (symbol_is_future or not symbol_is_option)
-                and direction_bias not in {"CE", "PE"}
-            ):
+            if strategy_name in {"VWAPPro", "OrderFlow"} and not symbol_is_option:
                 no_vote_reason_counts["context_symbol_skipped_for_option_strategy"] = (
                     no_vote_reason_counts.get(
                         "context_symbol_skipped_for_option_strategy", 0

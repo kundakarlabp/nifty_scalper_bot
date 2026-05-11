@@ -29,7 +29,7 @@ class BBSqueezeStrategy(EliteStrategy):
         try:
             self._no_vote("stale_or_invalid_data")
             if symbol.upper().endswith(('CE', 'PE')) and not indicators.get('source_symbol'):
-                self._no_vote('invalid_price_domain')
+                self._no_vote('domain_skip_option_symbol')
                 return None
             upper = float(indicators.get('bollinger_upper') or 0.0)
             lower = float(indicators.get('bollinger_lower') or 0.0)
