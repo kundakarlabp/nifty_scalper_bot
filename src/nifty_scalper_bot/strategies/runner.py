@@ -1925,6 +1925,22 @@ class StrategyRunner:
             extra={"event": "RUNNER_ACTIVE_OPTION_CONTEXT", "selected_ce": self._active_selected_ce, "selected_pe": self._active_selected_pe, "atm_strike": self._active_atm_strike, "option_count": len(self._active_option_symbols)},
         )
 
+    def set_active_trading_universe(self, basket: Mapping[str, Any]) -> None:
+        """Set active trading universe snapshot. Args: basket. Returns: none. Raises: none."""
+        option_symbols = basket.get("option_symbols") or basket.get("symbols") or []
+        self.set_active_option_context(
+            selected_ce=cast(str | None, basket.get("selected_ce") or basket.get("atm_ce")),
+            selected_pe=cast(str | None, basket.get("selected_pe") or basket.get("atm_pe")),
+            atm_strike=cast(int | float | str | None, basket.get("atm_strike")),
+            option_symbols=cast(list[str] | tuple[str, ...] | set[str], option_symbols),
+        )
+        self._logger.info(
+            "RUNNER_ACTIVE_BASKET_UPDATED selected_ce=%s selected_pe=%s option_count=%d",
+            self._active_selected_ce,
+            self._active_selected_pe,
+            len(self._active_option_symbols),
+        )
+
     def set_runtime_readiness(
         self,
         *,

@@ -7074,6 +7074,49 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, block_reason)
     if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
         ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols)
+
+
+def _commit_active_dynamic_basket(
+    ctx: BotContext,
+    *,
+    basket: Mapping[str, object],
+    option_symbols: Sequence[str],
+    symbols: Sequence[str],
+    atm_strike: int | float | str | None,
+) -> tuple[str | None, str | None]:
+    """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
+    current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
+    current_symbols = [str(sym) for sym in symbols if sym]
+    picked_ce, picked_pe = pick_atm_option_symbols_from_basket(basket)
+    selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or picked_ce or "") or None
+    selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or picked_pe or "") or None
+    active_set = set(current_options) | set(current_symbols)
+    if not (selected_ce and selected_ce.endswith("CE") and selected_ce in active_set):
+        selected_ce = next((sym for sym in current_options if sym.endswith("CE")), None)
+    if not (selected_pe and selected_pe.endswith("PE") and selected_pe in active_set):
+        selected_pe = next((sym for sym in current_options if sym.endswith("PE")), None)
+    ctx.selected_ce = selected_ce
+    ctx.selected_pe = selected_pe
+    ctx.atm_ce_symbol = selected_ce
+    ctx.atm_pe_symbol = selected_pe
+    committed = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
+    committed.update(
+        {
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "atm_ce": selected_ce,
+            "atm_pe": selected_pe,
+            "option_symbols": list(current_options),
+            "symbols": list(current_symbols),
+            "atm_strike": atm_strike,
+            "committed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    ctx.active_trading_universe = committed
+    runner = getattr(ctx, "strategy_runner", None)
+    if runner is not None and hasattr(runner, "set_active_trading_universe"):
+        runner.set_active_trading_universe(committed)
+    return selected_ce, selected_pe
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
@@ -9219,13 +9262,32 @@ async def startup_sequence(ctx: BotContext) -> None:
                         # where each option sits in the live lifecycle.
                         if add_symbols or drop_symbols:
                             try:
+                                basket_symbols = [
+                                    str(sym)
+                                    for sym in dict.fromkeys(
+                                        ["NSE:NIFTY", *sorted(latest_symbols)]
+                                    )
+                                ]
+                                committed_ce, committed_pe = _commit_active_dynamic_basket(
+                                    ctx,
+                                    basket=cast(
+                                        Mapping[str, object],
+                                        getattr(ctx, "active_trading_universe", {}) or {},
+                                    ),
+                                    option_symbols=sorted(latest_symbols),
+                                    symbols=basket_symbols,
+                                    atm_strike=cast(
+                                        int | float | str | None,
+                                        (getattr(ctx, "active_trading_universe", {}) or {}).get("atm_strike"),
+                                    ),
+                                )
                                 for _sym in add_symbols:
                                     _tok = active_symbol_tokens.get(_sym)
                                     _emit_option_symbol_pipeline_status(
                                         ctx,
                                         symbol=_sym,
                                         token=_tok,
-                                        selected=_is_selected_trade_symbol(ctx, sym),
+                                        selected=_sym in {committed_ce, committed_pe},
                                         hydrated_bars=(
                                             len(
                                                 ctx.market_data_manager.get_ohlc_bars(
@@ -9239,6 +9301,36 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         runner_added=bool(ctx.strategy_runner),
                                         source="dynamic_universe",
                                         reason="post_universe_sync",
+                                    )
+                                ce_bars = (
+                                    len(ctx.market_data_manager.get_ohlc_bars(committed_ce) or [])
+                                    if committed_ce and ctx.market_data_manager is not None
+                                    else 0
+                                )
+                                pe_bars = (
+                                    len(ctx.market_data_manager.get_ohlc_bars(committed_pe) or [])
+                                    if committed_pe and ctx.market_data_manager is not None
+                                    else 0
+                                )
+                                LOGGER.info(
+                                    "ACTIVE_DYNAMIC_BASKET_COMMITTED selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d ce_ready=%s pe_ready=%s",
+                                    committed_ce,
+                                    committed_pe,
+                                    (getattr(ctx, "active_trading_universe", {}) or {}).get("atm_strike"),
+                                    len(latest_symbols),
+                                    ce_bars >= _symbol_history_requirement(ctx),
+                                    pe_bars >= _symbol_history_requirement(ctx),
+                                )
+                                if committed_ce and committed_pe:
+                                    await _recompute_and_push_runtime_readiness(
+                                        ctx,
+                                        reason="dynamic_basket_committed",
+                                    )
+                                else:
+                                    LOGGER.info(
+                                        "LIVE_READINESS_DEFERRED reason=dynamic_basket_not_committed_yet selected_ce=%s selected_pe=%s",
+                                        committed_ce,
+                                        committed_pe,
                                     )
                                 _emit_trading_universe_summary(
                                     ctx,

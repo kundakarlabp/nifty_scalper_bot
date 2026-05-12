@@ -16,6 +16,9 @@ class _Runner:
     def set_runtime_readiness(self, **kwargs):
         self.calls.append(kwargs)
 
+    def set_active_trading_universe(self, basket):
+        self.basket = basket
+
 
 def _ctx(mdm):
     return SimpleNamespace(
@@ -99,3 +102,33 @@ def test_gate_runner_symbol_add_discards_pending_when_quote_ready() -> None:
     pending = {'NFO:NIFTY24600CE'}
     assert app._gate_runner_symbol_add(ctx, 'NFO:NIFTY24600CE', pending) is True
     assert 'NFO:NIFTY24600CE' not in pending
+
+
+@pytest.mark.asyncio
+async def test_dynamic_basket_commit_sets_selected_symbols_and_readiness() -> None:
+    class _Snap:
+        def __init__(self) -> None:
+            self.ltp = 1.0
+            self.tick_age_s = 1.0
+            self.tradable_quote = True
+            self.bid = 0.9
+            self.ask = 1.1
+
+    mdm = SimpleNamespace(
+        get_ohlc_bars=lambda s: list(range(60)),
+        get_symbol_snapshot=lambda s: _Snap(),
+    )
+    ctx = _ctx(mdm)
+    ctx.active_trading_universe = {'spot_symbol': 'NSE:NIFTY', 'atm_strike': 24600}
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket=ctx.active_trading_universe,
+        option_symbols=['NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'],
+        symbols=['NSE:NIFTY', 'NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'],
+        atm_strike=24600,
+    )
+    await app._recompute_and_push_runtime_readiness(ctx, reason='dynamic_basket_committed')
+    assert ctx.selected_ce == 'NFO:NIFTY24600CE'
+    assert ctx.selected_pe == 'NFO:NIFTY24600PE'
+    assert ctx.data_hard_ready is True
+    assert ctx.evaluation_ready is True

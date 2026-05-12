@@ -38,6 +38,11 @@ def pick_atm_option_symbols_from_basket(
         atm_strike = int(float(atm_raw)) if atm_raw is not None else None
     except Exception:
         atm_strike = None
+    valid_symbols = set(option_symbols)
+    if selected_ce and (not selected_ce.endswith('CE') or selected_ce not in valid_symbols):
+        selected_ce = None
+    if selected_pe and (not selected_pe.endswith('PE') or selected_pe not in valid_symbols):
+        selected_pe = None
     if selected_ce and selected_pe:
         return selected_ce, selected_pe
 
