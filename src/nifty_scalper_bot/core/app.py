@@ -322,30 +322,81 @@ def sync_symbol_history_to_runner(
     runner_after = 0
     ingested = 0
     ready = False
+    safe_required_bars = max(1, int(required_bars or 1))
     try:
         if mdm is None or runner is None:
-            logger.info('SELECTED_OPTION_HYDRATION_SYNC_RESULT symbol=%s mdm_before=%s runner_before=%s runner_after=%s required=%s ready=%s reason=%s', symbol, 0, 0, 0, required_bars, False, reason)
-            return {'symbol': symbol, 'mdm_before': 0, 'runner_before': 0, 'runner_after': 0, 'required': required_bars, 'ready': False, 'ingested': 0}
+            logger.info(
+                'SELECTED_OPTION_HYDRATION_SYNC_RESULT symbol=%s mdm_before=%s '
+                'runner_before=%s runner_after=%s required=%s ready=%s reason=%s',
+                symbol,
+                0,
+                0,
+                0,
+                safe_required_bars,
+                False,
+                reason,
+            )
+            return {
+                'symbol': symbol,
+                'mdm_before': 0,
+                'runner_before': 0,
+                'runner_after': 0,
+                'required': safe_required_bars,
+                'ready': False,
+                'ingested': 0,
+            }
         bars = list(mdm.get_ohlc_bars(symbol) or [])
         mdm_before = len(bars)
         engine = getattr(runner, '_indicator_engine', None)
         if engine is not None:
             runner_before = len(engine.get_history(symbol) or [])
-        if runner_before < required_bars and mdm_before >= required_bars:
-            for bar in bars[-required_bars:]:
+        if runner_before < safe_required_bars and mdm_before >= safe_required_bars:
+            for bar in bars[-safe_required_bars:]:
                 try:
                     runner.ingest_historical_bar({**dict(bar), 'symbol': symbol})
                     ingested += 1
                 except Exception as exc:
-                    logger.error('Failure in sync_symbol_history_to_runner: %s', exc)
+                    logger.error(
+                        'Failure in sync_symbol_history_to_runner: %s',
+                        exc,
+                        exc_info=True,
+                    )
         if engine is not None:
             runner_after = len(engine.get_history(symbol) or [])
-        ready = runner_after >= required_bars
-        logger.info('RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%s source=%s runner_history_count=%s mdm_history_count=%s', symbol, None, ingested, reason, runner_after, mdm_before)
-        logger.info('SELECTED_OPTION_HYDRATION_SYNC_RESULT symbol=%s mdm_before=%s runner_before=%s runner_after=%s required=%s ready=%s', symbol, mdm_before, runner_before, runner_after, required_bars, ready)
+        ready = runner_after >= safe_required_bars
+        logger.info(
+            'RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%s source=%s '
+            'runner_history_count=%s mdm_history_count=%s',
+            symbol,
+            None,
+            ingested,
+            reason,
+            runner_after,
+            mdm_before,
+        )
+        logger.info(
+            'SELECTED_OPTION_HYDRATION_SYNC_RESULT symbol=%s mdm_before=%s '
+            'runner_before=%s runner_after=%s required=%s ready=%s',
+            symbol,
+            mdm_before,
+            runner_before,
+            runner_after,
+            safe_required_bars,
+            ready,
+        )
     except Exception as exc:
         logger.error('Failure in sync_symbol_history_to_runner: %s', exc, exc_info=True)
-    return {'symbol': symbol, 'mdm_before': mdm_before, 'runner_before': runner_before, 'runner_after': runner_after, 'required': required_bars, 'ready': ready, 'ingested': ingested}
+    return {
+        'symbol': symbol,
+        'mdm_before': mdm_before,
+        'runner_before': runner_before,
+        'runner_after': runner_after,
+        'required': safe_required_bars,
+        'ready': ready,
+        'ingested': ingested,
+    }
+
+
 def _gate_runner_symbol_add(
     ctx: Any,
     symbol: str,
