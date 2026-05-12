@@ -598,6 +598,8 @@ class StrategyRunner:
         self._runtime_evaluation_ready = False
         self._runtime_live_orders_armed = False
         self._runtime_readiness_reason: str | None = None
+        self._runtime_startup_ready = False
+        self._startup_gate_last_log_ts = 0.0
         self._active_selected_ce: str | None = None
         self._active_selected_pe: str | None = None
         self._active_atm_strike: int | None = None
@@ -1908,8 +1910,10 @@ class StrategyRunner:
                 atm_value = int(float(atm_strike))
             except (TypeError, ValueError):
                 atm_value = None
-        self._active_selected_ce = selected_ce_norm
-        self._active_selected_pe = selected_pe_norm
+        if selected_ce_norm:
+            self._active_selected_ce = selected_ce_norm
+        if selected_pe_norm:
+            self._active_selected_pe = selected_pe_norm
         self._active_atm_strike = atm_value
         self._active_option_symbols = {normalize_symbol(str(sym)) for sym in (option_symbols or []) if sym}
         self._logger.info(
@@ -1938,8 +1942,21 @@ class StrategyRunner:
         self._runtime_evaluation_ready = bool(evaluation_ready)
         self._runtime_live_orders_armed = bool(live_orders_armed)
         self._runtime_readiness_reason = reason
+        self._runtime_startup_ready = bool(
+            self._runtime_data_hard_ready and self._runtime_evaluation_ready
+        )
         if any(value is not None for value in (selected_ce, selected_pe, atm_strike, option_symbols)):
             self.set_active_option_context(selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=atm_strike, option_symbols=option_symbols)
+        self._logger.info(
+            "RUNNER_STARTUP_READINESS_UPDATE startup_ready=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s selected_ce=%s selected_pe=%s",
+            self._runtime_startup_ready,
+            self._runtime_data_hard_ready,
+            self._runtime_evaluation_ready,
+            self._runtime_live_orders_armed,
+            self._runtime_readiness_reason,
+            self._active_selected_ce,
+            self._active_selected_pe,
+        )
 
     async def _prepare_signal_for_handling(
         self,
@@ -6266,6 +6283,21 @@ class StrategyRunner:
                     trace_id=trace_id,
                 )
                 return
+            if not bool(self._runtime_startup_ready):
+                now_mono = time_module.monotonic()
+                if now_mono - float(self._startup_gate_last_log_ts) >= 5.0:
+                    self._startup_gate_last_log_ts = now_mono
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="phase6",
+                        reason=str(
+                            self._runtime_readiness_reason
+                            or "startup_pipeline_incomplete"
+                        ),
+                        allowed=False,
+                        trace_id=trace_id,
+                    )
+                return
 
             # =================================================================
             # PHASE 7: STRATEGY PREPARATION
@@ -6567,6 +6599,14 @@ class StrategyRunner:
 
             self._last_global_eval_ts = time.monotonic()
             signal = generated_signal
+            upstream_version = int(
+                tick.get("candle_version")
+                or tick.get("version")
+                or tick.get("data_version")
+                or 0
+            )
+            if upstream_version > int(self._candle_versions.get(symbol, 0)):
+                self._candle_versions[symbol] = upstream_version
             current_version = int(self._candle_versions.get(symbol, 0))
             last_version = int(self._last_strategy_versions.get(symbol, 0))
             candle_count = len(self._indicator_engine.get_history(symbol) or [])

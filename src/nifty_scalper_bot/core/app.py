@@ -7029,6 +7029,20 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
             return bool(mdm.get_symbol_snapshot(sym))
         except Exception:
             return False
+    def _subscription_confirmed(sym: str | None) -> bool:
+        if not sym or mdm is None:
+            return False
+        try:
+            token = None
+            resolve_token = getattr(mdm, "_resolve_token_for_symbol", None)
+            if callable(resolve_token):
+                token = resolve_token(sym)
+            if token is None:
+                token = getattr(mdm, "_symbol_to_token", {}).get(sym)
+            confirmed = getattr(mdm, "_confirmed_subscriptions", set()) or set()
+            return bool(token is not None and int(token) in confirmed)
+        except Exception:
+            return False
     spot_ready = _quote(spot_symbol) or _bars(spot_symbol) >= 1
     option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "20")) or 20)
     option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
@@ -7040,6 +7054,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     pe_bars, pe_mdm_bars, pe_runner_bars = _readiness_bars(selected_pe)
     ce_quote_fresh = _quote(selected_ce)
     pe_quote_fresh = _quote(selected_pe)
+    ce_subscribed = _subscription_confirmed(selected_ce)
+    pe_subscribed = _subscription_confirmed(selected_pe)
     ce_eval_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_eval_min_live_bars
     pe_eval_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_eval_min_live_bars
     ce_exec_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_execution_min_bars
@@ -7052,7 +7068,13 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         spot_quote_fresh and fut_bars >= context_execution_min_bars
     )
     full_basket_ready = all((_quote(s) or _bars(s) >= 20) for s in option_symbols if s.endswith(("CE", "PE")))
-    data_hard_ready = bool(spot_ready and ce_eval_ready and pe_eval_ready)
+    data_hard_ready = bool(
+        spot_ready
+        and ce_eval_ready
+        and pe_eval_ready
+        and ce_subscribed
+        and pe_subscribed
+    )
     runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
     evaluation_ready = bool(data_hard_ready and runner_running)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
@@ -7073,10 +7095,12 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = None if live_orders_armed else "startup_pipeline_incomplete"
     LOGGER.info(
-        "LIVE_READINESS_COMPUTED spot_ready=%s ce_eval_ready=%s pe_eval_ready=%s ce_exec_ready=%s pe_exec_ready=%s full_basket_ready=%s selected_ce=%s selected_pe=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s",
+        "LIVE_READINESS_COMPUTED spot_ready=%s ce_eval_ready=%s pe_eval_ready=%s ce_subscribed=%s pe_subscribed=%s ce_exec_ready=%s pe_exec_ready=%s full_basket_ready=%s selected_ce=%s selected_pe=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s",
         spot_ready,
         ce_eval_ready,
         pe_eval_ready,
+        ce_subscribed,
+        pe_subscribed,
         ce_exec_ready,
         pe_exec_ready,
         full_basket_ready,
