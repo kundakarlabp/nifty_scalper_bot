@@ -44,6 +44,7 @@ import pytz
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
 
 from nifty_scalper_bot.config.paths import get_data_dir
+from nifty_scalper_bot.core.active_basket import pick_atm_option_symbols_from_basket
 
 from nifty_scalper_bot.data.robust_provider import (
     CircuitBreakerConfig,
@@ -6900,45 +6901,8 @@ def _count_symbol_bars(ctx: BotContext, symbol: str | None) -> int:
 
 
 def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str | None, str | None]:
-    """Pick ATM CE/PE from basket fields/options. Args: basket. Returns: (ce, pe). Raises: none."""
-    selected_ce = cast(str | None, basket.get("atm_ce") or basket.get("selected_ce"))
-    selected_pe = cast(str | None, basket.get("atm_pe") or basket.get("selected_pe"))
-    option_symbols = [
-        str(s)
-        for s in list(basket.get("option_symbols") or basket.get("symbols") or [])
-        if str(s).endswith(("CE", "PE"))
-    ]
-    atm_raw = basket.get("atm_strike")
-    try:
-        atm_strike = int(float(atm_raw)) if atm_raw is not None else None
-    except Exception:
-        atm_strike = None
-    if selected_ce and selected_pe:
-        return selected_ce, selected_pe
-
-    def _extract_strike(symbol: str) -> int | None:
-        digits = ""
-        base = symbol[:-2] if symbol.endswith(("CE", "PE")) else symbol
-        for ch in reversed(base):
-            if ch.isdigit():
-                digits = ch + digits
-            elif digits:
-                break
-        return int(digits) if digits else None
-
-    ce_candidates = [s for s in option_symbols if s.endswith("CE")]
-    pe_candidates = [s for s in option_symbols if s.endswith("PE")]
-    if not selected_ce and ce_candidates:
-        selected_ce = min(
-            ce_candidates,
-            key=lambda s: abs((_extract_strike(s) or 0) - (atm_strike or (_extract_strike(s) or 0))),
-        )
-    if not selected_pe and pe_candidates:
-        selected_pe = min(
-            pe_candidates,
-            key=lambda s: abs((_extract_strike(s) or 0) - (atm_strike or (_extract_strike(s) or 0))),
-        )
-    return selected_ce, selected_pe
+    """Compatibility wrapper for basket symbol selection. Args: basket. Returns: ce/pe. Raises: none."""
+    return pick_atm_option_symbols_from_basket(basket)
 
 
 async def _ensure_selected_options_hydrated(
@@ -6956,8 +6920,13 @@ async def _ensure_selected_options_hydrated(
         before_runner_bars = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
         if before_mdm_bars >= required_bars and before_runner_bars >= required_bars:
             continue
-        await mdm.hydrate_symbol_history(sym, interval="minute", days=_history_lookback_days(required_bars), max_bars=required_bars, reason=f"{reason}_selected_option_force_hydration")
-        bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
+        hydrate_fn = getattr(mdm, "hydrate_symbol_history", None)
+        if callable(hydrate_fn):
+            await hydrate_fn(sym, interval="minute", days=_history_lookback_days(required_bars), max_bars=required_bars, reason=f"{reason}_selected_option_force_hydration")
+        try:
+            bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
+        except TypeError:
+            bars = mdm.get_ohlc_bars(sym) or []
         for row in bars:
             if not isinstance(row, Mapping):
                 continue
@@ -6965,7 +6934,9 @@ async def _ensure_selected_options_hydrated(
             bar_data["symbol"] = sym
             if runner is not None and hasattr(runner, "ingest_historical_bar"):
                 runner.ingest_historical_bar(bar_data)
-        mdm.update_hydration_status(sym, mdm.get_ohlc_bars(sym))
+        update_fn = getattr(mdm, "update_hydration_status", None)
+        if callable(update_fn):
+            update_fn(sym, mdm.get_ohlc_bars(sym))
         after_mdm_bars = len(mdm.get_ohlc_bars(sym) or [])
         after_runner_bars = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
         LOGGER.info(
@@ -6977,159 +6948,132 @@ async def _ensure_selected_options_hydrated(
 async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
     """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
     basket = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
-    selected_ce, selected_pe = _pick_atm_option_symbols_from_basket(basket)
+    mdm = getattr(ctx, "market_data_manager", None)
     old_ce = getattr(ctx, "selected_ce", None)
     old_pe = getattr(ctx, "selected_pe", None)
-    selected_ce = selected_ce or basket.get("selected_ce") or basket.get("atm_ce") or old_ce
-    selected_pe = selected_pe or basket.get("selected_pe") or basket.get("atm_pe") or old_pe
-    LOGGER.info(
-        "SELECTED_OPTION_CONTEXT_REFRESH old_ce=%s old_pe=%s new_ce=%s new_pe=%s atm_strike=%s source=%s",
-        old_ce, old_pe, selected_ce, selected_pe, basket.get("atm_strike"), reason,
-    )
+    option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if s]
+    picked_ce, picked_pe = pick_atm_option_symbols_from_basket(basket)
+    selected_ce = cast(str | None, basket.get("selected_ce") or basket.get("atm_ce") or picked_ce)
+    selected_pe = cast(str | None, basket.get("selected_pe") or basket.get("atm_pe") or picked_pe)
+    if not selected_ce and old_ce in option_symbols:
+        selected_ce = old_ce
+    if not selected_pe and old_pe in option_symbols:
+        selected_pe = old_pe
+    basket.update({"selected_ce": selected_ce, "selected_pe": selected_pe, "option_symbols": option_symbols, "symbols": option_symbols})
+    ctx.active_trading_universe = basket
     ctx.selected_ce = selected_ce
     ctx.selected_pe = selected_pe
     ctx.atm_ce_symbol = selected_ce
     ctx.atm_pe_symbol = selected_pe
-    now_utc = datetime.now(timezone.utc)
-    for _sym in (selected_ce, selected_pe):
-        if _sym:
-            ctx.execution_locked_symbols.add(_sym)
-            ctx.execution_lock_timestamps[_sym] = now_utc
-    option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if s]
-    atm_strike = basket.get("atm_strike")
-    LOGGER.info("OPTION_SELECTION_FINAL selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d", selected_ce, selected_pe, atm_strike, len(option_symbols))
-
-    mdm = getattr(ctx, "market_data_manager", None)
-    spot_symbol = str(basket.get("spot_symbol") or "NSE:NIFTY")
-    def _bars(sym: str | None) -> int:
-        if not sym or mdm is None:
-            return 0
-        try:
-            return len(mdm.get_ohlc_bars(sym) or [])
-        except Exception:
-            return 0
-    def _readiness_bars(sym: str | None) -> tuple[int, int, int]:
-        if not sym:
-            return 0, 0, 0
-        mdm_bars = _bars(sym)
-        runner_bars = 0
-        runner = getattr(ctx, "strategy_runner", None)
-        if runner is not None and hasattr(runner, "_indicator_engine"):
-            try:
-                runner_bars = len(runner._indicator_engine.get_history(sym) or [])
-            except Exception:
-                runner_bars = 0
-        effective_bars = min(mdm_bars, runner_bars)
-        LOGGER.info("SELECTED_OPTION_HYDRATION_SYNC_CHECK symbol=%s mdm_bars=%s runner_bars=%s effective_bars=%s", sym, mdm_bars, runner_bars, effective_bars)
-        return effective_bars, mdm_bars, runner_bars
-    def _quote(sym: str | None) -> bool:
-        if not sym or mdm is None:
-            return False
-        try:
-            return bool(mdm.get_symbol_snapshot(sym))
-        except Exception:
-            return False
+    def _snapshot(sym:str|None)->Any:
+        if not sym or mdm is None: return None
+        try: return mdm.get_symbol_snapshot(sym)
+        except Exception: return None
+    def _tick_age_threshold()->float:
+        env=float(os.getenv("READINESS_TICK_MAX_AGE_SECONDS","0") or 0)
+        if env>0: return env
+        return 60.0
+    def _fresh_ltp(sym:str|None,max_age_s:float|None=None)->bool:
+        snap=_snapshot(sym)
+        if snap is None: return False
+        age_limit=max_age_s or _tick_age_threshold()
+        ltp=float(getattr(snap,'ltp',0.0) or 0.0)
+        age=getattr(snap,'tick_age_s',None)
+        if ltp<=0: return False
+        if age is not None:
+            return float(age)<=age_limit
+        last_tick_ts=getattr(mdm,'_last_tick_ts',{}) if mdm is not None else {}
+        ts=last_tick_ts.get(sym) if isinstance(last_tick_ts,dict) else None
+        dt=pd.to_datetime(ts,utc=True,errors='coerce')
+        if pd.isna(dt): return False
+        return (pd.Timestamp.utcnow()-dt).total_seconds()<=age_limit
+    def _tradable_quote(sym:str|None)->bool:
+        if not sym or mdm is None: return False
+        h=getattr(mdm,'has_ws_tradable_quote',None)
+        if callable(h):
+            try: return bool(h(sym))
+            except Exception: pass
+        snap=_snapshot(sym)
+        if snap is None: return False
+        bid=float(getattr(snap,'bid',0.0) or 0.0); ask=float(getattr(snap,'ask',0.0) or 0.0)
+        return bool(getattr(snap,'tradable_quote',False)) and bid>0 and ask>bid
+    def _live_tick_seen(sym:str|None)->bool:
+        if _fresh_ltp(sym): return True
+        if not sym or mdm is None: return False
+        limit=_tick_age_threshold()
+        for attr in ('_last_tick_ts','_last_tick_snapshot'):
+            cache=getattr(mdm,attr,{})
+            if isinstance(cache,dict) and sym in cache:
+                ts=cache.get(sym)
+                dt=pd.to_datetime(ts,utc=True,errors='coerce')
+                if not pd.isna(dt) and (pd.Timestamp.utcnow()-dt).total_seconds()<=limit:
+                    return True
+        return False
     def _subscription_confirmed(sym: str | None) -> bool:
-        if not sym or mdm is None:
-            return False
+        if not sym or mdm is None: return False
         try:
-            token = None
-            resolve_token = getattr(mdm, "_resolve_token_for_symbol", None)
-            if callable(resolve_token):
-                token = resolve_token(sym)
-            if token is None:
-                token = getattr(mdm, "_symbol_to_token", {}).get(sym)
+            token = getattr(mdm, "_resolve_token_for_symbol", lambda _s: None)(sym) or getattr(mdm, "_symbol_to_token", {}).get(sym)
             confirmed = getattr(mdm, "_confirmed_subscriptions", set()) or set()
             return bool(token is not None and int(token) in confirmed)
         except Exception:
             return False
-    spot_ready = _quote(spot_symbol) or _bars(spot_symbol) >= 1
+    def _subscription_or_live_tick(sym:str|None)->bool:
+        sub=_subscription_confirmed(sym)
+        if sub: return True
+        if _live_tick_seen(sym):
+            token=getattr(mdm, "_symbol_to_token", {}).get(sym) if mdm is not None else None
+            LOGGER.info("READINESS_SUBSCRIPTION_PROOF_FROM_LIVE_TICK symbol=%s token=%s", sym, token)
+            return True
+        return False
+    def _bars(sym: str | None) -> int:
+        if not sym or mdm is None: return 0
+        try: return len(mdm.get_ohlc_bars(sym) or [])
+        except Exception: return 0
+    def _readiness_bars(sym: str | None) -> tuple[int, int, int]:
+        mdm_bars=_bars(sym); runner_bars=0
+        runner=getattr(ctx,'strategy_runner',None)
+        if runner is not None and hasattr(runner,'_indicator_engine'):
+            try: runner_bars=len(runner._indicator_engine.get_history(sym) or []) if sym else 0
+            except Exception: runner_bars=0
+        return min(mdm_bars, runner_bars), mdm_bars, runner_bars
+    spot_symbol=str(basket.get('spot_symbol') or 'NSE:NIFTY')
     option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "20")) or 20)
     option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
     context_execution_min_bars = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
-    await _ensure_selected_options_hydrated(
-        ctx, selected_ce, selected_pe, option_execution_min_bars, reason
-    )
+    await _ensure_selected_options_hydrated(ctx, selected_ce, selected_pe, option_execution_min_bars, reason)
     ce_bars, ce_mdm_bars, ce_runner_bars = _readiness_bars(selected_ce)
     pe_bars, pe_mdm_bars, pe_runner_bars = _readiness_bars(selected_pe)
-    ce_quote_fresh = _quote(selected_ce)
-    pe_quote_fresh = _quote(selected_pe)
-    ce_subscribed = _subscription_confirmed(selected_ce)
-    pe_subscribed = _subscription_confirmed(selected_pe)
+    ce_quote_fresh=_fresh_ltp(selected_ce); pe_quote_fresh=_fresh_ltp(selected_pe)
+    ce_exec_ready = bool(selected_ce) and ce_quote_fresh and _tradable_quote(selected_ce) and ce_bars >= option_execution_min_bars
+    pe_exec_ready = bool(selected_pe) and pe_quote_fresh and _tradable_quote(selected_pe) and pe_bars >= option_execution_min_bars
     ce_eval_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_eval_min_live_bars
     pe_eval_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_eval_min_live_bars
-    ce_exec_ready = bool(selected_ce) and ce_quote_fresh and ce_bars >= option_execution_min_bars
-    pe_exec_ready = bool(selected_pe) and pe_quote_fresh and pe_bars >= option_execution_min_bars
+    spot_ready=_fresh_ltp(spot_symbol) or _bars(spot_symbol)>=1
     futures_symbol = str(basket.get("futures_symbol") or "")
-    fut_bars = _bars(futures_symbol)
-    spot_bars = _bars(spot_symbol)
-    spot_quote_fresh = _quote(spot_symbol)
-    context_exec_ready = spot_bars >= context_execution_min_bars or (
-        spot_quote_fresh and fut_bars >= context_execution_min_bars
-    )
-    full_basket_ready = all((_quote(s) or _bars(s) >= 20) for s in option_symbols if s.endswith(("CE", "PE")))
-    data_hard_ready = bool(
-        spot_ready
-        and ce_eval_ready
-        and pe_eval_ready
-        and ce_subscribed
-        and pe_subscribed
-    )
-    runner_running = _runner_is_running(getattr(ctx, "strategy_runner", None))
-    evaluation_ready = bool(data_hard_ready and runner_running)
+    context_exec_ready = _bars(spot_symbol)>=context_execution_min_bars or (_fresh_ltp(spot_symbol) and _bars(futures_symbol)>=context_execution_min_bars)
+    data_hard_ready=bool(spot_ready and ce_eval_ready and pe_eval_ready)
+    runner_running=_runner_is_running(getattr(ctx,'strategy_runner',None))
+    evaluation_ready=bool(data_hard_ready and runner_running)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
     broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
-    live_orders_armed = bool(
-        live_mode
-        and evaluation_ready
-        and ce_exec_ready
-        and pe_exec_ready
-        and context_exec_ready
-        and broker_ready
-    )
-    ctx.data_hard_ready = data_hard_ready
-    ctx.evaluation_ready = evaluation_ready
-    ctx.live_orders_armed = live_orders_armed
-    ctx.trading_ready = live_orders_armed
-    ctx.readiness_mode = "LIVE" if live_orders_armed else "DATA_WARMUP"
-    ctx.effective_mode = ctx.readiness_mode
-    ctx.live_block_reason = None if live_orders_armed else "startup_pipeline_incomplete"
-    LOGGER.info(
-        "LIVE_READINESS_COMPUTED spot_ready=%s ce_eval_ready=%s pe_eval_ready=%s ce_subscribed=%s pe_subscribed=%s ce_exec_ready=%s pe_exec_ready=%s full_basket_ready=%s selected_ce=%s selected_pe=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s",
-        spot_ready,
-        ce_eval_ready,
-        pe_eval_ready,
-        ce_subscribed,
-        pe_subscribed,
-        ce_exec_ready,
-        pe_exec_ready,
-        full_basket_ready,
-        selected_ce,
-        selected_pe,
-        ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars,
-    )
-    if (not selected_ce) or (not selected_pe):
-        LOGGER.warning("LIVE_BASKET_INVALID reason=atm_option_selection_failed")
-        ctx.live_orders_armed = False
-    if ctx.strategy_runner is not None:
-        if hasattr(ctx.strategy_runner, "set_active_option_context"):
-            ctx.strategy_runner.set_active_option_context(selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=atm_strike, option_symbols=option_symbols)
-        if hasattr(ctx.strategy_runner, "set_runtime_readiness"):
-            ctx.strategy_runner.set_runtime_readiness(
-                data_hard_ready=_as_bool(ctx.data_hard_ready),
-                evaluation_ready=_as_bool(ctx.evaluation_ready),
-                live_orders_armed=_as_bool(ctx.live_orders_armed),
-                reason=str(ctx.live_block_reason or reason),
-                selected_ce=selected_ce,
-                selected_pe=selected_pe,
-                atm_strike=atm_strike,
-                option_symbols=option_symbols,
-            )
-    LOGGER.info("RUNTIME_READINESS_REARM_RESULT data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s", ctx.data_hard_ready, ctx.evaluation_ready, ctx.live_orders_armed, reason)
-    if ctx.live_orders_armed:
-        LOGGER.info("LIVE_TRADING_ARMED")
-    elif ce_bars < option_execution_min_bars or pe_bars < option_execution_min_bars:
-        LOGGER.info("LIVE_TRADING_NOT_ARMED reason=selected_option_history_insufficient")
+    live_orders_armed=bool(live_mode and evaluation_ready and ce_exec_ready and pe_exec_ready and context_exec_ready and broker_ready)
+    missing=[]
+    if not selected_ce: missing.append('selected_ce_missing')
+    if not selected_pe: missing.append('selected_pe_missing')
+    if not spot_ready: missing.append('spot_not_ready')
+    if not ce_eval_ready: missing.append('ce_eval_not_ready')
+    if not pe_eval_ready: missing.append('pe_eval_not_ready')
+    if not runner_running: missing.append('runner_not_running')
+    if evaluation_ready and live_mode:
+        if not ce_exec_ready: missing.append('ce_exec_quote_or_history_not_ready')
+        if not pe_exec_ready: missing.append('pe_exec_quote_or_history_not_ready')
+        if not context_exec_ready: missing.append('context_exec_not_ready')
+        if not broker_ready: missing.append('broker_or_order_manager_not_ready')
+    block_reason=None if live_orders_armed else ((f"execution_not_armed:{','.join(missing)}" if evaluation_ready else f"startup_pipeline_incomplete:{','.join(missing)}"))
+    ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=live_orders_armed; ctx.live_block_reason=block_reason
+    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, block_reason)
+    if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
+        ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols)
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,

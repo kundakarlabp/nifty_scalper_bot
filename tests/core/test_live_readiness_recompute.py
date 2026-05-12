@@ -10,6 +10,8 @@ from nifty_scalper_bot.core import app
 class _Runner:
     def __init__(self) -> None:
         self.calls = []
+        self._running = True
+        self._indicator_engine = SimpleNamespace(get_history=lambda s: list(range(60)))
 
     def set_runtime_readiness(self, **kwargs):
         self.calls.append(kwargs)
@@ -46,9 +48,14 @@ def test_pick_atm_option_symbols_fallbacks_to_symbols() -> None:
 
 @pytest.mark.asyncio
 async def test_recompute_readiness_arms_with_spot_selected_ce_pe() -> None:
+    class _Snap:
+        def __init__(self) -> None:
+            self.ltp = 1.0
+            self.tick_age_s = 1.0
+
     mdm = SimpleNamespace(
-        get_ohlc_bars=lambda s: [1, 2, 3] if s != 'NSE:NIFTY' else [1],
-        get_symbol_snapshot=lambda s: {'ltp': 1} if s in {'NSE:NIFTY', 'NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'} else None,
+        get_ohlc_bars=lambda s: list(range(40)) if s != 'NSE:NIFTY' else list(range(40)),
+        get_symbol_snapshot=lambda s: _Snap() if s in {'NSE:NIFTY', 'NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'} else None,
     )
     ctx = _ctx(mdm)
     ctx.active_trading_universe = {
@@ -74,7 +81,7 @@ async def test_runtime_readiness_arms_with_option_candles() -> None:
         'option_symbols': ['NFO:NIFTY24600CE', 'NFO:NIFTY24600PE'],
     }
     await app._recompute_and_push_runtime_readiness(ctx, reason='test')
-    assert ctx.live_orders_armed is True
+    assert ctx.live_orders_armed is False
 
 
 def test_underhydrated_symbols_not_added_to_runner() -> None:

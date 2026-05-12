@@ -4536,8 +4536,10 @@ class MarketDataManager:
         if pd.isna(ts) or ts.year < 2020:
             ts = pd.Timestamp.utcnow()
 
+        quote_fields = self._extract_depth_quote_fields(raw)
         return {
             **to_json_safe(dict(raw)),
+            **quote_fields,
             "symbol": str(symbol),
             "instrument_token": token,
             "token": token,
@@ -4545,9 +4547,25 @@ class MarketDataManager:
             "last_price": price,
             "timestamp": ts.isoformat(),
             "timestamp_ms": float(pd.Timestamp(ts).timestamp() * 1000.0),
-            "source": raw.get("source") or "ws",
+            "source": "ws_full" if bool(quote_fields.get("depth_available")) else (raw.get("source") or "ws"),
             "received_at": float(raw.get("received_at") or time.time()),
         }
+
+    def _extract_depth_quote_fields(self, raw: Mapping[str, Any]) -> dict[str, Any]:
+        """Extract quote/depth fields. Args: raw. Returns: normalized quote fields. Raises: none."""
+        depth = raw.get("depth") if isinstance(raw, Mapping) and isinstance(raw.get("depth"), Mapping) else {}
+        buy_levels = depth.get("buy") if isinstance(depth, Mapping) else []
+        sell_levels = depth.get("sell") if isinstance(depth, Mapping) else []
+        buy_top = buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
+        sell_top = sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
+        bid = _coerce_float(raw.get("bid") or raw.get("best_bid") or raw.get("buy_price") or raw.get("best_bid_price") or (buy_top or {}).get("price"))
+        ask = _coerce_float(raw.get("ask") or raw.get("best_ask") or raw.get("sell_price") or raw.get("best_ask_price") or (sell_top or {}).get("price"))
+        bid_qty = _coerce_int(raw.get("bid_qty") or raw.get("buy_quantity") or (buy_top or {}).get("quantity"))
+        ask_qty = _coerce_int(raw.get("ask_qty") or raw.get("sell_quantity") or (sell_top or {}).get("quantity"))
+        depth_available = bool((isinstance(buy_levels, list) and buy_levels) or (isinstance(sell_levels, list) and sell_levels))
+        spread = (ask - bid) if (bid is not None and ask is not None and ask > bid) else None
+        mid = ((bid + ask) / 2.0) if (bid is not None and ask is not None and bid > 0 and ask > 0) else None
+        return {"bid": bid, "ask": ask, "best_bid": bid, "best_ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "mid": mid, "spread": spread, "depth": depth, "depth_available": depth_available, "tradable_quote": bool(bid is not None and ask is not None and bid > 0 and ask > bid), "bid_missing": not bool(bid and bid > 0), "ask_missing": not bool(ask and ask > 0), "bid_ask_source": "ws_full" if depth_available else ("quote" if bid is not None or ask is not None else "missing")}
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
         raw = self._normalize_ws_tick(raw)
@@ -4625,7 +4643,8 @@ class MarketDataManager:
         # StrategyRunner's per-symbol callbacks) were registered in _subscribers
         # but NEVER called from the WS path — _store_tick only cached the tick.
         # _emit_tick is the correct call; it was defined but never invoked.
-        tick_dict = {**to_json_safe(dict(raw)), **tick.to_dict()}
+        quote_fields = self._extract_depth_quote_fields(raw)
+        tick_dict = {**to_json_safe(dict(raw)), **tick.to_dict(), **quote_fields}
         tick_dict["symbol"] = symbol
         tick_dict["timestamp"] = pd.to_datetime(
             tick_dict["timestamp"], utc=True, errors="coerce"
@@ -4662,6 +4681,22 @@ class MarketDataManager:
         if normalized_live is None:
             return
         self._ingest_normalized_tick(normalized_live)
+        if bool(normalized_live.get("tradable_quote")):
+            log_throttled(
+                self._logger,
+                f"ws_full_quote_proof:{symbol}",
+                "WS_FULL_QUOTE_PROOF symbol=%s token=%s ltp=%s bid=%s ask=%s spread=%s depth_available=%s tradable_quote=%s",
+                symbol,
+                token_value,
+                normalized_live.get("ltp"),
+                normalized_live.get("bid"),
+                normalized_live.get("ask"),
+                normalized_live.get("spread"),
+                normalized_live.get("depth_available"),
+                normalized_live.get("tradable_quote"),
+                interval_sec=30.0,
+                level=logging.INFO,
+            )
         if candle:
             bar = {
                 "symbol": symbol,
@@ -6166,8 +6201,12 @@ class MarketDataManager:
         canonical = self._canonical_symbol(symbol)
         tick = self.get_latest_tick(canonical) or {}
         ltp = _coerce_float(tick.get("ltp") or tick.get("last_price"))
-        bid = _coerce_float(tick.get("bid"))
-        ask = _coerce_float(tick.get("ask"))
+        bid = _coerce_float(tick.get("bid") or tick.get("best_bid") or tick.get("best_bid_price"))
+        ask = _coerce_float(tick.get("ask") or tick.get("best_ask") or tick.get("best_ask_price"))
+        if (bid is None or ask is None) and isinstance(tick.get("depth"), Mapping):
+            quote_fields = self._extract_depth_quote_fields(cast(Mapping[str, Any], tick))
+            bid = bid if bid is not None else _coerce_float(quote_fields.get("bid"))
+            ask = ask if ask is not None else _coerce_float(quote_fields.get("ask"))
         mid = None
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             mid = (float(bid) + float(ask)) / 2.0

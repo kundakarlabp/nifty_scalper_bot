@@ -26,8 +26,8 @@ def pick_atm_option_symbols_from_basket(
     basket: Mapping[str, object],
 ) -> tuple[str | None, str | None]:
     """Pick ATM CE/PE from basket. Args: basket. Returns: ce/pe symbols. Raises: none."""
-    selected_ce = str(basket.get('atm_ce') or basket.get('selected_ce') or '') or None
-    selected_pe = str(basket.get('atm_pe') or basket.get('selected_pe') or '') or None
+    selected_ce = str(basket.get('selected_ce') or basket.get('atm_ce') or '') or None
+    selected_pe = str(basket.get('selected_pe') or basket.get('atm_pe') or '') or None
     option_symbols = [
         str(s)
         for s in list(basket.get('option_symbols') or basket.get('symbols') or [])
