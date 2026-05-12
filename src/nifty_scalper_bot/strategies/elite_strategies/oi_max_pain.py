@@ -31,7 +31,7 @@ class OIMaxPainStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
             direction = str(indicators.get('direction_bias') or '').upper()
             if max_pain <= 0:
-                LOGGER.debug('STRATEGY_NO_VOTE strategy=OIMaxPain reason=missing_oi')
+                self._no_vote('missing_oi_data')
                 return None
 
             context_bias = 'CE' if current_price < max_pain else 'PE'
@@ -47,6 +47,7 @@ class OIMaxPainStrategy(EliteStrategy):
                 reasons.append('near_oi_wall_against_trade')
             strategy_score = max(0.0, min(4.0, score))
             if strategy_score <= 0:
+                self._no_vote('no_max_pain_edge')
                 return None
 
             metadata = {

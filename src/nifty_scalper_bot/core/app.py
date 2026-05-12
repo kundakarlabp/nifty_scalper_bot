@@ -313,7 +313,7 @@ def _gate_runner_symbol_add(
     except Exception:
         runner_bars = 0
     mdm_bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
-    required = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1")) or 1)
+    required = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "20")) or 20)
     quote_ready = False
     try:
         quote_ready = bool(ctx.market_data_manager.get_symbol_snapshot(symbol))
@@ -6856,8 +6856,8 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         except Exception:
             return False
     spot_ready = _quote(spot_symbol) or _bars(spot_symbol) >= 1
-    option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1")) or 1)
-    option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "5")) or 5)
+    option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "20")) or 20)
+    option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
     context_execution_min_bars = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
     await _ensure_selected_options_hydrated(
         ctx, selected_ce, selected_pe, option_execution_min_bars, reason
@@ -7952,7 +7952,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 return None
 
             active_symbol_tokens: dict[str, int] = {}
-            symbols_to_hydrate_raw = [sym for sym in targets if sym]
+            symbols_to_hydrate_raw = build_active_trading_basket_symbols(ctx, basket)
             symbols_to_hydrate: list[str] = []
             for _sym in symbols_to_hydrate_raw:
                 _tok = _resolve_startup_token(_sym)
@@ -7964,10 +7964,20 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
                     continue
                 active_symbol_tokens[_sym] = int(_tok)
+                LOGGER.info("ACTIVE_BASKET_TOKEN_RESOLVED symbol=%s token=%s", _sym, int(_tok))
                 symbols_to_hydrate.append(_sym)
-            atm_ce = next((s for s in targets if s.endswith("CE")), None)
-            atm_pe = next((s for s in targets if s.endswith("PE")), None)
-            symbols_to_hydrate = build_active_trading_basket_symbols(ctx, basket)
+            atm_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "")
+            atm_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "")
+            if atm_ce and atm_ce not in active_symbol_tokens:
+                LOGGER.error("ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=True", atm_ce)
+            if atm_pe and atm_pe not in active_symbol_tokens:
+                LOGGER.error("ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=True", atm_pe)
+            LOGGER.info(
+                "ACTIVE_BASKET_TOKEN_MAP_READY count=%d selected_ce_token=%s selected_pe_token=%s",
+                len(active_symbol_tokens),
+                active_symbol_tokens.get(atm_ce) if atm_ce else None,
+                active_symbol_tokens.get(atm_pe) if atm_pe else None,
+            )
             LOGGER.info(
                 "HYDRATION_PLAN_STARTUP symbols=%d bars_target=%d lookback_days=%d",
                 len(symbols_to_hydrate),
@@ -9671,8 +9681,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "quote_available": False,
                                     },
                                 )
-                            if live_mode and armed:
-                                ctx.live_orders_armed = True
+                            if live_mode and armed and bool(getattr(ctx, "live_orders_armed", False)):
                                 ctx.trading_ready = bool(ctx.data_hard_ready)
                                 previous_mode = str(getattr(ctx, "readiness_mode", "DATA_WARMUP"))
                                 ctx.readiness_mode = "LIVE_READY"
