@@ -4,10 +4,18 @@ import math
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, cast
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+if TYPE_CHECKING:
+    from telegram import Update
+    from telegram.ext import Application, ContextTypes
+else:
+    Update = Any
+    Application = Any
+    class _ContextTypesStub:
+        DEFAULT_TYPE = Any
+
+    ContextTypes = _ContextTypesStub
 
 # Correct imports (utils and logging only)
 from nifty_scalper_bot.notifications.telegram_utils import redact, reply_err, reply_ok
@@ -80,6 +88,17 @@ def _extract_argument(update: Update) -> str:
         return ""
     parts = message.text.split(maxsplit=1)
     return parts[1].strip() if len(parts) >= 2 else ""
+
+
+def _load_command_handler() -> Any | None:
+    """Load telegram CommandHandler lazily. Args: none. Returns: class or None. Raises: never."""
+    try:
+        from telegram.ext import CommandHandler
+
+        return CommandHandler
+    except Exception as exc:
+        LOG.warning("telegram_commands_unavailable: %s", exc)
+        return None
 
 
 def _parse_chain_argument(argument: str) -> tuple[str, str | None]:
@@ -615,17 +634,21 @@ def cmd_emergencystop(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Servi
 
 def _command_exists(application: Application, command: str) -> bool:
     """Check if a command handler is already registered."""
+    command_handler_cls = _load_command_handler()
+    if command_handler_cls is None:
+        return False
     for handlers in application.handlers.values():
         for handler in handlers:
-            if isinstance(handler, CommandHandler) and command in handler.commands:
+            if isinstance(handler, command_handler_cls) and command in handler.commands:
                 return True
     return False
 
 
-def register_telegram_commands(
-    bot: Any, application: Application, services: Services
-) -> None:
+def register_telegram_commands(bot: Any, application: Application, services: Services) -> bool:
     """Register production commands with security wrapping."""
+    command_handler_cls = _load_command_handler()
+    if command_handler_cls is None:
+        return False
 
     # 1. Inject correct chat ID from the bot instance if not already set
     if hasattr(bot, "deps") and hasattr(bot.deps, "chat_id"):
@@ -642,7 +665,7 @@ def register_telegram_commands(
 
     for name, handler in aliases.items():
         if not _command_exists(application, name):
-            application.add_handler(CommandHandler(name, handler))
+            application.add_handler(command_handler_cls(name, handler))
 
     # 3. Register local commands with security wrapper
     new_commands: dict[str, CommandFunc] = {
@@ -687,5 +710,6 @@ def register_telegram_commands(
     for name, func in new_commands.items():
         if not _command_exists(application, name):
             application.add_handler(
-                CommandHandler(name, _wrap_command(services, func, name))
+                command_handler_cls(name, _wrap_command(services, func, name))
             )
+    return True
