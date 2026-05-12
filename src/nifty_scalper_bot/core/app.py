@@ -259,14 +259,30 @@ def build_active_trading_basket_symbols(ctx: Any, basket: Mapping[str, object]) 
     fut = str(basket.get("futures_symbol") or "")
     selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "")
     selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "")
-    option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if str(s).endswith(("CE","PE"))]
+    atm_strike = basket.get("atm_strike")
+    option_symbols = [
+        str(s)
+        for s in list(basket.get("option_symbols") or basket.get("symbols") or [])
+        if str(s).endswith(("CE", "PE"))
+    ]
     option_symbols = list(dict.fromkeys(option_symbols))
-    core = [s for s in (selected_ce, selected_pe) if s]
-    nearby = [s for s in option_symbols if s not in core]
-    selected_options = (core + nearby)[:max_active_options]
+    near_options = select_active_option_symbols(option_symbols, atm=atm_strike, max_active=max_active_options)
+    selected_options: list[str] = []
+    for symbol in (selected_ce, selected_pe, *near_options):
+        if symbol and symbol not in selected_options:
+            selected_options.append(symbol)
+        if len(selected_options) >= max_active_options:
+            break
     ordered = [s for s in (spot, fut, *selected_options) if s]
     out = list(dict.fromkeys(ordered))
-    LOGGER.info("ACTIVE_TRADING_BASKET_SELECTED count=%d selected_ce=%s selected_pe=%s symbols=%s", len(out), selected_ce or None, selected_pe or None, out)
+    LOGGER.info(
+        "ACTIVE_TRADING_BASKET_SELECTED selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d symbols=%s",
+        selected_ce or None,
+        selected_pe or None,
+        atm_strike,
+        len(selected_options),
+        out,
+    )
     return out
 
 
@@ -277,20 +293,15 @@ def prioritize_startup_hydration_symbols(
     futures_symbol: str | None,
 ) -> list[str]:
     """Prioritize startup symbols. Args: symbols/atm/futures. Returns: ordered symbols. Raises: none."""
-    priority = ["NSE:NIFTY"]
-    if futures_symbol:
-        priority.append(futures_symbol)
-    if atm_ce:
-        priority.append(atm_ce)
-    if atm_pe:
-        priority.append(atm_pe)
-
-    out: list[str] = []
-    known = set(symbols)
-    for sym in priority:
-        if sym and sym in known and sym not in out:
-            out.append(sym)
-    return out
+    basket = {
+        "spot_symbol": "NSE:NIFTY",
+        "futures_symbol": futures_symbol or "",
+        "selected_ce": atm_ce or "",
+        "selected_pe": atm_pe or "",
+        "option_symbols": [s for s in symbols if s.endswith(("CE", "PE"))],
+        "symbols": list(symbols),
+    }
+    return build_active_trading_basket_symbols(None, basket)
 
 
 def _gate_runner_symbol_add(
