@@ -16,6 +16,13 @@ def compute_live_readiness(
     ws_quote_proof: bool,
     market_open: bool,
     runner_running: bool,
+    selected_ce: str | None = None,
+    selected_pe: str | None = None,
+    ce_bars: int = 0,
+    pe_bars: int = 0,
+    option_exec_min_bars: int = 30,
+    ce_quote_ready: bool = False,
+    pe_quote_ready: bool = False,
 ) -> tuple[bool, list[str]]:
     """Decide whether live trading should be armed.
 
@@ -53,4 +60,14 @@ def compute_live_readiness(
         reasons.append("market_closed")
     if not runner_running:
         reasons.append("strategy_runner_not_running")
+    if not selected_ce or not selected_pe:
+        reasons.append("selected_options_missing")
+    if int(ce_bars) < int(option_exec_min_bars):
+        reasons.append("selected_ce_history_insufficient")
+    if int(pe_bars) < int(option_exec_min_bars):
+        reasons.append("selected_pe_history_insufficient")
+    if not ce_quote_ready:
+        reasons.append("selected_ce_quote_missing")
+    if not pe_quote_ready:
+        reasons.append("selected_pe_quote_missing")
     return (len(reasons) == 0), reasons
