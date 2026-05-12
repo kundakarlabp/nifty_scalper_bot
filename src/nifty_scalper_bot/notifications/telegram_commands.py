@@ -7,15 +7,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, cast
 
 if TYPE_CHECKING:
-    from telegram import Update
-    from telegram.ext import Application, ContextTypes
+    from telegram import Update as TelegramUpdate
+    from telegram.ext import Application as TelegramApplication
+    from telegram.ext import ContextTypes as TelegramContextTypes
 else:
-    Update = Any
-    Application = Any
-    class _ContextTypesStub:
+    TelegramUpdate = Any
+    TelegramApplication = Any
+
+    class _ContextTypesShim:
         DEFAULT_TYPE = Any
 
-    ContextTypes = _ContextTypesStub
+    TelegramContextTypes = _ContextTypesShim
 
 # Correct imports (utils and logging only)
 from nifty_scalper_bot.notifications.telegram_utils import redact, reply_err, reply_ok
@@ -49,15 +51,15 @@ class Services:
             self.version_info = {"build": "unknown", "sha": "unknown"}
 
 
-CommandFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE, Services], str]
+CommandFunc = Callable[[TelegramUpdate, TelegramContextTypes.DEFAULT_TYPE, Services], str]
 
 
 def _wrap_command(
     services: Services, command: CommandFunc, name: str
-) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Any]:
+) -> Callable[[TelegramUpdate, TelegramContextTypes.DEFAULT_TYPE], Any]:
     """Convert a synchronous command into a secure, async Telegram handler."""
 
-    async def _inner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _inner(update: TelegramUpdate, context: TelegramContextTypes.DEFAULT_TYPE) -> None:
         # 1. Security Guard
         chat = update.effective_chat
         if not chat or chat.id != services.allowed_chat_id:
@@ -81,7 +83,7 @@ def _wrap_command(
     return _inner
 
 
-def _extract_argument(update: Update) -> str:
+def _extract_argument(update: TelegramUpdate) -> str:
     """Return the argument string supplied with a command."""
     message = update.effective_message
     if not message or not message.text:
@@ -97,7 +99,7 @@ def _load_command_handler() -> Any | None:
 
         return CommandHandler
     except Exception as exc:
-        LOG.warning("telegram_commands_unavailable: %s", exc)
+        LOG.warning("TELEGRAM_COMMANDS_UNAVAILABLE reason=%s", exc)
         return None
 
 
@@ -225,7 +227,7 @@ def _format_chain_summary(
 
 # --- COMMAND IMPLEMENTATIONS ---
 
-def cmd_mode(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_mode(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     """Summarise current trading mode."""
     cfg = services.config
     if cfg is None:
@@ -236,7 +238,7 @@ def cmd_mode(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> s
     return f"mode: {'LIVE' if live else 'PAPER'} | shadow={shadow}"
 
 
-def cmd_live(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_live(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     """Toggle the live trading flag."""
     cfg = services.config
     if cfg is None:
@@ -250,7 +252,7 @@ def cmd_live(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> s
         return f"live toggle failed: {exc}"
 
 
-def cmd_flat(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_flat(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     """Request a full flatten of open positions."""
     manager = services.order_manager
     if manager is None:
@@ -264,7 +266,7 @@ def cmd_flat(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> s
     return "Requested: close all positions."
 
 
-def cmd_brk(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_brk(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     """Return broker connectivity status."""
     broker = services.broker
     if broker is None:
@@ -282,7 +284,7 @@ def cmd_brk(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> st
     return f'{name}: {"OK" if ok else "UNREACHABLE"}'
 
 
-def cmd_entry(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_entry(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     """Trigger strategy entry dry-run."""
     runner = services.strategy_runner
     if runner is None:
@@ -295,7 +297,7 @@ def cmd_entry(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> 
     return f"Paper entry OK: {fn()}"
 
 
-def cmd_exit(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_exit(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     """Trigger strategy exit dry-run."""
     runner = services.strategy_runner
     if runner is None:
@@ -308,7 +310,7 @@ def cmd_exit(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> s
     return f"Paper exit OK: {fn()}"
 
 
-def cmd_dryrun(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_dryrun(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     """Execute a single dry-run simulation."""
     runner = services.strategy_runner
     if runner is None:
@@ -346,7 +348,7 @@ def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE, services: Servi
     )
 
 
-def cmd_uptime(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_uptime(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     metrics = services.metrics
     if not metrics:
         return "uptime: metrics unavailable"
@@ -357,14 +359,14 @@ def cmd_uptime(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) ->
     return "uptime: n/a"
 
 
-def cmd_limits(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_limits(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     cfg = services.config
     if not cfg:
         return "limits: n/a"
     return str(getattr(cfg, "limits", "n/a"))
 
 
-def cmd_net(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_net(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     metrics = services.metrics
     if not metrics:
         return "net: n/a"
@@ -379,7 +381,7 @@ def cmd_net(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> st
     return "net: n/a"
 
 
-def cmd_save(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_save(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     journal = services.journal
     if not journal:
         return "save: journal unavailable"
@@ -390,7 +392,7 @@ def cmd_save(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> s
     return "save: not supported"
 
 
-def cmd_book(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_book(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     sym = _extract_argument(update).upper()
     if not sym:
         return "Usage: /book <SYMBOL>"
@@ -408,7 +410,7 @@ def cmd_book(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) 
     return "Orderbook unavailable"
 
 
-def cmd_ohlc(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_ohlc(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     sym = _extract_argument(update).upper()
     if not sym:
         return "Usage: /ohlc <SYMBOL>"
@@ -419,7 +421,7 @@ def cmd_ohlc(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) 
     return "MDM unavailable"
 
 
-def cmd_chain(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_chain(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     arg = _extract_argument(update)
     if not arg:
         return "Usage: /chain <ROOT> (e.g. NIFTY)"
@@ -434,7 +436,7 @@ def cmd_chain(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services)
     return "Chain unavailable"
 
 
-def cmd_atm(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_atm(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     arg = _extract_argument(update)
     if not arg:
         return "Usage: /atm <ROOT>"
@@ -444,7 +446,7 @@ def cmd_atm(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -
     return "ATM unavailable"
 
 
-def cmd_spot(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_spot(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     arg = _extract_argument(update)
     if not arg:
         return "Usage: /spot <ROOT>"
@@ -454,7 +456,7 @@ def cmd_spot(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) 
     return "Spot unavailable"
 
 
-def cmd_greeks(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_greeks(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     arg = _extract_argument(update)
     if not arg:
         return "Usage: /greeks <SYMBOL>"
@@ -464,7 +466,7 @@ def cmd_greeks(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services
     return "Greeks unavailable"
 
 
-def cmd_iv(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_iv(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     arg = _extract_argument(update)
     if not arg:
         return "Usage: /iv <ROOT>"
@@ -474,7 +476,7 @@ def cmd_iv(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) ->
     return "IV unavailable"
 
 
-def cmd_prevclose(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_prevclose(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     arg = _extract_argument(update)
     if not arg:
         return "Usage: /prevclose <SYMBOL>"
@@ -484,38 +486,38 @@ def cmd_prevclose(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Servi
     return "PrevClose unavailable"
 
 
-def cmd_session(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_session(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     if services.market_data_manager and hasattr(services.market_data_manager, "get_market_session"):
         return str(services.market_data_manager.get_market_session())
     return "Session info unavailable"
 
 
-def cmd_holiday(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_holiday(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     if services.market_data_manager and hasattr(services.market_data_manager, "next_holiday"):
         return str(services.market_data_manager.next_holiday())
     return "Holiday info unavailable"
 
 
-def cmd_sig(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_sig(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     if services.strategy_runner and hasattr(services.strategy_runner, "current_signal"):
         return str(services.strategy_runner.current_signal())
     return "Signal unavailable"
 
 
-def cmd_state(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_state(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     if services.strategy_runner and hasattr(services.strategy_runner, "state_snapshot"):
         return str(services.strategy_runner.state_snapshot())
     return "State unavailable"
 
 
-def cmd_score(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_score(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     if services.strategy_runner and hasattr(services.strategy_runner, "composite_score"):
         val = services.strategy_runner.composite_score()
         return f"score={val}" if val is not None else "score: n/a"
     return "Score unavailable"
 
 
-def cmd_regime(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_regime(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     detector = services.market_regime
     if not detector:
         return "Regime detector unavailable"
@@ -531,13 +533,13 @@ def cmd_regime(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) ->
     return "Regime unknown"
 
 
-def cmd_gate_why(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_gate_why(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     if services.strategy_runner and hasattr(services.strategy_runner, "gate_reason"):
         return str(services.strategy_runner.gate_reason())
     return "Gate info unavailable"
 
 
-def cmd_size(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_size(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     arg = _extract_argument(update)
     if not arg:
         return "Usage: /size ..."
@@ -548,14 +550,14 @@ def cmd_size(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) 
     return "Sizing unavailable"
 
 
-def cmd_trail(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_trail(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     om = services.order_manager
     if om and hasattr(om, "trailing_snapshot"):
         return str(om.trailing_snapshot())
     return "Trail info unavailable"
 
 
-def cmd_riskstate(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_riskstate(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     rm = services.risk_manager
     if not rm:
         return "Risk manager unavailable"
@@ -565,7 +567,7 @@ def cmd_riskstate(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services)
     return f"Risk: breaker={breaker}, last_reason={reason}"
 
 
-def cmd_journal_read(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_journal_read(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     j = services.journal
     if j and hasattr(j, "last_entries"):
         entries = j.last_entries(limit=5)
@@ -573,7 +575,7 @@ def cmd_journal_read(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Servic
     return "Journal unavailable"
 
 
-def cmd_execstate(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_execstate(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     sym = _extract_argument(update).upper()
     if not sym:
         return "Usage: /execstate <SYMBOL>"
@@ -588,7 +590,7 @@ def cmd_execstate(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Servi
     return "OrderManager unavailable"
 
 
-def cmd_execqueue(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_execqueue(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     om = services.order_manager
     if om and hasattr(om, "get_pending_orders"):
         return str(om.get_pending_orders())
@@ -599,7 +601,7 @@ def cmd_execqueue(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services)
     return "Queue unavailable"
 
 
-def cmd_execlast(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_execlast(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     om = services.order_manager
     if om and hasattr(om, "get_execution_stats"):
         return str(om.get_execution_stats())
@@ -608,7 +610,7 @@ def cmd_execlast(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) 
     return "Execution stats unavailable"
 
 
-def cmd_execwhy(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_execwhy(update: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     sym = _extract_argument(update).upper()
     if not sym:
         return "Usage: /execwhy <SYMBOL>"
@@ -619,7 +621,7 @@ def cmd_execwhy(update: Update, _c: ContextTypes.DEFAULT_TYPE, services: Service
     return "OrderManager preflight diagnostics unavailable"
 
 
-def cmd_emergencystop(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Services) -> str:
+def cmd_emergencystop(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
     om = services.order_manager
     if om and hasattr(om, "emergency_stop"):
         res = om.emergency_stop(reason="telegram")
@@ -632,7 +634,7 @@ def cmd_emergencystop(_u: Update, _c: ContextTypes.DEFAULT_TYPE, services: Servi
 
 # --- REGISTRATION ---
 
-def _command_exists(application: Application, command: str) -> bool:
+def _command_exists(application: TelegramApplication, command: str) -> bool:
     """Check if a command handler is already registered."""
     command_handler_cls = _load_command_handler()
     if command_handler_cls is None:
@@ -644,7 +646,7 @@ def _command_exists(application: Application, command: str) -> bool:
     return False
 
 
-def register_telegram_commands(bot: Any, application: Application, services: Services) -> bool:
+def register_telegram_commands(bot: Any, application: TelegramApplication, services: Services) -> bool:
     """Register production commands with security wrapping."""
     command_handler_cls = _load_command_handler()
     if command_handler_cls is None:
