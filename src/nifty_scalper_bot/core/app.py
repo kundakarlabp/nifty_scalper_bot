@@ -9639,6 +9639,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     },
                                 )
                             market_open_now = market_state == MarketState.OPEN
+                            option_exec_min_bars = int(
+                                os.getenv(
+                                    "READINESS_OPTION_EXEC_MIN_BARS",
+                                    os.getenv("OPTION_EXECUTION_MIN_BARS", "30"),
+                                )
+                                or 30
+                            )
                             armed, blocking_reasons = compute_live_readiness(
                                 live_mode=bool(live_mode),
                                 hard_ready=bool(ctx.data_hard_ready),
@@ -9646,6 +9653,13 @@ async def startup_sequence(ctx: BotContext) -> None:
                                 ws_quote_proof=bool(ws_quote_for_gate),
                                 market_open=bool(market_open_now),
                                 runner_running=bool(runner_running),
+                                selected_ce=selected_ce,
+                                selected_pe=selected_pe,
+                                ce_bars=int(hydrated_ce),
+                                pe_bars=int(hydrated_pe),
+                                option_exec_min_bars=option_exec_min_bars,
+                                ce_quote_ready=bool(quote_ce is not None),
+                                pe_quote_ready=bool(quote_pe is not None),
                             )
                             data_warmup_reasons: list[str] = list(blocking_reasons)
                             if live_mode and not quote_available and ws_quote_proof:
@@ -9660,8 +9674,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if live_mode and armed:
                                 ctx.live_orders_armed = True
                                 ctx.trading_ready = bool(ctx.data_hard_ready)
-                                ctx.readiness_mode = "LIVE"
+                                previous_mode = str(getattr(ctx, "readiness_mode", "DATA_WARMUP"))
+                                ctx.readiness_mode = "LIVE_READY"
                                 ctx.effective_mode = ctx.readiness_mode
+                                LOGGER.info(
+                                    "STARTUP_MODE_TRANSITION from=%s to=%s reason=selected_options_exec_ready",
+                                    previous_mode,
+                                    ctx.readiness_mode,
+                                )
                                 LOGGER.info(
                                     "LIVE_TRADING_ARMED hard_ready=%s quote_available=%s ws_quote_proof=%s",
                                     hard_ready,
@@ -9677,8 +9697,40 @@ async def startup_sequence(ctx: BotContext) -> None:
                             elif live_mode:
                                 ctx.live_orders_armed = False
                                 ctx.trading_ready = False
-                                ctx.readiness_mode = "DATA_WARMUP"
+                                previous_mode = str(getattr(ctx, "readiness_mode", "DATA_WARMUP"))
+                                ctx.readiness_mode = (
+                                    "EVALUATION_READY"
+                                    if bool(ctx.evaluation_ready)
+                                    else "DATA_WARMUP"
+                                )
                                 ctx.effective_mode = ctx.readiness_mode
+                                LOGGER.info(
+                                    "STARTUP_MODE_BLOCKED current=%s reason=%s",
+                                    ctx.readiness_mode,
+                                    (
+                                        "selected_option_history_or_quote_not_ready"
+                                        if ctx.readiness_mode == "EVALUATION_READY"
+                                        else "awaiting_spot_or_active_basket"
+                                    ),
+                                )
+                                if previous_mode != ctx.readiness_mode:
+                                    LOGGER.info(
+                                        "STARTUP_MODE_TRANSITION from=%s to=%s reason=%s",
+                                        previous_mode,
+                                        ctx.readiness_mode,
+                                        "active_basket_ready"
+                                        if ctx.readiness_mode == "EVALUATION_READY"
+                                        else "warmup_guard",
+                                    )
+                                LOGGER.info(
+                                    "LIVE_ORDER_ARM_BLOCKED reason=%s ce_bars=%s pe_bars=%s required=%s indicators_ready=%s quote_ready=%s",
+                                    ",".join(data_warmup_reasons) if data_warmup_reasons else "unknown",
+                                    hydrated_ce,
+                                    hydrated_pe,
+                                    option_exec_min_bars,
+                                    bool(ctx.evaluation_ready),
+                                    bool(option_ticks_ready),
+                                )
                                 if "startup_pipeline_incomplete" in data_warmup_reasons:
                                     LOGGER.error(
                                         "LIVE_TRADING_BLOCKED reason=startup_pipeline_incomplete missing=%s",
