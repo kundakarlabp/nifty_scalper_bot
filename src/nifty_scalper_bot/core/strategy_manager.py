@@ -2232,12 +2232,13 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 log_throttled(
                     log,
-                    key=f"strategy_domain_skip:{symbol}:{strategy_name}",
-                    msg=(
+                    f"strategy_domain_skip:{symbol}:{strategy_name}",
+                    (
                         "STRATEGY_NO_VOTE strategy=%s symbol=%s "
                         "reason=context_symbol_skipped_for_option_strategy"
                     ),
-                    args=(strategy_name, symbol),
+                    strategy_name,
+                    symbol,
                     interval_sec=30.0,
                     level=logging.INFO,
                 )
