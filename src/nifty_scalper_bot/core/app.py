@@ -304,6 +304,48 @@ def prioritize_startup_hydration_symbols(
     return build_active_trading_basket_symbols(None, basket)
 
 
+
+
+def sync_symbol_history_to_runner(
+    ctx: Any,
+    symbol: str,
+    required_bars: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Sync MDM history into runner cache. Args: ctx/symbol/required_bars/reason. Returns: sync status map. Raises: none."""
+
+    logger = LOGGER
+    mdm = getattr(ctx, 'market_data_manager', None)
+    runner = getattr(ctx, 'strategy_runner', None)
+    mdm_before = 0
+    runner_before = 0
+    runner_after = 0
+    ingested = 0
+    ready = False
+    try:
+        if mdm is None or runner is None:
+            logger.info('SELECTED_OPTION_HYDRATION_SYNC_RESULT symbol=%s mdm_before=%s runner_before=%s runner_after=%s required=%s ready=%s reason=%s', symbol, 0, 0, 0, required_bars, False, reason)
+            return {'symbol': symbol, 'mdm_before': 0, 'runner_before': 0, 'runner_after': 0, 'required': required_bars, 'ready': False, 'ingested': 0}
+        bars = list(mdm.get_ohlc_bars(symbol) or [])
+        mdm_before = len(bars)
+        engine = getattr(runner, '_indicator_engine', None)
+        if engine is not None:
+            runner_before = len(engine.get_history(symbol) or [])
+        if runner_before < required_bars and mdm_before >= required_bars:
+            for bar in bars[-required_bars:]:
+                try:
+                    runner.ingest_historical_bar({**dict(bar), 'symbol': symbol})
+                    ingested += 1
+                except Exception as exc:
+                    logger.error('Failure in sync_symbol_history_to_runner: %s', exc)
+        if engine is not None:
+            runner_after = len(engine.get_history(symbol) or [])
+        ready = runner_after >= required_bars
+        logger.info('RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%s source=%s runner_history_count=%s mdm_history_count=%s', symbol, None, ingested, reason, runner_after, mdm_before)
+        logger.info('SELECTED_OPTION_HYDRATION_SYNC_RESULT symbol=%s mdm_before=%s runner_before=%s runner_after=%s required=%s ready=%s', symbol, mdm_before, runner_before, runner_after, required_bars, ready)
+    except Exception as exc:
+        logger.error('Failure in sync_symbol_history_to_runner: %s', exc, exc_info=True)
+    return {'symbol': symbol, 'mdm_before': mdm_before, 'runner_before': runner_before, 'runner_after': runner_after, 'required': required_bars, 'ready': ready, 'ingested': ingested}
 def _gate_runner_symbol_add(
     ctx: Any,
     symbol: str,
@@ -324,13 +366,14 @@ def _gate_runner_symbol_add(
     except Exception:
         runner_bars = 0
     mdm_bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
-    required = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "20")) or 20)
+    required = max(20, _symbol_history_requirement(ctx))
     quote_ready = False
     try:
         quote_ready = bool(ctx.market_data_manager.get_symbol_snapshot(symbol))
     except Exception:
         quote_ready = False
     if runner_bars < required and mdm_bars >= required:
+        sync_symbol_history_to_runner(ctx, symbol, required, source)
         hydrate_fn = getattr(ctx.strategy_runner, "_hydrate_from_mdm_cache", None)
         if callable(hydrate_fn):
             LOGGER.info(
