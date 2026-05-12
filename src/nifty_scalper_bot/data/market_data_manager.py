@@ -7030,9 +7030,9 @@ class MarketDataManager:
         if token <= 0:
             log_throttled(
                 self._logger,
-                key=f"spot_resubscribe_token_missing:{symbol}",
-                msg="SPOT_RESUBSCRIBE_SKIPPED symbol=%s reason=token_missing",
-                args=(symbol,),
+                f"spot_resubscribe_token_missing:{symbol}",
+                "SPOT_RESUBSCRIBE_SKIPPED symbol=%s reason=token_missing",
+                symbol,
                 interval_sec=60.0,
                 level=logging.WARNING,
                 extra={
@@ -7058,9 +7058,12 @@ class MarketDataManager:
         if not self.symbol_has_tick(symbol):
             log_throttled(
                 self._logger,
-                key="spot_ws_first_tick_missing",
-                msg="MDM_WS_FIRST_TICK_MISSING symbol=%s reason=no_tick_received connected=%s connect_task_alive=%s ws_tokens=%s",
-                args=(symbol, self.ws_status_snapshot().get("connected"), self.ws_status_snapshot().get("connect_task_alive"), self.ws_status_snapshot().get("tokens")),
+                "spot_ws_first_tick_missing",
+                "MDM_WS_FIRST_TICK_MISSING symbol=%s reason=no_tick_received connected=%s connect_task_alive=%s ws_tokens=%s",
+                symbol,
+                self.ws_status_snapshot().get("connected"),
+                self.ws_status_snapshot().get("connect_task_alive"),
+                self.ws_status_snapshot().get("tokens"),
                 interval_sec=60.0,
                 level=logging.WARNING,
                 extra={"event": "MDM_WS_FIRST_TICK_MISSING", "symbol": symbol, "reason": "no_tick_received", "connected": self.ws_status_snapshot().get("connected"), "connect_task_alive": self.ws_status_snapshot().get("connect_task_alive"), "ws_tokens": self.ws_status_snapshot().get("tokens")},
