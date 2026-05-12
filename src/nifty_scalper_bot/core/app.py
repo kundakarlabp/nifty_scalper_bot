@@ -920,15 +920,15 @@ from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
 from nifty_scalper_bot.utils.symbols import canonical, unique_normalized_symbols
 
+from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
+
 if TYPE_CHECKING:
-    from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
     from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
     from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
         TelegramWebhookController,
     )
     from telegram.ext import Application
 else:
-    TelegramEnhancedNotifier = Any
     TelegramWebhookController = Any
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
@@ -5004,6 +5004,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     _apply_paper_mode(paper_state["enabled"])
     shadow_enabled = paper_state["enabled"]
+    notifier: TelegramEnhancedNotifier | None = None
 
     if not ctx_ref.get("telegram_wired", False):
         try:
@@ -5011,8 +5012,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             order_manager.set_notifier(notifier)
             ctx_ref["telegram_wired"] = True
             LOGGER.info("✅ Telegram Notifier wired to Order Manager")
-        except Exception as e:
-            LOGGER.error(f"Telegram notifier wiring failed: {e}")
+        except Exception:
+            notifier = None
+            order_manager.set_notifier(None)
+            LOGGER.exception("Telegram notifier wiring failed")
     else:
         LOGGER.info("ℹ️ Telegram Notifier already wired")
 
