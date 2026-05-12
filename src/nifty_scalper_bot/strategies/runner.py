@@ -1948,7 +1948,7 @@ class StrategyRunner:
         if any(value is not None for value in (selected_ce, selected_pe, atm_strike, option_symbols)):
             self.set_active_option_context(selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=atm_strike, option_symbols=option_symbols)
         self._logger.info(
-            "RUNNER_STARTUP_READINESS_UPDATE startup_ready=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s selected_ce=%s selected_pe=%s",
+            "RUNNER_STARTUP_READINESS_UPDATE startup_ready=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s selected_ce=%s selected_pe=%s option_count=%s",
             self._runtime_startup_ready,
             self._runtime_data_hard_ready,
             self._runtime_evaluation_ready,
@@ -1956,7 +1956,23 @@ class StrategyRunner:
             self._runtime_readiness_reason,
             self._active_selected_ce,
             self._active_selected_pe,
+            len(self._active_option_symbols),
         )
+
+    def get_runtime_readiness_snapshot(self) -> dict[str, object]:
+        """Return runtime readiness snapshot. Args: none. Returns: readiness map. Raises: none."""
+        return {
+            "startup_ready": self._runtime_startup_ready,
+            "data_hard_ready": self._runtime_data_hard_ready,
+            "evaluation_ready": self._runtime_evaluation_ready,
+            "live_orders_armed": self._runtime_live_orders_armed,
+            "reason": self._runtime_readiness_reason,
+            "selected_ce": self._active_selected_ce,
+            "selected_pe": self._active_selected_pe,
+            "atm_strike": self._active_atm_strike,
+            "option_count": len(self._active_option_symbols),
+            "runner_state": str(self._runner_state),
+        }
 
     async def _prepare_signal_for_handling(
         self,
@@ -6290,9 +6306,12 @@ class StrategyRunner:
                     self._emit_runner_eval_decision(
                         symbol=symbol,
                         stage="phase6",
-                        reason=str(
-                            self._runtime_readiness_reason
-                            or "startup_pipeline_incomplete"
+                        reason=(
+                            f"{self._runtime_readiness_reason or 'startup_pipeline_incomplete'} "
+                            f"selected_ce={self._active_selected_ce} selected_pe={self._active_selected_pe} "
+                            f"startup_ready={self._runtime_startup_ready} data_hard_ready={self._runtime_data_hard_ready} "
+                            f"evaluation_ready={self._runtime_evaluation_ready} live_orders_armed={self._runtime_live_orders_armed} "
+                            f"runner_state={self._runner_state}"
                         ),
                         allowed=False,
                         trace_id=trace_id,
