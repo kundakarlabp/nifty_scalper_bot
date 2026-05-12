@@ -259,14 +259,30 @@ def build_active_trading_basket_symbols(ctx: Any, basket: Mapping[str, object]) 
     fut = str(basket.get("futures_symbol") or "")
     selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or "")
     selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or "")
-    option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if str(s).endswith(("CE","PE"))]
+    atm_strike = basket.get("atm_strike")
+    option_symbols = [
+        str(s)
+        for s in list(basket.get("option_symbols") or basket.get("symbols") or [])
+        if str(s).endswith(("CE", "PE"))
+    ]
     option_symbols = list(dict.fromkeys(option_symbols))
-    core = [s for s in (selected_ce, selected_pe) if s]
-    nearby = [s for s in option_symbols if s not in core]
-    selected_options = (core + nearby)[:max_active_options]
+    near_options = select_active_option_symbols(option_symbols, atm=atm_strike, max_active=max_active_options)
+    selected_options: list[str] = []
+    for symbol in (selected_ce, selected_pe, *near_options):
+        if symbol and symbol not in selected_options:
+            selected_options.append(symbol)
+        if len(selected_options) >= max_active_options:
+            break
     ordered = [s for s in (spot, fut, *selected_options) if s]
     out = list(dict.fromkeys(ordered))
-    LOGGER.info("ACTIVE_TRADING_BASKET_SELECTED count=%d selected_ce=%s selected_pe=%s symbols=%s", len(out), selected_ce or None, selected_pe or None, out)
+    LOGGER.info(
+        "ACTIVE_TRADING_BASKET_SELECTED selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d symbols=%s",
+        selected_ce or None,
+        selected_pe or None,
+        atm_strike,
+        len(selected_options),
+        out,
+    )
     return out
 
 
@@ -277,20 +293,108 @@ def prioritize_startup_hydration_symbols(
     futures_symbol: str | None,
 ) -> list[str]:
     """Prioritize startup symbols. Args: symbols/atm/futures. Returns: ordered symbols. Raises: none."""
-    priority = ["NSE:NIFTY"]
-    if futures_symbol:
-        priority.append(futures_symbol)
-    if atm_ce:
-        priority.append(atm_ce)
-    if atm_pe:
-        priority.append(atm_pe)
+    basket = {
+        "spot_symbol": "NSE:NIFTY",
+        "futures_symbol": futures_symbol or "",
+        "selected_ce": atm_ce or "",
+        "selected_pe": atm_pe or "",
+        "option_symbols": [s for s in symbols if s.endswith(("CE", "PE"))],
+        "symbols": list(symbols),
+    }
+    return build_active_trading_basket_symbols(None, basket)
 
-    out: list[str] = []
-    known = set(symbols)
-    for sym in priority:
-        if sym and sym in known and sym not in out:
-            out.append(sym)
-    return out
+
+
+
+def sync_symbol_history_to_runner(
+    ctx: Any,
+    symbol: str,
+    required_bars: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Sync MDM history into runner cache. Args: ctx/symbol/required_bars/reason. Returns: sync status map. Raises: none."""
+
+    logger = LOGGER
+    mdm = getattr(ctx, 'market_data_manager', None)
+    runner = getattr(ctx, 'strategy_runner', None)
+    mdm_before = 0
+    runner_before = 0
+    runner_after = 0
+    ingested = 0
+    ready = False
+    safe_required_bars = max(1, int(required_bars or 1))
+    try:
+        if mdm is None or runner is None:
+            logger.info(
+                'SELECTED_OPTION_HYDRATION_SYNC_RESULT symbol=%s mdm_before=%s '
+                'runner_before=%s runner_after=%s required=%s ready=%s reason=%s',
+                symbol,
+                0,
+                0,
+                0,
+                safe_required_bars,
+                False,
+                reason,
+            )
+            return {
+                'symbol': symbol,
+                'mdm_before': 0,
+                'runner_before': 0,
+                'runner_after': 0,
+                'required': safe_required_bars,
+                'ready': False,
+                'ingested': 0,
+            }
+        bars = list(mdm.get_ohlc_bars(symbol) or [])
+        mdm_before = len(bars)
+        engine = getattr(runner, '_indicator_engine', None)
+        if engine is not None:
+            runner_before = len(engine.get_history(symbol) or [])
+        if runner_before < safe_required_bars and mdm_before >= safe_required_bars:
+            for bar in bars[-safe_required_bars:]:
+                try:
+                    runner.ingest_historical_bar({**dict(bar), 'symbol': symbol})
+                    ingested += 1
+                except Exception as exc:
+                    logger.error(
+                        'Failure in sync_symbol_history_to_runner: %s',
+                        exc,
+                        exc_info=True,
+                    )
+        if engine is not None:
+            runner_after = len(engine.get_history(symbol) or [])
+        ready = runner_after >= safe_required_bars
+        logger.info(
+            'RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%s source=%s '
+            'runner_history_count=%s mdm_history_count=%s',
+            symbol,
+            None,
+            ingested,
+            reason,
+            runner_after,
+            mdm_before,
+        )
+        logger.info(
+            'SELECTED_OPTION_HYDRATION_SYNC_RESULT symbol=%s mdm_before=%s '
+            'runner_before=%s runner_after=%s required=%s ready=%s',
+            symbol,
+            mdm_before,
+            runner_before,
+            runner_after,
+            safe_required_bars,
+            ready,
+        )
+    except Exception as exc:
+        logger.error('Failure in sync_symbol_history_to_runner: %s', exc, exc_info=True)
+    return {
+        'symbol': symbol,
+        'mdm_before': mdm_before,
+        'runner_before': runner_before,
+        'runner_after': runner_after,
+        'required': safe_required_bars,
+        'ready': ready,
+        'ingested': ingested,
+    }
 
 
 def _gate_runner_symbol_add(
@@ -313,13 +417,14 @@ def _gate_runner_symbol_add(
     except Exception:
         runner_bars = 0
     mdm_bars = len(ctx.market_data_manager.get_ohlc_bars(symbol) or [])
-    required = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "20")) or 20)
+    required = max(20, _symbol_history_requirement(ctx))
     quote_ready = False
     try:
         quote_ready = bool(ctx.market_data_manager.get_symbol_snapshot(symbol))
     except Exception:
         quote_ready = False
     if runner_bars < required and mdm_bars >= required:
+        sync_symbol_history_to_runner(ctx, symbol, required, source)
         hydrate_fn = getattr(ctx.strategy_runner, "_hydrate_from_mdm_cache", None)
         if callable(hydrate_fn):
             LOGGER.info(
