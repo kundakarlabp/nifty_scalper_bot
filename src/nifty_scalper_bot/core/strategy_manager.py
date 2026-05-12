@@ -2234,11 +2234,12 @@ class StrategyManager(_BaseStrategyManager):
                     log,
                     f"strategy_domain_skip:{symbol}:{strategy_name}",
                     (
-                        "STRATEGY_NO_VOTE strategy=%s symbol=%s "
+                        "STRATEGY_DOMAIN_SKIPPED strategy=%s symbol=%s domain=%s "
                         "reason=context_symbol_skipped_for_option_strategy"
                     ),
                     strategy_name,
                     symbol,
+                    "underlying_or_futures",
                     interval_sec=30.0,
                     level=logging.INFO,
                 )
@@ -2249,6 +2250,19 @@ class StrategyManager(_BaseStrategyManager):
                         "context_symbol_skipped_for_underlying_strategy", 0
                     )
                     + 1
+                )
+                log_throttled(
+                    log,
+                    f"strategy_domain_skip:{symbol}:{strategy_name}",
+                    (
+                        "STRATEGY_DOMAIN_SKIPPED strategy=%s symbol=%s domain=%s "
+                        "reason=context_symbol_skipped_for_underlying_strategy"
+                    ),
+                    strategy_name,
+                    symbol,
+                    "options",
+                    interval_sec=30.0,
+                    level=logging.INFO,
                 )
                 continue
             try:

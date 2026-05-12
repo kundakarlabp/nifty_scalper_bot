@@ -5281,7 +5281,19 @@ class StrategyRunner:
             }
             if context:
                 payload.update(context)
-            self._logger.info("RUNNER_EVAL_DECISION", extra=payload)
+            self._logger.info(
+                "RUNNER_EVAL_DECISION symbol=%s allowed=%s stage=%s reason=%s candle_count=%s current_version=%s last_version=%s tick_age_ms=%s data_phase=%s",
+                symbol,
+                allowed,
+                stage,
+                reason,
+                candle_count,
+                current_version,
+                last_version,
+                tick_age_ms,
+                payload.get("data_phase"),
+                extra=payload,
+            )
         except Exception as exc:  # noqa: BLE001
             # Observability must never raise; log and continue.
             try:
