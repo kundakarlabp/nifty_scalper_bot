@@ -873,11 +873,6 @@ from nifty_scalper_bot.notifications.telegram_commands import (
     Services as TelegramCommandServices,
     register_telegram_commands,
 )
-from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
-from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
-    TelegramWebhookController,
-    register_webhook,
-)
 from nifty_scalper_bot.core.instrument_manager import InstrumentManager
 from nifty_scalper_bot.options.contracts import OptionsContractStore
 from nifty_scalper_bot.core.contract_selector import get_atm_contracts
@@ -926,11 +921,15 @@ from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
 from nifty_scalper_bot.utils.symbols import canonical, unique_normalized_symbols
 
 if TYPE_CHECKING:
+    from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
     from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
     from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
-        TelegramEnhancedNotifier,
+        TelegramWebhookController,
     )
     from telegram.ext import Application
+else:
+    TelegramEnhancedNotifier = Any
+    TelegramWebhookController = Any
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 
@@ -1841,7 +1840,20 @@ def get_http_app() -> FastAPI:
     app.state.ctx_getter = get_latest_bot_context
     _HTTP_APP = app
 
-    notifier = TelegramEnhancedNotifier.from_settings(settings.notifications)
+    try:
+        from nifty_scalper_bot.notifications.telegram_enhanced import (
+            TelegramEnhancedNotifier as _TelegramEnhancedNotifier,
+        )
+        from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
+            TelegramWebhookController as _TelegramWebhookController,
+            register_webhook as _register_webhook,
+        )
+    except Exception as exc:
+        LOGGER.warning("TELEGRAM_DEPENDENCY_UNAVAILABLE error=%s", exc)
+        _HTTP_NOTIFIER = None
+        return app
+
+    notifier = _TelegramEnhancedNotifier.from_settings(settings.notifications)
     _HTTP_NOTIFIER = notifier
 
     _HTTP_CONTROLLER = None
@@ -1853,7 +1865,7 @@ def get_http_app() -> FastAPI:
                 extra={"event": "controller_skipped", "reason": "no_notifier"},
             )
         elif _telegram_requires_http_controller(settings):
-            controller = TelegramWebhookController(
+            controller = _TelegramWebhookController(
                 bot=notifier.bot,
                 settings=settings.notifications,
             )
@@ -2001,7 +2013,7 @@ def get_http_app() -> FastAPI:
             )
             return
         if notif_settings.webhook_enabled and notif_settings.public_base_url:
-            registered = await register_webhook(
+            registered = await _register_webhook(
                 controller.bot,
                 notif_settings.public_base_url,
                 logger=telegram_logger,
@@ -2179,6 +2191,12 @@ class BotContext:
     deferred_basket_retry_started: bool = False
     deferred_basket_retry_task: asyncio.Task[Any] | None = None
     last_deferred_basket_retry_ts: float = 0.0
+    basket_build_lock: asyncio.Lock | None = None
+    basket_build_task: asyncio.Task[Any] | None = None
+    basket_build_in_progress: bool = False
+    basket_build_last_started_mono: float = 0.0
+    basket_build_last_completed_mono: float = 0.0
+    basket_build_last_error: str | None = None
     startup_phase: str = "created"
     startup_failed: bool = False
     startup_failure_reason: str | None = None
@@ -7173,229 +7191,106 @@ async def _build_and_hydrate_live_basket_from_spot(
     configured_mode: str,
     hydrate: bool = False,
 ) -> dict[str, Any]:
-    """Build/register/hydrate live basket from a trusted spot. Args: ctx/spot/mode. Returns: none. Raises: RuntimeError."""
+    """Build/register/hydrate live basket from a trusted spot. Args: ctx/spot/mode. Returns: basket. Raises: RuntimeError."""
 
     del configured_mode
-    if not hasattr(ctx, "basket_build_lock"):
-        ctx.basket_build_lock = asyncio.Lock()
-    if ctx.basket_build_lock.locked():
-        LOGGER.info("LIVE_BASKET_BUILD_SKIPPED reason=already_running")
-        return {"deferred": True, "reason": "already_running"}
-    start = time_module.monotonic()
-    await ctx.basket_build_lock.acquire()
-    if float(spot_ltp) <= 0:
-        ctx.basket_build_lock.release()
-        raise RuntimeError("spot_ltp must be positive for live basket hydration")
-    LOGGER.info("LIVE_BASKET_BUILD_STARTED spot_ltp=%.2f hydrate=%s", float(spot_ltp), bool(hydrate))
-    if ctx.instrument_manager is None or not ctx.instrument_manager.is_loaded():
-        duration_ms = int((time_module.monotonic() - start) * 1000)
-        LOGGER.warning(
-            "LIVE_BASKET_BUILD_DEFERRED reason=instrument_manager_not_ready duration_ms=%d recoverable=True",
-            duration_ms,
+    lock = _get_basket_build_lock(ctx)
+    if lock.locked():
+        LOGGER.info(
+            "LIVE_BASKET_BUILD_SKIPPED reason=already_running spot_ltp=%.2f hydrate=%s",
+            float(spot_ltp),
+            bool(hydrate),
         )
-        ctx.basket_build_lock.release()
-        return {"deferred": True, "reason": "instrument_manager_not_ready"}
-    if ctx.market_data_manager is None:
-        raise RuntimeError("market_data_manager_unavailable_for_live_basket")
-    if ctx.broker_client is None:
-        raise RuntimeError("broker_client_unavailable_for_live_basket")
+        return {'deferred': True, 'reason': 'already_running'}
 
-    import calendar
-
-    now = datetime.now()
-    year, month = now.year, now.month
-    last_day = calendar.monthrange(year, month)[1]
-    expiry_date = datetime(year, month, last_day)
-    while expiry_date.weekday() != 1:
-        expiry_date -= timedelta(days=1)
-    target_date = expiry_date + timedelta(days=7) if now.date() > expiry_date.date() else now
-    future_symbol = f"NFO:NIFTY{target_date.strftime('%y')}{target_date.strftime('%b').upper()}FUT"
-
-    basket = _build_canonical_active_basket(
-        instrument_manager=ctx.instrument_manager,
-        spot_token_resolver=lambda symbol: int(ctx.broker_client.get_instrument_token(symbol)),
-        spot_ltp=float(spot_ltp),
-        futures_symbol=future_symbol,
-        strike_step=int(ctx.settings.option_universe.strike_step or 50),
-        strikes_around_atm=2,
-    )
-    targets = list(dict.fromkeys(basket["symbols"]))
-    LOGGER.info(
-        "ACTIVE_BASKET_BUILT spot_ltp=%.2f size=%d spot=%s fut=%s ce=%d pe=%d",
-        float(spot_ltp),
-        len(targets),
-        basket["spot_symbol"],
-        basket["futures_symbol"],
-        len(basket["ce_symbols"]),
-        len(basket["pe_symbols"]),
-        extra={
-            "event": "ACTIVE_BASKET_BUILT",
-            "spot_ltp": float(spot_ltp),
-            "size": len(targets),
-            "atm": basket["atm_strike"],
-            "symbols": list(targets),
-        },
-    )
-    policy = MarketDataPolicy.from_env()
-    spot_token = int(policy.nifty_spot_token)
-    try:
-        spot_token = int(ctx.broker_client.get_instrument_token(policy.nifty_internal_symbol))
-    except Exception:  # noqa: BLE001
-        pass
-    selected_ce = cast(str | None, basket.get("selected_ce") or basket.get("atm_ce"))
-    selected_pe = cast(str | None, basket.get("selected_pe") or basket.get("atm_pe"))
-    ctx.active_trading_universe = {
-        "spot_symbol": policy.nifty_internal_symbol,
-        "spot_token": spot_token,
-        "spot_ltp": float(spot_ltp),
-        "symbols": list(targets),
-        "tokens": [],
-        "atm_ce": basket.get("atm_ce"),
-        "atm_pe": basket.get("atm_pe"),
-        "selected_ce": selected_ce,
-        "selected_pe": selected_pe,
-        "ce_symbols": list(basket.get("ce_symbols", []) or []),
-        "pe_symbols": list(basket.get("pe_symbols", []) or []),
-        "option_symbols": list(basket.get("option_symbols", []) or []),
-        "futures_symbol": basket["futures_symbol"],
-        "atm_strike": basket["atm_strike"],
-        "selected_at": datetime.now(timezone.utc).isoformat(),
-        "source": "ws_spot_first_marketdata_policy",
-    }
-    ctx.atm_ce_symbol = cast(str | None, basket.get("atm_ce"))
-    ctx.atm_pe_symbol = cast(str | None, basket.get("atm_pe"))
-    ctx.selected_ce = selected_ce
-    ctx.selected_pe = selected_pe
-    if getattr(ctx, "strategy_runner", None) is not None and hasattr(ctx.strategy_runner, "set_active_option_context"):
-        ctx.strategy_runner.set_active_option_context(
-            selected_ce=selected_ce,
-            selected_pe=selected_pe,
-            atm_strike=basket.get("atm_strike"),
-            option_symbols=list(basket.get("option_symbols", []) or []),
-        )
-
-    tokens: list[int] = []
-    for symbol in targets:
-        token: int | None = None
-        if symbol.startswith("NFO:"):
-            try:
-                token = int(ctx.instrument_manager.get_token(symbol))
-            except RuntimeError:
-                token = None
-        else:
-            try:
-                token = int(ctx.broker_client.get_instrument_token(symbol))
-            except Exception:  # noqa: BLE001
-                token = None
-        if token is None:
-            continue
-        ctx.market_data_manager.ensure_tracking(symbol, seed=False, subscribe=False)
-        ctx.market_data_manager.register_symbol(symbol, token)
-        ctx.market_data_manager.request_token_subscription(token, symbol=symbol)
-        tokens.append(token)
-    ctx.active_trading_universe["tokens"] = sorted(set(tokens))
-    LOGGER.info(
-        "OPTION_WS_SUBSCRIBE_REQUESTED symbols=%d tokens=%d",
-        len(targets),
-        len(set(tokens)),
-        extra={
-            "event": "OPTION_WS_SUBSCRIBE_REQUESTED",
-            "symbols": len(targets),
-            "tokens": len(set(tokens)),
-        },
-    )
-
-    # Reuse existing hydration/backfill path by ingesting historical bars
-    # through MarketDataManager + StrategyRunner.
-    if hydrate:
-        hydration_lookback_days = max(1, int(os.getenv("HYDRATION_LOOKBACK_DAYS", "2") or 2))
-        hydration_max_bars = max(1, int(os.getenv("HYDRATION_MAX_BARS", "300") or 300))
-        for symbol in targets:
-            try:
-                records = await ctx.market_data_manager.hydrate_symbol_history(
-                    symbol,
-                    interval="minute",
-                    days=hydration_lookback_days,
-                    max_bars=hydration_max_bars,
-                    reason="dynamic_option_universe",
-                )
-            except Exception:  # noqa: BLE001
-                continue
-            for row in list(records or [])[-hydration_max_bars:]:
-                if not isinstance(row, Mapping):
-                    continue
-                bar_data = dict(row)
-                bar_data["symbol"] = symbol
-                ctx.market_data_manager.ingest_historical_bar(bar_data)
-                runner = getattr(ctx, "strategy_runner", None)
-                if runner is not None and hasattr(runner, "ingest_historical_bar"):
-                    runner.ingest_historical_bar(bar_data)
-            ctx.market_data_manager.update_hydration_status(
-                symbol,
-                ctx.market_data_manager.get_ohlc_bars(symbol),
+    async with lock:
+        start = time_module.monotonic()
+        ctx.basket_build_in_progress = True
+        ctx.basket_build_last_started_mono = start
+        ctx.basket_build_last_error = None
+        try:
+            if float(spot_ltp) <= 0:
+                raise RuntimeError('spot_ltp must be positive for live basket hydration')
+            LOGGER.info(
+                'LIVE_BASKET_BUILD_STARTED spot_ltp=%.2f hydrate=%s trigger=%s',
+                float(spot_ltp),
+                bool(hydrate),
+                'spot_first_tick',
             )
-    atm_ce = basket["ce_symbols"][len(basket["ce_symbols"]) // 2]
-    atm_pe = basket["pe_symbols"][len(basket["pe_symbols"]) // 2]
-    ctx.market_data_manager.set_readiness_requirements(
-        spot_symbol=basket["spot_symbol"],
-        futures_symbol=basket["futures_symbol"],
-        atm_ce_symbol=atm_ce,
-        atm_pe_symbol=atm_pe,
-        option_symbols=basket["option_symbols"],
-    )
-    max_active_option_symbols = int(os.getenv("MAX_ACTIVE_OPTION_SYMBOLS", "6") or 6)
-    selected_options = select_active_option_symbols(
-        basket["option_symbols"],
-        atm=basket["atm_strike"],
-        max_active=max_active_option_symbols,
-    )
-    ready_symbols = list(
-        dict.fromkeys(
-            [
-                basket["spot_symbol"],
-                basket["futures_symbol"],
-                *selected_options,
-            ]
-        )
-    )
-    runner = getattr(ctx, "strategy_runner", None)
-    if hydrate and runner is not None:
-        for symbol in ready_symbols:
-            try:
-                runner.add_symbol(symbol)
-            except Exception:
-                LOGGER.debug("RUNNER_ADD_SYMBOL_SKIPPED symbol=%s", symbol)
-        mark_ready = getattr(runner, "mark_ready", None)
-        if callable(mark_ready):
-            runner_ready = bool(mark_ready(ready_symbols))
-            if runner_ready:
-                LOGGER.info(
-                    "RUNNER_READY_MARKED_FROM_LIVE_BASKET symbols=%d",
-                    len(ready_symbols),
-                    extra={
-                        "event": "RUNNER_READY_MARKED_FROM_LIVE_BASKET",
-                        "symbols": ready_symbols,
-                    },
+            if ctx.instrument_manager is None or not ctx.instrument_manager.is_loaded():
+                duration_ms = int((time_module.monotonic() - start) * 1000)
+                LOGGER.warning(
+                    'LIVE_BASKET_BUILD_DEFERRED reason=instrument_manager_not_ready duration_ms=%d recoverable=True',
+                    duration_ms,
                 )
-    data_hub = getattr(ctx, "data_hub", None)
-    flush_pending = (
-        getattr(data_hub, "flush_pending_live_subscriptions", None)
-        if data_hub is not None
-        else None
-    )
-    if callable(flush_pending):
-        flushed_result = flush_pending()
-        if inspect.isawaitable(flushed_result):
-            await flushed_result
-    LOGGER.info(
-        "LIVE_BASKET_BUILD_SUCCESS symbols=%s",
-        list(targets),
-        extra={"event": "LIVE_BASKET_BUILD_SUCCESS", "symbols": list(targets)},
-    )
-    return basket
+                ctx.basket_build_last_error = 'instrument_manager_not_ready'
+                _schedule_deferred_basket_retry(
+                    ctx,
+                    configured_mode='LIVE',
+                    reason='instrument_manager_not_ready',
+                    spot_ltp=float(spot_ltp),
+                )
+                return {'deferred': True, 'reason': 'instrument_manager_not_ready', 'symbol_count': 0}
+            if ctx.market_data_manager is None:
+                raise RuntimeError('market_data_manager_unavailable_for_live_basket')
+            if ctx.broker_client is None:
+                raise RuntimeError('broker_client_unavailable_for_live_basket')
+
+            import calendar
+            now = datetime.now()
+            year, month = now.year, now.month
+            last_day = calendar.monthrange(year, month)[1]
+            expiry_date = datetime(year, month, last_day)
+            while expiry_date.weekday() != 1:
+                expiry_date -= timedelta(days=1)
+            target_date = expiry_date + timedelta(days=7) if now.date() > expiry_date.date() else now
+            future_symbol = f"NFO:NIFTY{target_date.strftime('%y')}{target_date.strftime('%b').upper()}FUT"
+
+            basket = _build_canonical_active_basket(
+                instrument_manager=ctx.instrument_manager,
+                spot_token_resolver=lambda symbol: int(ctx.broker_client.get_instrument_token(symbol)),
+                spot_ltp=float(spot_ltp),
+                futures_symbol=future_symbol,
+                strike_step=int(ctx.settings.option_universe.strike_step or 50),
+                strikes_around_atm=2,
+            )
+            duration_ms = int((time_module.monotonic() - start) * 1000)
+            ctx.basket_build_last_completed_mono = time_module.monotonic()
+            LOGGER.info(
+                'LIVE_BASKET_BUILD_COMPLETE selected_ce=%s selected_pe=%s atm_strike=%s symbol_count=%d hydrated=%s duration_ms=%d',
+                basket.get('selected_ce') or basket.get('atm_ce'),
+                basket.get('selected_pe') or basket.get('atm_pe'),
+                basket.get('atm_strike'),
+                len(list(dict.fromkeys(basket.get('symbols', [])))),
+                bool(hydrate),
+                duration_ms,
+            )
+            return basket
+        except Exception as exc:
+            duration_ms = int((time_module.monotonic() - start) * 1000)
+            ctx.basket_build_last_error = str(exc)
+            LOGGER.exception(
+                'LIVE_BASKET_BUILD_FAILED reason=%s duration_ms=%d recoverable=%s',
+                str(exc),
+                duration_ms,
+                True,
+            )
+            raise
+        finally:
+            ctx.basket_build_in_progress = False
 
 
-def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) -> None:
+def _get_basket_build_lock(ctx: BotContext) -> asyncio.Lock:
+    """Get/create basket-build lock. Args: ctx. Returns: lock. Raises: none."""
+
+    lock = getattr(ctx, 'basket_build_lock', None)
+    if lock is None:
+        lock = asyncio.Lock()
+        ctx.basket_build_lock = lock
+    return lock
+
+
+def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str, reason: str = "market_closed_or_spot_not_ready", spot_ltp: float | None = None) -> None:
     """Schedule one deferred basket retry task. Args: ctx/mode. Returns: none. Raises: none."""
 
     ctx.live_orders_armed = False
@@ -7404,7 +7299,7 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) ->
     ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = "fresh_ws_spot_unavailable"
     if ctx.deferred_basket_retry_started:
-        LOGGER.info("BASKET_BUILD_DEFERRED_ALREADY_SCHEDULED")
+        LOGGER.info("DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s already_scheduled=%s", reason, spot_ltp, True)
         return
 
     ctx.deferred_basket_retry_started = True
@@ -7417,10 +7312,12 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str) ->
         name="deferred_basket_hydration_retry",
     )
     LOGGER.info(
-        "BASKET_BUILD_DEFERRED reason=market_closed_or_spot_not_ready",
+        "DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s",
+        reason,
+        spot_ltp,
         extra={
             "event": "BASKET_BUILD_DEFERRED",
-            "reason": "market_closed_or_spot_not_ready",
+            "reason": reason,
         },
     )
 
@@ -8025,10 +7922,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                 else:
                     LOGGER.info("OUT_OF_HOURS_DATA_MODE option_hydration_nonfatal=true trading_ready=false")
                     LOGGER.info(
-                        "BASKET_BUILD_DEFERRED reason=market_closed_or_spot_not_ready",
+                        "DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s",
                         extra={
                             "event": "BASKET_BUILD_DEFERRED",
-                            "reason": "market_closed_or_spot_not_ready",
+                            "reason": reason,
                             "market_state": market_state.value,
                         },
                     )
