@@ -397,6 +397,54 @@ def sync_symbol_history_to_runner(
     }
 
 
+def get_runner_history_count(ctx: Any, symbol: str) -> int:
+    """Read runner history count for symbol. Args: ctx/symbol. Returns: bars. Raises: none."""
+    runner = getattr(ctx, "strategy_runner", None)
+    if runner is None:
+        return 0
+    engine = getattr(runner, "_indicator_engine", None)
+    if engine is None:
+        return 0
+    try:
+        return len(engine.get_history(symbol) or [])
+    except Exception:
+        return 0
+
+
+def resolve_active_basket_tokens(
+    ctx: Any,
+    active_basket_symbols: Sequence[str],
+    selected_ce: str | None,
+    selected_pe: str | None,
+) -> dict[str, int]:
+    """Resolve tokens for active symbols. Args: ctx/symbols/selected. Returns: symbol token map. Raises: none."""
+    token_map: dict[str, int] = {}
+    instrument_manager = getattr(ctx, "instrument_manager", None)
+    broker_client = getattr(ctx, "broker_client", None)
+    for symbol in active_basket_symbols:
+        token: int | None = None
+        try:
+            if str(symbol).startswith("NFO:") and instrument_manager is not None:
+                token = int(instrument_manager.get_token(symbol))
+            elif broker_client is not None:
+                token = int(broker_client.get_instrument_token(symbol))
+        except Exception:
+            token = None
+        if token is None:
+            fatal = symbol in {selected_ce, selected_pe}
+            LOGGER.error("ACTIVE_BASKET_TOKEN_MISSING symbol=%s fatal_for_live=%s", symbol, fatal)
+            continue
+        token_map[symbol] = int(token)
+        LOGGER.info("ACTIVE_BASKET_TOKEN_RESOLVED symbol=%s token=%s", symbol, int(token))
+    LOGGER.info(
+        "ACTIVE_BASKET_TOKEN_MAP_READY count=%d selected_ce_token=%s selected_pe_token=%s",
+        len(token_map),
+        token_map.get(selected_ce or ""),
+        token_map.get(selected_pe or ""),
+    )
+    return token_map
+
+
 def _gate_runner_symbol_add(
     ctx: Any,
     symbol: str,
@@ -7128,33 +7176,25 @@ async def _build_and_hydrate_live_basket_from_spot(
     """Build/register/hydrate live basket from a trusted spot. Args: ctx/spot/mode. Returns: none. Raises: RuntimeError."""
 
     del configured_mode
+    if not hasattr(ctx, "basket_build_lock"):
+        ctx.basket_build_lock = asyncio.Lock()
+    if ctx.basket_build_lock.locked():
+        LOGGER.info("LIVE_BASKET_BUILD_SKIPPED reason=already_running")
+        return {"deferred": True, "reason": "already_running"}
+    start = time_module.monotonic()
+    await ctx.basket_build_lock.acquire()
     if float(spot_ltp) <= 0:
+        ctx.basket_build_lock.release()
         raise RuntimeError("spot_ltp must be positive for live basket hydration")
-    LOGGER.info(
-        "LIVE_BASKET_BUILD_STARTED spot_ltp=%.2f hydrate=%s",
-        float(spot_ltp),
-        bool(hydrate),
-        extra={"event": "LIVE_BASKET_BUILD_STARTED", "spot_ltp": float(spot_ltp), "hydrate": bool(hydrate)},
-    )
+    LOGGER.info("LIVE_BASKET_BUILD_STARTED spot_ltp=%.2f hydrate=%s", float(spot_ltp), bool(hydrate))
     if ctx.instrument_manager is None or not ctx.instrument_manager.is_loaded():
-        instrument_manager = getattr(ctx, "instrument_manager", None)
-        is_loaded = bool(instrument_manager.is_loaded()) if instrument_manager is not None and hasattr(instrument_manager, "is_loaded") else False
-        LOGGER.error(
-            "LIVE_BASKET_BUILD_BLOCKED reason=instrument_manager_not_ready type=%s is_loaded=%s",
-            type(instrument_manager).__name__ if instrument_manager is not None else "NoneType",
-            is_loaded,
-            extra={
-                "event": "LIVE_BASKET_BUILD_BLOCKED",
-                "reason": "instrument_manager_not_ready",
-                "instrument_manager_type": type(instrument_manager).__name__ if instrument_manager is not None else "NoneType",
-                "is_loaded": is_loaded,
-            },
+        duration_ms = int((time_module.monotonic() - start) * 1000)
+        LOGGER.warning(
+            "LIVE_BASKET_BUILD_DEFERRED reason=instrument_manager_not_ready duration_ms=%d recoverable=True",
+            duration_ms,
         )
-        return {
-            "deferred": True,
-            "reason": "instrument_manager_not_ready",
-            "symbol_count": 0,
-        }
+        ctx.basket_build_lock.release()
+        return {"deferred": True, "reason": "instrument_manager_not_ready"}
     if ctx.market_data_manager is None:
         raise RuntimeError("market_data_manager_unavailable_for_live_basket")
     if ctx.broker_client is None:
