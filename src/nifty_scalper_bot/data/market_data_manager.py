@@ -4604,6 +4604,28 @@ class MarketDataManager:
             delta = cumulative - previous
         else:
             delta = 0.0
+        symbol_upper = str(symbol or "").upper()
+        is_option_symbol = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
+        if is_option_symbol:
+            max_delta = float(os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000") or "1000000")
+            if delta > max_delta:
+                self._logger.warning(
+                    "OPTION_VOLUME_DELTA_CLAMPED symbol=%s cumulative=%s previous=%s delta=%s max_delta=%s",
+                    symbol,
+                    cumulative,
+                    previous,
+                    delta,
+                    max_delta,
+                    extra={
+                        "event": "OPTION_VOLUME_DELTA_CLAMPED",
+                        "symbol": symbol,
+                        "cumulative": cumulative,
+                        "previous": previous,
+                        "delta": delta,
+                        "max_delta": max_delta,
+                    },
+                )
+                delta = 0.0
         self._last_cumulative_volume_by_symbol[key] = cumulative
         payload["volume_cumulative"] = cumulative
         payload["volume_delta"] = delta

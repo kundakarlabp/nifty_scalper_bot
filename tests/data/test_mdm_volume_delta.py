@@ -29,3 +29,17 @@ def test_normalise_tick_volume_delta_uses_ltq_on_first_tick() -> None:
 
     assert first['volume'] == 12.0
     assert second['volume'] == 40.0
+
+
+
+def test_normalise_tick_volume_delta_clamps_option_spike(monkeypatch) -> None:
+    monkeypatch.setenv('OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA', '1000000')
+    manager = MarketDataManager(broker=None, websocket=None)
+    symbol = 'NFO:NIFTY26MAY23500CE'
+
+    _ = manager._normalise_tick_volume_delta(symbol, {'symbol': symbol, 'volume_traded_today': 1000})
+    spiked = manager._normalise_tick_volume_delta(symbol, {'symbol': symbol, 'volume_traded_today': 2005000})
+
+    assert spiked['volume_cumulative'] == 2005000.0
+    assert spiked['volume'] == 0.0
+    assert spiked['volume_delta'] == 0.0

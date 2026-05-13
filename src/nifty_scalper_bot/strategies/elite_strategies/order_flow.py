@@ -150,6 +150,13 @@ class OrderFlowStrategy(EliteStrategy):
                 'premium_target_rr': 1.8,
             }
             LOGGER.info('STRATEGY_VOTE strategy=OrderFlow side=%s score=%.2f', side, strategy_score)
+            if metadata["role"] == "trigger":
+                LOGGER.info(
+                    "ORDERFLOW_TRIGGER_ROLE_ENABLED symbol=%s score=%.2f spread_pct=%.3f",
+                    symbol,
+                    strategy_score,
+                    spread_pct,
+                )
             return EliteSignal(
                 symbol=symbol,
                 signal='BUY',

@@ -2614,7 +2614,7 @@ class StrategyManager(_BaseStrategyManager):
                 selected_ok,
                 vetoed,
             )
-            if best_vote.score >= single_high:
+            if best_vote.score >= single_high and selected_ok and not vetoed:
                 metadata_stage = "preliminary_single_high_conviction"
             elif allow_scalp_single and score_ok and conf_ok and selected_ok and not vetoed:
                 metadata_stage = "single_vote_scalp_controlled"
