@@ -5998,8 +5998,9 @@ class StrategyRunner:
             timestamp = _extract_timestamp(tick, now)
             tick_age = (now - timestamp).total_seconds()
             price = _extract_float(tick, "ltp", "last_price", "close", "price")
-            raw_volume = _extract_int(
-                tick, "volume", "volume_traded", "volume_traded_today"
+            raw_volume_delta = _extract_int(tick, "volume_delta", "volume")
+            raw_volume_cumulative = _extract_int(
+                tick, "volume_cumulative", "volume_traded", "volume_traded_today"
             )
             source = tick.get("source", "unknown")
             if source == "poll":
@@ -6031,28 +6032,46 @@ class StrategyRunner:
                 )
                 return
 
-            # ✅ FIX S5: Convert cumulative exchange volume to per-tick delta
             volume = 0
-            first_tick_seen = symbol not in self._last_cumulative_volume
-            if raw_volume > 0:
-                last_cum = self._last_cumulative_volume.get(symbol, -1)
-                if last_cum < 0:
+            if "volume_delta" in tick or "volume" in tick:
+                volume = max(int(raw_volume_delta), 0)
+            else:
+                first_tick_seen = symbol not in self._last_cumulative_volume
+                if raw_volume_cumulative > 0:
+                    last_cum = self._last_cumulative_volume.get(symbol, -1)
+                    if last_cum < 0:
+                        volume = 0
+                    elif raw_volume_cumulative >= last_cum:
+                        volume = raw_volume_cumulative - last_cum
+                    else:
+                        volume = 0
+                    self._last_cumulative_volume[symbol] = raw_volume_cumulative
+                elif first_tick_seen:
                     volume = 0
-                elif raw_volume >= last_cum:
-                    volume = raw_volume - last_cum
-                else:
-                    volume = min(raw_volume, 1000)
-                self._last_cumulative_volume[symbol] = raw_volume
-            elif first_tick_seen:
-                volume = 0
-                self._last_cumulative_volume[symbol] = raw_volume
-                log_throttled(
-                    self._logger,
-                    f"tick_volume_seeded_{symbol}",
-                    "Condition met: tick_volume_baseline_only_first_tick",
-                    interval_sec=60.0,
-                    level=logging.INFO,
-                )
+                    self._last_cumulative_volume[symbol] = raw_volume_cumulative
+                    log_throttled(
+                        self._logger,
+                        f"tick_volume_seeded_{symbol}",
+                        "Condition met: tick_volume_baseline_only_first_tick",
+                        interval_sec=60.0,
+                        level=logging.INFO,
+                    )
+            if self._is_tradable_symbol(symbol):
+                max_runner_delta = int(os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000") or "1000000")
+                if volume > max_runner_delta:
+                    self._logger.warning(
+                        "RUNNER_OPTION_VOLUME_CLAMPED symbol=%s volume=%s max=%s",
+                        symbol,
+                        volume,
+                        max_runner_delta,
+                        extra={
+                            "event": "RUNNER_OPTION_VOLUME_CLAMPED",
+                            "symbol": symbol,
+                            "volume": volume,
+                            "max": max_runner_delta,
+                        },
+                    )
+                    volume = 0
 
             price_source = "ltp"
             price_from_cache = False
@@ -7149,6 +7168,22 @@ class StrategyRunner:
                             "atm_strike": atm_strike,
                             "is_selected_option": normalized_symbol in selected_set,
                         }
+                        option_side = None
+                        symbol_upper = normalized_symbol.upper()
+                        if symbol_upper.endswith("CE"):
+                            option_side = "CE"
+                        elif symbol_upper.endswith("PE"):
+                            option_side = "PE"
+                        if option_side:
+                            runtime_ctx.setdefault("contract_side", option_side)
+                            runtime_ctx.setdefault("option_contract_side", option_side)
+                        existing_bias = (
+                            indicators_ctx.get("direction_bias")
+                            or indicators_ctx.get("underlying_direction_bias")
+                            or getattr(self, "_latest_direction_bias", None)
+                        )
+                        if str(existing_bias or "").upper() in {"CE", "PE"}:
+                            runtime_ctx["direction_bias"] = str(existing_bias).upper()
                         if symbol_strike is not None and atm_strike is not None:
                             runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
                         quote_payload = self.get_quote(symbol) if hasattr(self, "get_quote") else {}

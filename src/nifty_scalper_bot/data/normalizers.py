@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from typing import Any, Mapping
 
 
@@ -31,6 +32,14 @@ def normalize_history_row(symbol: str, row: Any, source: str = "historical") -> 
         o, h, l, c = float(open_), float(high), float(low), float(close)
         if min(o, h, l, c) <= 0:
             return None
+        symbol_upper = str(symbol or "").upper()
+        is_option_symbol = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
+        try:
+            volume_value = int(float(volume or 0))
+        except (TypeError, ValueError):
+            volume_value = 0
+        if is_option_symbol and volume_value > int(os.getenv("OPTION_MAX_REASONABLE_1M_VOLUME", "5000000")):
+            volume_value = 0
         return {
             "symbol": str(symbol),
             "timestamp": ts,
@@ -38,7 +47,7 @@ def normalize_history_row(symbol: str, row: Any, source: str = "historical") -> 
             "high": h,
             "low": l,
             "close": c,
-            "volume": int(float(volume or 0)),
+            "volume": volume_value,
             "source": source,
         }
     except Exception:
