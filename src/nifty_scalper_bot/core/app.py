@@ -3130,6 +3130,26 @@ def _build_canonical_active_basket(
         spot_token = well_known_spot_tokens.get(spot_symbol)
     if spot_token is None:
         raise RuntimeError(f"failed to resolve spot token for {spot_symbol}")
+    def _nearest_side(candidates: list[str], side: str) -> str | None:
+        parsed: list[tuple[int, str]] = []
+        for candidate in candidates:
+            if not candidate.endswith(side):
+                continue
+            strike_digits = ""
+            for char in reversed(candidate[:-2]):
+                if char.isdigit():
+                    strike_digits = char + strike_digits
+                elif strike_digits:
+                    break
+            if not strike_digits:
+                continue
+            parsed.append((abs(int(strike_digits) - int(atm)), candidate))
+        if not parsed:
+            return None
+        parsed.sort(key=lambda item: (item[0], item[1]))
+        return parsed[0][1]
+    atm_ce = _nearest_side(ce_symbols, "CE")
+    atm_pe = _nearest_side(pe_symbols, "PE")
     symbols = [spot_symbol, futures_symbol, *ce_symbols, *pe_symbols]
     return {
         "spot_symbol": spot_symbol,
@@ -3140,6 +3160,10 @@ def _build_canonical_active_basket(
         "ce_symbols": ce_symbols,
         "pe_symbols": pe_symbols,
         "option_symbols": [*ce_symbols, *pe_symbols],
+        "atm_ce": atm_ce,
+        "atm_pe": atm_pe,
+        "selected_ce": atm_ce,
+        "selected_pe": atm_pe,
         "symbols": symbols,
     }
 
@@ -7012,8 +7036,11 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if not sym or mdm is None: return False
         h=getattr(mdm,'has_ws_tradable_quote',None)
         if callable(h):
-            try: return bool(h(sym))
-            except Exception: pass
+            try: return bool(h([sym]))
+            except TypeError:
+                return bool(h(sym))
+            except Exception:
+                pass
         snap=_snapshot(sym)
         if snap is None: return False
         bid=float(getattr(snap,'bid',0.0) or 0.0); ask=float(getattr(snap,'ask',0.0) or 0.0)
@@ -7112,10 +7139,30 @@ def _commit_active_dynamic_basket(
     selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or picked_ce or "") or None
     selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or picked_pe or "") or None
     active_set = set(current_options) | set(current_symbols)
+    def _nearest_for_side(side: str) -> str | None:
+        if atm_strike is None:
+            return None
+        candidates: list[tuple[float, str]] = []
+        for sym in current_options:
+            if not sym.endswith(side):
+                continue
+            strike_digits = ""
+            for char in reversed(sym[:-2]):
+                if char.isdigit():
+                    strike_digits = char + strike_digits
+                elif strike_digits:
+                    break
+            if not strike_digits:
+                continue
+            candidates.append((abs(float(strike_digits) - float(atm_strike)), sym))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return candidates[0][1]
     if not (selected_ce and selected_ce.endswith("CE") and selected_ce in active_set):
-        selected_ce = next((sym for sym in current_options if sym.endswith("CE")), None)
+        selected_ce = _nearest_for_side("CE")
     if not (selected_pe and selected_pe.endswith("PE") and selected_pe in active_set):
-        selected_pe = next((sym for sym in current_options if sym.endswith("PE")), None)
+        selected_pe = _nearest_for_side("PE")
     ctx.selected_ce = selected_ce
     ctx.selected_pe = selected_pe
     ctx.atm_ce_symbol = selected_ce
