@@ -2712,6 +2712,84 @@ class StrategyRunner:
             )
             raise
 
+    def reseed_history_from_bars(
+        self,
+        symbol: str,
+        bars: Iterable[Mapping[str, Any]],
+        source: str = "mdm_reseed",
+        min_bars: int = 1,
+    ) -> int:
+        """Args: symbol/bars/source/min_bars. Returns: runner history count. Raises: Exception."""
+        try:
+            normalized_symbol = self._normalize_symbol(symbol)
+            if not normalized_symbol:
+                return 0
+            normalized_rows: dict[datetime, dict[str, Any]] = {}
+            for row in bars or ():
+                normalized = normalize_history_row(normalized_symbol, dict(row), source=source)
+                if normalized is None:
+                    continue
+                ts_value = normalized.get("timestamp")
+                if not isinstance(ts_value, datetime):
+                    continue
+                timestamp = ts_value.astimezone(timezone.utc).replace(microsecond=0)
+                normalized_rows[timestamp] = {
+                    "timestamp": timestamp,
+                    "open": float(normalized["open"]),
+                    "high": float(normalized["high"]),
+                    "low": float(normalized["low"]),
+                    "close": float(normalized["close"]),
+                    "volume": int(normalized.get("volume", 0) or 0),
+                }
+            selected_rows = sorted(normalized_rows.values(), key=lambda item: item["timestamp"])
+            one_minute_bars: list[OneMinuteBar] = []
+            for row in selected_rows:
+                start_ts = cast(datetime, row["timestamp"])
+                one_minute_bars.append(
+                    OneMinuteBar(
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=int(row["volume"]),
+                        start=start_ts,
+                        end=start_ts + timedelta(minutes=1),
+                    )
+                )
+            with self._lock:
+                self._symbol_history[normalized_symbol] = deque(one_minute_bars, maxlen=2000)
+                if one_minute_bars:
+                    self._last_bar_ts[normalized_symbol] = one_minute_bars[-1].start
+                self._active_symbols.add(normalized_symbol)
+                self._tracked_symbols.add(normalized_symbol)
+                self._data_phase.setdefault(normalized_symbol, "HYDRATION")
+            indicator_count = self._indicator_engine.replace_history(
+                normalized_symbol,
+                selected_rows,
+                source=source,
+                min_bars=min_bars,
+            )
+            target_min_bars = max(1, int(min_bars or 1))
+            if indicator_count >= target_min_bars:
+                self._set_symbol_hydration_state(normalized_symbol, SymbolState.READY)
+                self._seed_pipeline_store(normalized_symbol)
+                self._seed_candle_engine_from_history(normalized_symbol)
+            else:
+                self._set_symbol_hydration_state(normalized_symbol, SymbolState.DEGRADED)
+            runner_count = len(self._symbol_history.get(normalized_symbol, []))
+            self._logger.info(
+                "RUNNER_HISTORY_RESEEDED symbol=%s runner_bars=%d indicator_bars=%d min_bars=%d source=%s",
+                normalized_symbol,
+                runner_count,
+                indicator_count,
+                target_min_bars,
+                source,
+            )
+            return runner_count
+        except Exception as e:
+            self._logger.error("Failure in StrategyRunner.reseed_history_from_bars: %s", e)
+            raise
+
     async def safe_ingest(self, data: dict[str, Any]) -> None:
         """Synchronize hydration ingestion on event loop. Args: data. Returns: None. Raises: None."""
         self._startup_hydrated = True

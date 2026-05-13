@@ -6927,18 +6927,39 @@ async def _ensure_selected_options_hydrated(
             bars = mdm.get_ohlc_bars(sym, limit=required_bars) or []
         except TypeError:
             bars = mdm.get_ohlc_bars(sym) or []
+        normalized_bars: list[dict[str, Any]] = []
         for row in bars:
             if not isinstance(row, Mapping):
                 continue
             bar_data = dict(row)
             bar_data["symbol"] = sym
-            if runner is not None and hasattr(runner, "ingest_historical_bar"):
+            normalized_bars.append(bar_data)
+        used_reseed = False
+        if runner is not None and hasattr(runner, "reseed_history_from_bars"):
+            runner.reseed_history_from_bars(
+                sym,
+                normalized_bars,
+                source=f"{reason}_selected_option_reseed",
+                min_bars=required_bars,
+            )
+            used_reseed = True
+        elif runner is not None and hasattr(runner, "ingest_historical_bar"):
+            for bar_data in normalized_bars:
                 runner.ingest_historical_bar(bar_data)
         update_fn = getattr(mdm, "update_hydration_status", None)
         if callable(update_fn):
             update_fn(sym, mdm.get_ohlc_bars(sym))
         after_mdm_bars = len(mdm.get_ohlc_bars(sym) or [])
         after_runner_bars = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
+        if used_reseed and after_mdm_bars >= required_bars and after_runner_bars < required_bars:
+            LOGGER.warning(
+                "SELECTED_OPTION_RESEED_FAILED symbol=%s after_mdm_bars=%d after_runner_bars=%d required_bars=%d reason=%s",
+                sym,
+                after_mdm_bars,
+                after_runner_bars,
+                required_bars,
+                reason,
+            )
         LOGGER.info(
             "SELECTED_OPTION_FORCE_HYDRATION_RESULT symbol=%s before_mdm_bars=%d after_mdm_bars=%d before_runner_bars=%d after_runner_bars=%d required_bars=%d",
             sym, before_mdm_bars, after_mdm_bars, before_runner_bars, after_runner_bars, required_bars,
