@@ -2124,7 +2124,15 @@ class StrategyRunner:
                 "source": str(snapshot.source or "signal_snapshot"),
                 "atr_option": float(metadata.get("atr", 0.0) or 0.0),
                 "history_bars": int(metadata.get("history_bars", 0) or 0),
-                "data_quality_score": float(metadata.get("data_quality_score", 0.0) or 0.0),
+                "data_quality_score": float(
+                    metadata.get("data_quality_score")
+                    if metadata.get("data_quality_score") is not None
+                    else metadata.get("data_score", 0.0)
+                    or 0.0
+                ),
+                "candidate_selected": bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")),
+                "quote_usable_for_order_plan": bool(snapshot.tradable_quote and has_bid_ask),
+                "tradable_quote": bool(snapshot.tradable_quote and has_bid_ask),
                 "effective_bars": int(metadata.get("effective_bars", metadata.get("history_bars", 0)) or 0),
             }
         except Exception as exc:  # noqa: BLE001
@@ -8817,17 +8825,67 @@ class StrategyRunner:
                     ),
                     {},
                 )
-                metadata["tradable_quote"] = bool(
-                    (selected_snapshot or {}).get("tradable_quote")
+                selected_snapshot = dict(selected_snapshot or {})
+                metadata["selected_snapshot_symbol"] = selected_snapshot.get("symbol")
+
+                snapshot_bid = selected_snapshot.get("bid")
+                snapshot_ask = selected_snapshot.get("ask")
+
+                try:
+                    snapshot_bid_f = float(snapshot_bid) if snapshot_bid is not None else 0.0
+                except (TypeError, ValueError):
+                    snapshot_bid_f = 0.0
+
+                try:
+                    snapshot_ask_f = float(snapshot_ask) if snapshot_ask is not None else 0.0
+                except (TypeError, ValueError):
+                    snapshot_ask_f = 0.0
+
+                snapshot_bid_ask_valid = bool(
+                    snapshot_bid_f > 0
+                    and snapshot_ask_f > snapshot_bid_f
                 )
-                allow_ltp_live_plan = _env_flag(
-                    "ALLOW_LTP_ONLY_LIVE_ORDER_PLAN", default=False
+
+                snapshot_tradable_quote = bool(
+                    selected_snapshot.get("tradable_quote")
+                    or snapshot_bid_ask_valid
                 )
+
+                mdm_tradable_quote = False
+                mdm_bid_ask_valid = False
+                if self._market_data is not None:
+                    try:
+                        latest_snapshot = self._market_data.get_symbol_snapshot(candidate.symbol)
+                        latest_bid = float(latest_snapshot.bid or 0.0)
+                        latest_ask = float(latest_snapshot.ask or 0.0)
+                        mdm_bid_ask_valid = bool(latest_bid > 0 and latest_ask > latest_bid)
+                        mdm_tradable_quote = bool(latest_snapshot.tradable_quote and mdm_bid_ask_valid)
+                        metadata["latest_quote_bid"] = latest_bid
+                        metadata["latest_quote_ask"] = latest_ask
+                        metadata["latest_quote_tradable"] = bool(latest_snapshot.tradable_quote)
+                    except Exception as quote_exc:  # noqa: BLE001
+                        self._logger.warning(
+                            "QUOTE_REVALIDATION_FAILED symbol=%s err=%s trace_id=%s",
+                            candidate.symbol,
+                            quote_exc,
+                            trace_id,
+                            extra={
+                                "event": "QUOTE_REVALIDATION_FAILED",
+                                "symbol": candidate.symbol,
+                                "trace_id": trace_id,
+                                "error": str(quote_exc),
+                            },
+                        )
+
+                allow_ltp_live_plan = _env_flag("ALLOW_LTP_ONLY_LIVE_ORDER_PLAN", default=False)
+
+                metadata["tradable_quote"] = bool(snapshot_tradable_quote or mdm_tradable_quote)
                 metadata["quote_usable_for_order_plan"] = bool(
-                    (selected_snapshot or {}).get("tradable_quote")
+                    snapshot_tradable_quote
+                    or mdm_tradable_quote
                     or (
                         allow_ltp_live_plan
-                        and (selected_snapshot or {}).get("ltp_only_fallback")
+                        and selected_snapshot.get("ltp_only_fallback")
                         and candidate.entry_price
                         and candidate.stop_loss
                         and candidate.target
@@ -8920,17 +8978,42 @@ class StrategyRunner:
                 )
                 has_candidate = bool(metadata.get("candidate_selected"))
                 has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
+                missing_components = [
+                    component
+                    for component in required_components
+                    if metadata.get(component) is None
+                ]
+
                 if not (has_components and has_candidate and has_quote_usable):
                     self._logger.info(
-                        "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required symbol=%s trace_id=%s",
+                        "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required "
+                        "symbol=%s trace_id=%s has_components=%s missing_components=%s "
+                        "has_candidate=%s has_quote_usable=%s candidate_symbol=%s "
+                        "tradable_quote=%s quote_usable_for_order_plan=%s selected_snapshot_symbol=%s",
                         base_symbol,
                         trace_id,
+                        has_components,
+                        missing_components,
+                        has_candidate,
+                        has_quote_usable,
+                        metadata.get("candidate_symbol"),
+                        metadata.get("tradable_quote"),
+                        metadata.get("quote_usable_for_order_plan"),
+                        metadata.get("selected_snapshot_symbol"),
                         extra={
                             "event": "SIGNAL_EXECUTION_RESULT",
                             "accepted": False,
                             "reason": "final_score_required",
                             "symbol": base_symbol,
                             "trace_id": trace_id,
+                            "has_components": has_components,
+                            "missing_components": missing_components,
+                            "has_candidate": has_candidate,
+                            "has_quote_usable": has_quote_usable,
+                            "candidate_symbol": metadata.get("candidate_symbol"),
+                            "tradable_quote": metadata.get("tradable_quote"),
+                            "quote_usable_for_order_plan": metadata.get("quote_usable_for_order_plan"),
+                            "selected_snapshot_symbol": metadata.get("selected_snapshot_symbol"),
                         },
                     )
                     self._reset_execution_state(base_symbol)
