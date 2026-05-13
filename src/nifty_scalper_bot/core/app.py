@@ -7146,8 +7146,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     runner_running=_runner_is_running(getattr(ctx,'strategy_runner',None))
     evaluation_ready=bool(data_hard_ready and runner_running)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
+    market_open = get_market_state() == MarketState.OPEN
     broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
-    live_orders_armed=bool(live_mode and evaluation_ready and ce_exec_ready and pe_exec_ready and context_exec_ready and broker_ready)
+    live_orders_armed=bool(live_mode and market_open and evaluation_ready and ce_exec_ready and pe_exec_ready and context_exec_ready and broker_ready)
     missing=[]
     if not selected_ce: missing.append('selected_ce_missing')
     if not selected_pe: missing.append('selected_pe_missing')
@@ -7156,6 +7157,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     if not pe_eval_ready: missing.append('pe_eval_not_ready')
     if not runner_running: missing.append('runner_not_running')
     if evaluation_ready and live_mode:
+        if not market_open: missing.append('market_closed')
         if not ce_exec_ready: missing.append('ce_exec_quote_or_history_not_ready')
         if not pe_exec_ready: missing.append('pe_exec_quote_or_history_not_ready')
         if not context_exec_ready: missing.append('context_exec_not_ready')
@@ -7178,14 +7180,18 @@ def _commit_active_dynamic_basket(
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
     current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
     current_symbols = [str(sym) for sym in symbols if sym]
-    picked_ce, picked_pe = pick_atm_option_symbols_from_basket(basket)
+    local_basket = dict(basket or {})
+    local_basket["option_symbols"] = list(current_options)
+    local_basket["symbols"] = list(current_symbols)
+    if atm_strike is not None:
+        local_basket["atm_strike"] = atm_strike
+    picked_ce, picked_pe = pick_atm_option_symbols_from_basket(local_basket)
     selected_ce = str(basket.get("selected_ce") or basket.get("atm_ce") or picked_ce or "") or None
     selected_pe = str(basket.get("selected_pe") or basket.get("atm_pe") or picked_pe or "") or None
     active_set = set(current_options) | set(current_symbols)
     def _nearest_for_side(side: str) -> str | None:
-        if atm_strike is None:
-            return None
         candidates: list[tuple[float, str]] = []
+        fallback: list[str] = []
         for sym in current_options:
             if not sym.endswith(side):
                 continue
@@ -7196,16 +7202,37 @@ def _commit_active_dynamic_basket(
                 elif strike_digits:
                     break
             if not strike_digits:
+                fallback.append(sym)
                 continue
-            candidates.append((abs(float(strike_digits) - float(atm_strike)), sym))
+            if atm_strike is None:
+                candidates.append((0.0, sym))
+            else:
+                candidates.append((abs(float(strike_digits) - float(atm_strike)), sym))
         if not candidates:
-            return None
+            return sorted(fallback)[0] if fallback else None
         candidates.sort(key=lambda item: (item[0], item[1]))
         return candidates[0][1]
     if not (selected_ce and selected_ce.endswith("CE") and selected_ce in active_set):
         selected_ce = _nearest_for_side("CE")
     if not (selected_pe and selected_pe.endswith("PE") and selected_pe in active_set):
         selected_pe = _nearest_for_side("PE")
+    old_ce = getattr(ctx, "selected_ce", None)
+    old_pe = getattr(ctx, "selected_pe", None)
+    if not selected_ce and old_ce in active_set and str(old_ce).endswith("CE"):
+        selected_ce = old_ce
+    if not selected_pe and old_pe in active_set and str(old_pe).endswith("PE"):
+        selected_pe = old_pe
+    if not selected_ce or not selected_pe:
+        LOGGER.info(
+            "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_resolution_failed option_count=%d",
+            len(current_options),
+            extra={
+                "event": "ACTIVE_DYNAMIC_BASKET_DEFERRED",
+                "reason": "selected_option_resolution_failed",
+                "option_count": len(current_options),
+            },
+        )
+        return cast(str | None, old_ce), cast(str | None, old_pe)
     ctx.selected_ce = selected_ce
     ctx.selected_pe = selected_pe
     ctx.atm_ce_symbol = selected_ce
@@ -9194,6 +9221,17 @@ async def startup_sequence(ctx: BotContext) -> None:
                         )
                         add_symbols = sorted(added)
                         drop_symbols = sorted(removed)
+                        market_open = get_market_state() == MarketState.OPEN
+                        if not market_open and drop_symbols:
+                            LOGGER.info(
+                                "DYNAMIC_BASKET_REFRESH_SKIPPED_OFF_MARKET reason=%s",
+                                "market_closed_preserve_active_context",
+                                extra={
+                                    "event": "DYNAMIC_BASKET_REFRESH_SKIPPED_OFF_MARKET",
+                                    "reason": "market_closed_preserve_active_context",
+                                },
+                            )
+                            drop_symbols = []
 
                         if add_symbols or drop_symbols:
                             LOGGER.info(
