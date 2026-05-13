@@ -94,3 +94,25 @@ def test_single_vote_scalp_disabled_rejects_single_vote(monkeypatch) -> None:
         indicators={'selected_ce': 'NFO:NIFTY25000CE', 'selected_pe': 'NFO:NIFTY25000PE', 'atm_strike': 25000},
     )
     assert combined is None
+
+
+
+def test_context_only_vote_returns_none_and_logs(caplog) -> None:
+    manager = _manager_stub()
+    signal = _make_signal()
+    vote = StrategyVote(
+        strategy='OrderFlow',
+        side='CE',
+        score=6.0,
+        confidence=0.7,
+        reasons=[],
+        metadata={'role': 'context'},
+    )
+    caplog.set_level('INFO')
+    combined = manager._combine_strategy_votes(
+        symbol='NFO:NIFTY25000CE',
+        signals=[(signal, vote)],
+        indicators={},
+    )
+    assert combined is None
+    assert any('STRATEGY_NO_TRIGGER_VOTE' in rec.message for rec in caplog.records)

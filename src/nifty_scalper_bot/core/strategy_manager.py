@@ -2532,7 +2532,23 @@ class StrategyManager(_BaseStrategyManager):
         indicators: t.Mapping[str, t.Any],
     ) -> Signal | None:
         """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
-        del symbol, indicators
+        symbol_norm = str(symbol or "").strip().upper()
+        indicator_map = dict(indicators or {})
+        selected_symbols = {
+            str(indicator_map.get("selected_ce") or "").strip().upper(),
+            str(indicator_map.get("selected_pe") or "").strip().upper(),
+        }
+        selected_symbols.discard("")
+        indicator_selected_option = bool(
+            indicator_map.get("is_selected_option")
+            or symbol_norm in selected_symbols
+        )
+        indicator_near_atm = False
+        try:
+            if indicator_map.get("strike_distance_from_atm") is not None:
+                indicator_near_atm = float(indicator_map.get("strike_distance_from_atm")) <= 50.0
+        except (TypeError, ValueError):
+            indicator_near_atm = False
         if not signals:
             return None
         trigger_votes: list[tuple[Signal, StrategyVote]] = []
@@ -2546,6 +2562,20 @@ class StrategyManager(_BaseStrategyManager):
             else:
                 trigger_votes.append((signal, vote))
         if not trigger_votes:
+            log_throttled(
+                log,
+                f"strategy_no_trigger_vote:{symbol_norm}",
+                "STRATEGY_NO_TRIGGER_VOTE symbol=%s context_votes=%s",
+                symbol_norm,
+                [v.strategy for _, v in context_votes],
+                interval_sec=30.0,
+                level=logging.INFO,
+                extra={
+                    "event": "STRATEGY_NO_TRIGGER_VOTE",
+                    "symbol": symbol_norm,
+                    "context_votes": [v.strategy for _, v in context_votes],
+                },
+            )
             return None
         best_signal, best_vote = max(trigger_votes, key=lambda pair: pair[1].score)
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
@@ -2564,8 +2594,12 @@ class StrategyManager(_BaseStrategyManager):
         if opposite_context and max(v.score for v in opposite_context) >= 8.0:
             vetoed = True
         if len(trigger_votes) == 1:
-            selected_option = bool((best_signal.metadata or {}).get("is_selected_option"))
-            near_atm = float((best_signal.metadata or {}).get("strike_distance_from_atm") or 999.0) <= 50.0
+            metadata = dict(best_signal.metadata or {})
+            selected_option = bool(metadata.get("is_selected_option") or indicator_selected_option)
+            try:
+                near_atm = float(metadata.get("strike_distance_from_atm")) <= 50.0
+            except (TypeError, ValueError):
+                near_atm = indicator_near_atm
             score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
             score_ok = best_vote.score >= score_min
             conf_ok = best_vote.confidence >= conf_min
@@ -2591,6 +2625,8 @@ class StrategyManager(_BaseStrategyManager):
         if vetoed or final_score < threshold:
             return None
         metadata = dict(best_signal.metadata or {})
+        metadata["is_selected_option"] = bool(metadata.get("is_selected_option") or indicator_selected_option)
+        metadata["indicator_near_atm"] = bool(indicator_near_atm)
         metadata.setdefault("trigger_strategy_score", metadata.get("strategy_score"))
         metadata["consensus_score"] = round(final_score, 3)
         metadata["strategy_score"] = round(final_score, 3)
