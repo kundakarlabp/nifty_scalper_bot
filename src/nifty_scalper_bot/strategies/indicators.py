@@ -224,7 +224,11 @@ class IndicatorEngine:
             allowed_context_keys = {
                 "contract_side", "underlying", "spot_symbol", "spot_price",
                 "futures_symbol", "futures_price", "quote_age_s", "spread_pct",
-                "bid", "ask",
+                "bid", "ask", "best_bid", "best_ask",
+                "bid_qty", "ask_qty", "buy_qty", "sell_qty",
+                "depth", "depth_available", "tradable_quote",
+                "spread", "mid", "bid_ask_source", "tick_direction",
+                "data_age_seconds",
                 "selected_ce",
                 "selected_pe",
                 "atm_strike",

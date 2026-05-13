@@ -7137,6 +7137,46 @@ class StrategyRunner:
                         }
                         if symbol_strike is not None and atm_strike is not None:
                             runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
+                        quote_payload = self.get_quote(symbol) if hasattr(self, "get_quote") else {}
+                        quote_map = dict(quote_payload) if isinstance(quote_payload, Mapping) else {}
+                        tick_map = dict(self._last_tick.get(symbol) or {}) if isinstance(getattr(self, "_last_tick", {}), Mapping) else {}
+                        depth_payload = quote_map.get("depth") or tick_map.get("depth")
+                        bid = quote_map.get("bid") or quote_map.get("best_bid") or tick_map.get("bid") or tick_map.get("best_bid")
+                        ask = quote_map.get("ask") or quote_map.get("best_ask") or tick_map.get("ask") or tick_map.get("best_ask")
+                        bid_qty = quote_map.get("bid_qty") or tick_map.get("bid_qty") or quote_map.get("buy_qty") or tick_map.get("buy_qty")
+                        ask_qty = quote_map.get("ask_qty") or tick_map.get("ask_qty") or quote_map.get("sell_qty") or tick_map.get("sell_qty")
+                        spread = quote_map.get("spread")
+                        mid = quote_map.get("mid")
+                        if spread in (None, "") and bid and ask:
+                            with suppress(Exception):
+                                spread = float(ask) - float(bid)
+                        if mid in (None, "") and bid and ask:
+                            with suppress(Exception):
+                                mid = (float(ask) + float(bid)) / 2.0
+                        spread_pct = quote_map.get("spread_pct")
+                        if spread_pct in (None, "") and spread not in (None, "") and mid not in (None, "", 0):
+                            with suppress(Exception):
+                                spread_pct = (float(spread) / float(mid)) * 100.0
+                        runtime_ctx.update({
+                            "bid": bid,
+                            "ask": ask,
+                            "best_bid": bid,
+                            "best_ask": ask,
+                            "bid_qty": bid_qty,
+                            "ask_qty": ask_qty,
+                            "buy_qty": quote_map.get("buy_qty") or tick_map.get("buy_qty") or bid_qty,
+                            "sell_qty": quote_map.get("sell_qty") or tick_map.get("sell_qty") or ask_qty,
+                            "depth": depth_payload,
+                            "depth_available": bool(quote_map.get("depth_available") or depth_payload),
+                            "tradable_quote": bool(quote_map.get("tradable_quote") or (bid and ask and float(ask) > float(bid))),
+                            "spread": spread,
+                            "mid": mid,
+                            "spread_pct": spread_pct,
+                            "bid_ask_source": quote_map.get("bid_ask_source") or tick_map.get("bid_ask_source") or "runner_context",
+                            "tick_direction": quote_map.get("tick_direction") or tick_map.get("tick_direction"),
+                            "data_age_seconds": quote_map.get("data_age_seconds") or tick_map.get("data_age_seconds"),
+                            "quote_age_s": quote_map.get("quote_age_s") or quote_map.get("data_age_seconds") or tick_map.get("data_age_seconds"),
+                        })
                         if hasattr(self._indicator_engine, "set_runtime_context"):
                             self._indicator_engine.set_runtime_context(symbol, runtime_ctx)
                         elif self._should_log_throttled(

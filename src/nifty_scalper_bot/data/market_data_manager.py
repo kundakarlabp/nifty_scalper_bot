@@ -2790,6 +2790,16 @@ class MarketDataManager:
                 "ltp": ltp,
                 "bid": bid,
                 "ask": ask,
+                "best_bid": bid,
+                "best_ask": ask,
+                "bid_qty": bid_qty,
+                "ask_qty": ask_qty,
+                "buy_qty": bid_qty,
+                "sell_qty": ask_qty,
+                "mid": mid,
+                "spread": spread,
+                "last_price": ltp,
+                "instrument_token": token,
                 "ts": ts_value,
                 "age_s": age_seconds,
                 "source": source,
@@ -6111,6 +6121,16 @@ class MarketDataManager:
                 "last_price": ltp,
                 "bid": bid,
                 "ask": ask,
+                "best_bid": bid,
+                "best_ask": ask,
+                "bid_qty": bid_qty,
+                "ask_qty": ask_qty,
+                "buy_qty": bid_qty,
+                "sell_qty": ask_qty,
+                "mid": mid,
+                "spread": spread,
+                "last_price": ltp,
+                "instrument_token": token,
                 "timestamp": now_ts.isoformat(),
                 "timestamp_ms": float(now_ts.timestamp() * 1000.0),
                 "received_at": time.time(),
@@ -7022,17 +7042,28 @@ class MarketDataManager:
                 or raw.get("best_ask_price")
             )
             depth_obj = raw.get("depth") if isinstance(raw.get("depth"), Mapping) else None
+            buy_levels = depth_obj.get("buy") if isinstance(depth_obj, Mapping) else None
+            sell_levels = depth_obj.get("sell") if isinstance(depth_obj, Mapping) else None
             bid_ask_source = "missing"
             if bid is not None and ask is not None:
                 bid_ask_source = "ws_full"
             elif depth_obj:
-                buy_levels = depth_obj.get("buy") if isinstance(depth_obj, Mapping) else None
-                sell_levels = depth_obj.get("sell") if isinstance(depth_obj, Mapping) else None
                 if isinstance(buy_levels, list) and buy_levels:
                     bid = _coerce_float((buy_levels[0] or {}).get("price"))
                 if isinstance(sell_levels, list) and sell_levels:
                     ask = _coerce_float((sell_levels[0] or {}).get("price"))
                 bid_ask_source = "market_depth"
+            bid_qty = _coerce_int(raw.get("bid_qty") or raw.get("buy_qty"))
+            ask_qty = _coerce_int(raw.get("ask_qty") or raw.get("sell_qty"))
+            if bid_qty is None and isinstance(buy_levels, list) and buy_levels:
+                bid_qty = _coerce_int((buy_levels[0] or {}).get("quantity"))
+            if ask_qty is None and isinstance(sell_levels, list) and sell_levels:
+                ask_qty = _coerce_int((sell_levels[0] or {}).get("quantity"))
+            spread = None
+            mid = None
+            if bid is not None and ask is not None and ask > bid:
+                spread = float(ask) - float(bid)
+                mid = (float(ask) + float(bid)) / 2.0
             tradable_quote = bool(
                 bid is not None and ask is not None and bid > 0 and ask > bid
             )
@@ -7042,6 +7073,16 @@ class MarketDataManager:
                 "ltp": ltp,
                 "bid": bid,
                 "ask": ask,
+                "best_bid": bid,
+                "best_ask": ask,
+                "bid_qty": bid_qty,
+                "ask_qty": ask_qty,
+                "buy_qty": bid_qty,
+                "sell_qty": ask_qty,
+                "mid": mid,
+                "spread": spread,
+                "last_price": ltp,
+                "instrument_token": token,
                 "volume": _coerce_int(raw.get("volume") or raw.get("volume_traded") or raw.get("volume_traded_today")),
                 "oi": _coerce_int(raw.get("oi")),
                 "depth": depth_obj,

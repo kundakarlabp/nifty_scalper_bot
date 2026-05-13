@@ -91,6 +91,10 @@ def build_elite_strategies(
                 disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
                 continue
 
+            if field_name == 'oi_max_pain' and str(os.getenv('ENABLE_OI_CONTEXT_PROVIDER', 'false')).strip().lower() not in {'1','true','yes','on'}:
+                disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
+                continue
+
             if strategy_mode == 'directional_scalp':
                 if field_name in _EXPIRY_ONLY or field_name in _THETA_ONLY:
                     disabled_names.append(strategy_cls.__name__.replace('Strategy', ''))
