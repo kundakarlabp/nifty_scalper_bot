@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 from collections import defaultdict, deque
+from contextlib import suppress
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time, timedelta, timezone
@@ -3092,7 +3093,7 @@ class StrategyRunner:
             if rows:
                 self._write_history_cache(symbol, rows)
                 for row in rows:
-                    with contextlib.suppress(Exception):
+                    with suppress(Exception):
                         self.ingest_historical_bar(row)
             else:
                 self._request_mdm_hydration(symbol, target)
@@ -5612,10 +5613,11 @@ class StrategyRunner:
                                 "required": required_bars,
                             },
                         )
+                reason = 'insufficient_indicator_bar_count' if history_count < required_bars else 'indicator_history_integrity_failed'
                 self._emit_runner_eval_decision(
                     symbol=symbol,
                     stage='phase9',
-                    reason='insufficient_indicator_bars',
+                    reason=reason,
                     allowed=False,
                     trace_id=trace_id,
                 )
@@ -7014,10 +7016,7 @@ class StrategyRunner:
                                 return
                         # Frequency limit moved to ExecutionEngine
                         state._last_strategy_eval = now
-                        # ✅ FIX K (continued): store the effective bar_ts so the
-                        # same-bar-skip correctly advances each minute for options.
-                        if _effective_last_bar_ts:
-                            state._last_eval_bar_ts = _effective_last_bar_ts
+                        pending_eval_bar_ts = _effective_last_bar_ts
                         should_evaluate = True
 
                 if should_evaluate:
@@ -7165,20 +7164,25 @@ class StrategyRunner:
                         depth_payload = quote_map.get("depth") or tick_map.get("depth")
                         bid = quote_map.get("bid") or quote_map.get("best_bid") or tick_map.get("bid") or tick_map.get("best_bid")
                         ask = quote_map.get("ask") or quote_map.get("best_ask") or tick_map.get("ask") or tick_map.get("best_ask")
+                        bid_f = _extract_float({"value": bid}, "value")
+                        ask_f = _extract_float({"value": ask}, "value")
                         bid_qty = quote_map.get("bid_qty") or tick_map.get("bid_qty") or quote_map.get("buy_qty") or tick_map.get("buy_qty")
                         ask_qty = quote_map.get("ask_qty") or tick_map.get("ask_qty") or quote_map.get("sell_qty") or tick_map.get("sell_qty")
                         spread = quote_map.get("spread")
                         mid = quote_map.get("mid")
-                        if spread in (None, "") and bid and ask:
-                            with suppress(Exception):
-                                spread = float(ask) - float(bid)
-                        if mid in (None, "") and bid and ask:
-                            with suppress(Exception):
-                                mid = (float(ask) + float(bid)) / 2.0
+                        if spread in (None, "") and bid_f is not None and ask_f is not None:
+                            spread = ask_f - bid_f
+                        if mid in (None, "") and bid_f is not None and ask_f is not None:
+                            mid = (ask_f + bid_f) / 2.0
                         spread_pct = quote_map.get("spread_pct")
                         if spread_pct in (None, "") and spread not in (None, "") and mid not in (None, "", 0):
-                            with suppress(Exception):
-                                spread_pct = (float(spread) / float(mid)) * 100.0
+                            spread_f = _extract_float({"value": spread}, "value")
+                            mid_f = _extract_float({"value": mid}, "value")
+                            if spread_f is not None and mid_f not in (None, 0.0):
+                                spread_pct = (spread_f / mid_f) * 100.0
+                        tradable_quote = bool(quote_map.get("tradable_quote"))
+                        if not tradable_quote and bid_f is not None and ask_f is not None:
+                            tradable_quote = ask_f > bid_f
                         runtime_ctx.update({
                             "bid": bid,
                             "ask": ask,
@@ -7190,7 +7194,7 @@ class StrategyRunner:
                             "sell_qty": quote_map.get("sell_qty") or tick_map.get("sell_qty") or ask_qty,
                             "depth": depth_payload,
                             "depth_available": bool(quote_map.get("depth_available") or depth_payload),
-                            "tradable_quote": bool(quote_map.get("tradable_quote") or (bid and ask and float(ask) > float(bid))),
+                            "tradable_quote": tradable_quote,
                             "spread": spread,
                             "mid": mid,
                             "spread_pct": spread_pct,
@@ -7238,6 +7242,11 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        if pending_eval_bar_ts is not None:
+                            with self._lock:
+                                state_after = self._symbol_state.get(symbol)
+                                if state_after is not None:
+                                    state_after._last_eval_bar_ts = pending_eval_bar_ts
                         if signal is None:
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
