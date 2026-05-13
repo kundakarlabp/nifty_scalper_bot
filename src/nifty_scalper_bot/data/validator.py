@@ -69,7 +69,21 @@ def validate_tick(raw_tick: Mapping[str, Any]) -> Tick:
         raise DataIntegrityError('Invalid price')
 
     # ── 4. VOLUME ────────────────────────────────────────────────────────────
-    volume = float(raw_tick.get('volume') or raw_tick.get('volume_traded') or 0.0)
+    volume_raw = 0.0
+    if 'volume_delta' in raw_tick:
+        volume_raw = raw_tick.get('volume_delta')
+    elif 'volume' in raw_tick:
+        volume_raw = raw_tick.get('volume')
+    elif 'volume_traded' in raw_tick:
+        # Legacy/raw fallback only. This path should not be used for MDM-normalized ticks.
+        volume_raw = raw_tick.get('volume_traded')
+    else:
+        volume_raw = 0.0
+
+    try:
+        volume = float(volume_raw if volume_raw is not None else 0.0)
+    except (TypeError, ValueError):
+        volume = 0.0
 
     return Tick(
         symbol=str(symbol_raw),

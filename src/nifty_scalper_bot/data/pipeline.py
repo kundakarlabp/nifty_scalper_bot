@@ -128,7 +128,19 @@ class TickValidator:
             if ltp <= 0:
                 raise DataIntegrityError(f"invalid price: {ltp}")
 
-            volume = float(raw.get("volume") or raw.get("vol") or 0.0)
+            if "volume_delta" in raw:
+                volume_raw = raw.get("volume_delta")
+            elif "volume" in raw:
+                volume_raw = raw.get("volume")
+            elif "vol" in raw:
+                volume_raw = raw.get("vol")
+            else:
+                volume_raw = 0.0
+
+            try:
+                volume = float(volume_raw if volume_raw is not None else 0.0)
+            except (TypeError, ValueError):
+                volume = 0.0
             return ValidatedTick(
                 symbol=str(symbol_raw).strip().upper(),
                 timestamp=ts,

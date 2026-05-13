@@ -831,6 +831,7 @@ class StrategyRunner:
         self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
         self._market_regime_engine = MarketRegimeEngine()
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
+        self._last_regime_inputs_by_symbol: dict[str, dict[str, Any]] = {}
 
         # FIX S10-2: wire bracket-exit callback so direction lock clears on SL/TP
         if self._bracket_manager is not None and hasattr(
@@ -5218,6 +5219,16 @@ class StrategyRunner:
                     "volume_expansion": volume_expansion,
                 }
             )
+            self._last_regime_inputs_by_symbol[symbol] = {
+                "adx": indicators.get("adx"),
+                "atr": indicators.get("atr"),
+                "atr_average": atr_avg,
+                "vwap_slope": vwap_slope,
+                "volume": volume,
+                "avg_volume": avg_volume,
+                "volume_expansion": volume_expansion,
+                "vwap": current_vwap,
+            }
             self._last_regime_by_symbol[symbol] = snapshot.regime
             return snapshot.regime
         except Exception as exc:
@@ -5998,7 +6009,11 @@ class StrategyRunner:
             timestamp = _extract_timestamp(tick, now)
             tick_age = (now - timestamp).total_seconds()
             price = _extract_float(tick, "ltp", "last_price", "close", "price")
-            raw_volume_delta = _extract_int(tick, "volume_delta", "volume")
+            has_explicit_delta = "volume_delta" in tick
+            has_explicit_volume = "volume" in tick
+            raw_volume_delta = _extract_int(tick, "volume_delta") if has_explicit_delta else (
+                _extract_int(tick, "volume") if has_explicit_volume else 0
+            )
             raw_volume_cumulative = _extract_int(
                 tick, "volume_cumulative", "volume_traded", "volume_traded_today"
             )
@@ -6033,8 +6048,29 @@ class StrategyRunner:
                 return
 
             volume = 0
-            if "volume_delta" in tick or "volume" in tick:
+            if has_explicit_delta:
                 volume = max(int(raw_volume_delta), 0)
+            elif has_explicit_volume:
+                if raw_volume_cumulative > 0 and raw_volume_delta == raw_volume_cumulative:
+                    volume = 0
+                    log_throttled(
+                        self._logger,
+                        f"runner_rejected_cumulative_volume:{symbol}",
+                        "RUNNER_REJECTED_CUMULATIVE_VOLUME symbol=%s volume=%s cumulative=%s",
+                        symbol,
+                        raw_volume_delta,
+                        raw_volume_cumulative,
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                        extra={
+                            "event": "RUNNER_REJECTED_CUMULATIVE_VOLUME",
+                            "symbol": symbol,
+                            "volume": raw_volume_delta,
+                            "cumulative": raw_volume_cumulative,
+                        },
+                    )
+                else:
+                    volume = max(int(raw_volume_delta), 0)
             else:
                 first_tick_seen = symbol not in self._last_cumulative_volume
                 if raw_volume_cumulative > 0:
@@ -6059,11 +6095,15 @@ class StrategyRunner:
             if self._is_tradable_symbol(symbol):
                 max_runner_delta = int(os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000") or "1000000")
                 if volume > max_runner_delta:
-                    self._logger.warning(
+                    log_throttled(
+                        self._logger,
+                        f"runner_option_volume_clamped:{symbol}",
                         "RUNNER_OPTION_VOLUME_CLAMPED symbol=%s volume=%s max=%s",
                         symbol,
                         volume,
                         max_runner_delta,
+                        interval_sec=30.0,
+                        level=logging.WARNING,
                         extra={
                             "event": "RUNNER_OPTION_VOLUME_CLAMPED",
                             "symbol": symbol,
@@ -7453,7 +7493,17 @@ class StrategyRunner:
                             "side": signal.action,
                             "score": float(signal.confidence or 0.0),
                             "trace_id": trace_id,
+                            "regime_inputs": self._last_regime_inputs_by_symbol.get(symbol, {}),
                         },
+                    )
+                    self._logger.info(
+                        "SIGNAL_EXECUTION_DECISION symbol=%s stage=phase10 decision=regime_rejected trace_id=%s strategy=%s action=%s confidence=%.2f",
+                        symbol,
+                        trace_id,
+                        signal_strategy or "unknown",
+                        signal.action,
+                        float(signal.confidence or 0.0),
+                        extra={"event": "SIGNAL_EXECUTION_DECISION", "symbol": symbol, "stage": "phase10", "decision": "regime_rejected", "trace_id": trace_id, "strategy": signal_strategy or "unknown", "action": signal.action, "confidence": float(signal.confidence or 0.0)},
                     )
                     return
                 coarse_regime = self.detect_market_regime(symbol)
@@ -7472,6 +7522,11 @@ class StrategyRunner:
                             },
                         )
                     if self._block_low_volatility:
+                        self._logger.info(
+                            "SIGNAL_EXECUTION_DECISION symbol=%s stage=phase10 decision=low_volatility_rejected trace_id=%s strategy=%s action=%s confidence=%.2f",
+                            symbol, trace_id, signal_strategy or "unknown", signal.action, float(signal.confidence or 0.0),
+                            extra={"event": "SIGNAL_EXECUTION_DECISION", "symbol": symbol, "stage": "phase10", "decision": "low_volatility_rejected", "trace_id": trace_id, "strategy": signal_strategy or "unknown", "action": signal.action, "confidence": float(signal.confidence or 0.0)},
+                        )
                         return
                 if (
                     signal.action in {"BUY", "SELL"}

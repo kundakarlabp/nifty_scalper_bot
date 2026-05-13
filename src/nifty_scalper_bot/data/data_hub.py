@@ -1117,7 +1117,17 @@ class DataHub:
             quote = self.get_quote(normalized, allow_pull=False)
             if quote is not None:
                 try:
-                    callback(dict(quote))
+                    quote_payload = dict(quote)
+                    if "volume_delta" in quote_payload:
+                        quote_payload["volume"] = quote_payload.get("volume_delta")
+                    elif (
+                        "volume_cumulative" in quote_payload
+                        and quote_payload.get("volume") == quote_payload.get("volume_cumulative")
+                        and (normalized.endswith("CE") or normalized.endswith("PE"))
+                    ):
+                        quote_payload["volume"] = 0
+                        quote_payload["volume_delta"] = 0
+                    callback(quote_payload)
                 except Exception as exc:  # noqa: BLE001
                     self._log_listener_failure(exc)
 
