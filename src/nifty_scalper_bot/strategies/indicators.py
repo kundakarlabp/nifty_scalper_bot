@@ -370,7 +370,12 @@ class IndicatorEngine:
             for row in bars or ():
                 if not isinstance(row, Mapping):
                     continue
-                ts_value = row.get("timestamp") or row.get("start")
+                ts_value = (
+                    row.get("timestamp")
+                    or row.get("start")
+                    or row.get("date")
+                    or row.get("time")
+                )
                 if ts_value is None:
                     continue
                 if isinstance(ts_value, datetime):
@@ -384,13 +389,22 @@ class IndicatorEngine:
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
                 ts = ts.astimezone(timezone.utc).replace(microsecond=0)
+                open_price = float(row.get("open", row.get("close", 0.0)) or 0.0)
+                high_price = float(row.get("high", row.get("close", 0.0)) or 0.0)
+                low_price = float(row.get("low", row.get("close", 0.0)) or 0.0)
+                close_price = float(row.get("close", row.get("open", 0.0)) or 0.0)
+                volume = int(float(row.get("volume", 0) or 0))
+
+                if min(open_price, high_price, low_price, close_price) <= 0:
+                    continue
+
                 normalized_rows[ts] = {
                     "timestamp": ts,
-                    "open": float(row.get("open", row.get("close", 0.0)) or 0.0),
-                    "high": float(row.get("high", row.get("close", 0.0)) or 0.0),
-                    "low": float(row.get("low", row.get("close", 0.0)) or 0.0),
-                    "close": float(row.get("close", row.get("open", 0.0)) or 0.0),
-                    "volume": int(row.get("volume", 0) or 0),
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": volume,
                 }
 
             selected_rows = sorted(normalized_rows.values(), key=lambda item: item["timestamp"])
@@ -404,7 +418,7 @@ class IndicatorEngine:
                         "close": bar["close"],
                     },
                     volume=int(bar["volume"]),
-                    timestamp=cast(datetime, bar["timestamp"]),
+                    timestamp=bar["timestamp"],
                     is_complete=True,
                     is_provisional=False,
                 )
@@ -427,7 +441,12 @@ class IndicatorEngine:
             )
             return final_count
         except Exception as e:
-            self._logger.error("Failure in IndicatorEngine.replace_history: %s", e)
+            self._logger.exception(
+                "INDICATOR_HISTORY_RESEED_FAILED symbol=%s source=%s error=%s",
+                symbol,
+                source,
+                e,
+            )
             raise
 
     def history_count(self, symbol: str) -> int:
