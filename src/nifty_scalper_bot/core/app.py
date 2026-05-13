@@ -921,18 +921,30 @@ from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import SOFT, canonical as canonical_reason
 from nifty_scalper_bot.utils.symbols import canonical, unique_normalized_symbols
 
-from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
-
 if TYPE_CHECKING:
+    from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
     from nifty_scalper_bot.notifications.telegram_controller import TelegramBot
     from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
         TelegramWebhookController,
     )
     from telegram.ext import Application
 else:
+    TelegramEnhancedNotifier = Any
     TelegramWebhookController = Any
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
+
+
+def _load_telegram_enhanced_notifier() -> type[Any] | None:
+    """Load Telegram notifier lazily. Args: none. Returns: notifier class or None. Raises: none."""
+    try:
+        from nifty_scalper_bot.notifications.telegram_enhanced import TelegramEnhancedNotifier
+
+        return TelegramEnhancedNotifier
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("TELEGRAM_ENHANCED_IMPORT_UNAVAILABLE reason=%s", exc)
+        return None
+
 
 _ComponentT = TypeVar("_ComponentT")
 
@@ -5032,15 +5044,21 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     notifier: TelegramEnhancedNotifier | None = None
 
     if not ctx_ref.get("telegram_wired", False):
-        try:
-            notifier = TelegramEnhancedNotifier.from_settings(settings.notifications)
-            order_manager.set_notifier(notifier)
-            ctx_ref["telegram_wired"] = True
-            LOGGER.info("✅ Telegram Notifier wired to Order Manager")
-        except Exception:
+        TelegramEnhancedNotifierCls = _load_telegram_enhanced_notifier()
+        if TelegramEnhancedNotifierCls is None:
             notifier = None
             order_manager.set_notifier(None)
-            LOGGER.exception("Telegram notifier wiring failed")
+            LOGGER.warning("TELEGRAM_NOTIFIER_SKIPPED reason=dependency_unavailable")
+        else:
+            try:
+                notifier = TelegramEnhancedNotifierCls.from_settings(settings.notifications)
+                order_manager.set_notifier(notifier)
+                ctx_ref["telegram_wired"] = True
+                LOGGER.info("✅ Telegram Notifier wired to Order Manager")
+            except Exception:
+                notifier = None
+                order_manager.set_notifier(None)
+                LOGGER.exception("Telegram notifier wiring failed")
     else:
         LOGGER.info("ℹ️ Telegram Notifier already wired")
 

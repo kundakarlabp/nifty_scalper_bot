@@ -2758,7 +2758,7 @@ class StrategyRunner:
                     )
                 )
             with self._lock:
-                self._symbol_history[normalized_symbol] = deque(one_minute_bars, maxlen=2000)
+                self._symbol_history[normalized_symbol] = list(one_minute_bars[-2000:])
                 if one_minute_bars:
                     self._last_bar_ts[normalized_symbol] = one_minute_bars[-1].start
                 self._active_symbols.add(normalized_symbol)
