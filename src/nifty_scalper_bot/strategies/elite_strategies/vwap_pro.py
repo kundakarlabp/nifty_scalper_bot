@@ -147,6 +147,7 @@ class VWAPProStrategy(EliteStrategy):
                     avg_vol,
                     trend_alignment,
                     pullback_flag,
+                    extra={'score_reasons': reasons},
                 )
                 return None
 
@@ -162,9 +163,17 @@ class VWAPProStrategy(EliteStrategy):
                 'side': contract_side,
                 'contract_side': contract_side,
                 'premium_above_vwap': premium_above_vwap,
-                'direction_bias': contract_side,
+                'direction_bias': direction if direction in {'CE', 'PE'} else None,
                 'preliminary_only': True,
                 'requires_runner_final_score': True,
+                'raw_setup_score': strategy_score,
+                'setup_score': strategy_score,
+                'setup_min': 5.5,
+                'setup_pass': True,
+                'execution_required': True,
+                'regime_required': True,
+                'strategy_family': 'vwap_continuation_pullback',
+                'context_required': False,
                 'direction_score': strategy_score,
                 'strategy_score': strategy_score,
                 'data_score': 8.0 if not stale_data else 3.0,

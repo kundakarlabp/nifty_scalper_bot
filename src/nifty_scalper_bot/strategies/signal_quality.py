@@ -176,5 +176,15 @@ def score_signal_quality(
         rr_score=rr,
         allowed=(final >= threshold and direction >= 6.0),
         reasons=reasons,
-        components={'threshold': threshold, 'strategy_name': strategy_name or '', 'normalized_strategy_name': normalized_strategy_name},
+        components={
+            'direction_score': direction,
+            'strategy_score': strategy,
+            'option_score': option,
+            'data_score': data,
+            'rr_score': rr,
+            'final_score': round(final, 3),
+            'threshold': threshold,
+            'strategy_name': strategy_name or '',
+            'normalized_strategy_name': normalized_strategy_name,
+        },
     )

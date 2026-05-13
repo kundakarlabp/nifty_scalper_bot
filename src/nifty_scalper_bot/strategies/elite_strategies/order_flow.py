@@ -91,6 +91,8 @@ class OrderFlowStrategy(EliteStrategy):
                     return None
                 metadata = {'orderflow_depth_source': 'ltp_tick_fallback', 'risk_label': 'ltp_only_orderflow_reduced_confidence'}
                 metadata.update({'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'trigger' if allow_orderflow_trigger and strategy_score >= 7.0 and spread_pct <= 8.0 else 'context', 'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'direction_bias': side, 'strategy_score': strategy_score, 'spread_pct': round(spread_pct, 3), 'depth_imbalance': 0.0, 'tick_direction': tick_direction, 'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0), 'premium_target_rr': 1.8})
+                side_aligns = direction in {'CE', 'PE'} and direction == side
+                metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'can_trigger': bool(metadata['role'] == 'trigger')})
                 return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.55, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
             side = contract_side if option_premium_domain else ('CE' if depth_imbalance > 0 else 'PE')
@@ -149,6 +151,8 @@ class OrderFlowStrategy(EliteStrategy):
                 'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0),
                 'premium_target_rr': 1.8,
             }
+            side_aligns = direction in {'CE', 'PE'} and direction == side
+            metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'can_trigger': bool(metadata['role'] == 'trigger')})
             LOGGER.info('STRATEGY_VOTE strategy=OrderFlow side=%s score=%.2f', side, strategy_score)
             if metadata["role"] == "trigger":
                 LOGGER.info(

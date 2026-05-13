@@ -322,6 +322,9 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     metadata["vote_score_raw_strategy"] = score_candidate
     metadata["vote_score_from_confidence"] = confidence_score
     metadata["vote_score"] = max(0.0, min(10.0, score))
+    metadata["raw_setup_score"] = max(0.0, min(10.0, score))
+    metadata["setup_score"] = max(0.0, min(10.0, score))
+    metadata["raw_confidence"] = max(0.0, min(1.0, float(signal.confidence or 0.0)))
     metadata["score_reasons"] = reason_list
     return StrategyVote(
         strategy=strategy_name,
@@ -2551,6 +2554,30 @@ class StrategyManager(_BaseStrategyManager):
             indicator_near_atm = False
         if not signals:
             return None
+        def _raw_score(vote: StrategyVote) -> float:
+            payload = dict(vote.metadata or {})
+            try:
+                return float(
+                    payload.get("raw_vote_score")
+                    if payload.get("raw_vote_score") is not None
+                    else payload.get("raw_setup_score")
+                    if payload.get("raw_setup_score") is not None
+                    else payload.get("vote_score")
+                    if payload.get("vote_score") is not None
+                    else vote.score
+                )
+            except (TypeError, ValueError):
+                return float(vote.score or 0.0)
+        def _weighted_score(vote: StrategyVote) -> float:
+            try:
+                return float(vote.score or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+        def _regime_weight(vote: StrategyVote) -> float:
+            try:
+                return float((vote.metadata or {}).get("regime_weight", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                return 1.0
         trigger_votes: list[tuple[Signal, StrategyVote]] = []
         context_votes: list[tuple[Signal, StrategyVote]] = []
         for signal, vote in signals:
@@ -2576,20 +2603,40 @@ class StrategyManager(_BaseStrategyManager):
                     "context_votes": [v.strategy for _, v in context_votes],
                 },
             )
+            log.info(
+                "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s context_votes=%s",
+                symbol_norm,
+                "context_only",
+                "UNKNOWN",
+                False,
+                "strategy_manager_trigger_gate",
+                "no_trigger_vote",
+                [v.strategy for _, v in context_votes],
+                extra={
+                    "event": "TRADE_DECISION_TRACE",
+                    "symbol": symbol_norm,
+                    "strategy": "context_only",
+                    "allowed": False,
+                    "blocked_at": "strategy_manager_trigger_gate",
+                    "blocked_reason": "no_trigger_vote",
+                    "context_votes": [v.strategy for _, v in context_votes],
+                },
+            )
             return None
-        best_signal, best_vote = max(trigger_votes, key=lambda pair: pair[1].score)
+        best_signal, best_vote = max(trigger_votes, key=lambda pair: _raw_score(pair[1]))
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
         single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
         allow_scalp_single = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
-        final_score = float(best_vote.score)
+        raw_trigger_score = _raw_score(best_vote)
+        weighted_trigger_score = _weighted_score(best_vote)
         vetoed = False
         same_side_context = [v for _, v in context_votes if v.side == best_vote.side]
         opposite_context = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
         positive_context = sum(float(v.score) for v in same_side_context)
         negative_context = sum(float(v.score) for v in opposite_context)
-        final_score = float(best_vote.score)
-        final_score += min(1.5, 0.45 * positive_context)
-        final_score -= min(1.5, 0.60 * negative_context)
+        context_bonus = min(1.5, 0.45 * positive_context)
+        context_penalty = min(1.5, 0.60 * negative_context)
+        final_score = raw_trigger_score + context_bonus - context_penalty
         final_score = max(0.0, min(10.0, final_score))
         if opposite_context and max(v.score for v in opposite_context) >= 8.0:
             vetoed = True
@@ -2601,28 +2648,71 @@ class StrategyManager(_BaseStrategyManager):
             except (TypeError, ValueError):
                 near_atm = indicator_near_atm
             score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
-            score_ok = best_vote.score >= score_min
+            regime_weight = _regime_weight(best_vote)
+            score_ok = raw_trigger_score >= score_min
             conf_ok = best_vote.confidence >= conf_min
             selected_ok = selected_option or near_atm
             log.info(
-                "SINGLE_VOTE_DECISION strategy=%s score=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
+                "SINGLE_VOTE_DECISION strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
                 best_vote.strategy,
-                best_vote.score,
+                raw_trigger_score,
+                weighted_trigger_score,
+                regime_weight,
                 score_min,
                 best_vote.confidence,
                 conf_min,
                 selected_ok,
                 vetoed,
+                extra={
+                    "event": "SINGLE_VOTE_DECISION",
+                    "symbol": symbol_norm,
+                    "strategy": best_vote.strategy,
+                    "raw_score": raw_trigger_score,
+                    "weighted_score": weighted_trigger_score,
+                    "regime_weight": regime_weight,
+                    "score_min": score_min,
+                    "confidence": best_vote.confidence,
+                    "conf_min": conf_min,
+                    "selected_ok": selected_ok,
+                    "vetoed": vetoed,
+                },
             )
-            if best_vote.score >= single_high and selected_ok and not vetoed:
+            if raw_trigger_score >= single_high and selected_ok and not vetoed:
                 metadata_stage = "preliminary_single_high_conviction"
             elif allow_scalp_single and score_ok and conf_ok and selected_ok and not vetoed:
                 metadata_stage = "single_vote_scalp_controlled"
             else:
+                blocked_reason = (
+                    "raw_score_below_min" if not score_ok else "confidence_below_min"
+                    if not conf_ok else "not_selected_or_near_atm" if not selected_ok
+                    else "context_veto"
+                )
+                log.info(
+                    "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s",
+                    symbol_norm,
+                    best_vote.strategy,
+                    best_vote.side,
+                    False,
+                    "single_vote_gate",
+                    blocked_reason,
+                    extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "allowed": False, "blocked_at": "single_vote_gate", "blocked_reason": blocked_reason},
+                )
                 return None
         else:
             metadata_stage = "multi_vote_confirmed"
+        metadata["raw_setup_score"] = round(raw_trigger_score, 3)
+        metadata["regime_weighted_score"] = round(weighted_trigger_score, 3)
+        metadata["regime_weight"] = round(_regime_weight(best_vote), 3)
+        metadata["context_bonus"] = round(context_bonus, 3)
+        metadata["context_penalty"] = round(context_penalty, 3)
+        metadata["final_trade_score"] = round(final_score, 3)
         if vetoed or final_score < threshold:
+            blocked_reason = "context_veto" if vetoed else "final_trade_score_below_threshold"
+            log.info(
+                "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s data_gate=%s setup_score=%.2f setup_min=%.2f weighted_score=%.2f regime_weight=%.2f context_bonus=%.2f context_penalty=%.2f final_score=%.2f final_min=%.2f allowed=%s blocked_at=%s blocked_reason=%s",
+                symbol_norm, best_vote.strategy, best_vote.side, True, raw_trigger_score, threshold, weighted_trigger_score, _regime_weight(best_vote), context_bonus, context_penalty, final_score, threshold, False, "strategy_manager_combine", blocked_reason,
+                extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "data_gate": True, "setup_score": raw_trigger_score, "setup_min": threshold, "weighted_score": weighted_trigger_score, "regime_weight": _regime_weight(best_vote), "context_bonus": context_bonus, "context_penalty": context_penalty, "final_score": final_score, "final_min": threshold, "allowed": False, "blocked_at": "strategy_manager_combine", "blocked_reason": blocked_reason},
+            )
             return None
         metadata = dict(best_signal.metadata or {})
         metadata["is_selected_option"] = bool(metadata.get("is_selected_option") or indicator_selected_option)
@@ -2704,8 +2794,12 @@ class StrategyManager(_BaseStrategyManager):
                 },
             )
             metadata = dict(vote.metadata or {})
+            raw_score = float((vote.metadata or {}).get("raw_setup_score", vote.score))
+            metadata["raw_vote_score"] = raw_score
+            metadata["raw_setup_score"] = raw_score
             metadata["regime_weight"] = weight
             metadata["regime_weighted_vote_score"] = weighted_score
+            metadata["regime_name"] = regime_key or "UNKNOWN"
             return StrategyVote(
                 strategy=vote.strategy,
                 side=vote.side,
