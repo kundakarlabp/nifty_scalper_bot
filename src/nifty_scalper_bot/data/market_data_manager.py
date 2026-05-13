@@ -4636,6 +4636,7 @@ class MarketDataManager:
         raw = self._normalize_ws_tick(raw)
         if raw is None:
             return
+        volume_delta_normalized = False
         enqueued_mono = raw.get("_enqueued_monotonic")
         if isinstance(enqueued_mono, (int, float)):
             self._event_loop_lag_seconds = max(0.0, time.monotonic() - float(enqueued_mono))
@@ -4659,9 +4660,10 @@ class MarketDataManager:
                 return
             raw = {**raw, "symbol": symbol_from_map}
             raw = self._normalise_tick_volume_delta(symbol_from_map or raw.get("symbol", ""), raw)
+            volume_delta_normalized = True
 
         symbol = str(raw.get("symbol") or "")
-        if symbol:
+        if symbol and not volume_delta_normalized:
             raw = self._normalise_tick_volume_delta(symbol, raw)
 
         try:
@@ -4714,7 +4716,24 @@ class MarketDataManager:
         # but NEVER called from the WS path — _store_tick only cached the tick.
         # _emit_tick is the correct call; it was defined but never invoked.
         quote_fields = self._extract_depth_quote_fields(raw)
-        tick_dict = {**to_json_safe(dict(raw)), **tick.to_dict(), **quote_fields}
+        raw_safe = to_json_safe(dict(raw))
+        tick_safe = tick.to_dict()
+        tick_dict = {**raw_safe, **tick_safe, **quote_fields}
+        if "volume_delta" in raw_safe:
+            tick_dict["volume_delta"] = raw_safe.get("volume_delta")
+            tick_dict["volume"] = raw_safe.get("volume_delta")
+        elif "volume" in raw_safe:
+            tick_dict["volume"] = raw_safe.get("volume")
+            tick_dict["volume_delta"] = raw_safe.get("volume")
+        else:
+            tick_dict["volume"] = tick_safe.get("volume", 0)
+            tick_dict["volume_delta"] = tick_safe.get("volume", 0)
+        if "volume_cumulative" in raw_safe:
+            tick_dict["volume_cumulative"] = raw_safe.get("volume_cumulative")
+        elif "volume_traded_today" in raw_safe:
+            tick_dict["volume_cumulative"] = raw_safe.get("volume_traded_today")
+        elif "volume_traded" in raw_safe:
+            tick_dict["volume_cumulative"] = raw_safe.get("volume_traded")
         tick_dict["symbol"] = symbol
         tick_dict["timestamp"] = pd.to_datetime(
             tick_dict["timestamp"], utc=True, errors="coerce"
@@ -7127,6 +7146,20 @@ class MarketDataManager:
             tradable_quote = bool(
                 bid is not None and ask is not None and bid > 0 and ask > bid
             )
+            if "volume_delta" in raw:
+                volume_delta_value = _coerce_int(raw.get("volume_delta")) or 0
+            elif "volume" in raw:
+                volume_delta_value = _coerce_int(raw.get("volume")) or 0
+            else:
+                volume_delta_value = 0
+            if "volume_cumulative" in raw:
+                volume_cumulative_value = _coerce_int(raw.get("volume_cumulative"))
+            elif "volume_traded_today" in raw:
+                volume_cumulative_value = _coerce_int(raw.get("volume_traded_today"))
+            elif "volume_traded" in raw:
+                volume_cumulative_value = _coerce_int(raw.get("volume_traded"))
+            else:
+                volume_cumulative_value = None
             return {
                 "symbol": self._canonical_symbol(symbol),
                 "token": token,
@@ -7143,8 +7176,9 @@ class MarketDataManager:
                 "spread": spread,
                 "last_price": ltp,
                 "instrument_token": token,
-                "volume": _coerce_int(raw.get("volume") or raw.get("volume_delta") or 0),
-                "volume_cumulative": _coerce_int(raw.get("volume_cumulative") or raw.get("volume_traded_today") or raw.get("volume_traded")),
+                "volume": volume_delta_value,
+                "volume_delta": volume_delta_value,
+                "volume_cumulative": volume_cumulative_value,
                 "oi": _coerce_int(raw.get("oi")),
                 "depth": depth_obj,
                 "depth_available": bool(depth_obj),
