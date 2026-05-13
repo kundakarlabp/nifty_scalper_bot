@@ -6957,16 +6957,41 @@ async def _ensure_selected_options_hydrated(
                 continue
             bar_data = dict(row)
             bar_data["symbol"] = sym
-            normalized_bars.append(bar_data)
+
+            if "timestamp" not in bar_data:
+                if "start" in bar_data:
+                    bar_data["timestamp"] = bar_data["start"]
+                elif "date" in bar_data:
+                    bar_data["timestamp"] = bar_data["date"]
+                elif "time" in bar_data:
+                    bar_data["timestamp"] = bar_data["time"]
+
+            if {"timestamp", "open", "high", "low", "close"}.issubset(bar_data):
+                normalized_bars.append(bar_data)
         used_reseed = False
         if runner is not None and hasattr(runner, "reseed_history_from_bars"):
-            runner.reseed_history_from_bars(
-                sym,
-                normalized_bars,
-                source=f"{reason}_selected_option_reseed",
-                min_bars=required_bars,
-            )
-            used_reseed = True
+            try:
+                reseeded_count = runner.reseed_history_from_bars(
+                    sym,
+                    normalized_bars,
+                    source=f"{reason}_selected_option_reseed",
+                    min_bars=required_bars,
+                )
+                used_reseed = True
+                LOGGER.info(
+                    "SELECTED_OPTION_RUNNER_RESEED_DONE symbol=%s reseeded_count=%s required_bars=%d reason=%s",
+                    sym,
+                    reseeded_count,
+                    required_bars,
+                    reason,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "SELECTED_OPTION_RUNNER_RESEED_FAILED symbol=%s required_bars=%d reason=%s",
+                    sym,
+                    required_bars,
+                    reason,
+                )
         elif runner is not None and hasattr(runner, "ingest_historical_bar"):
             for bar_data in normalized_bars:
                 runner.ingest_historical_bar(bar_data)

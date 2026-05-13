@@ -737,6 +737,7 @@ class StrategyRunner:
         self._last_global_eval_ts: float = time.monotonic()
         self._last_tick_seen_ts: float = time.monotonic()
         self._last_tick_time_by_symbol: dict[str, float] = defaultdict(float)
+        self._last_tick: dict[str, dict[str, Any]] = {}
         self._symbol_locks: defaultdict[str, threading.Lock] = defaultdict(
             threading.Lock
         )
@@ -2744,7 +2745,7 @@ class StrategyRunner:
             selected_rows = sorted(normalized_rows.values(), key=lambda item: item["timestamp"])
             one_minute_bars: list[OneMinuteBar] = []
             for row in selected_rows:
-                start_ts = cast(datetime, row["timestamp"])
+                start_ts = row["timestamp"]
                 one_minute_bars.append(
                     OneMinuteBar(
                         open=float(row["open"]),
@@ -2785,9 +2786,14 @@ class StrategyRunner:
                 target_min_bars,
                 source,
             )
-            return runner_count
+            return min(runner_count, int(indicator_count or 0))
         except Exception as e:
-            self._logger.error("Failure in StrategyRunner.reseed_history_from_bars: %s", e)
+            self._logger.exception(
+                "RUNNER_HISTORY_RESEED_FAILED symbol=%s source=%s error=%s",
+                symbol,
+                source,
+                e,
+            )
             raise
 
     async def safe_ingest(self, data: dict[str, Any]) -> None:
@@ -4745,6 +4751,14 @@ class StrategyRunner:
             except Exception:  # pragma: no cover - defensive
                 pass
             self._last_tick_time_by_symbol[normalized_symbol] = time.time()
+            try:
+                self._last_tick[normalized_symbol] = dict(tick)
+            except Exception:
+                self._last_tick[normalized_symbol] = {
+                    "symbol": normalized_symbol,
+                    "ltp": tick.get("ltp") or tick.get("last_price") or tick.get("price"),
+                    "timestamp": tick.get("timestamp"),
+                }
             if not hasattr(self, "_first_tick_ingested_symbols"):
                 self._first_tick_ingested_symbols = set()
             if normalized_symbol not in self._first_tick_ingested_symbols:
@@ -7139,7 +7153,15 @@ class StrategyRunner:
                             runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
                         quote_payload = self.get_quote(symbol) if hasattr(self, "get_quote") else {}
                         quote_map = dict(quote_payload) if isinstance(quote_payload, Mapping) else {}
-                        tick_map = dict(self._last_tick.get(symbol) or {}) if isinstance(getattr(self, "_last_tick", {}), Mapping) else {}
+                        last_tick_store = getattr(self, "_last_tick", None)
+                        if isinstance(last_tick_store, Mapping):
+                            tick_map = dict(
+                                last_tick_store.get(symbol)
+                                or last_tick_store.get(normalized_symbol)
+                                or {}
+                            )
+                        else:
+                            tick_map = {}
                         depth_payload = quote_map.get("depth") or tick_map.get("depth")
                         bid = quote_map.get("bid") or quote_map.get("best_bid") or tick_map.get("bid") or tick_map.get("best_bid")
                         ask = quote_map.get("ask") or quote_map.get("best_ask") or tick_map.get("ask") or tick_map.get("best_ask")

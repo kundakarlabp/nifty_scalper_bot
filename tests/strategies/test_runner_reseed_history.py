@@ -91,3 +91,56 @@ async def test_ensure_selected_options_hydrated_prefers_reseed_path() -> None:
     assert runner.reseed_calls[0][0] == symbol
     assert runner.reseed_calls[0][1] >= 30
     assert runner.reseed_calls[0][2] == 30
+
+
+def test_runner_on_tick_safe_caches_last_tick() -> None:
+    runner = StrategyRunner()
+    tick = {
+        'symbol': 'NFO:NIFTY26MAY23300CE',
+        'ltp': 123.45,
+        'timestamp': '2026-05-01T04:00:00Z',
+    }
+
+    runner._on_tick_safe(tick)
+
+    normalized_symbol = 'NFO:NIFTY26MAY23300CE'
+    assert normalized_symbol in runner._last_tick
+    assert runner._last_tick[normalized_symbol]['ltp'] == 123.45
+
+
+def test_phase9_tick_map_fallback_without_last_tick_attr() -> None:
+    runner = StrategyRunner()
+    symbol = 'NFO:NIFTY26MAY23300CE'
+    normalized_symbol = 'NFO:NIFTY26MAY23300CE'
+
+    delattr(runner, '_last_tick')
+
+    last_tick_store = getattr(runner, '_last_tick', None)
+    if isinstance(last_tick_store, dict):
+        tick_map = dict(
+            last_tick_store.get(symbol)
+            or last_tick_store.get(normalized_symbol)
+            or {}
+        )
+    else:
+        tick_map = {}
+
+    assert tick_map == {}
+
+
+def test_indicator_replace_history_accepts_multiple_time_keys_and_skips_zero_ohlc() -> None:
+    engine = IndicatorEngine()
+    symbol = 'NFO:NIFTY26MAY23300PE'
+    base = datetime(2026, 5, 1, 3, 45, tzinfo=timezone.utc)
+
+    bars = [
+        {'start': base.isoformat(), 'open': 100, 'high': 101, 'low': 99, 'close': 100.5, 'volume': 10},
+        {'date': (base + timedelta(minutes=1)).isoformat(), 'open': 101, 'high': 102, 'low': 100, 'close': 101.5, 'volume': 10},
+        {'time': (base + timedelta(minutes=2)).isoformat(), 'open': 102, 'high': 103, 'low': 101, 'close': 102.5, 'volume': 10},
+        {'timestamp': base + timedelta(minutes=3), 'open': 0, 'high': 103, 'low': 101, 'close': 102.5, 'volume': 10},
+    ]
+
+    count = engine.replace_history(symbol, bars, source='test', min_bars=1)
+
+    assert count == 3
+    assert engine.history_count(symbol) == 3

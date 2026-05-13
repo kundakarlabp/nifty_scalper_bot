@@ -81,3 +81,29 @@ async def test_live_orders_armed_with_fresh_ltp_bars_and_tradable_depth() -> Non
     assert ctx.evaluation_ready is True
     assert ctx.live_orders_armed is True
     assert ctx.trading_ready is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_selected_options_hydrated_handles_runner_reseed_failure() -> None:
+    symbol = 'NFO:CE'
+
+    class RunnerFailing:
+        def __init__(self) -> None:
+            self._indicator_engine = SimpleNamespace(get_history=lambda _s: list(range(5)))
+
+        def reseed_history_from_bars(self, *args, **kwargs):
+            raise RuntimeError('boom')
+
+    class MdmStub:
+        async def hydrate_symbol_history(self, *args, **kwargs) -> None:
+            return None
+
+        def get_ohlc_bars(self, _sym: str, limit: int | None = None):
+            bars = [
+                {'start': '2026-05-01T03:45:00+00:00', 'open': 100, 'high': 101, 'low': 99, 'close': 100.5},
+            ]
+            return bars[: limit or len(bars)]
+
+    ctx = SimpleNamespace(market_data_manager=MdmStub(), strategy_runner=RunnerFailing())
+
+    await app._ensure_selected_options_hydrated(ctx, symbol, None, 1, 'test')
