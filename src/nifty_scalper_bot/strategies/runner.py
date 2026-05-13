@@ -3450,14 +3450,15 @@ class StrategyRunner:
                 # FIX S12-3: was float(bar.close) — scalar input causes _normalize_price
                 # to use close for ALL of open/high/low/close, destroying ATR/EMA accuracy.
                 # Pass bar.as_mapping() so the full OHLC is stored correctly.
-                indicator_volume = 0 if getattr(bar, "synthetic", False) else bar.volume
+                synthetic_gap_fill = bool(getattr(bar, "synthetic", False))
+                indicator_volume = 0 if synthetic_gap_fill else bar.volume
                 self._indicator_engine.update_price(
                     symbol,
                     bar.as_mapping(),
                     volume=indicator_volume,
                     timestamp=bar.timestamp,
                     is_complete=True,
-                    is_provisional=bool(getattr(bar, "synthetic", False)),
+                    is_provisional=False,
                 )
 
             self._update_symbol_readiness(symbol)

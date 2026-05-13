@@ -8095,11 +8095,28 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             def _resolve_startup_token(symbol: str) -> int | None:
                 """Resolve startup token by symbol class. Args: symbol. Returns: token or None. Raises: None."""
+                canonical = str(symbol or "").strip().upper()
+                well_known_spot_tokens = {
+                    "NSE:NIFTY": 256265,
+                    "NIFTY": 256265,
+                    "NSE:NIFTY50": 256265,
+                    "NIFTY50": 256265,
+                }
+                if canonical in well_known_spot_tokens:
+                    return int(well_known_spot_tokens[canonical])
                 if _is_nfo_symbol(symbol):
                     if ctx.instrument_manager and ctx.instrument_manager.is_loaded():
                         try:
                             return int(ctx.instrument_manager.get_token(symbol))
                         except RuntimeError:
+                            return None
+                        except Exception as exc:
+                            LOGGER.warning(
+                                "startup_nfo_token_unresolved symbol=%s err=%s",
+                                symbol,
+                                exc,
+                                extra={"event": "startup_nfo_token_unresolved", "symbol": symbol},
+                            )
                             return None
                     return None
                 if ctx.broker_client and hasattr(ctx.broker_client, "get_instrument_token"):
@@ -8144,6 +8161,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                 len(active_symbol_tokens),
                 active_symbol_tokens.get(atm_ce) if atm_ce else None,
                 active_symbol_tokens.get(atm_pe) if atm_pe else None,
+            )
+            LOGGER.info(
+                "HYDRATION_SYMBOLS_FINAL symbols=%s has_spot=%s has_futures=%s",
+                symbols_to_hydrate,
+                "NSE:NIFTY" in symbols_to_hydrate,
+                any(str(s).startswith("NFO:NIFTY") and str(s).endswith("FUT") for s in symbols_to_hydrate),
+                extra={
+                    "event": "HYDRATION_SYMBOLS_FINAL",
+                    "symbols": symbols_to_hydrate,
+                    "has_spot": "NSE:NIFTY" in symbols_to_hydrate,
+                    "has_futures": any(str(s).startswith("NFO:NIFTY") and str(s).endswith("FUT") for s in symbols_to_hydrate),
+                },
             )
             LOGGER.info(
                 "HYDRATION_PLAN_STARTUP symbols=%d bars_target=%d lookback_days=%d",

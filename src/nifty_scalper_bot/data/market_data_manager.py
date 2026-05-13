@@ -231,6 +231,7 @@ class MarketDataManager:
         self._engines: dict[str, CandleEngine] = {}
         self._last_historical_ts: dict[str, float] = {}
         self._last_tick_ts: dict[str, float] = {}
+        self._last_cumulative_volume_by_symbol: dict[str, float] = {}
         self._last_tick_snapshot: dict[str, dict[str, Any]] = {}
         self._readiness_requirements: dict[str, Any] = {}
         self._last_readiness_state: dict[str, Any] = {
@@ -4577,6 +4578,38 @@ class MarketDataManager:
         mid = ((bid + ask) / 2.0) if (bid is not None and ask is not None and bid > 0 and ask > 0) else None
         return {"bid": bid, "ask": ask, "best_bid": bid, "best_ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "mid": mid, "spread": spread, "depth": depth, "depth_available": depth_available, "tradable_quote": bool(bid is not None and ask is not None and bid > 0 and ask > bid), "bid_missing": not bool(bid and bid > 0), "ask_missing": not bool(ask and ask > 0), "bid_ask_source": "ws_full" if depth_available else ("quote" if bid is not None or ask is not None else "missing")}
 
+    def _normalise_tick_volume_delta(self, symbol: str, raw: dict[str, Any]) -> dict[str, Any]:
+        """Convert cumulative broker volume into per-tick delta volume. Args: symbol/raw. Returns: normalized payload. Raises: none."""
+        payload = dict(raw)
+        cumulative_raw = (
+            payload.get("volume_traded_today")
+            or payload.get("volume_traded")
+            or payload.get("total_traded_volume")
+        )
+        if cumulative_raw is None:
+            return payload
+        try:
+            cumulative = float(cumulative_raw)
+        except (TypeError, ValueError):
+            return payload
+        key = self._canonical_symbol(symbol)
+        previous = self._last_cumulative_volume_by_symbol.get(key)
+        if previous is None:
+            ltq_raw = payload.get("last_traded_quantity") or payload.get("last_quantity") or payload.get("ltq")
+            try:
+                delta = max(float(ltq_raw), 0.0) if ltq_raw is not None else 0.0
+            except (TypeError, ValueError):
+                delta = 0.0
+        elif cumulative >= previous:
+            delta = cumulative - previous
+        else:
+            delta = 0.0
+        self._last_cumulative_volume_by_symbol[key] = cumulative
+        payload["volume_cumulative"] = cumulative
+        payload["volume_delta"] = delta
+        payload["volume"] = delta
+        return payload
+
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
         raw = self._normalize_ws_tick(raw)
         if raw is None:
@@ -4603,6 +4636,11 @@ class MarketDataManager:
                 )
                 return
             raw = {**raw, "symbol": symbol_from_map}
+            raw = self._normalise_tick_volume_delta(symbol_from_map or raw.get("symbol", ""), raw)
+
+        symbol = str(raw.get("symbol") or "")
+        if symbol:
+            raw = self._normalise_tick_volume_delta(symbol, raw)
 
         try:
             tick = validate_tick(raw)
@@ -7083,7 +7121,8 @@ class MarketDataManager:
                 "spread": spread,
                 "last_price": ltp,
                 "instrument_token": token,
-                "volume": _coerce_int(raw.get("volume") or raw.get("volume_traded") or raw.get("volume_traded_today")),
+                "volume": _coerce_int(raw.get("volume") or raw.get("volume_delta") or 0),
+                "volume_cumulative": _coerce_int(raw.get("volume_cumulative") or raw.get("volume_traded_today") or raw.get("volume_traded")),
                 "oi": _coerce_int(raw.get("oi")),
                 "depth": depth_obj,
                 "depth_available": bool(depth_obj),

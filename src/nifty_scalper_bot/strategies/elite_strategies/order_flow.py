@@ -38,6 +38,9 @@ class OrderFlowStrategy(EliteStrategy):
             contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
 
+            allow_orderflow_trigger = str(
+                os.getenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'false')
+            ).strip().lower() in {'1', 'true', 'yes', 'on'}
             if bid <= 0 or ask <= 0 or ask <= bid:
                 self._no_vote('ltp_only_no_depth' if not depth else 'missing_bid_ask')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=missing_bid_ask')
@@ -87,7 +90,7 @@ class OrderFlowStrategy(EliteStrategy):
                     self._no_vote('weak_tick_confirmation')
                     return None
                 metadata = {'orderflow_depth_source': 'ltp_tick_fallback', 'risk_label': 'ltp_only_orderflow_reduced_confidence'}
-                metadata.update({'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'context', 'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'direction_bias': side, 'strategy_score': strategy_score, 'spread_pct': round(spread_pct, 3), 'depth_imbalance': 0.0, 'tick_direction': tick_direction, 'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0), 'premium_target_rr': 1.8})
+                metadata.update({'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'trigger' if allow_orderflow_trigger and strategy_score >= 7.0 and spread_pct <= 8.0 else 'context', 'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'direction_bias': side, 'strategy_score': strategy_score, 'spread_pct': round(spread_pct, 3), 'depth_imbalance': 0.0, 'tick_direction': tick_direction, 'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0), 'premium_target_rr': 1.8})
                 return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.55, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
             side = contract_side if option_premium_domain else ('CE' if depth_imbalance > 0 else 'PE')
@@ -124,7 +127,7 @@ class OrderFlowStrategy(EliteStrategy):
             metadata = {
                 'strategy': 'OrderFlow',
                 'strategy_name': 'OrderFlow',
-                'role': 'context',
+                'role': 'trigger' if allow_orderflow_trigger and strategy_score >= 7.0 and spread_pct <= 8.0 else 'context',
                 'source_domain': 'market_microstructure',
                 'context_score': strategy_score,
                 'side': side,
