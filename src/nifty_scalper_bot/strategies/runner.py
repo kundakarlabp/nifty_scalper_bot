@@ -5320,6 +5320,33 @@ class StrategyRunner:
             extra={"event": "REGIME_GATE_DECISION"},
         )
         return allowed_for_regime
+    def _strategy_regime_decision(
+        self, *, strategy: str, regime: MarketRegime, symbol: str, metadata: Mapping[str, Any] | None = None
+    ) -> tuple[bool, str]:
+        """Return strategy-regime compatibility decision. Args: strategy/regime/symbol/metadata; Returns: tuple[bool,str]; Raises: none."""
+        del symbol
+        normalized = (strategy or "").strip().lower()
+        regime_name = str(regime.value or "").upper()
+        canonical = {"VOLATILE": "HIGH_VOLATILITY", "HIGHVOL": "HIGH_VOLATILITY", "HIGH_VOL": "HIGH_VOLATILITY", "TRENDING": "TREND", "RANGING": "RANGE"}.get(regime_name, regime_name)
+        meta = dict(metadata or {})
+        selected = bool(meta.get("candidate_selected") or meta.get("is_selected_option"))
+        try:
+            spread_pct = float(meta.get("spread_pct") or meta.get("candidate_spread_pct") or 999.0)
+        except (TypeError, ValueError):
+            spread_pct = 999.0
+        try:
+            rr = float(meta.get("candidate_rr") or 0.0)
+        except (TypeError, ValueError):
+            rr = 0.0
+        if self._strategy_allowed_for_regime(strategy, regime):
+            return True, "regime_in_allowed_list"
+        if normalized in {"vwap_pro", "vwappro"} and canonical == "HIGH_VOLATILITY":
+            max_spread = float(os.getenv("VWAP_HIGH_VOL_MAX_SPREAD_PCT", "0.75") or "0.75")
+            min_rr = float(os.getenv("VWAP_HIGH_VOL_MIN_RR", "1.6") or "1.6")
+            if selected and spread_pct <= max_spread and rr >= min_rr:
+                return True, "vwap_high_vol_execution_quality_soft_allow"
+            return False, "vwap_high_vol_execution_quality_failed"
+        return False, "regime_not_allowed"
 
     def _strategy_slots_available(self) -> bool:
         """Return True when active strategy slots are available for new entries."""
@@ -7468,10 +7495,15 @@ class StrategyRunner:
                 self._last_strategy_versions[symbol] = current_version
                 signal_strategy = str((signal.metadata or {}).get("strategy") or "")
                 current_regime = self._compute_regime_snapshot(symbol)
-                if not self._strategy_allowed_for_regime(
-                    signal_strategy, current_regime
-                ):
+                regime_allowed, regime_reason = self._strategy_regime_decision(
+                    strategy=signal_strategy, regime=current_regime, symbol=symbol, metadata=signal.metadata or {}
+                )
+                if not regime_allowed:
                     self._regime_block_counter += 1
+                    regime_metadata = dict(signal.metadata or {})
+                    selected = bool(regime_metadata.get("candidate_selected") or regime_metadata.get("is_selected_option"))
+                    spread_pct = regime_metadata.get("spread_pct") or regime_metadata.get("candidate_spread_pct")
+                    candidate_rr = regime_metadata.get("candidate_rr")
                     allowed_env = os.getenv("RUNNER_VWAP_ALLOWED_REGIMES", "TREND,NORMAL")
                     if signal_strategy.strip().lower() in {"premium_momentum", "premium_momentum_squeeze"}:
                         allowed_env = os.getenv(
@@ -7484,13 +7516,17 @@ class StrategyRunner:
                             "TREND,NORMAL,HIGH_VOLATILITY",
                         )
                     self._logger.info(
-                        "REGIME_GATE_REJECTED symbol=%s strategy=%s regime=%s allowed_regimes=%s side=%s score=%.2f trace_id=%s",
+                        "REGIME_GATE_REJECTED symbol=%s strategy=%s regime=%s allowed_regimes=%s side=%s score=%.2f reason=%s selected=%s spread_pct=%s candidate_rr=%s trace_id=%s",
                         symbol,
                         signal_strategy or "unknown",
                         current_regime.value,
                         allowed_env,
                         signal.action,
                         float(signal.confidence or 0.0),
+                        regime_reason,
+                        selected,
+                        spread_pct,
+                        candidate_rr,
                         trace_id,
                         extra={
                             "event": "REGIME_GATE_REJECTED",
@@ -7500,6 +7536,10 @@ class StrategyRunner:
                             "allowed_regimes": allowed_env,
                             "side": signal.action,
                             "score": float(signal.confidence or 0.0),
+                            "regime_reason": regime_reason,
+                            "selected": selected,
+                            "spread_pct": spread_pct,
+                            "candidate_rr": candidate_rr,
                             "trace_id": trace_id,
                             "regime_inputs": self._last_regime_inputs_by_symbol.get(symbol, {}),
                         },
@@ -8815,6 +8855,14 @@ class StrategyRunner:
                 metadata["spread_pct"] = candidate.spread_pct
                 metadata["candidate_score"] = candidate.score
                 metadata["candidate_selected"] = True
+                metadata["candidate_symbol"] = candidate.symbol
+                metadata["candidate_entry_price"] = candidate.entry_price
+                metadata["candidate_stop_loss"] = candidate.stop_loss
+                metadata["candidate_target"] = candidate.target
+                metadata["candidate_rr"] = candidate.rr
+                metadata["candidate_data_quality_score"] = candidate.data_quality_score
+                metadata["candidate_spread_pct"] = candidate.spread_pct
+                metadata["candidate_tick_age_s"] = getattr(candidate, "tick_age_s", None)
                 selected_snapshot = next(
                     (
                         snap
@@ -8985,40 +9033,53 @@ class StrategyRunner:
                 ]
 
                 if not (has_components and has_candidate and has_quote_usable):
+                    if missing_components:
+                        final_score_block_reason = "missing_final_score_components"
+                    elif not has_candidate:
+                        final_score_block_reason = "candidate_not_selected"
+                    elif not has_quote_usable:
+                        final_score_block_reason = "quote_not_usable_for_order_plan"
+                    else:
+                        final_score_block_reason = "final_score_required"
+                    strategy_name = metadata.get("strategy_name") or metadata.get("strategy") or signal.reason
                     self._logger.info(
-                        "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required "
-                        "symbol=%s trace_id=%s has_components=%s missing_components=%s "
-                        "has_candidate=%s has_quote_usable=%s candidate_symbol=%s "
-                        "tradable_quote=%s quote_usable_for_order_plan=%s selected_snapshot_symbol=%s",
+                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s missing_components=%s has_candidate=%s has_quote_usable=%s candidate_symbol=%s selected_snapshot_symbol=%s latest_bid=%s latest_ask=%s latest_quote_tradable=%s",
                         base_symbol,
-                        trace_id,
-                        has_components,
+                        strategy_name,
+                        infer_option_side(signal.symbol, metadata),
+                        False,
+                        "runner_final_score_precheck",
+                        final_score_block_reason,
                         missing_components,
                         has_candidate,
                         has_quote_usable,
                         metadata.get("candidate_symbol"),
-                        metadata.get("tradable_quote"),
-                        metadata.get("quote_usable_for_order_plan"),
                         metadata.get("selected_snapshot_symbol"),
+                        metadata.get("latest_quote_bid"),
+                        metadata.get("latest_quote_ask"),
+                        metadata.get("latest_quote_tradable"),
                         extra={
-                            "event": "SIGNAL_EXECUTION_RESULT",
-                            "accepted": False,
-                            "reason": "final_score_required",
+                            "event": "TRADE_DECISION_TRACE",
                             "symbol": base_symbol,
+                            "strategy": strategy_name,
+                            "side": infer_option_side(signal.symbol, metadata),
+                            "allowed": False,
+                            "blocked_at": "runner_final_score_precheck",
+                            "blocked_reason": final_score_block_reason,
                             "trace_id": trace_id,
-                            "has_components": has_components,
                             "missing_components": missing_components,
                             "has_candidate": has_candidate,
                             "has_quote_usable": has_quote_usable,
                             "candidate_symbol": metadata.get("candidate_symbol"),
-                            "tradable_quote": metadata.get("tradable_quote"),
-                            "quote_usable_for_order_plan": metadata.get("quote_usable_for_order_plan"),
                             "selected_snapshot_symbol": metadata.get("selected_snapshot_symbol"),
+                            "latest_bid": metadata.get("latest_quote_bid"),
+                            "latest_ask": metadata.get("latest_quote_ask"),
+                            "latest_quote_tradable": metadata.get("latest_quote_tradable"),
                         },
                     )
                     self._reset_execution_state(base_symbol)
-                    _trace("final_score_required")
-                    return SignalExecutionResult(False, "final_score_required")
+                    _trace(final_score_block_reason)
+                    return SignalExecutionResult(False, final_score_block_reason)
             missing_components = missing_score_components(metadata)
             if missing_components and reason_key == "premium_momentum_squeeze":
                 metadata["shadow_only"] = True
@@ -9085,22 +9146,42 @@ class StrategyRunner:
                 live_threshold = float(quality.components.get("threshold", 0.0) or 0.0)
                 if quality.final_score < live_threshold:
                     self._logger.info(
-                        "SIGNAL_EXECUTION_RESULT accepted=False reason=final_score_required symbol=%s trace_id=%s",
+                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f threshold=%.2f direction_score=%.2f strategy_score=%.2f option_score=%.2f data_score=%.2f rr_score=%.2f reasons=%s trace_id=%s",
                         base_symbol,
+                        str(quality.components.get("strategy_name", "")),
+                        infer_option_side(signal.symbol, metadata),
+                        False,
+                        "runner_final_score",
+                        "final_score_below_live_threshold",
+                        quality.final_score,
+                        live_threshold,
+                        float(quality.components.get("direction_score", quality.direction_score) or 0.0),
+                        float(quality.components.get("strategy_score", quality.strategy_score) or 0.0),
+                        float(quality.components.get("option_score", quality.option_score) or 0.0),
+                        float(quality.components.get("data_score", quality.data_score) or 0.0),
+                        float(quality.components.get("rr_score", quality.rr_score) or 0.0),
+                        quality.reasons,
                         trace_id,
                         extra={
-                            "event": "SIGNAL_EXECUTION_RESULT",
-                            "accepted": False,
-                            "reason": "final_score_required",
+                            "event": "TRADE_DECISION_TRACE",
                             "symbol": base_symbol,
                             "trace_id": trace_id,
                             "final_score": quality.final_score,
-                            "required_score": live_threshold,
+                            "threshold": live_threshold,
+                            "allowed": False,
+                            "blocked_at": "runner_final_score",
+                            "blocked_reason": "final_score_below_live_threshold",
+                            "direction_score": quality.components.get("direction_score", quality.direction_score),
+                            "strategy_score": quality.components.get("strategy_score", quality.strategy_score),
+                            "option_score": quality.components.get("option_score", quality.option_score),
+                            "data_score": quality.components.get("data_score", quality.data_score),
+                            "rr_score": quality.components.get("rr_score", quality.rr_score),
+                            "reasons": quality.reasons,
                         },
                     )
                     self._reset_execution_state(base_symbol)
-                    _trace("final_score_required")
-                    return SignalExecutionResult(False, "final_score_required")
+                    _trace("final_score_below_live_threshold")
+                    return SignalExecutionResult(False, "final_score_below_live_threshold")
             if not quality.allowed:
                 delta = quality.final_score - float(quality.components.get("threshold", 0.0) or 0.0)
                 self._logger.info(
