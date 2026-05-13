@@ -408,6 +408,17 @@ class IndicatorEngine:
                 }
 
             selected_rows = sorted(normalized_rows.values(), key=lambda item: item["timestamp"])
+            if not selected_rows:
+                self._logger.warning(
+                    "INDICATOR_HISTORY_RESEED_EMPTY symbol=%s min_bars=%d source=%s",
+                    symbol,
+                    max(1, int(min_bars or 1)),
+                    source,
+                )
+                with self._lock:
+                    self._histories[symbol] = PriceHistory()
+                    self._cache.pop(symbol, None)
+                return 0
             new_history = PriceHistory()
             for bar in selected_rows:
                 new_history.add_tick(
