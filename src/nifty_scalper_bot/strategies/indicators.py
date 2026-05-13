@@ -353,6 +353,79 @@ class IndicatorEngine:
             self._logger.error("Failure in IndicatorEngine.ingest_historical_bar: %s", e)
             raise
 
+    def replace_history(
+        self,
+        symbol: str,
+        bars: Iterable[Mapping[str, Any]],
+        source: str = "historical_reseed",
+        min_bars: int = 1,
+    ) -> int:
+        """Args: symbol/bars/source/min_bars. Returns: final history count. Raises: Exception."""
+        try:
+            normalized_rows: dict[datetime, dict[str, Any]] = {}
+            for row in bars or ():
+                if not isinstance(row, Mapping):
+                    continue
+                ts_value = row.get("timestamp") or row.get("start")
+                if ts_value is None:
+                    continue
+                if isinstance(ts_value, datetime):
+                    ts = ts_value
+                elif isinstance(ts_value, (int, float)):
+                    ts = datetime.fromtimestamp(float(ts_value), tz=timezone.utc)
+                elif isinstance(ts_value, str):
+                    ts = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
+                else:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.astimezone(timezone.utc).replace(microsecond=0)
+                normalized_rows[ts] = {
+                    "timestamp": ts,
+                    "open": float(row.get("open", row.get("close", 0.0)) or 0.0),
+                    "high": float(row.get("high", row.get("close", 0.0)) or 0.0),
+                    "low": float(row.get("low", row.get("close", 0.0)) or 0.0),
+                    "close": float(row.get("close", row.get("open", 0.0)) or 0.0),
+                    "volume": int(row.get("volume", 0) or 0),
+                }
+
+            selected_rows = sorted(normalized_rows.values(), key=lambda item: item["timestamp"])
+            new_history = PriceHistory()
+            for bar in selected_rows:
+                new_history.add_tick(
+                    {
+                        "open": bar["open"],
+                        "high": bar["high"],
+                        "low": bar["low"],
+                        "close": bar["close"],
+                    },
+                    volume=int(bar["volume"]),
+                    timestamp=cast(datetime, bar["timestamp"]),
+                    is_complete=True,
+                    is_provisional=False,
+                )
+            with self._lock:
+                self._histories[symbol] = new_history
+                self._cache.pop(symbol, None)
+                final_count = len(new_history)
+            event_name = (
+                "INDICATOR_HISTORY_RESEEDED"
+                if final_count >= max(1, int(min_bars or 1))
+                else "INDICATOR_HISTORY_RESEED_SHORT"
+            )
+            self._logger.info(
+                "%s symbol=%s bars=%d min_bars=%d source=%s",
+                event_name,
+                symbol,
+                final_count,
+                max(1, int(min_bars or 1)),
+                source,
+            )
+            return final_count
+        except Exception as e:
+            self._logger.error("Failure in IndicatorEngine.replace_history: %s", e)
+            raise
+
     def history_count(self, symbol: str) -> int:
         """Return symbol history length. Args: symbol. Returns: count. Raises: none."""
         with self._lock:
