@@ -6185,13 +6185,58 @@ class MarketDataManager:
             if not isinstance(payload, Mapping) or not payload:
                 return False
 
-            ltp = _coerce_positive_float(
-                payload.get("last_price")
-                or payload.get("ltp")
-                or payload.get("LastTradedPrice")
+            quote_payload = payload
+            naked_symbol = symbol.split(":", 1)[-1]
+            if symbol in payload and isinstance(payload.get(symbol), Mapping):
+                quote_payload = cast(Mapping[str, Any], payload[symbol])
+            elif naked_symbol in payload and isinstance(payload.get(naked_symbol), Mapping):
+                quote_payload = cast(Mapping[str, Any], payload[naked_symbol])
+
+            token = (
+                quote_payload.get("instrument_token")
+                or quote_payload.get("token")
+                or payload.get("instrument_token")
+                or payload.get("token")
             )
-            bid = _coerce_positive_float(payload.get("bid"))
-            ask = _coerce_positive_float(payload.get("ask"))
+            ltp = _coerce_positive_float(
+                quote_payload.get("last_price")
+                or quote_payload.get("ltp")
+                or quote_payload.get("LastTradedPrice")
+            )
+            depth = quote_payload.get("depth") if isinstance(quote_payload.get("depth"), Mapping) else {}
+            buy_levels = depth.get("buy") if isinstance(depth, Mapping) else []
+            sell_levels = depth.get("sell") if isinstance(depth, Mapping) else []
+            buy_top = buy_levels[0] if isinstance(buy_levels, list) and buy_levels else {}
+            sell_top = sell_levels[0] if isinstance(sell_levels, list) and sell_levels else {}
+            bid = _coerce_positive_float(
+                quote_payload.get("bid")
+                or quote_payload.get("best_bid")
+                or quote_payload.get("buy_price")
+                or buy_top.get("price")
+            )
+            ask = _coerce_positive_float(
+                quote_payload.get("ask")
+                or quote_payload.get("best_ask")
+                or quote_payload.get("sell_price")
+                or sell_top.get("price")
+            )
+            bid_qty = _coerce_int(
+                quote_payload.get("bid_qty")
+                or quote_payload.get("buy_qty")
+                or quote_payload.get("buy_quantity")
+                or buy_top.get("quantity")
+            )
+            ask_qty = _coerce_int(
+                quote_payload.get("ask_qty")
+                or quote_payload.get("sell_qty")
+                or quote_payload.get("sell_quantity")
+                or sell_top.get("quantity")
+            )
+            spread = None
+            mid = None
+            if bid is not None and ask is not None and ask > bid:
+                spread = ask - bid
+                mid = (ask + bid) / 2.0
 
             now_ts = pd.Timestamp.utcnow()
             tick = {
@@ -6208,14 +6253,16 @@ class MarketDataManager:
                 "sell_qty": ask_qty,
                 "mid": mid,
                 "spread": spread,
-                "last_price": ltp,
-                "instrument_token": token,
+                "depth": depth,
+                "depth_available": bool(buy_levels or sell_levels),
+                "tradable_quote": bool(
+                    bid is not None and ask is not None and bid > 0 and ask > bid
+                ),
                 "timestamp": now_ts.isoformat(),
                 "timestamp_ms": float(now_ts.timestamp() * 1000.0),
                 "received_at": time.time(),
                 "source": "rest",
             }
-            token = payload.get("instrument_token") or payload.get("token")
             if token is not None:
                 tick["instrument_token"] = int(token)
                 tick["token"] = int(token)
