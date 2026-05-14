@@ -35,6 +35,19 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 log = get_logger(__name__)
 
+
+def classify_symbol_role(symbol: str) -> str:
+    """Classify symbols for strategy routing."""
+    s = normalize_symbol(str(symbol or ""))
+    u = s.upper()
+    if u in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}:
+        return "spot_context"
+    if u.startswith("NFO:NIFTY") and u.endswith("FUT"):
+        return "futures_context"
+    if u.startswith("NFO:NIFTY") and (u.endswith("CE") or u.endswith("PE")):
+        return "tradable_option"
+    return "unknown"
+
 REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
     "TREND_UP": {"SMC": 1.2, "VWAPPro": 1.2, "ORBPro": 1.15, "BBSqueeze": 1.1, "OrderFlow": 1.15, "RSIDivergence": 0.8},
     "TREND_DOWN": {"SMC": 1.2, "VWAPPro": 1.2, "ORBPro": 1.15, "BBSqueeze": 1.1, "OrderFlow": 1.15, "RSIDivergence": 0.8},
@@ -1784,6 +1797,50 @@ class StrategyManager(_BaseStrategyManager):
                 extra={"event": "strategy_no_signal_summary_error", "symbol": symbol},
             )
 
+
+    def _update_context_snapshot(
+        self,
+        *,
+        symbol: str,
+        indicators: t.Mapping[str, t.Any],
+        role: str,
+    ) -> None:
+        """Store latest spot/futures context snapshots for option strategies."""
+        if not hasattr(self, "_latest_context_snapshots"):
+            self._latest_context_snapshots: dict[str, dict[str, t.Any]] = {}
+
+        def _num(*keys: str) -> float | None:
+            for key in keys:
+                value = indicators.get(key)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        context_kind = (
+            "price_direction"
+            if role == "spot_context"
+            else "volume_flow"
+            if role == "futures_context"
+            else "unknown"
+        )
+        snapshot = {
+            "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
+            "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
+            "vwap": _num("vwap", "exchange_vwap", "session_vwap"),
+            "ema_fast": _num("ema_fast", "ema_9", "ema9"),
+            "ema_slow": _num("ema_slow", "ema_21", "ema21"), "ema_50": _num("ema_50", "ema50"),
+            "adx": _num("adx"), "atr": _num("atr"), "volume": _num("volume"),
+            "avg_volume": _num("avg_volume"), "futures_volume_ratio": _num("futures_volume_ratio"),
+            "vwap_slope": _num("vwap_slope"), "ema_slope": _num("ema_slope"),
+            "direction_bias": indicators.get("direction_bias") or indicators.get("underlying_direction_bias"),
+            "regime": indicators.get("regime") or indicators.get("market_regime"),
+        }
+        self._latest_context_snapshots[role] = snapshot
+
     def generate_signal(
         self,
         symbol: str,
@@ -2036,6 +2093,8 @@ class StrategyManager(_BaseStrategyManager):
         )
         score_map = self._recompute_scores()
         indicators = dict(indicators)
+        symbol_role = classify_symbol_role(symbol)
+        indicators["symbol_role"] = symbol_role
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
         # ✅ FIX S3: Inject exchange VWAP for options
@@ -2098,14 +2157,23 @@ class StrategyManager(_BaseStrategyManager):
         is_nifty_context_symbol = symbol in {"NSE:NIFTY", "NIFTY"}
         try:
             if vwap is None or float(vwap) <= 0.0:
-                if is_nifty_context_symbol and (volume is None or float(volume) <= 0.0):
-                    log.info(
-                        "CONTEXT_VWAP_UNAVAILABLE_NON_FATAL symbol=%s",
-                        symbol,
-                        extra={
-                            "event": "CONTEXT_VWAP_UNAVAILABLE_NON_FATAL",
-                            "symbol": symbol,
-                        },
+                if symbol_role == "spot_context" and (volume is None or float(volume) <= 0.0):
+                    log_throttled(
+                        log,
+                        key=f"context_vwap_missing:{symbol}:spot",
+                        msg=f"CONTEXT_VWAP_UNAVAILABLE_NON_FATAL symbol={symbol}",
+                        interval_sec=300.0,
+                        level=logging.INFO,
+                        extra={"event": "CONTEXT_VWAP_UNAVAILABLE_NON_FATAL", "symbol": symbol, "reason": "spot_vwap_optional", "context_kind": "price_direction"},
+                    )
+                elif symbol_role == "futures_context":
+                    log_throttled(
+                        log,
+                        key=f"context_vwap_missing:{symbol}:futures",
+                        msg=f"CONTEXT_VWAP_UNAVAILABLE_NON_FATAL symbol={symbol}",
+                        interval_sec=30.0,
+                        level=logging.WARNING,
+                        extra={"event": "CONTEXT_VWAP_UNAVAILABLE_NON_FATAL", "symbol": symbol, "reason": "futures_vwap_unavailable", "context_kind": "volume_flow"},
                     )
                 else:
                     invalid_reason = "vwap_zero_or_invalid"
@@ -2202,7 +2270,7 @@ class StrategyManager(_BaseStrategyManager):
 
         if symbol in self._symbol_temporarily_ineligible:
             _log_reject(
-                "data_invalid",
+                "no_strategy_signal",
                 {
                     "reason_code": self._symbol_temporarily_ineligible.get(symbol),
                     "invalid_streak": self._symbol_invalid_counts.get(symbol, 0),
@@ -2210,6 +2278,8 @@ class StrategyManager(_BaseStrategyManager):
                     "vwap": vwap,
                     "volume": volume,
                     "avg_volume": avg_volume,
+                    "no_vote_reason_counts": no_vote_reason_counts,
+                    "symbol_role": symbol_role,
                 },
             )
             _emit_no_signal(
@@ -2221,6 +2291,44 @@ class StrategyManager(_BaseStrategyManager):
             no_signal_reasons.append("data_invalid")
             _emit_strategy_exit()
             return None
+        if symbol_role in {"spot_context", "futures_context"}:
+            self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
+            log_throttled(
+                log,
+                key=f"context_symbol_strategy_eval_skipped:{symbol}",
+                msg=(
+                    "CONTEXT_SYMBOL_STRATEGY_EVAL_SKIPPED "
+                    f"symbol={symbol} role={symbol_role} "
+                    "reason=context_only_no_trade_strategy_eval"
+                ),
+                interval_sec=30.0,
+                level=logging.INFO,
+                extra={"event": "CONTEXT_SYMBOL_STRATEGY_EVAL_SKIPPED", "symbol": symbol, "symbol_role": symbol_role, "reason": "context_only_no_trade_strategy_eval"},
+            )
+            return None
+
+        if symbol_role == "tradable_option":
+            context_snapshots = getattr(self, "_latest_context_snapshots", {})
+            spot_ctx = context_snapshots.get("spot_context", {})
+            fut_ctx = context_snapshots.get("futures_context", {})
+            indicators.setdefault("spot_context", spot_ctx)
+            indicators.setdefault("futures_context", fut_ctx)
+            direction_bias = (
+                indicators.get("direction_bias")
+                or indicators.get("underlying_direction_bias")
+                or spot_ctx.get("direction_bias")
+                or fut_ctx.get("direction_bias")
+            )
+            if str(direction_bias or "").upper() in {"CE", "PE"}:
+                indicators["direction_bias"] = str(direction_bias).upper()
+                indicators["underlying_direction_bias"] = str(direction_bias).upper()
+            if fut_ctx.get("futures_volume_ratio") is not None:
+                indicators.setdefault("futures_volume_ratio", fut_ctx.get("futures_volume_ratio"))
+            if fut_ctx.get("vwap") is not None:
+                indicators.setdefault("futures_vwap", fut_ctx.get("vwap"))
+            if fut_ctx.get("vwap_slope") is not None:
+                indicators.setdefault("futures_vwap_slope", fut_ctx.get("vwap_slope"))
+
         position = self._position_manager.get_position(symbol)
 
         signals: list[Signal] = []
@@ -2369,7 +2477,7 @@ class StrategyManager(_BaseStrategyManager):
                 error_strategies=errors,
             )
             _log_reject(
-                "data_invalid",
+                "no_strategy_signal",
                 {
                     "missing_indicators": missing,
                     "no_signal_strategies": empty[:8],
@@ -2378,13 +2486,18 @@ class StrategyManager(_BaseStrategyManager):
                     "vwap": vwap,
                     "volume": volume,
                     "avg_volume": avg_volume,
+                    "no_vote_reason_counts": no_vote_reason_counts,
+                    "symbol_role": symbol_role,
                 },
             )
             _emit_no_signal(
-                "data_invalid",
+                "no_strategy_signal",
                 {
                     "missing_indicators": missing,
                     "no_signal_strategies": empty[:8],
+                    "error_strategies": errors,
+                    "no_vote_reason_counts": no_vote_reason_counts,
+                    "symbol_role": symbol_role,
                 },
             )
             no_signal_reasons.append("no_strategy_signal")
@@ -2468,13 +2581,15 @@ class StrategyManager(_BaseStrategyManager):
                 },
             )
             _log_reject(
-                "data_invalid",
+                "no_strategy_signal",
                 {
                     "stage": "combine",
                     "ltp": current_price,
                     "vwap": vwap,
                     "volume": volume,
                     "avg_volume": avg_volume,
+                    "no_vote_reason_counts": no_vote_reason_counts,
+                    "symbol_role": symbol_role,
                 },
             )
             _emit_no_signal("data_invalid", {"stage": "combine"})
@@ -2493,7 +2608,7 @@ class StrategyManager(_BaseStrategyManager):
                 },
             )
             _log_reject(
-                "data_invalid",
+                "no_strategy_signal",
                 {
                     "stage": "filter",
                     "action": combined.action,
@@ -2502,6 +2617,8 @@ class StrategyManager(_BaseStrategyManager):
                     "vwap": vwap,
                     "volume": volume,
                     "avg_volume": avg_volume,
+                    "no_vote_reason_counts": no_vote_reason_counts,
+                    "symbol_role": symbol_role,
                 },
             )
             _emit_no_signal(
