@@ -2777,11 +2777,18 @@ class StrategyManager(_BaseStrategyManager):
                     metadata["candidate_switch_requested"] = True
                     metadata["candidate_switch_reason"] = "high_raw_score_nearby_strike"
                 else:
-                    blocked_reason = (
-                        "raw_score_below_min" if not score_ok else "confidence_below_min"
-                        if not conf_ok else "not_selected_or_near_atm" if not selected_ok
-                        else "context_veto"
-                    )
+                    if not score_ok:
+                        blocked_reason = "raw_score_below_min"
+                    elif not conf_ok:
+                        blocked_reason = "confidence_below_min"
+                    elif not selected_ok:
+                        blocked_reason = "not_selected_or_near_atm"
+                    elif vetoed:
+                        blocked_reason = "context_veto"
+                    elif not allow_scalp_single:
+                        blocked_reason = "single_vote_scalp_disabled"
+                    else:
+                        blocked_reason = "single_vote_gate_failed_unknown"
                     log.info(
                         "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s selected_ce=%s selected_pe=%s strike_distance_from_atm=%s near_atm_threshold=%s selected_ok_reason=%s raw_score=%.2f confidence=%.2f",
                         symbol_norm,
