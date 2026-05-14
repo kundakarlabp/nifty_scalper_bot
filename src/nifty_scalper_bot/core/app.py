@@ -8168,6 +8168,8 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             active_symbol_tokens: dict[str, int] = {}
             symbols_to_hydrate_raw = build_active_trading_basket_symbols(ctx, basket)
+            if "NSE:NIFTY" not in symbols_to_hydrate_raw:
+                symbols_to_hydrate_raw = ["NSE:NIFTY", *symbols_to_hydrate_raw]
             symbols_to_hydrate: list[str] = []
             for _sym in symbols_to_hydrate_raw:
                 _tok = _resolve_startup_token(_sym)
@@ -8339,6 +8341,27 @@ async def startup_sequence(ctx: BotContext) -> None:
                             "mdm_history_count": mdm_history_count,
                         },
                     )
+                    if sym == "NSE:NIFTY":
+                        required = int(getattr(ctx.strategy_runner, "_context_required_bars", 0) or 0)
+                        success = runner_history_count >= required and mdm_history_count >= required
+                        reason = "hydrated" if success else "insufficient_bars_after_hydration"
+                        LOGGER.info(
+                            "SPOT_CONTEXT_HYDRATION_RESULT symbol=NSE:NIFTY mdm_bars=%d runner_bars=%d required=%d success=%s reason=%s",
+                            mdm_history_count,
+                            runner_history_count,
+                            required,
+                            success,
+                            reason,
+                            extra={
+                                "event": "SPOT_CONTEXT_HYDRATION_RESULT",
+                                "symbol": "NSE:NIFTY",
+                                "mdm_bars": mdm_history_count,
+                                "runner_bars": runner_history_count,
+                                "required": required,
+                                "success": success,
+                                "reason": reason,
+                            },
+                        )
                 if ctx.market_data_manager:
                     bars_snapshot = ctx.market_data_manager.get_ohlc_bars(sym)
                     ctx.market_data_manager.update_hydration_status(
