@@ -543,6 +543,8 @@ class StrategyRunner:
         )
         self._last_same_bar_eval_ts_by_symbol: dict[str, float] = {}
         self._last_eval_price_by_symbol: dict[str, float] = {}
+        self._last_same_bar_eval_block_reason_by_symbol: dict[str, str] = {}
+        self._last_same_bar_eval_block_detail_by_symbol: dict[str, dict[str, Any]] = {}
         self._tick_log_throttle_seconds = max(
             1.0,
             float(os.getenv("RUNNER_TICK_LOG_THROTTLE_SECONDS", "120")),
@@ -612,6 +614,14 @@ class StrategyRunner:
         
         self._logger.info(
             "StrategyRunner initialized with MessageBus: ticks=MDM-callback signals=MessageBus"
+        )
+        self._logger.info(
+            "RUNNER_INTRABAR_EVAL_CONFIG enabled=%s selected_seconds=%s non_selected_seconds=%s near_selected_points=%s min_price_move_pct=%s",
+            os.getenv("RUNNER_ENABLE_INTRABAR_STRATEGY_EVAL", "true"),
+            os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10"),
+            os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60"),
+            os.getenv("RUNNER_INTRABAR_NEAR_SELECTED_POINTS", "100"),
+            os.getenv("RUNNER_INTRABAR_EVAL_MIN_PRICE_MOVE_PCT", "0.12"),
         )
 
         hedge_env = os.getenv("NSB__ALLOW_HEDGE_ENTRIES", "false").strip().lower()
@@ -5564,10 +5574,15 @@ class StrategyRunner:
         """Return reason for intentional same-bar strategy evaluation, else None."""
         _ = tick
         if not _env_bool("RUNNER_ENABLE_INTRABAR_STRATEGY_EVAL", True):
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_env_disabled"
             return None
         if self._data_phase.get(symbol) != "LIVE":
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_non_live_phase"
             return None
-        if candle_count < self._required_bars_for_symbol(symbol):
+        required = self._required_bars_for_symbol(symbol)
+        if candle_count < required:
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_insufficient_bars"
+            self._last_same_bar_eval_block_detail_by_symbol[symbol] = {"candle_count": candle_count, "required": required}
             return None
         normalized = normalize_symbol(symbol)
         selected_ce = normalize_symbol(str(getattr(self, "_active_selected_ce", "") or ""))
@@ -5575,20 +5590,44 @@ class StrategyRunner:
         selected_set = {s for s in (selected_ce, selected_pe) if s}
         is_selected_option = normalized in selected_set
         is_context = normalized in {"NSE:NIFTY", "NIFTY", "NFO:NIFTY26MAYFUT"} or normalized.endswith("FUT")
-        if not is_selected_option and not is_context:
+        near_selected = False
+        try:
+            symbol_strike = self._extract_strike_from_symbol(normalized)
+            same_side_selected = (
+                selected_ce
+                if normalized.endswith("CE")
+                else selected_pe if normalized.endswith("PE") else ""
+            )
+            selected_strike = self._extract_strike_from_symbol(same_side_selected) if same_side_selected else None
+            if symbol_strike is not None and selected_strike is not None:
+                near_selected_threshold = float(os.getenv("RUNNER_INTRABAR_NEAR_SELECTED_POINTS", "100") or "100")
+                near_selected = abs(float(symbol_strike) - float(selected_strike)) <= near_selected_threshold
+        except Exception:
+            near_selected = False
+        if not is_selected_option and not near_selected and not is_context:
             interval = float(os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60") or "60")
         else:
             interval = float(os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10") or "10")
         last_eval_ts = float(self._last_same_bar_eval_ts_by_symbol.get(symbol, 0.0))
         if now_ts - last_eval_ts >= interval:
+            self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
+            self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
             return "same_bar_periodic_eval"
-        if is_selected_option:
+        if not is_selected_option and not near_selected and not is_context:
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_non_selected_waiting"
+            return None
+        if is_selected_option or near_selected:
             last_price = float(self._last_eval_price_by_symbol.get(symbol, 0.0) or 0.0)
             if last_price > 0 and price > 0:
                 move_pct = abs(price - last_price) / last_price * 100.0
                 min_move_pct = float(os.getenv("RUNNER_INTRABAR_EVAL_MIN_PRICE_MOVE_PCT", "0.12") or "0.12")
                 if move_pct >= min_move_pct:
+                    self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
+                    self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
                     return "same_bar_price_move_eval"
+                self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_price_move_too_small"
+                return None
+        self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_interval_not_elapsed"
         return None
 
     def _is_tradable_symbol(self, symbol: str) -> bool:
@@ -6933,6 +6972,7 @@ class StrategyRunner:
             last_version = int(self._last_strategy_versions.get(symbol, 0))
             candle_count = len(self._indicator_engine.get_history(symbol) or [])
             same_bar_eval_allowed = False
+            pending_same_bar_eval_ts = 0.0
             if current_version <= last_version:
                 now_eval_ts = time_module.time()
                 same_bar_eval_reason = self._same_bar_eval_reason(
@@ -6944,7 +6984,7 @@ class StrategyRunner:
                 )
                 if same_bar_eval_reason:
                     same_bar_eval_allowed = True
-                    self._last_same_bar_eval_ts_by_symbol[symbol] = now_eval_ts
+                    pending_same_bar_eval_ts = now_eval_ts
                     self._emit_runner_eval_decision(
                         symbol=symbol,
                         stage="phase9",
@@ -6956,6 +6996,8 @@ class StrategyRunner:
                         price=price,
                     )
                 else:
+                    same_bar_block_reason = self._last_same_bar_eval_block_reason_by_symbol.get(symbol)
+                    same_bar_block_detail = self._last_same_bar_eval_block_detail_by_symbol.get(symbol, {})
                     if self._should_log_throttled(
                         f"strategy_eval_skipped_same_bar:{symbol}",
                         float(os.getenv("RUNNER_SAME_BAR_SKIP_LOG_SECONDS", "30") or "30"),
@@ -6969,6 +7011,12 @@ class StrategyRunner:
                             current_version=current_version,
                             last_version=last_version,
                             price=price,
+                            same_bar_block_reason=same_bar_block_reason,
+                            same_bar_block_detail=same_bar_block_detail,
+                            active_selected_ce=self._active_selected_ce,
+                            active_selected_pe=self._active_selected_pe,
+                            intrabar_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10"),
+                            intrabar_non_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60"),
                         )
                     return
             else:
@@ -7155,6 +7203,8 @@ class StrategyRunner:
                                     f"strategy_eval_skipped_same_bar:{symbol}",
                                     float(os.getenv("RUNNER_SAME_BAR_SKIP_LOG_SECONDS", "30") or "30"),
                                 ):
+                                    same_bar_block_reason = self._last_same_bar_eval_block_reason_by_symbol.get(symbol)
+                                    same_bar_block_detail = self._last_same_bar_eval_block_detail_by_symbol.get(symbol, {})
                                     self._emit_runner_eval_decision(
                                         symbol=symbol,
                                         stage="phase9",
@@ -7162,6 +7212,12 @@ class StrategyRunner:
                                         allowed=False,
                                         trace_id=trace_id,
                                         effective_bar_ts=_effective_last_bar_ts.isoformat(),
+                                        same_bar_block_reason=same_bar_block_reason,
+                                        same_bar_block_detail=same_bar_block_detail,
+                                        active_selected_ce=self._active_selected_ce,
+                                        active_selected_pe=self._active_selected_pe,
+                                        intrabar_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10"),
+                                        intrabar_non_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60"),
                                     )
                                 return
                         if last_bar_ts:
@@ -7455,6 +7511,8 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        if same_bar_eval_allowed and pending_same_bar_eval_ts > 0.0:
+                            self._last_same_bar_eval_ts_by_symbol[symbol] = pending_same_bar_eval_ts
                         self._last_eval_price_by_symbol[symbol] = float(price)
                         if pending_eval_bar_ts is not None:
                             with self._lock:
