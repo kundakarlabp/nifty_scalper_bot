@@ -2880,6 +2880,14 @@ class StrategyManager(_BaseStrategyManager):
 
     def _single_vote_thresholds(self, strategy_name: str) -> tuple[float, float]:
         """Args: strategy_name. Returns: score/conf thresholds. Raises: none."""
+        # Keep live defaults conservative:
+        # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false
+        # STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.8
+        # STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE=0.45
+        # Paper/shadow only (opt-in):
+        # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=true
+        # STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.5
+        # STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE=0.45
         key = str(strategy_name or "").strip().lower().replace(" ", "_")
         if key in {"vwappro", "vwap_pro"}:
             return (
