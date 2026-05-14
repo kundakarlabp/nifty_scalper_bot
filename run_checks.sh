@@ -69,6 +69,9 @@ if [[ -f "requirements-dev.txt" ]]; then
   $PIP_BIN install "${CONSTRAINT_ARGS[@]}" -r requirements-dev.txt
 fi
 
+echo "--- Installing essential quality tools ---"
+$PIP_BIN install "${CONSTRAINT_ARGS[@]}" pytest pytest-cov ruff mypy
+
 # ---------------------------
 # Static checks (best-effort)
 # ---------------------------
