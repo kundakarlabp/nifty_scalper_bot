@@ -2101,6 +2101,21 @@ class StrategyRunner:
             parsed_strike = int(strike_match.group(1)) if strike_match is not None else 0
             strike = int(metadata.get("strike") or parsed_strike or metadata.get("atm_strike") or 0)
             atm_strike = int(metadata.get("atm_strike") or strike)
+            signal_norm = normalize_symbol(signal.symbol)
+            selected_ce = normalize_symbol(str(metadata.get("selected_ce") or self._active_selected_ce or ""))
+            selected_pe = normalize_symbol(str(metadata.get("selected_pe") or self._active_selected_pe or ""))
+            selected_set = {item for item in (selected_ce, selected_pe) if item}
+            try:
+                strike_distance = abs(float(strike) - float(atm_strike)) if strike and atm_strike else None
+            except (TypeError, ValueError):
+                strike_distance = None
+            near_threshold = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
+            candidate_selected = bool(
+                metadata.get("candidate_selected")
+                or metadata.get("is_selected_option")
+                or signal_norm in selected_set
+                or (strike_distance is not None and strike_distance <= near_threshold)
+            )
             spread_pct = ((ask - bid) / ltp * 100.0) if has_bid_ask and ltp > 0 else None
             tick_age_raw = getattr(snapshot, "tick_age_s", None)
             tick_age_s = float(tick_age_raw) if tick_age_raw is not None else 0.0
@@ -2133,7 +2148,11 @@ class StrategyRunner:
                     else metadata.get("data_score", 0.0)
                     or 0.0
                 ),
-                "candidate_selected": bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")),
+                "candidate_selected": candidate_selected,
+                "is_selected_option": candidate_selected,
+                "selected_ce": selected_ce,
+                "selected_pe": selected_pe,
+                "strike_distance_from_atm": strike_distance,
                 "quote_usable_for_order_plan": bool(snapshot.tradable_quote and has_bid_ask),
                 "tradable_quote": bool(snapshot.tradable_quote and has_bid_ask),
                 "effective_bars": int(metadata.get("effective_bars", metadata.get("history_bars", 0)) or 0),
@@ -7300,6 +7319,14 @@ class StrategyRunner:
                             runtime_ctx["direction_bias"] = str(existing_bias).upper()
                         if symbol_strike is not None and atm_strike is not None:
                             runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(atm_strike))
+                        runtime_ctx["active_selected_ce"] = selected_ce
+                        runtime_ctx["active_selected_pe"] = selected_pe
+                        runtime_ctx["active_option_count"] = len(getattr(self, "_active_option_symbols", []) or [])
+                        if runtime_ctx.get("strike_distance_from_atm") is None:
+                            same_side_selected = selected_ce if option_side == "CE" else selected_pe if option_side == "PE" else None
+                            selected_strike = self._extract_strike_from_symbol(same_side_selected) if same_side_selected else None
+                            if symbol_strike is not None and selected_strike is not None:
+                                runtime_ctx["strike_distance_from_atm"] = abs(float(symbol_strike) - float(selected_strike))
                         quote_payload = self.get_quote(symbol) if hasattr(self, "get_quote") else {}
                         quote_map = dict(quote_payload) if isinstance(quote_payload, Mapping) else {}
                         last_tick_store = getattr(self, "_last_tick", None)
@@ -8955,13 +8982,33 @@ class StrategyRunner:
             )
             atr_for_plan = max(float(metadata.get("atr", 0.0) or 0.0), 1.0)
             try:
+                signal = dataclasses.replace(signal, metadata=dict(metadata))
                 signal = self._materialize_option_trade_plan(
                     signal,
                     execution_price=float(trade_price or 0.0),
                     atr=atr_for_plan,
                     entry_side=str(signal.action or "BUY"),
                 )
-                metadata = dict(signal.metadata or metadata)
+                materialized_metadata = dict(signal.metadata or {})
+                metadata = {
+                    **metadata,
+                    **materialized_metadata,
+                }
+                if "candidate_symbol" not in metadata and candidate is not None:
+                    metadata["candidate_symbol"] = candidate.symbol
+                if "candidate_selected" not in metadata and candidate is not None:
+                    metadata["candidate_selected"] = True
+                if "option_score" not in metadata and candidate is not None:
+                    metadata["option_score"] = float(candidate.score or 0.0)
+                if "data_score" not in metadata and candidate is not None:
+                    metadata["data_score"] = float(candidate.data_quality_score or 0.0)
+                if "candidate_rr" not in metadata and candidate is not None:
+                    metadata["candidate_rr"] = candidate.rr
+                if "candidate_spread_pct" not in metadata and candidate is not None:
+                    metadata["candidate_spread_pct"] = candidate.spread_pct
+                if "quote_usable_for_order_plan" not in metadata:
+                    metadata["quote_usable_for_order_plan"] = bool(metadata.get("tradable_quote"))
+                signal = dataclasses.replace(signal, metadata=dict(metadata))
                 metadata["entry_price"] = float(trade_price or metadata.get("entry_price") or 0.0)
                 metadata["stop_loss"] = signal.stop_loss
                 metadata["take_profit"] = signal.take_profit

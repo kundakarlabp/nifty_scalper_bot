@@ -2683,9 +2683,26 @@ class StrategyManager(_BaseStrategyManager):
         if opposite_context and max(_context_veto_score(v) for v in opposite_context) >= 8.0:
             vetoed = True
         if len(trigger_votes) == 1:
-            selected_option = bool(metadata.get("is_selected_option") or indicator_selected_option)
-            selected_ce = str(metadata.get("selected_ce") or "")
-            selected_pe = str(metadata.get("selected_pe") or "")
+            selected_ce = str(
+                metadata.get("selected_ce")
+                or indicator_map.get("selected_ce")
+                or ""
+            )
+            selected_pe = str(
+                metadata.get("selected_pe")
+                or indicator_map.get("selected_pe")
+                or ""
+            )
+            selected_symbol_set = {
+                str(selected_ce).strip().upper(),
+                str(selected_pe).strip().upper(),
+            }
+            selected_symbol_set.discard("")
+            selected_option = bool(
+                metadata.get("is_selected_option")
+                or indicator_selected_option
+                or symbol_norm in selected_symbol_set
+            )
             near_atm_threshold = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
             try:
                 strike_distance_from_atm = float(metadata.get("strike_distance_from_atm"))
@@ -2693,12 +2710,26 @@ class StrategyManager(_BaseStrategyManager):
             except (TypeError, ValueError):
                 strike_distance_from_atm = None
                 near_atm = indicator_near_atm
+            def _extract_option_strike(sym: str) -> int | None:
+                match = re.search(r"(\d{5})(CE|PE)$", str(sym).upper())
+                return int(match.group(1)) if match else None
+            symbol_strike = _extract_option_strike(symbol_norm)
+            same_side_selected = selected_ce if symbol_norm.endswith("CE") else selected_pe if symbol_norm.endswith("PE") else ""
+            selected_strike = _extract_option_strike(same_side_selected)
+            if strike_distance_from_atm is None and symbol_strike is not None and selected_strike is not None:
+                strike_distance_from_atm = abs(float(symbol_strike) - float(selected_strike))
+                near_atm = strike_distance_from_atm <= near_atm_threshold
             score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
             regime_weight = _regime_weight(best_vote)
             score_ok = raw_trigger_score >= score_min
             conf_ok = best_vote.confidence >= conf_min
             selected_ok = selected_option or near_atm
             selected_ok_reason = "selected_option" if selected_option else "near_atm" if near_atm else "not_selected_or_near_atm"
+            metadata["selected_ce"] = selected_ce
+            metadata["selected_pe"] = selected_pe
+            metadata["strike_distance_from_atm"] = strike_distance_from_atm
+            metadata["is_selected_option"] = selected_option
+            metadata["selected_ok_reason"] = selected_ok_reason
             log.info(
                 "SINGLE_VOTE_DECISION strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
                 best_vote.strategy,
