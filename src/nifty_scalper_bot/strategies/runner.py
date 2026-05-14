@@ -1208,14 +1208,6 @@ class StrategyRunner:
 
         self._logger.info("Tracking symbol %s", normalized)
 
-    def _required_bars_for_symbol(self, symbol: str) -> int:
-        """Args: symbol. Returns: required bar count by symbol role. Raises: None."""
-        return (
-            self._option_required_bars
-            if self._is_tradable_option_symbol(symbol)
-            else self._context_required_bars
-        )
-
     def _prehydrate_symbol_history(self, symbol: str) -> None:
         """Hydrate startup candles from cache only. Args: symbol. Returns: None. Raises: None."""
         self._hydrate_from_mdm_cache(symbol)
@@ -5698,6 +5690,17 @@ class StrategyRunner:
         value = str(symbol or "").upper()
         return value == "NSE:NIFTY" or (value.startswith("NFO:NIFTY") and value.endswith("FUT"))
 
+    def _symbol_role_for_runner(self, symbol: str) -> str:
+        """Return runner role label for a symbol. Args: symbol. Returns: role. Raises: none."""
+        s = normalize_symbol(str(symbol or "")).upper()
+        if s in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}:
+            return "spot_context"
+        if s.startswith("NFO:NIFTY") and s.endswith("FUT"):
+            return "futures_context"
+        if s.startswith("NFO:NIFTY") and (s.endswith("CE") or s.endswith("PE")):
+            return "tradable_option"
+        return "unknown"
+
     def _required_bars_for_symbol(self, symbol: str) -> int:
         """Return readiness bars by role. Args: symbol. Returns: int. Raises: none."""
         return self._context_required_bars if self._is_context_symbol(symbol) else self._option_required_bars
@@ -7506,6 +7509,22 @@ class StrategyRunner:
                                 extra={"event": "MARKET_DEPTH_SOFT_FAIL_SIGNAL_CONTINUES", "symbol": symbol},
                             )
 
+                        symbol_role = self._symbol_role_for_runner(symbol)
+                        market_open = True
+                        try:
+                            market_open = get_market_state() == MarketState.OPEN
+                        except Exception:
+                            market_open = True
+                        if symbol_role in {"spot_context", "futures_context"} and not market_open:
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="context_diagnostic_only_market_closed",
+                                allowed=False,
+                                trace_id=trace_id,
+                                symbol_role=symbol_role,
+                            )
+                            return
                         signal = self._strategy_manager.generate_signal(
                             symbol,
                             price,
@@ -8775,6 +8794,20 @@ class StrategyRunner:
             # Cooldown + burst guard
             now_epoch = time.time()
             underlying = self._extract_underlying(base_symbol) or base_symbol
+            if is_live_mode and not self._is_tradable_symbol(base_symbol):
+                self._logger.info(
+                    "ORDER_PATH_BLOCKED reason=non_option_symbol symbol=%s trace_id=%s",
+                    base_symbol,
+                    trace_id,
+                    extra={
+                        "event": "ORDER_PATH_BLOCKED",
+                        "reason": "non_option_symbol",
+                        "symbol": base_symbol,
+                        "trace_id": trace_id,
+                    },
+                )
+                self._reset_execution_state(base_symbol)
+                return SignalExecutionResult(False, "non_option_symbol")
             reason_key = str(signal.reason or "unknown")
             underlying_reason_key = f"{underlying}:{reason_key}"
             reject_cooldown_key = f"{base_symbol}:{reason_key}:score_below_threshold"
