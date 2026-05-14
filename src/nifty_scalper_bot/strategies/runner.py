@@ -542,6 +542,7 @@ class StrategyRunner:
             float(os.getenv("RUNNER_EVAL_WITHOUT_NEW_BAR_SECONDS", "15")),
         )
         self._last_same_bar_eval_ts_by_symbol: dict[str, float] = {}
+        self._last_eval_price_by_symbol: dict[str, float] = {}
         self._tick_log_throttle_seconds = max(
             1.0,
             float(os.getenv("RUNNER_TICK_LOG_THROTTLE_SECONDS", "120")),
@@ -5551,6 +5552,45 @@ class StrategyRunner:
             except Exception:  # pragma: no cover - defensive
                 pass
 
+    def _same_bar_eval_reason(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        tick: Mapping[str, Any],
+        candle_count: int,
+        now_ts: float,
+    ) -> str | None:
+        """Return reason for intentional same-bar strategy evaluation, else None."""
+        _ = tick
+        if not _env_bool("RUNNER_ENABLE_INTRABAR_STRATEGY_EVAL", True):
+            return None
+        if self._data_phase.get(symbol) != "LIVE":
+            return None
+        if candle_count < self._required_bars_for_symbol(symbol):
+            return None
+        normalized = normalize_symbol(symbol)
+        selected_ce = normalize_symbol(str(getattr(self, "_active_selected_ce", "") or ""))
+        selected_pe = normalize_symbol(str(getattr(self, "_active_selected_pe", "") or ""))
+        selected_set = {s for s in (selected_ce, selected_pe) if s}
+        is_selected_option = normalized in selected_set
+        is_context = normalized in {"NSE:NIFTY", "NIFTY", "NFO:NIFTY26MAYFUT"} or normalized.endswith("FUT")
+        if not is_selected_option and not is_context:
+            interval = float(os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60") or "60")
+        else:
+            interval = float(os.getenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10") or "10")
+        last_eval_ts = float(self._last_same_bar_eval_ts_by_symbol.get(symbol, 0.0))
+        if now_ts - last_eval_ts >= interval:
+            return "same_bar_periodic_eval"
+        if is_selected_option:
+            last_price = float(self._last_eval_price_by_symbol.get(symbol, 0.0) or 0.0)
+            if last_price > 0 and price > 0:
+                move_pct = abs(price - last_price) / last_price * 100.0
+                min_move_pct = float(os.getenv("RUNNER_INTRABAR_EVAL_MIN_PRICE_MOVE_PCT", "0.12") or "0.12")
+                if move_pct >= min_move_pct:
+                    return "same_bar_price_move_eval"
+        return None
+
     def _is_tradable_symbol(self, symbol: str) -> bool:
         """Return True when symbol is a tradable NIFTY option. Args: symbol. Returns: bool. Raises: none."""
         value = str(symbol or "").upper()
@@ -6892,52 +6932,43 @@ class StrategyRunner:
             current_version = int(self._candle_versions.get(symbol, 0))
             last_version = int(self._last_strategy_versions.get(symbol, 0))
             candle_count = len(self._indicator_engine.get_history(symbol) or [])
+            same_bar_eval_allowed = False
             if current_version <= last_version:
                 now_eval_ts = time_module.time()
-                last_same_bar_eval = float(
-                    self._last_same_bar_eval_ts_by_symbol.get(symbol, 0.0)
+                same_bar_eval_reason = self._same_bar_eval_reason(
+                    symbol=symbol,
+                    price=float(price),
+                    tick=tick,
+                    candle_count=candle_count,
+                    now_ts=now_eval_ts,
                 )
-                if (
-                    self._allow_eval_without_new_bar
-                    and candle_count >= self._required_candles
-                    and now_eval_ts - last_same_bar_eval
-                    >= self._eval_without_new_bar_seconds
-                ):
+                if same_bar_eval_reason:
+                    same_bar_eval_allowed = True
                     self._last_same_bar_eval_ts_by_symbol[symbol] = now_eval_ts
-                    self._logger.info(
-                        "RUNNER_EVAL_DECISION",
-                        extra={
-                            "event": "RUNNER_EVAL_DECISION",
-                            "symbol": symbol,
-                            "trace_id": trace_id,
-                            "allowed": True,
-                            "reason": "same_bar_periodic_eval",
-                            "current_version": current_version,
-                            "last_version": last_version,
-                            "runner_history_count": candle_count,
-                            "required_candles": self._required_candles,
-                            "tick_price": price,
-                        },
+                    self._emit_runner_eval_decision(
+                        symbol=symbol,
+                        stage="phase9",
+                        reason=same_bar_eval_reason,
+                        allowed=True,
+                        trace_id=trace_id,
+                        current_version=current_version,
+                        last_version=last_version,
+                        price=price,
                     )
                 else:
                     if self._should_log_throttled(
-                        f"runner_eval_same_bar_skip:{symbol}",
-                        self._eval_log_throttle_seconds,
+                        f"strategy_eval_skipped_same_bar:{symbol}",
+                        float(os.getenv("RUNNER_SAME_BAR_SKIP_LOG_SECONDS", "30") or "30"),
                     ):
-                        self._logger.info(
-                            "RUNNER_EVAL_DECISION",
-                            extra={
-                                "event": "RUNNER_EVAL_DECISION",
-                                "symbol": symbol,
-                                "trace_id": trace_id,
-                                "allowed": False,
-                                "reason": "same_bar_version",
-                                "current_version": current_version,
-                                "last_version": last_version,
-                                "runner_history_count": candle_count,
-                                "required_candles": self._required_candles,
-                                "tick_price": price,
-                            },
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage="phase9",
+                            reason="strategy_eval_skipped_same_bar",
+                            allowed=False,
+                            trace_id=trace_id,
+                            current_version=current_version,
+                            last_version=last_version,
+                            price=price,
                         )
                     return
             else:
@@ -7097,7 +7128,8 @@ class StrategyRunner:
                             )
                         disable_same_bar_skip = phase != "LIVE"
                         if (
-                            not disable_same_bar_skip
+                            not same_bar_eval_allowed
+                            and not disable_same_bar_skip
                             and _effective_last_bar_ts
                             and state._last_eval_bar_ts
                         ):
@@ -7119,14 +7151,18 @@ class StrategyRunner:
                                         "Condition met: strategy_eval_skipped_same_bar",
                                         extra=extra_payload,
                                     )
-                                self._emit_runner_eval_decision(
-                                    symbol=symbol,
-                                    stage="phase9",
-                                    reason="strategy_eval_skipped_same_bar",
-                                    allowed=False,
-                                    trace_id=trace_id,
-                                    effective_bar_ts=_effective_last_bar_ts.isoformat(),
-                                )
+                                if self._should_log_throttled(
+                                    f"strategy_eval_skipped_same_bar:{symbol}",
+                                    float(os.getenv("RUNNER_SAME_BAR_SKIP_LOG_SECONDS", "30") or "30"),
+                                ):
+                                    self._emit_runner_eval_decision(
+                                        symbol=symbol,
+                                        stage="phase9",
+                                        reason="strategy_eval_skipped_same_bar",
+                                        allowed=False,
+                                        trace_id=trace_id,
+                                        effective_bar_ts=_effective_last_bar_ts.isoformat(),
+                                    )
                                 return
                         if last_bar_ts:
                             bar_age = (now - last_bar_ts).total_seconds()
@@ -7419,6 +7455,7 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        self._last_eval_price_by_symbol[symbol] = float(price)
                         if pending_eval_bar_ts is not None:
                             with self._lock:
                                 state_after = self._symbol_state.get(symbol)
@@ -7559,6 +7596,42 @@ class StrategyRunner:
             if signal and signal.action != "HOLD":
                 phase = "phase10_signal_execution"
                 self._last_strategy_versions[symbol] = current_version
+                signal_phase = self._data_phase.get(symbol)
+                if signal_phase != "LIVE":
+                    signal_metadata = dict(signal.metadata or {})
+                    signal_metadata["shadow_only"] = True
+                    signal_metadata["blocked_reason"] = "non_live_data_phase_signal"
+                    signal_metadata["data_phase"] = signal_phase
+                    self._logger.info(
+                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s data_phase=%s",
+                        symbol,
+                        signal_metadata.get("strategy")
+                        or signal_metadata.get("strategy_name")
+                        or signal.reason,
+                        signal_metadata.get("trade_side")
+                        or signal_metadata.get("contract_side")
+                        or signal_metadata.get("side"),
+                        False,
+                        "runner_phase10",
+                        "non_live_data_phase_signal",
+                        signal_phase,
+                        extra={
+                            "event": "TRADE_DECISION_TRACE",
+                            "symbol": symbol,
+                            "strategy": signal_metadata.get("strategy")
+                            or signal_metadata.get("strategy_name")
+                            or signal.reason,
+                            "side": signal_metadata.get("trade_side")
+                            or signal_metadata.get("contract_side")
+                            or signal_metadata.get("side"),
+                            "allowed": False,
+                            "blocked_at": "runner_phase10",
+                            "blocked_reason": "non_live_data_phase_signal",
+                            "data_phase": signal_phase,
+                            "trace_id": trace_id,
+                        },
+                    )
+                    return
                 current_regime = self._compute_regime_snapshot(symbol)
                 signal_metadata = dict(signal.metadata or {})
                 signal_metadata["runtime_regime"] = current_regime.value

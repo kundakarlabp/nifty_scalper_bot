@@ -587,3 +587,14 @@ StrategyRunner → OrderManager → BracketManager
 - StrategyRunner builds and submits TradePlan objects.
 - OrderManager owns entry order placement to broker/paper execution.
 - BracketManager owns SL/TP/trailing/EOD virtual bracket exits.
+
+## Paper/Shadow single-vote tuning (optional)
+For paper or shadow validation only (keep live defaults conservative):
+
+```env
+STRATEGY_ALLOW_SINGLE_VOTE_SCALP=true
+STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.5
+STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE=0.45
+```
+
+Live defaults remain stricter (`STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false`, `STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.8`).
