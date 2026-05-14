@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from nifty_scalper_bot.brokers.instrument_lookup import (
-    Instrument,
-    InstrumentLookup as InstrumentResolver,
-)
+from nifty_scalper_bot.brokers.instrument_lookup import Instrument
+from nifty_scalper_bot.data.instrument_resolver import InstrumentResolver
 from nifty_scalper_bot.data.instrument_loader import (
     InstrumentUniverseStatus,
     ensure_sqlite,

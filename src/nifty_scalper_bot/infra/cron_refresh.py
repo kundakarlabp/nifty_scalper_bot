@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.data.instrument_loader import parse_kite_csv
 from nifty_scalper_bot.infra.metrics import METRICS
-from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.async_helpers import safe_task
+from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
@@ -119,19 +120,34 @@ def schedule_instrument_refresh(
                     "instrument_refresh_start",
                     extra={"event": "instrument_refresh_start"},
                 )
-                await asyncio.to_thread(instrument_manager.load)
-                count = instrument_manager.size()
+                count = 0
+                if hasattr(instrument_manager, 'load'):
+                    await asyncio.to_thread(instrument_manager.load)
+                    size_fn = getattr(instrument_manager, 'size', None)
+                    if callable(size_fn):
+                        count = int(size_fn())
+                elif hasattr(instrument_manager, 'warm_from_broker_dump'):
+                    csv_path = getattr(instrument_cfg, 'csv_path', None)
+                    if csv_path is None:
+                        rows = []
+                    else:
+                        with open(csv_path, 'rb') as csv_file:
+                            rows = list(parse_kite_csv(csv_file))
+                    await asyncio.to_thread(instrument_manager.warm_from_broker_dump, rows)
+                    count = len(rows)
+                else:
+                    raise AttributeError('instrument manager has no supported refresh method')
                 if state is not None:
                     try:
                         state.record_refresh(
                             tokens=count,
                             options=count,
-                            source="cron_broker",
-                            path=None,
-                            timestamp=datetime.now(),
+                            source="cron",
+                            path=str(getattr(instrument_cfg, 'db_path', '') or ''),
+                            timestamp=datetime.now(timezone.utc),
                         )
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:
+                        LOGGER.error('Failure in schedule_instrument_refresh: %s', exc, exc_info=exc)
                 METRICS.record_resolver_tokens(source="cron_broker", count=count)
                 LOGGER.info(
                     "instrument_refresh_complete tokens=%s source=broker",

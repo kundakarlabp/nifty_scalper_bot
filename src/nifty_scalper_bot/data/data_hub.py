@@ -1488,17 +1488,24 @@ class DataHub:
 
     def _touch_warm_symbol_cache(self, symbol: str) -> None:
         """Track recently hydrated option symbols. Args: symbol. Returns: None. Raises: none."""
-        normalized = self._canonical_quote_symbol(symbol)
-        self._warm_symbol_cache[normalized] = datetime.now(timezone.utc)
-        max_size = int(os.getenv("OPTION_HISTORY_WARM_CACHE_SIZE", "5") or "5")
-        stale_before = datetime.now(timezone.utc) - timedelta(minutes=15)
-        stale = [sym for sym, ts in self._warm_symbol_cache.items() if ts < stale_before]
-        for sym in stale:
-            self._warm_symbol_cache.pop(sym, None)
-        if len(self._warm_symbol_cache) > max_size:
-            ordered = sorted(self._warm_symbol_cache.items(), key=lambda item: item[1])
-            for sym, _ in ordered[:-max_size]:
-                self._warm_symbol_cache.pop(sym, None)
+        try:
+            normalized = self._canonical_quote_symbol(symbol)
+            warm_cache = getattr(self, '_warm_symbol_cache', None)
+            if not isinstance(warm_cache, dict):
+                warm_cache = {}
+                self._warm_symbol_cache = warm_cache
+            warm_cache[normalized] = datetime.now(timezone.utc)
+            max_size = int(os.getenv('OPTION_HISTORY_WARM_CACHE_SIZE', '5') or '5')
+            stale_before = datetime.now(timezone.utc) - timedelta(minutes=15)
+            stale = [sym for sym, ts in warm_cache.items() if ts < stale_before]
+            for sym in stale:
+                warm_cache.pop(sym, None)
+            if len(warm_cache) > max_size:
+                ordered = sorted(warm_cache.items(), key=lambda item: item[1])
+                for sym, _ in ordered[:-max_size]:
+                    warm_cache.pop(sym, None)
+        except Exception as exc:
+            self._logger.error('Failure in _touch_warm_symbol_cache: %s', exc, exc_info=exc)
 
     async def hydrate_symbol_history(
         self,

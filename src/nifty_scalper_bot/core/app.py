@@ -6984,7 +6984,8 @@ async def _ensure_selected_options_hydrated(
                 elif "time" in bar_data:
                     bar_data["timestamp"] = bar_data["time"]
 
-            if {"timestamp", "open", "high", "low", "close"}.issubset(bar_data):
+            if {"open", "high", "low", "close"}.issubset(bar_data):
+                bar_data.setdefault("timestamp", str(bar_data.get("date") or bar_data.get("start") or bar_data.get("time") or f"{sym}-bar-{len(normalized_bars)}"))
                 normalized_bars.append(bar_data)
         used_reseed = False
         if runner is not None and hasattr(runner, "reseed_history_from_bars"):
@@ -7454,7 +7455,7 @@ def _schedule_deferred_basket_retry(ctx: BotContext, *, configured_mode: str, re
     ctx.readiness_mode = "DATA_WARMUP"
     ctx.effective_mode = ctx.readiness_mode
     ctx.live_block_reason = "fresh_ws_spot_unavailable"
-    if ctx.deferred_basket_retry_started:
+    if bool(getattr(ctx, "deferred_basket_retry_started", False)):
         LOGGER.info("DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s already_scheduled=%s", reason, spot_ltp, True)
         return
 

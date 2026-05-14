@@ -995,9 +995,9 @@ class TelegramBot:
     # -----------------
     async def _guard(self, update: Update) -> t.Any | None:
         """Return the authorized chat or ``None`` if access should be denied."""
-        chat = update.effective_chat
-        user = update.effective_user
-        message = update.effective_message
+        chat = getattr(update, 'effective_chat', None)
+        user = getattr(update, 'effective_user', None)
+        message = getattr(update, 'effective_message', None)
 
         text = ""
         if message is not None:
@@ -2085,8 +2085,6 @@ class TelegramBot:
         bot_obj: t.Any = bot_override
         if bot_obj is None and ctx is not None:
             bot_obj = getattr(ctx, "bot", None)
-        if bot_obj is None and self._app is not None:
-            bot_obj = self._app.bot
         if bot_obj is None and chat is not None:
             bot_obj = getattr(chat, "bot", None)
 
@@ -2122,6 +2120,9 @@ class TelegramBot:
                     return result
 
             bot_obj = _ChatProxy(chat)
+
+        if bot_obj is None and self._app is not None:
+            bot_obj = self._app.bot
 
         if bot_obj is None:
             raise RuntimeError("Telegram bot instance unavailable")
@@ -7931,6 +7932,20 @@ class TelegramBot:
         elif symbols:
             unresolved = list(symbols)
 
+        streamer = getattr(self.deps, 'streamer', None)
+        if supervisor is None and streamer is not None and hasattr(streamer, 'subscribe_tokens'):
+            streamer.subscribe_tokens(combined_tokens)
+            tracked = []
+            tracked_fn = getattr(streamer, 'tracked_tokens', None)
+            if callable(tracked_fn):
+                tracked = list(tracked_fn() or [])
+            ignored = [item.upper() for item in [*invalid, *unresolved] if item]
+            lines = [f'Subscribed {len(combined_tokens)} token(s).', f'Now tracking {len(tracked)} token(s).']
+            if ignored:
+                lines.append(f"symbols ignored: {', '.join(ignored)}")
+            await self._reply(chat, ctx, '\n'.join(lines))
+            return
+
         changed, desired_total = self._mdm_subscribe_tokens(combined_tokens)
         if changed < 0:
             await self._reply(chat, ctx, "MarketDataManager unavailable for subscription.")
@@ -7958,6 +7973,19 @@ class TelegramBot:
         if chat is None:
             return
         tokens, invalid = self._parse_token_args(ctx.args)
+        streamer = getattr(self.deps, 'streamer', None)
+        supervisor = self._stream_supervisor()
+        if supervisor is None and streamer is not None and hasattr(streamer, 'unsubscribe'):
+            streamer.unsubscribe(tokens)
+            tracked = []
+            tracked_fn = getattr(streamer, 'tracked_tokens', None)
+            if callable(tracked_fn):
+                tracked = list(tracked_fn() or [])
+            lines = [f'Unsubscribed {len(tokens)} token(s).', f'Now tracking {len(tracked)} token(s).']
+            if invalid:
+                lines.append(f"ignored: {', '.join(invalid)}")
+            await self._reply(chat, ctx, '\n'.join(lines))
+            return
         if not tokens:
             await self._reply(chat, ctx, "Usage: /unsubscribe TOKEN[,TOKEN]")
             return
