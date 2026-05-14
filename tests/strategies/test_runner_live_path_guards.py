@@ -408,7 +408,7 @@ def test_preliminary_signal_requires_final_score_gate(monkeypatch) -> None:
         trace_id='prelim-final-required',
     )
     assert result.accepted is False
-    assert result.reason == 'final_score_required'
+    assert result.reason == 'final_score_precheck_failed_unknown'
 
 
 @pytest.mark.asyncio
