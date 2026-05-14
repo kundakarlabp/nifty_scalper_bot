@@ -568,6 +568,14 @@ def _emit_option_symbol_pipeline_status(
     reason: str,
 ) -> None:
     """Emit OPTION_SYMBOL_PIPELINE_STATUS for one symbol across the full pipeline."""
+    selected_set = {
+        str(getattr(ctx, "selected_ce", "") or ""),
+        str(getattr(ctx, "selected_pe", "") or ""),
+        str((getattr(ctx, "active_trading_universe", {}) or {}).get("selected_ce") or ""),
+        str((getattr(ctx, "active_trading_universe", {}) or {}).get("selected_pe") or ""),
+    }
+    selected_set.discard("")
+    selected = symbol in selected_set or selected
     try:
         import time as _time_module
 
@@ -953,8 +961,9 @@ def _safe_ws_token_count(ctx: BotContext) -> int | str:
     """Resolve WS token diagnostics safely. Args: ctx. Returns: count or unknown. Raises: none."""
     for obj_name, attr_name in [
         ("market_data_manager", "_subscribed_tokens"),
-        ("market_data_manager", "subscribed_tokens"),
-        ("market_data_manager", "_token_to_symbol"),
+        ("market_data_manager", "_desired_tokens"),
+        ("websocket_manager", "_subscribed_tokens"),
+        ("websocket_manager", "_tokens"),
         ("broker_client", "ws_tokens"),
     ]:
         obj = getattr(ctx, obj_name, None)
@@ -6455,12 +6464,20 @@ async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> N
                     and "_build_and_hydrate_live_basket_from_spot" in globals()
                 ):
                     try:
-                        await _build_and_hydrate_live_basket_from_spot(
+                        basket = await _build_and_hydrate_live_basket_from_spot(
                             ctx,
                             spot_ltp=spot_ltp,
                             configured_mode=configured_mode,
                             hydrate=True,
                         )
+                        if basket and not getattr(ctx, "selected_ce", None):
+                            _commit_active_dynamic_basket(
+                                ctx,
+                                basket=basket,
+                                option_symbols=basket.get("option_symbols") or [],
+                                symbols=basket.get("symbols") or [],
+                                atm_strike=basket.get("atm_strike"),
+                            )
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning(
                             "LIVE_BASKET_BUILD_FAILED reason=%s",
@@ -6783,12 +6800,20 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                         timeout=10.0,
                         configured_mode=configured_mode,
                     )
-                    await _build_and_hydrate_live_basket_from_spot(
+                    basket = await _build_and_hydrate_live_basket_from_spot(
                         ctx,
                         spot_ltp=float(spot_ltp),
                         configured_mode=configured_mode,
                         hydrate=False,
                     )
+                    if basket and not getattr(ctx, "selected_ce", None):
+                        _commit_active_dynamic_basket(
+                            ctx,
+                            basket=basket,
+                            option_symbols=basket.get("option_symbols") or [],
+                            symbols=basket.get("symbols") or [],
+                            atm_strike=basket.get("atm_strike"),
+                        )
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning("LIVE_REARM_BASKET_BUILD_FAILED error=%s", exc, exc_info=True)
             try:
@@ -7042,16 +7067,34 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     old_pe = getattr(ctx, "selected_pe", None)
     option_symbols = [str(s) for s in list(basket.get("option_symbols") or basket.get("symbols") or []) if s]
     picked_ce, picked_pe = pick_atm_option_symbols_from_basket(basket)
-    selected_ce = cast(str | None, basket.get("selected_ce") or basket.get("atm_ce") or picked_ce)
-    selected_pe = cast(str | None, basket.get("selected_pe") or basket.get("atm_pe") or picked_pe)
+    selected_ce = cast(
+        str | None,
+        getattr(ctx, "selected_ce", None)
+        or basket.get("selected_ce")
+        or basket.get("atm_ce")
+        or picked_ce,
+    )
+    selected_pe = cast(
+        str | None,
+        getattr(ctx, "selected_pe", None)
+        or basket.get("selected_pe")
+        or basket.get("atm_pe")
+        or picked_pe,
+    )
     if not selected_ce and old_ce in option_symbols:
         selected_ce = old_ce
     if not selected_pe and old_pe in option_symbols:
         selected_pe = old_pe
     basket.update({"selected_ce": selected_ce, "selected_pe": selected_pe, "option_symbols": option_symbols, "symbols": option_symbols})
     ctx.active_trading_universe = basket
-    ctx.selected_ce = selected_ce
-    ctx.selected_pe = selected_pe
+    if selected_ce and not getattr(ctx, "selected_ce", None):
+        ctx.selected_ce = str(selected_ce)
+    elif selected_ce is None:
+        ctx.selected_ce = None
+    if selected_pe and not getattr(ctx, "selected_pe", None):
+        ctx.selected_pe = str(selected_pe)
+    elif selected_pe is None:
+        ctx.selected_pe = None
     ctx.atm_ce_symbol = selected_ce
     ctx.atm_pe_symbol = selected_pe
     def _snapshot(sym:str|None)->Any:
@@ -7238,8 +7281,14 @@ def _commit_active_dynamic_basket(
             },
         )
         return cast(str | None, old_ce), cast(str | None, old_pe)
-    ctx.selected_ce = selected_ce
-    ctx.selected_pe = selected_pe
+    if selected_ce and not getattr(ctx, "selected_ce", None):
+        ctx.selected_ce = str(selected_ce)
+    elif selected_ce is None:
+        ctx.selected_ce = None
+    if selected_pe and not getattr(ctx, "selected_pe", None):
+        ctx.selected_pe = str(selected_pe)
+    elif selected_pe is None:
+        ctx.selected_pe = None
     ctx.atm_ce_symbol = selected_ce
     ctx.atm_pe_symbol = selected_pe
     committed = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
@@ -7297,11 +7346,19 @@ async def _deferred_basket_hydration_retry(
             continue
 
         try:
-            await _build_and_hydrate_live_basket_from_spot(
+            basket = await _build_and_hydrate_live_basket_from_spot(
                 ctx,
                 spot_ltp=float(spot_ltp),
                 configured_mode=configured_mode,
             )
+            if basket and not getattr(ctx, "selected_ce", None):
+                _commit_active_dynamic_basket(
+                    ctx,
+                    basket=basket,
+                    option_symbols=basket.get("option_symbols") or [],
+                    symbols=basket.get("symbols") or [],
+                    atm_strike=basket.get("atm_strike"),
+                )
             await _ensure_strategy_runner_started(
                 ctx,
                 reason="deferred_basket_hydration_success",
@@ -7422,7 +7479,38 @@ async def _build_and_hydrate_live_basket_from_spot(
                 bool(hydrate),
                 duration_ms,
             )
-            return basket
+            option_symbols = [
+                str(sym)
+                for sym in dict.fromkeys(basket.get("option_symbols") or [])
+                if str(sym).endswith(("CE", "PE"))
+            ]
+            symbols = [
+                str(sym)
+                for sym in dict.fromkeys(basket.get("symbols") or [])
+                if sym
+            ]
+            committed_ce, committed_pe = _commit_active_dynamic_basket(
+                ctx,
+                basket=basket,
+                option_symbols=option_symbols,
+                symbols=symbols,
+                atm_strike=basket.get("atm_strike"),
+            )
+            LOGGER.info(
+                "LIVE_BASKET_COMMITTED_FROM_BUILD selected_ce=%s selected_pe=%s atm_strike=%s option_count=%d",
+                committed_ce,
+                committed_pe,
+                basket.get("atm_strike"),
+                len(option_symbols),
+                extra={
+                    "event": "LIVE_BASKET_COMMITTED_FROM_BUILD",
+                    "selected_ce": committed_ce,
+                    "selected_pe": committed_pe,
+                    "atm_strike": basket.get("atm_strike"),
+                    "option_count": len(option_symbols),
+                },
+            )
+            return dict(getattr(ctx, "active_trading_universe", {}) or basket)
         except Exception as exc:
             duration_ms = int((time_module.monotonic() - start) * 1000)
             ctx.basket_build_last_error = str(exc)
@@ -8169,8 +8257,25 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             active_symbol_tokens: dict[str, int] = {}
             symbols_to_hydrate_raw = build_active_trading_basket_symbols(ctx, basket)
-            if "NSE:NIFTY" not in symbols_to_hydrate_raw:
-                symbols_to_hydrate_raw = ["NSE:NIFTY", *symbols_to_hydrate_raw]
+            selected_symbols = [
+                basket.get("selected_ce") or basket.get("atm_ce"),
+                basket.get("selected_pe") or basket.get("atm_pe"),
+            ]
+            other_option_symbols = [
+                sym
+                for sym in symbols_to_hydrate_raw
+                if sym not in {"NSE:NIFTY", basket.get("futures_symbol"), *selected_symbols}
+            ]
+            symbols_to_hydrate_raw = list(
+                dict.fromkeys(
+                    [
+                        "NSE:NIFTY",
+                        basket.get("futures_symbol"),
+                        *selected_symbols,
+                        *other_option_symbols,
+                    ]
+                )
+            )
             symbols_to_hydrate: list[str] = []
             for _sym in symbols_to_hydrate_raw:
                 _tok = _resolve_startup_token(_sym)
@@ -8760,34 +8865,38 @@ async def startup_sequence(ctx: BotContext) -> None:
                         token=int(tok),
                         source="startup",
                     )
+                    mdm_tracked = sym in getattr(mdm, "_tracked_symbols", set()) if mdm else False
+                    broker_ws_token_requested = int(tok) in getattr(mdm, "_requested_tokens", set()) if mdm else False
+                    runner_callback_registered = bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(sym)) if ctx.data_hub is not None else False
+                    reason_detail = "startup"
+                    success = bool(
+                        mdm_tracked
+                        and (runner_callback_registered or reason_detail in {"deferred_until_ready", "history_pending"})
+                        and (broker_ws_token_requested or not market_open_now or reason_detail in {"startup", "history_pending"})
+                    )
+                    partial = (not success) and mdm_tracked
                     LOGGER.info(
-                        "LIVE_SYMBOL_WIRED symbol=%s token=%s mdm_tracked=%s broker_ws_token_requested=%s runner_callback_registered=%s success=%s reason=%s",
+                        "LIVE_SYMBOL_WIRED symbol=%s token=%s mdm_tracked=%s broker_ws_token_requested=%s runner_callback_registered=%s success=%s partial=%s reason=%s reason_detail=%s",
                         sym,
                         int(tok),
-                        sym in getattr(mdm, "_tracked_symbols", set()) if mdm else False,
-                        int(tok) in getattr(mdm, "_requested_tokens", set()) if mdm else False,
-                        bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(sym))
-                        if ctx.data_hub is not None
-                        else False,
-                        True,
+                        mdm_tracked,
+                        broker_ws_token_requested,
+                        runner_callback_registered,
+                        success,
+                        partial,
                         "startup",
+                        reason_detail,
                         extra={
                             "event": "LIVE_SYMBOL_WIRED",
                             "symbol": sym,
                             "token": int(tok),
-                            "mdm_tracked": (
-                                sym in getattr(mdm, "_tracked_symbols", set()) if mdm else False
-                            ),
-                            "broker_ws_token_requested": (
-                                int(tok) in getattr(mdm, "_requested_tokens", set()) if mdm else False
-                            ),
-                            "runner_callback_registered": (
-                                bool(getattr(ctx.data_hub, "_tick_subscribers", {}).get(sym))
-                                if ctx.data_hub is not None
-                                else False
-                            ),
-                            "success": True,
+                            "mdm_tracked": mdm_tracked,
+                            "broker_ws_token_requested": broker_ws_token_requested,
+                            "runner_callback_registered": runner_callback_registered,
+                            "success": success,
+                            "partial": partial,
                             "reason": "startup",
+                            "reason_detail": reason_detail,
                         },
                     )
                 else:
@@ -9385,15 +9494,24 @@ async def startup_sequence(ctx: BotContext) -> None:
                             if ctx.data_hub is not None:
                                 tick_subscribers = getattr(ctx.data_hub, "_tick_subscribers", {})
                                 runner_callback_registered = bool(tick_subscribers.get(sym))
+                            reason_detail = "dynamic_add"
+                            success = bool(
+                                mdm_tracked
+                                and (runner_callback_registered or reason_detail in {"deferred_until_ready", "history_pending"})
+                                and (broker_ws_token_requested or not market_open_now or reason_detail in {"startup", "history_pending"})
+                            )
+                            partial = (not success) and mdm_tracked
                             LOGGER.info(
-                                "LIVE_SYMBOL_WIRED symbol=%s token=%s mdm_tracked=%s broker_ws_token_requested=%s runner_callback_registered=%s success=%s reason=%s",
+                                "LIVE_SYMBOL_WIRED symbol=%s token=%s mdm_tracked=%s broker_ws_token_requested=%s runner_callback_registered=%s success=%s partial=%s reason=%s reason_detail=%s",
                                 sym,
                                 int(tok),
                                 mdm_tracked,
                                 broker_ws_token_requested,
                                 runner_callback_registered,
-                                True,
+                                success,
+                                partial,
                                 "dynamic_add",
+                                reason_detail,
                                 extra={
                                     "event": "LIVE_SYMBOL_WIRED",
                                     "symbol": sym,
@@ -9401,8 +9519,10 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     "mdm_tracked": mdm_tracked,
                                     "broker_ws_token_requested": broker_ws_token_requested,
                                     "runner_callback_registered": runner_callback_registered,
-                                    "success": True,
+                                    "success": success,
+                                    "partial": partial,
                                     "reason": "dynamic_add",
+                                    "reason_detail": reason_detail,
                                 },
                             )
 
