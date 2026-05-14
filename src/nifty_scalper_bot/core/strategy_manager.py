@@ -1087,6 +1087,17 @@ class StrategyManager(_BaseStrategyManager):
             getattr(strategy, "name", strategy.__class__.__name__): set(strategy.get_required_indicators())
             for strategy in strategies
         }
+        allow_scalp_single = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
+        vwap_min_score, vwap_min_conf = self._single_vote_thresholds("VWAPPro")
+        generic_min_score, generic_min_conf = self._single_vote_thresholds("generic")
+        log.info(
+            "STRATEGY_SINGLE_VOTE_CONFIG allow_scalp_single=%s vwap_min_score=%s vwap_min_conf=%s generic_min_score=%s generic_min_conf=%s",
+            allow_scalp_single,
+            vwap_min_score,
+            vwap_min_conf,
+            generic_min_score,
+            generic_min_conf,
+        )
 
     def record_trade_result(
         self,
@@ -2673,15 +2684,21 @@ class StrategyManager(_BaseStrategyManager):
             vetoed = True
         if len(trigger_votes) == 1:
             selected_option = bool(metadata.get("is_selected_option") or indicator_selected_option)
+            selected_ce = str(metadata.get("selected_ce") or "")
+            selected_pe = str(metadata.get("selected_pe") or "")
+            near_atm_threshold = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
             try:
-                near_atm = float(metadata.get("strike_distance_from_atm")) <= 50.0
+                strike_distance_from_atm = float(metadata.get("strike_distance_from_atm"))
+                near_atm = strike_distance_from_atm <= near_atm_threshold
             except (TypeError, ValueError):
+                strike_distance_from_atm = None
                 near_atm = indicator_near_atm
             score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
             regime_weight = _regime_weight(best_vote)
             score_ok = raw_trigger_score >= score_min
             conf_ok = best_vote.confidence >= conf_min
             selected_ok = selected_option or near_atm
+            selected_ok_reason = "selected_option" if selected_option else "near_atm" if near_atm else "not_selected_or_near_atm"
             log.info(
                 "SINGLE_VOTE_DECISION strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
                 best_vote.strategy,
@@ -2704,6 +2721,7 @@ class StrategyManager(_BaseStrategyManager):
                     "confidence": best_vote.confidence,
                     "conf_min": conf_min,
                     "selected_ok": selected_ok,
+                    "selected_ok_reason": selected_ok_reason,
                     "vetoed": vetoed,
                 },
             )
@@ -2712,26 +2730,51 @@ class StrategyManager(_BaseStrategyManager):
             elif allow_scalp_single and score_ok and conf_ok and selected_ok and not vetoed:
                 metadata_stage = "single_vote_scalp_controlled"
             else:
-                blocked_reason = (
-                    "raw_score_below_min" if not score_ok else "confidence_below_min"
-                    if not conf_ok else "not_selected_or_near_atm" if not selected_ok
-                    else "context_veto"
+                allow_candidate_switch = str(os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false")).lower() in {"1", "true", "yes", "on"}
+                max_candidate_switch_distance = float(os.getenv("CANDIDATE_SWITCH_MAX_DISTANCE_POINTS", "100") or "100")
+                quote_depth_valid = bool(metadata.get("quote_depth_valid", True))
+                switch_allowed = (
+                    allow_candidate_switch
+                    and (strike_distance_from_atm is not None)
+                    and raw_trigger_score >= 7.0
+                    and best_vote.confidence >= 0.60
+                    and quote_depth_valid
+                    and strike_distance_from_atm <= max_candidate_switch_distance
                 )
-                log.info(
-                    "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s",
-                    symbol_norm,
-                    best_vote.strategy,
-                    best_vote.side,
-                    False,
-                    "single_vote_gate",
-                    blocked_reason,
-                    extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "allowed": False, "blocked_at": "single_vote_gate", "blocked_reason": blocked_reason},
-                )
-                return None
+                if switch_allowed:
+                    metadata_stage = "single_vote_candidate_switch"
+                    metadata["candidate_switch_requested"] = True
+                    metadata["candidate_switch_reason"] = "high_raw_score_nearby_strike"
+                else:
+                    blocked_reason = (
+                        "raw_score_below_min" if not score_ok else "confidence_below_min"
+                        if not conf_ok else "not_selected_or_near_atm" if not selected_ok
+                        else "context_veto"
+                    )
+                    log.info(
+                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s selected_ce=%s selected_pe=%s strike_distance_from_atm=%s near_atm_threshold=%s selected_ok_reason=%s raw_score=%.2f confidence=%.2f",
+                        symbol_norm,
+                        best_vote.strategy,
+                        best_vote.side,
+                        False,
+                        "single_vote_gate",
+                        blocked_reason,
+                        selected_ce,
+                        selected_pe,
+                        strike_distance_from_atm,
+                        near_atm_threshold,
+                        selected_ok_reason,
+                        raw_trigger_score,
+                        best_vote.confidence,
+                        extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "allowed": False, "blocked_at": "single_vote_gate", "blocked_reason": blocked_reason, "selected_ce": selected_ce, "selected_pe": selected_pe, "strike_distance_from_atm": strike_distance_from_atm, "near_atm_threshold": near_atm_threshold, "selected_ok_reason": selected_ok_reason, "raw_score": raw_trigger_score, "confidence": best_vote.confidence},
+                    )
+                    return None
         else:
             metadata_stage = "multi_vote_confirmed"
         metadata["is_selected_option"] = bool(metadata.get("is_selected_option") or indicator_selected_option)
         metadata["indicator_near_atm"] = bool(indicator_near_atm)
+        metadata["selected_ok_reason"] = metadata.get("selected_ok_reason", "selected_or_near_atm")
+        metadata["near_atm_threshold"] = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
         metadata["raw_setup_score"] = round(raw_trigger_score, 3)
         metadata["setup_score"] = round(raw_trigger_score, 3)
         metadata["regime_weighted_score"] = round(weighted_trigger_score, 3)

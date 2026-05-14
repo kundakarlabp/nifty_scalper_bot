@@ -759,6 +759,7 @@ class StrategyRunner:
         self._last_readiness_update_by_symbol: dict[str, datetime] = {}
         self._rate_limit_backoff_until_by_symbol: dict[str, float] = {}
         self._hydration_attempted_symbols: set[str] = set()
+        self._last_hydration_reason_by_symbol: dict[str, str] = {}
         self._strategy_slot_limit: int = max(
             1,
             int(os.getenv("MAX_CONCURRENT_STRATEGIES", "3")),
@@ -1230,6 +1231,8 @@ class StrategyRunner:
 
     def _request_mdm_hydration(self, symbol: str, min_bars: int) -> None:
         """Request async hydration from owner service. Args: symbol/min_bars. Returns: None. Raises: None."""
+        self._hydration_attempted_symbols.add(symbol)
+        self._last_hydration_reason_by_symbol[symbol] = "runner_missing_bars"
         for source in (self._market_data, self._data_hub):
             fn = getattr(source, "request_hydration", None)
             if callable(fn):
@@ -5433,6 +5436,15 @@ class StrategyRunner:
         ``signal_forward``; ``reason`` names the specific gate.
         """
         try:
+            if (
+                symbol == "NSE:NIFTY"
+                and reason == "insufficient_indicator_bar_count"
+                and not self._should_log_throttled(
+                    f"runner_eval_insufficient:{symbol}:{stage}:{reason}",
+                    30.0,
+                )
+            ):
+                return
             state_obj = self._symbol_state.get(symbol)
             state_active = bool(getattr(state_obj, "active", False)) if state_obj else False
             sym_state = self._symbol_states.get(symbol)
@@ -5464,6 +5476,12 @@ class StrategyRunner:
             except Exception:  # pragma: no cover - defensive
                 pass
             has_live_bars = symbol in getattr(self, "_live_bar_seen", set())
+            required_bars = self._required_bars_for_symbol(symbol)
+            mdm_bars = None
+            try:
+                mdm_bars = len(self._market_data.get_ohlc_bars(symbol) or [])
+            except Exception:
+                mdm_bars = None
             payload = {
                 "event": "RUNNER_EVAL_DECISION",
                 "symbol": symbol,
@@ -5483,6 +5501,11 @@ class StrategyRunner:
                 "tick_age_ms": tick_age_ms,
                 "has_live_bars": has_live_bars,
                 "data_phase": self._data_phase.get(symbol),
+                "required_bars": required_bars,
+                "runner_bars": candle_count,
+                "mdm_bars": mdm_bars,
+                "hydration_attempted": symbol in self._hydration_attempted_symbols,
+                "last_hydration_reason": self._last_hydration_reason_by_symbol.get(symbol),
             }
             if context:
                 payload.update(context)
