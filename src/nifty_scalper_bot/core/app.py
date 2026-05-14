@@ -7222,14 +7222,18 @@ def _commit_active_dynamic_basket(
         selected_ce = old_ce
     if not selected_pe and old_pe in active_set and str(old_pe).endswith("PE"):
         selected_pe = old_pe
-    if not selected_ce or not selected_pe:
-        LOGGER.info(
-            "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_resolution_failed option_count=%d",
+    if current_options and (not selected_ce or not selected_pe):
+        LOGGER.warning(
+            "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_resolution_failed option_count=%d selected_ce=%s selected_pe=%s",
             len(current_options),
+            selected_ce,
+            selected_pe,
             extra={
                 "event": "ACTIVE_DYNAMIC_BASKET_DEFERRED",
                 "reason": "selected_option_resolution_failed",
                 "option_count": len(current_options),
+                "selected_ce": selected_ce,
+                "selected_pe": selected_pe,
             },
         )
         return cast(str | None, old_ce), cast(str | None, old_pe)

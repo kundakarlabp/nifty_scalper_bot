@@ -13,3 +13,6 @@ def test_single_vote_uses_raw_score_for_threshold(monkeypatch):
     assert combined.metadata['raw_setup_score'] == 5.5
     assert combined.metadata['regime_weighted_score'] == 4.4
     assert combined.metadata['regime_weight'] == 0.8
+    assert combined.metadata['strategy_score'] == 5.5
+    assert combined.metadata.get('consensus_score') is not None or combined.metadata.get('final_trade_score') is not None
+    assert combined.metadata.get('direction_bias') in (None, 'CE', 'PE')

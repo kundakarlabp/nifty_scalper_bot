@@ -309,27 +309,39 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
         side = metadata_side or symbol_side
     if signal.action == "HOLD" and side not in {"CE", "PE"}:
         side = "NO_TRADE"
-    score_candidate = float(metadata.get("strategy_score") or metadata.get("setup_quality") or 0.0)
+    score_candidate = float(
+        metadata.get("raw_setup_score")
+        if metadata.get("raw_setup_score") is not None
+        else metadata.get("setup_score")
+        if metadata.get("setup_score") is not None
+        else metadata.get("strategy_score")
+        if metadata.get("strategy_score") is not None
+        else metadata.get("setup_quality")
+        if metadata.get("setup_quality") is not None
+        else 0.0
+    )
     confidence_score = float(signal.confidence or 0.0) * 10.0
-    score = max(score_candidate, confidence_score)
+
+    raw_setup_score = max(0.0, min(10.0, score_candidate))
+    vote_score = max(raw_setup_score, max(0.0, min(10.0, confidence_score)))
     reason = str(signal.reason or '').strip()
     reason_list = list(metadata.get("score_reasons") or [])
     if reason and reason not in reason_list:
         reason_list.append(reason)
     metadata.setdefault("strategy", strategy_name)
     metadata.setdefault("required_data_present", True)
-    metadata.setdefault("setup_quality", score_candidate)
-    metadata["vote_score_raw_strategy"] = score_candidate
-    metadata["vote_score_from_confidence"] = confidence_score
-    metadata["vote_score"] = max(0.0, min(10.0, score))
-    metadata["raw_setup_score"] = max(0.0, min(10.0, score))
-    metadata["setup_score"] = max(0.0, min(10.0, score))
+    metadata.setdefault("setup_quality", raw_setup_score)
+    metadata["vote_score_raw_strategy"] = raw_setup_score
+    metadata["vote_score_from_confidence"] = max(0.0, min(10.0, confidence_score))
+    metadata["vote_score"] = vote_score
+    metadata["raw_setup_score"] = raw_setup_score
+    metadata["setup_score"] = raw_setup_score
     metadata["raw_confidence"] = max(0.0, min(1.0, float(signal.confidence or 0.0)))
     metadata["score_reasons"] = reason_list
     return StrategyVote(
         strategy=strategy_name,
         side=side if side in {'CE', 'PE', 'NO_TRADE'} else 'UNKNOWN',
-        score=max(0.0, min(10.0, score)),
+        score=vote_score,
         confidence=max(0.0, min(1.0, float(signal.confidence or 0.0))),
         reasons=reason_list,
         metadata=metadata,
@@ -2578,6 +2590,24 @@ class StrategyManager(_BaseStrategyManager):
                 return float((vote.metadata or {}).get("regime_weight", 1.0) or 1.0)
             except (TypeError, ValueError):
                 return 1.0
+        def _context_bonus_score(vote: StrategyVote) -> float:
+            payload = dict(vote.metadata or {})
+            for key in ("context_bonus_score", "context_score", "raw_setup_score", "raw_vote_score", "vote_score"):
+                try:
+                    if payload.get(key) is not None:
+                        return max(0.0, float(payload.get(key)))
+                except (TypeError, ValueError):
+                    continue
+            return max(0.0, _raw_score(vote))
+        def _context_veto_score(vote: StrategyVote) -> float:
+            payload = dict(vote.metadata or {})
+            for key in ("context_veto_score", "context_score", "raw_setup_score", "raw_vote_score", "vote_score"):
+                try:
+                    if payload.get(key) is not None:
+                        return max(0.0, float(payload.get(key)))
+                except (TypeError, ValueError):
+                    continue
+            return max(0.0, _raw_score(vote))
         trigger_votes: list[tuple[Signal, StrategyVote]] = []
         context_votes: list[tuple[Signal, StrategyVote]] = []
         for signal, vote in signals:
@@ -2624,6 +2654,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             return None
         best_signal, best_vote = max(trigger_votes, key=lambda pair: _raw_score(pair[1]))
+        metadata = dict(best_signal.metadata or {})
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
         single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
         allow_scalp_single = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
@@ -2632,16 +2663,15 @@ class StrategyManager(_BaseStrategyManager):
         vetoed = False
         same_side_context = [v for _, v in context_votes if v.side == best_vote.side]
         opposite_context = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
-        positive_context = sum(float(v.score) for v in same_side_context)
-        negative_context = sum(float(v.score) for v in opposite_context)
+        positive_context = sum(_context_bonus_score(v) for v in same_side_context)
+        negative_context = sum(_context_veto_score(v) for v in opposite_context)
         context_bonus = min(1.5, 0.45 * positive_context)
         context_penalty = min(1.5, 0.60 * negative_context)
         final_score = raw_trigger_score + context_bonus - context_penalty
         final_score = max(0.0, min(10.0, final_score))
-        if opposite_context and max(v.score for v in opposite_context) >= 8.0:
+        if opposite_context and max(_context_veto_score(v) for v in opposite_context) >= 8.0:
             vetoed = True
         if len(trigger_votes) == 1:
-            metadata = dict(best_signal.metadata or {})
             selected_option = bool(metadata.get("is_selected_option") or indicator_selected_option)
             try:
                 near_atm = float(metadata.get("strike_distance_from_atm")) <= 50.0
@@ -2700,7 +2730,10 @@ class StrategyManager(_BaseStrategyManager):
                 return None
         else:
             metadata_stage = "multi_vote_confirmed"
+        metadata["is_selected_option"] = bool(metadata.get("is_selected_option") or indicator_selected_option)
+        metadata["indicator_near_atm"] = bool(indicator_near_atm)
         metadata["raw_setup_score"] = round(raw_trigger_score, 3)
+        metadata["setup_score"] = round(raw_trigger_score, 3)
         metadata["regime_weighted_score"] = round(weighted_trigger_score, 3)
         metadata["regime_weight"] = round(_regime_weight(best_vote), 3)
         metadata["context_bonus"] = round(context_bonus, 3)
@@ -2714,14 +2747,19 @@ class StrategyManager(_BaseStrategyManager):
                 extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "data_gate": True, "setup_score": raw_trigger_score, "setup_min": threshold, "weighted_score": weighted_trigger_score, "regime_weight": _regime_weight(best_vote), "context_bonus": context_bonus, "context_penalty": context_penalty, "final_score": final_score, "final_min": threshold, "allowed": False, "blocked_at": "strategy_manager_combine", "blocked_reason": blocked_reason},
             )
             return None
-        metadata = dict(best_signal.metadata or {})
-        metadata["is_selected_option"] = bool(metadata.get("is_selected_option") or indicator_selected_option)
-        metadata["indicator_near_atm"] = bool(indicator_near_atm)
         metadata.setdefault("trigger_strategy_score", metadata.get("strategy_score"))
+        metadata["setup_score"] = round(raw_trigger_score, 3)
+        metadata["raw_setup_score"] = round(raw_trigger_score, 3)
+        metadata["strategy_score"] = round(raw_trigger_score, 3)
         metadata["consensus_score"] = round(final_score, 3)
-        metadata["strategy_score"] = round(final_score, 3)
+        metadata["final_trade_score"] = round(final_score, 3)
+        metadata["trade_side"] = best_vote.side
+        metadata["contract_side"] = best_vote.side
+        metadata["side"] = best_vote.side
         metadata["confirming_votes"] = [best_vote.strategy] + [v.strategy for v in same_side_context]
-        metadata["direction_bias"] = best_vote.side
+        existing_direction_bias = str(metadata.get("direction_bias") or "").upper()
+        if existing_direction_bias not in {"CE", "PE"}:
+            metadata.pop("direction_bias", None)
         metadata["confidence"] = float(best_vote.confidence)
         metadata["consensus_stage"] = metadata_stage
         return Signal(

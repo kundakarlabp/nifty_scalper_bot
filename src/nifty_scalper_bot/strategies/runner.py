@@ -5329,13 +5329,29 @@ class StrategyRunner:
         regime_name = str(regime.value or "").upper()
         canonical = {"VOLATILE": "HIGH_VOLATILITY", "HIGHVOL": "HIGH_VOLATILITY", "HIGH_VOL": "HIGH_VOLATILITY", "TRENDING": "TREND", "RANGING": "RANGE"}.get(regime_name, regime_name)
         meta = dict(metadata or {})
-        selected = bool(meta.get("candidate_selected") or meta.get("is_selected_option"))
+        selected = bool(
+            meta.get("candidate_selected")
+            or meta.get("is_selected_option")
+            or meta.get("selected_ok")
+        )
         try:
-            spread_pct = float(meta.get("spread_pct") or meta.get("candidate_spread_pct") or 999.0)
+            spread_pct = float(
+                meta.get("candidate_spread_pct")
+                if meta.get("candidate_spread_pct") is not None
+                else meta.get("spread_pct")
+                if meta.get("spread_pct") is not None
+                else 999.0
+            )
         except (TypeError, ValueError):
             spread_pct = 999.0
         try:
-            rr = float(meta.get("candidate_rr") or 0.0)
+            rr = float(
+                meta.get("candidate_rr")
+                if meta.get("candidate_rr") is not None
+                else meta.get("rr")
+                if meta.get("rr") is not None
+                else 0.0
+            )
         except (TypeError, ValueError):
             rr = 0.0
         if self._strategy_allowed_for_regime(strategy, regime):
@@ -7493,67 +7509,12 @@ class StrategyRunner:
             if signal and signal.action != "HOLD":
                 phase = "phase10_signal_execution"
                 self._last_strategy_versions[symbol] = current_version
-                signal_strategy = str((signal.metadata or {}).get("strategy") or "")
                 current_regime = self._compute_regime_snapshot(symbol)
-                regime_allowed, regime_reason = self._strategy_regime_decision(
-                    strategy=signal_strategy, regime=current_regime, symbol=symbol, metadata=signal.metadata or {}
-                )
-                if not regime_allowed:
-                    self._regime_block_counter += 1
-                    regime_metadata = dict(signal.metadata or {})
-                    selected = bool(regime_metadata.get("candidate_selected") or regime_metadata.get("is_selected_option"))
-                    spread_pct = regime_metadata.get("spread_pct") or regime_metadata.get("candidate_spread_pct")
-                    candidate_rr = regime_metadata.get("candidate_rr")
-                    allowed_env = os.getenv("RUNNER_VWAP_ALLOWED_REGIMES", "TREND,NORMAL")
-                    if signal_strategy.strip().lower() in {"premium_momentum", "premium_momentum_squeeze"}:
-                        allowed_env = os.getenv(
-                            "RUNNER_PREMIUM_SQUEEZE_ALLOWED_REGIMES",
-                            "TREND,NORMAL,HIGH_VOLATILITY",
-                        )
-                    elif signal_strategy.strip().lower() in {"orb_pro", "orbpro"}:
-                        allowed_env = os.getenv(
-                            "RUNNER_ORB_ALLOWED_REGIMES",
-                            "TREND,NORMAL,HIGH_VOLATILITY",
-                        )
-                    self._logger.info(
-                        "REGIME_GATE_REJECTED symbol=%s strategy=%s regime=%s allowed_regimes=%s side=%s score=%.2f reason=%s selected=%s spread_pct=%s candidate_rr=%s trace_id=%s",
-                        symbol,
-                        signal_strategy or "unknown",
-                        current_regime.value,
-                        allowed_env,
-                        signal.action,
-                        float(signal.confidence or 0.0),
-                        regime_reason,
-                        selected,
-                        spread_pct,
-                        candidate_rr,
-                        trace_id,
-                        extra={
-                            "event": "REGIME_GATE_REJECTED",
-                            "symbol": symbol,
-                            "strategy": signal_strategy or "unknown",
-                            "regime": current_regime.value,
-                            "allowed_regimes": allowed_env,
-                            "side": signal.action,
-                            "score": float(signal.confidence or 0.0),
-                            "regime_reason": regime_reason,
-                            "selected": selected,
-                            "spread_pct": spread_pct,
-                            "candidate_rr": candidate_rr,
-                            "trace_id": trace_id,
-                            "regime_inputs": self._last_regime_inputs_by_symbol.get(symbol, {}),
-                        },
-                    )
-                    self._logger.info(
-                        "SIGNAL_EXECUTION_DECISION symbol=%s stage=phase10 decision=regime_rejected trace_id=%s strategy=%s action=%s confidence=%.2f",
-                        symbol,
-                        trace_id,
-                        signal_strategy or "unknown",
-                        signal.action,
-                        float(signal.confidence or 0.0),
-                        extra={"event": "SIGNAL_EXECUTION_DECISION", "symbol": symbol, "stage": "phase10", "decision": "regime_rejected", "trace_id": trace_id, "strategy": signal_strategy or "unknown", "action": signal.action, "confidence": float(signal.confidence or 0.0)},
-                    )
-                    return
+                signal_metadata = dict(signal.metadata or {})
+                signal_metadata["runtime_regime"] = current_regime.value
+                signal_metadata["runtime_regime_inputs"] = self._last_regime_inputs_by_symbol.get(symbol, {})
+                signal = dataclasses.replace(signal, metadata=signal_metadata)
+                signal_strategy = str((signal.metadata or {}).get("strategy") or "")
                 coarse_regime = self.detect_market_regime(symbol)
                 if coarse_regime == "low_volatility":
                     if self._should_log_throttled(
@@ -8851,7 +8812,11 @@ class StrategyRunner:
                 metadata["rr_score"] = max(float(metadata.get("rr_score", 0.0) or 0.0), min(10.0, float(candidate.rr or 0.0) * 5.0))
                 if str(candidate.side or "").upper() == option_side:
                     metadata["direction_score"] = max(float(metadata.get("direction_score", 0.0) or 0.0), 7.5)
-                metadata["strategy_score"] = max(float(metadata.get("strategy_score", 0.0) or 0.0), float(candidate.score or 0.0) - 0.5)
+                metadata["strategy_score"] = max(
+                    float(metadata.get("strategy_score", 0.0) or 0.0),
+                    float(metadata.get("raw_setup_score", 0.0) or 0.0),
+                    float(metadata.get("setup_score", 0.0) or 0.0),
+                )
                 metadata["spread_pct"] = candidate.spread_pct
                 metadata["candidate_score"] = candidate.score
                 metadata["candidate_selected"] = True
@@ -9012,6 +8977,86 @@ class StrategyRunner:
                 except (TypeError, ValueError):
                     rr_score = quality_hint
                 metadata["rr_score"] = rr_score
+            signal_strategy = str(
+                metadata.get("strategy")
+                or metadata.get("strategy_name")
+                or signal.reason
+                or ""
+            )
+            current_regime = self._compute_regime_snapshot(base_symbol)
+            metadata["runtime_regime"] = current_regime.value
+            metadata["runtime_regime_inputs"] = self._last_regime_inputs_by_symbol.get(
+                base_symbol, {}
+            )
+            regime_allowed, regime_reason = self._strategy_regime_decision(
+                strategy=signal_strategy,
+                regime=current_regime,
+                symbol=base_symbol,
+                metadata=metadata,
+            )
+            metadata["regime_decision"] = "allow" if regime_allowed else "block"
+            metadata["regime_reason"] = regime_reason
+            if not regime_allowed:
+                self._logger.info(
+                    "REGIME_GATE_REJECTED symbol=%s strategy=%s regime=%s side=%s reason=%s selected=%s spread_pct=%s candidate_rr=%s trace_id=%s",
+                    base_symbol,
+                    signal_strategy or "unknown",
+                    current_regime.value,
+                    infer_option_side(signal.symbol, metadata),
+                    regime_reason,
+                    bool(
+                        metadata.get("candidate_selected")
+                        or metadata.get("is_selected_option")
+                    ),
+                    metadata.get("candidate_spread_pct") or metadata.get("spread_pct"),
+                    metadata.get("candidate_rr"),
+                    trace_id,
+                    extra={
+                        "event": "REGIME_GATE_REJECTED",
+                        "symbol": base_symbol,
+                        "strategy": signal_strategy or "unknown",
+                        "regime": current_regime.value,
+                        "side": infer_option_side(signal.symbol, metadata),
+                        "regime_reason": regime_reason,
+                        "selected": bool(
+                            metadata.get("candidate_selected")
+                            or metadata.get("is_selected_option")
+                        ),
+                        "spread_pct": metadata.get("candidate_spread_pct")
+                        or metadata.get("spread_pct"),
+                        "candidate_rr": metadata.get("candidate_rr"),
+                        "trace_id": trace_id,
+                        "regime_inputs": self._last_regime_inputs_by_symbol.get(
+                            base_symbol, {}
+                        ),
+                    },
+                )
+                self._logger.info(
+                    "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s regime=%s regime_reason=%s",
+                    base_symbol,
+                    signal_strategy or "unknown",
+                    infer_option_side(signal.symbol, metadata),
+                    False,
+                    "runner_regime_gate",
+                    "regime_not_allowed",
+                    current_regime.value,
+                    regime_reason,
+                    extra={
+                        "event": "TRADE_DECISION_TRACE",
+                        "symbol": base_symbol,
+                        "strategy": signal_strategy or "unknown",
+                        "side": infer_option_side(signal.symbol, metadata),
+                        "allowed": False,
+                        "blocked_at": "runner_regime_gate",
+                        "blocked_reason": "regime_not_allowed",
+                        "regime": current_regime.value,
+                        "regime_reason": regime_reason,
+                        "trace_id": trace_id,
+                    },
+                )
+                self._reset_execution_state(base_symbol)
+                _trace("regime_not_allowed")
+                return SignalExecutionResult(False, "regime_not_allowed")
             if requires_final_score:
                 required_components = (
                     "direction_score",
@@ -9040,7 +9085,7 @@ class StrategyRunner:
                     elif not has_quote_usable:
                         final_score_block_reason = "quote_not_usable_for_order_plan"
                     else:
-                        final_score_block_reason = "final_score_required"
+                        final_score_block_reason = "final_score_precheck_failed_unknown"
                     strategy_name = metadata.get("strategy_name") or metadata.get("strategy") or signal.reason
                     self._logger.info(
                         "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s missing_components=%s has_candidate=%s has_quote_usable=%s candidate_symbol=%s selected_snapshot_symbol=%s latest_bid=%s latest_ask=%s latest_quote_tradable=%s",

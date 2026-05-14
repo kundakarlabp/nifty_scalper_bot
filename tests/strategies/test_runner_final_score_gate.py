@@ -79,7 +79,7 @@ def test_final_score_gate_passes_precheck_and_not_generic_rejection(monkeypatch:
         'atm_strike': 23350,
     }
     result = runner._handle_entry_signal_inner(_build_signal(metadata), 'NFO:NIFTY26MAY23350CE', 'NFO:NIFTY26MAY23350CE', 431.05, datetime.now(timezone.utc), trace_id='t1')
-    assert result.reason != 'final_score_required'
+    assert result.reason != 'final_score_precheck_failed_unknown'
 
 
 def test_quote_usable_from_mdm_revalidation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,10 +97,10 @@ def test_quote_usable_from_mdm_revalidation(monkeypatch: pytest.MonkeyPatch) -> 
         'atm_strike': 23350,
     }
     result = runner._handle_entry_signal_inner(_build_signal(metadata), 'NFO:NIFTY26MAY23350CE', 'NFO:NIFTY26MAY23350CE', 431.05, datetime.now(timezone.utc), trace_id='t2')
-    assert result.reason != 'final_score_required'
+    assert result.reason != 'final_score_precheck_failed_unknown'
 
 
-def test_final_score_required_when_snapshot_and_mdm_not_usable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_final_score_precheck_failed_unknown_when_snapshot_and_mdm_not_usable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
     runner = _build_runner()
     runner._market_data = SimpleNamespace(get_symbol_snapshot=lambda _symbol: _Snapshot(bid=0.0, ask=0.0, tradable_quote=False))
@@ -115,7 +115,7 @@ def test_final_score_required_when_snapshot_and_mdm_not_usable(monkeypatch: pyte
         'atm_strike': 23350,
     }
     result = runner._handle_entry_signal_inner(_build_signal(metadata), 'NFO:NIFTY26MAY23350CE', 'NFO:NIFTY26MAY23350CE', 431.05, datetime.now(timezone.utc), trace_id='t3')
-    assert result.reason == 'final_score_required'
+    assert result.reason == 'final_score_precheck_failed_unknown'
 
 
 def test_build_single_candidate_uses_data_score_fallback() -> None:
