@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
@@ -46,8 +47,10 @@ class SMCStrategy(EliteStrategy):
 
             body = abs(close - open_price)
             displacement_score = body / atr
-            bullish_sweep = low < (open_price - 0.3 * atr) and close > open_price
-            bearish_sweep = high > (open_price + 0.3 * atr) and close < open_price
+            prior_swing_low = float(indicators.get('prior_swing_low') or low)
+            prior_swing_high = float(indicators.get('prior_swing_high') or high)
+            bullish_sweep = bool(indicators.get('liquidity_sweep_confirmed')) or (low <= prior_swing_low and close > open_price)
+            bearish_sweep = bool(indicators.get('liquidity_sweep_confirmed_bear')) or (high >= prior_swing_high and close < open_price)
             if not bullish_sweep and not bearish_sweep:
                 self._no_vote('no_liquidity_sweep')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=no_sweep')
@@ -63,7 +66,10 @@ class SMCStrategy(EliteStrategy):
             else:
                 side = 'CE' if bullish_sweep else 'PE'
             sweep_level = low if bullish_sweep else high
-            structure_confirmed = bool(indicators.get('bos_confirmed') or indicators.get('choch_confirmed') or displacement_score >= 0.6)
+            choch_confirmed = bool(indicators.get('choch_confirmed'))
+            bos_confirmed = bool(indicators.get('bos_confirmed'))
+            premium_reclaim = bool(indicators.get('premium_reclaim'))
+            structure_confirmed = bool(bos_confirmed or choch_confirmed)
             retest_confirmed = bool(indicators.get('retest_confirmed') or indicators.get('mitigation_confirmed'))
 
             score = 2.0
@@ -74,18 +80,35 @@ class SMCStrategy(EliteStrategy):
             if structure_confirmed:
                 score += 2.0
                 reasons.append('structure_confirmation')
+            elif displacement_score >= 0.6:
+                score += 1.0
+                reasons.append('displacement_only')
             if retest_confirmed:
                 score += 1.0
                 reasons.append('retest_mitigation')
-            if direction in {'CE', 'PE'} and direction == side:
+            direction_aligned = direction in {'CE', 'PE'} and direction == side
+            if direction_aligned:
                 score += 2.0
                 reasons.append('direction_alignment')
+            elif premium_reclaim:
+                score += 1.0
+                reasons.append('premium_reclaim_support')
             if displacement_score >= 0.9:
                 score += 1.0
                 reasons.append('clean_invalidation_rr')
 
             strategy_score = max(0.0, min(10.0, score))
-            if strategy_score < 4.0:
+            execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
+            is_live = execution_mode == 'LIVE'
+            min_score = float(os.getenv('SMC_MIN_SCORE_LIVE', '6.5') if is_live else os.getenv('SMC_MIN_SCORE_SHADOW', '4.5'))
+            require_structure_live = str(os.getenv('SMC_REQUIRE_STRUCTURE_CONFIRMATION_LIVE', 'true')).lower() in {'1', 'true', 'yes', 'on'}
+            if is_live and require_structure_live and not structure_confirmed:
+                self._no_vote('smc_structure_required_live')
+                return None
+            if not (bullish_sweep or bearish_sweep or premium_reclaim) or not (displacement_score >= 0.6 or structure_confirmed) or not (direction_aligned or premium_reclaim):
+                self._no_vote('smc_quality_gate_failed')
+                return None
+            if strategy_score < min_score:
                 self._no_vote('no_liquidity_sweep')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=low_quality')
                 return None
@@ -114,6 +137,11 @@ class SMCStrategy(EliteStrategy):
                 'sweep_level': sweep_level,
                 'displacement_score': round(displacement_score, 3),
                 'structure_confirmed': structure_confirmed,
+                'smc_sweep_type': 'bullish' if bullish_sweep else 'bearish',
+                'structure_confirmation_used': structure_confirmed,
+                'premium_reclaim_used': premium_reclaim,
+                'smc_quality_score': strategy_score,
+                'smc_block_reason': '',
                 'retest_confirmed': retest_confirmed,
                 'underlying_invalidation_level': sweep_level,
                 'premium_stop_distance': max(atr * 1.2, current_price * 0.025, 1.0),

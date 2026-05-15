@@ -77,6 +77,7 @@ class VWAPProStrategy(EliteStrategy):
 
             score = 0.0
             reasons: list[str] = []
+            conflict_penalty_applied = 0.0
             contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
             trend_alignment = False
             pullback_flag = False
@@ -143,12 +144,25 @@ class VWAPProStrategy(EliteStrategy):
             if slope_support:
                 score += 1.0
                 reasons.append('futures_slope_alignment')
+            else:
+                reasons.append('futures_slope_conflict')
+            if not trend_alignment and bias in {'CE', 'PE'}:
+                conflict_penalty_applied = float(os.getenv('VWAP_PRO_CONFLICT_PENALTY', '2.0') or '2.0')
+                score -= conflict_penalty_applied
+                reasons.append('conflict_penalty')
 
             execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
             is_live = execution_mode == 'LIVE'
+            require_alignment_live = str(os.getenv('VWAP_PRO_REQUIRE_UNDERLYING_ALIGNMENT_LIVE', 'true')).lower() in {'1', 'true', 'yes', 'on'}
+            require_alignment_shadow = str(os.getenv('VWAP_PRO_REQUIRE_UNDERLYING_ALIGNMENT_SHADOW', 'false')).lower() in {'1', 'true', 'yes', 'on'}
             min_score_default = '5.8' if is_live else '5.0'
             min_trend_score_default = '5.5' if is_live else '4.5'
             min_score = float(os.getenv('VWAP_PRO_MIN_TREND_ALIGNED_SCORE', min_trend_score_default) if trend_alignment else os.getenv('VWAP_PRO_MIN_SCORE', min_score_default))
+            if not trend_alignment:
+                min_score += conflict_penalty_applied
+            if ((is_live and require_alignment_live) or ((not is_live) and require_alignment_shadow)) and not trend_alignment:
+                self._no_vote('underlying_direction_conflict')
+                return None
             threshold_source = 'trend_aligned' if trend_alignment else 'base'
 
             if score < min_score:
@@ -213,6 +227,11 @@ class VWAPProStrategy(EliteStrategy):
                 'underlying_context_used': bool(indicators.get('spot_context') or indicators.get('underlying_direction_bias')),
                 'futures_context_used': bool(indicators.get('futures_context') or indicators.get('futures_vwap') is not None),
                 'futures_vwap_slope': futures_vwap_slope,
+                'vwap_domain': 'option_premium',
+                'underlying_alignment': trend_alignment,
+                'futures_alignment': slope_support,
+                'conflict_penalty_applied': conflict_penalty_applied,
+                'final_vwap_score': strategy_score,
                 'futures_volume_ratio': futures_volume_ratio,
                 'trigger_block_reason': '' if strategy_score >= min_score else 'weak_score',
                 'continuation_confirmed': continuation_confirmed,

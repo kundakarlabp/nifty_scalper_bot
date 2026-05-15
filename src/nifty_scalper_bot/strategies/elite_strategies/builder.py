@@ -28,8 +28,8 @@ from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-_PRODUCTION_DIRECTIONAL = {'smc', 'vwap', 'order_flow', 'bb_squeeze', 'orb'}
-_CONTEXT_ONLY = {'oi_max_pain', 'order_flow'}
+_PRODUCTION_DIRECTIONAL = {'smc', 'vwap', 'order_flow'}
+_CONTEXT_ONLY = {'oi_max_pain'}
 _DISABLED_UNTIL_FEATURE_COMPLETE = {'cpr', 'rsi_div'}
 _EXPIRY_ONLY = {'gamma_scalping', 'tuesday_gamma_buyer'}
 _THETA_ONLY = {'straddle'}
@@ -138,9 +138,12 @@ def build_elite_strategies(
     passed = len(strategies)
     total = len(registry)
     LOGGER.info(f"📊 Strategy Build Complete: {passed}/{total} active.")
+    orderflow_trigger = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+    if not orderflow_trigger and 'OrderFlow' in active_names and 'OrderFlow' not in context_names:
+        context_names.append('OrderFlow')
     trigger_capable = [name for name in active_names if name not in (context_names or [])]
     LOGGER.info(
-        "STRATEGY_PRODUCTION_SET active=%s trigger_capable=%s context_only=%s experimental_disabled=%s",
+        "STRATEGY_PRODUCTION_SET active=%s trigger_capable=%s context_only=%s disabled_experimental=%s",
         active_names,
         trigger_capable,
         context_names or ['OIMaxPain'],

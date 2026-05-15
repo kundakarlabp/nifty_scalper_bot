@@ -162,10 +162,19 @@ class OrderFlowStrategy(EliteStrategy):
 
             side_aligns = direction in {'CE', 'PE'} and direction == side
             side_alignment_ok = direction not in {'CE', 'PE'} or side_aligns
-            trigger_conditions_met = bool(allow_orderflow_trigger and strategy_score >= trigger_min_score and spread_pct <= trigger_max_spread_pct and side_alignment_ok and tick_supports)
+            trigger_conditions_met = bool(
+                allow_orderflow_trigger
+                and depth_available
+                and strategy_score >= trigger_min_score
+                and spread_pct <= trigger_max_spread_pct
+                and side_alignment_ok
+                and tick_supports
+            )
             trigger_block_reason = ''
             if not allow_orderflow_trigger:
                 trigger_block_reason = 'trigger_role_disabled'
+            elif not depth_available:
+                trigger_block_reason = 'quote_depth_invalid'
             elif strategy_score < trigger_min_score:
                 trigger_block_reason = 'score_below_trigger_min'
             elif spread_pct > trigger_max_spread_pct:
@@ -187,6 +196,13 @@ class OrderFlowStrategy(EliteStrategy):
                 'premium_target_rr': 1.8, 'can_trigger': bool(trigger_conditions_met), 'trigger_min_score': trigger_min_score,
                 'trigger_max_spread_pct': trigger_max_spread_pct, 'trigger_conditions_met': trigger_conditions_met,
                 'trigger_block_reason': trigger_block_reason, 'quote_depth_valid': bool(depth_available),
+                'trigger_eligible': bool(trigger_conditions_met),
+                'trigger_disqualified_by': trigger_block_reason or None,
+                'liquidity_score': 2.0 if spread_pct <= 12.0 else 0.5,
+                'spread_score': 2.0 if spread_pct <= trigger_max_spread_pct else 0.0,
+                'depth_score': 2.0 if depth_available else 0.0,
+                'tick_score': 2.0 if tick_supports else 0.0,
+                'direction_alignment_score': 2.0 if side_alignment_ok else 0.0,
             }
             metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0})
             return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
