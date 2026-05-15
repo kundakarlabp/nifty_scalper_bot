@@ -46,6 +46,9 @@ class VWAPProStrategy(EliteStrategy):
             avg_vol = float(indicators.get('avg_volume') or 0.0)
             spread_pct = float(indicators.get('spread_pct') or 0.0)
             direction = str(indicators.get('direction_bias') or '').upper()
+            underlying_direction = str(indicators.get('underlying_direction_bias') or '').upper()
+            futures_vwap_slope = float(indicators.get('futures_vwap_slope') or 0.0)
+            futures_volume_ratio = float(indicators.get('futures_volume_ratio') or 0.0)
             if current_price <= 0 or vwap <= 0:
                 self._no_vote('missing_vwap')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=VWAPPro reason=missing_vwap')
@@ -120,11 +123,15 @@ class VWAPProStrategy(EliteStrategy):
                 score += 1.0
                 reasons.append('not_overextended')
 
-            if avg_vol > 0 and vol >= 0.6 * avg_vol:
+            vol_support = avg_vol > 0 and vol >= 0.6 * avg_vol
+            fut_vol_support = (contract_side == 'CE' and futures_volume_ratio >= 1.0) or (contract_side == 'PE' and futures_volume_ratio >= 1.0)
+            if vol_support or fut_vol_support:
                 score += 1.0
+                reasons.append('volume_confirmation')
 
-            if direction in {'CE', 'PE'}:
-                trend_alignment = direction == contract_side
+            bias = direction if direction in {'CE','PE'} else underlying_direction
+            if bias in {'CE', 'PE'}:
+                trend_alignment = bias == contract_side
                 if trend_alignment:
                     score += 2.0
                     reasons.append('trend_alignment')
@@ -132,7 +139,19 @@ class VWAPProStrategy(EliteStrategy):
                     score -= 2.0
                     reasons.append('direction_conflict')
 
-            if score < 5.5:
+            slope_support = (contract_side == 'CE' and futures_vwap_slope > 0) or (contract_side == 'PE' and futures_vwap_slope < 0)
+            if slope_support:
+                score += 1.0
+                reasons.append('futures_slope_alignment')
+
+            execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
+            is_live = execution_mode == 'LIVE'
+            min_score_default = '5.8' if is_live else '5.0'
+            min_trend_score_default = '5.5' if is_live else '4.5'
+            min_score = float(os.getenv('VWAP_PRO_MIN_TREND_ALIGNED_SCORE', min_trend_score_default) if trend_alignment else os.getenv('VWAP_PRO_MIN_SCORE', min_score_default))
+            threshold_source = 'trend_aligned' if trend_alignment else 'base'
+
+            if score < min_score:
                 self._no_vote('weak_score')
                 LOGGER.info(
                     'STRATEGY_NO_VOTE strategy=VWAPPro reason=weak_score score=%.2f direction=%s contract_side=%s current_price=%.2f vwap=%.2f distance_pct=%.4f atr=%.2f volume=%.2f avg_volume=%.2f trend_alignment=%s pullback_flag=%s',
@@ -168,7 +187,7 @@ class VWAPProStrategy(EliteStrategy):
                 'requires_runner_final_score': True,
                 'raw_setup_score': strategy_score,
                 'setup_score': strategy_score,
-                'setup_min': 5.5,
+                'setup_min': min_score,
                 'setup_pass': True,
                 'execution_required': True,
                 'regime_required': True,
@@ -190,6 +209,12 @@ class VWAPProStrategy(EliteStrategy):
                 'atr': atr_safe,
                 'pullback_flag': pullback_flag,
                 'trend_alignment': trend_alignment,
+                'threshold_source': threshold_source,
+                'underlying_context_used': bool(indicators.get('spot_context') or indicators.get('underlying_direction_bias')),
+                'futures_context_used': bool(indicators.get('futures_context') or indicators.get('futures_vwap') is not None),
+                'futures_vwap_slope': futures_vwap_slope,
+                'futures_volume_ratio': futures_volume_ratio,
+                'trigger_block_reason': '' if strategy_score >= min_score else 'weak_score',
                 'continuation_confirmed': continuation_confirmed,
                 'setup_invalidation_premium': current_price - atr_safe,
                 'premium_stop_distance': atr_safe,

@@ -138,12 +138,13 @@ def build_elite_strategies(
     passed = len(strategies)
     total = len(registry)
     LOGGER.info(f"📊 Strategy Build Complete: {passed}/{total} active.")
+    trigger_capable = [name for name in active_names if name not in (context_names or [])]
     LOGGER.info(
-        "STRATEGY_REGISTRY_LOADED active=%s context=%s disabled=%s mode=%s",
+        "STRATEGY_PRODUCTION_SET active=%s trigger_capable=%s context_only=%s experimental_disabled=%s",
         active_names,
+        trigger_capable,
         context_names or ['OIMaxPain'],
         sorted(set(disabled_names)),
-        strategy_mode,
     )
 
     return strategies

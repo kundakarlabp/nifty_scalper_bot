@@ -2747,6 +2747,23 @@ class StrategyManager(_BaseStrategyManager):
             else:
                 trigger_votes.append((signal, vote))
         if not trigger_votes:
+            allow_context_promotion = str(os.getenv("STRATEGY_ALLOW_CONTEXT_PROMOTION", "false")).lower() in {"1", "true", "yes", "on"}
+            live_promotion_allowed = str(os.getenv("STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED", "false")).lower() in {"1", "true", "yes", "on"}
+            execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+            allowed_strategies = {s.strip() for s in str(os.getenv("STRATEGY_CONTEXT_PROMOTION_ALLOWED_STRATEGIES", "OrderFlow,VWAPPro")).split(",") if s.strip()}
+            min_score = float(os.getenv("STRATEGY_CONTEXT_PROMOTION_MIN_SCORE", "5.0") or "5.0")
+            min_conf = float(os.getenv("STRATEGY_CONTEXT_PROMOTION_MIN_CONFIDENCE", "0.45") or "0.45")
+            if context_votes and allow_context_promotion and (execution_mode != "LIVE" or live_promotion_allowed):
+                best_signal, best_vote = max(context_votes, key=lambda pair: _raw_score(pair[1]))
+                opp = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
+                vetoed = bool(opp and max(_context_veto_score(v) for v in opp) >= 8.0)
+                raw_score = _raw_score(best_vote)
+                near_atm_ok = indicator_near_atm
+                selected_ok = indicator_selected_option or near_atm_ok
+                if best_vote.strategy in allowed_strategies and raw_score >= min_score and best_vote.confidence >= min_conf and best_vote.side in {"CE","PE"} and selected_ok and not vetoed:
+                    md = dict(best_signal.metadata or {})
+                    md.update({"role":"trigger","promoted_from_context":True,"consensus_stage":"context_promoted_controlled","promotion_reason":"context_only_quality_pass","raw_setup_score":round(raw_score,3),"setup_score":round(raw_score,3),"strategy_score":round(raw_score,3),"final_trade_score":round(raw_score,3),"trade_side":best_vote.side,"side":best_vote.side,"contract_side":best_vote.side,"confirming_votes":[best_vote.strategy]})
+                    return Signal(action="BUY",symbol=best_signal.symbol,quantity=best_signal.quantity,confidence=best_signal.confidence,reason=best_signal.reason,stop_loss=best_signal.stop_loss,take_profit=best_signal.take_profit,metadata=md)
             log_throttled(
                 log,
                 f"strategy_no_trigger_vote:{symbol_norm}",
@@ -3005,15 +3022,17 @@ class StrategyManager(_BaseStrategyManager):
         # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=true
         # STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.5
         # STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE=0.45
+        execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        is_live = execution_mode == "LIVE"
         key = str(strategy_name or "").strip().lower().replace(" ", "_")
         if key in {"vwappro", "vwap_pro"}:
             return (
-                float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE", "5.8") or "5.8"),
-                float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE", "0.45") or "0.45"),
+                float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE", "5.8" if is_live else "4.8") or ("5.8" if is_live else "4.8")),
+                float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE", "0.45" if is_live else "0.40") or ("0.45" if is_live else "0.40")),
             )
         return (
-            float(os.getenv("STRATEGY_SINGLE_VOTE_SCALP_MIN", "6.6") or "6.6"),
-            float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0.60") or "0.60"),
+            float(os.getenv("STRATEGY_SINGLE_VOTE_SCALP_MIN", "6.6" if is_live else "4.5") or ("6.6" if is_live else "4.5")),
+            float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0.60" if is_live else "0.45") or ("0.60" if is_live else "0.45")),
         )
 
     def _apply_regime_vote_weight(
