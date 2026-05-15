@@ -5750,6 +5750,7 @@ class StrategyRunner:
             if restored_from_cache and history_count >= required_bars:
                 return True
             if not self._indicator_engine.has_min_bars(symbol, required_bars):
+                soft_pass = False
                 if history_count < required_bars:
                     if self._is_context_symbol(symbol):
                         if symbol == "NSE:NIFTY" and self._should_log_throttled(f"spot_cold:{symbol}", 120.0):
@@ -5773,18 +5774,33 @@ class StrategyRunner:
                     }
                     is_selected_option = normalize_symbol(symbol) in selected_symbols
                     option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or "1")
-                    spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
-                    fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY"), "")
+                    spot_symbol = "NSE:NIFTY"
+                    fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context"), "")
+                    if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
+                        self._logger.warning("CONTEXT_FUTURES_UNRESOLVED symbol=%s", symbol)
+                    spot_bars = len(self._indicator_engine.get_history(spot_symbol) or [])
                     fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
+                    opt_bars = history_count
+                    self._logger.info("CONTEXT_HISTORY_STATUS domain=spot symbol=%s bars=%d required=%d quality=%s", spot_symbol, spot_bars, self._context_required_bars, "warm" if spot_bars >= self._context_required_bars else "cold")
+                    self._logger.info("CONTEXT_HISTORY_STATUS domain=futures symbol=%s bars=%d required=%d quality=%s", fut_symbol or "missing", fut_bars, self._context_required_bars, "missing" if not fut_symbol else ("warm" if fut_bars >= self._context_required_bars else "cold"))
+                    self._logger.info("CONTEXT_HISTORY_STATUS domain=options symbol=%s bars=%d required=%d quality=%s", symbol, opt_bars, required_bars, "warm" if opt_bars >= required_bars else "cold")
                     context_ready = spot_bars >= self._context_required_bars and fut_bars >= self._context_required_bars
+                    require_warm_context_live = _env_bool("LIVE_REQUIRE_WARM_UNDERLYING_CONTEXT", False)
                     soft_pass = (
                         self._is_tradable_symbol(symbol)
                         and not strict_for_all
                         and is_selected_option
                         and history_count >= option_eval_min_live_bars
                         and tick_is_fresh
-                        and context_ready
+                        and (context_ready or not require_warm_context_live)
                     )
+                    if soft_pass and not context_ready:
+                        self._logger.warning("LIVE_CONTEXT_COLD_CONTINUE domain=futures penalty=quality_threshold_plus_1")
+                        self._runtime_indicators.setdefault(symbol, {})
+                        self._runtime_indicators[symbol]["underlying_context_quality"] = "cold"
+                        self._runtime_indicators[symbol]["futures_context_quality"] = "cold" if fut_symbol else "missing"
+                        self._runtime_indicators[symbol]["context_confidence_multiplier"] = 0.75
+                        self._runtime_indicators[symbol]["context_cold_reasons"] = ["spot_context_cold" if spot_bars < self._context_required_bars else "", "futures_context_cold" if fut_bars < self._context_required_bars else ""]
                     if self._should_log_throttled(
                         f"eval_block_cold_history:{symbol}", 120.0
                     ):
@@ -5808,7 +5824,7 @@ class StrategyRunner:
                     allowed=False,
                     trace_id=trace_id,
                 )
-                return False
+                return bool(soft_pass)
             return True
         except Exception as exc:  # noqa: BLE001
             self._logger.error(

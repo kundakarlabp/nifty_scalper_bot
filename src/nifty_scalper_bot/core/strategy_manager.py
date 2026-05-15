@@ -2797,13 +2797,14 @@ class StrategyManager(_BaseStrategyManager):
                 approval_path = "context_promotion"
             else:
                 approval_path = "no_trade"
-                log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s", approval_path, symbol_norm)
+                log.info("TRADE_DECISION_TRACE approval_path=%s blocked_at=%s blocked_reason=%s symbol=%s", approval_path, "no_trigger_vote", "no_trigger_vote", symbol_norm)
                 log_throttled(
                     log,
                     f"strategy_no_trigger_vote:{symbol_norm}",
-                    "STRATEGY_NO_TRIGGER_VOTE symbol=%s context_votes=%s",
+                    "STRATEGY_NO_TRIGGER_VOTE symbol=%s context_votes=%s live_context_promotion_allowed=%s",
                     symbol_norm,
                     [v.strategy for _, v in context_votes],
+                    bool(mode_profile.get("allow_context_promotion", False)),
                     interval_sec=30.0,
                     level=logging.INFO,
                     extra={
@@ -2884,7 +2885,9 @@ class StrategyManager(_BaseStrategyManager):
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
             log.info(
-                "SINGLE_VOTE_DECISION strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
+                "SINGLE_VOTE_DECISION allowed=%s reason=%s strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
+                bool(raw_trigger_score >= score_min and best_vote.confidence >= conf_min and selected_ok and not vetoed),
+                "ok",
                 best_vote.strategy,
                 raw_trigger_score,
                 weighted_trigger_score,
@@ -3050,15 +3053,15 @@ class StrategyManager(_BaseStrategyManager):
         """Args: none. Returns: strategy mode profile. Raises: none."""
         execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
         if execution_mode == "LIVE":
-            defaults = {"allow_context_promotion": False, "allow_single_vote": False, "min_trade_quality": 7.0}
+            defaults = {"allow_context_promotion": False, "allow_single_vote": True, "min_trade_quality": 7.0}
         elif execution_mode == "PAPER":
             defaults = {"allow_context_promotion": True, "allow_single_vote": True, "min_trade_quality": 5.8}
         else:
             defaults = {"allow_context_promotion": True, "allow_single_vote": True, "min_trade_quality": 5.0}
         return {
             "mode": execution_mode,
-            "allow_context_promotion": str(os.getenv("STRATEGY_ALLOW_CONTEXT_PROMOTION", str(defaults["allow_context_promotion"]).lower())).lower() in {"1", "true", "yes", "on"},
-            "allow_single_vote": str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_BY_MODE", str(defaults["allow_single_vote"]).lower())).lower() in {"1", "true", "yes", "on"},
+            "allow_context_promotion": str(os.getenv("STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED" if execution_mode == "LIVE" else "STRATEGY_ALLOW_CONTEXT_PROMOTION", str(defaults["allow_context_promotion"]).lower())).lower() in {"1", "true", "yes", "on"},
+            "allow_single_vote": str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_LIVE" if execution_mode == "LIVE" else "STRATEGY_ALLOW_SINGLE_VOTE_BY_MODE", str(defaults["allow_single_vote"]).lower())).lower() in {"1", "true", "yes", "on"},
             "min_trade_quality": float(os.getenv(f"STRATEGY_MIN_TRADE_QUALITY_{execution_mode}", str(defaults["min_trade_quality"])) or defaults["min_trade_quality"]),
         }
 
