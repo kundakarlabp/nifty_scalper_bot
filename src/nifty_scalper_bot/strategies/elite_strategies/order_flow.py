@@ -124,6 +124,10 @@ class OrderFlowStrategy(EliteStrategy):
                     'trigger_block_reason': trigger_block_reason,
                     'quote_depth_valid': False,
                     'can_trigger': bool(trigger_conditions_met),
+                    'spread_score': 2.0 if spread_pct <= trigger_max_spread_pct else 0.0,
+                    'depth_score': 0.0,
+                    'tick_score': 2.0 if tick_supports else 0.0,
+                    'direction_alignment_score': 2.0 if side_aligns else 0.0,
                     'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0),
                     'premium_target_rr': 1.8,
                 }
