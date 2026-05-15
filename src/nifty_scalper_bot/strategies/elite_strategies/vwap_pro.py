@@ -147,9 +147,10 @@ class VWAPProStrategy(EliteStrategy):
             else:
                 reasons.append('futures_slope_conflict')
             if not trend_alignment and bias in {'CE', 'PE'}:
-                conflict_penalty_applied = float(os.getenv('VWAP_PRO_CONFLICT_PENALTY', '2.0') or '2.0')
-                score -= conflict_penalty_applied
-                reasons.append('conflict_penalty')
+                if 'direction_conflict' not in reasons:
+                    conflict_penalty_applied = float(os.getenv('VWAP_PRO_CONFLICT_PENALTY', '2.0') or '2.0')
+                    score -= conflict_penalty_applied
+                    reasons.append('conflict_penalty')
 
             execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
             is_live = execution_mode == 'LIVE'
@@ -158,8 +159,6 @@ class VWAPProStrategy(EliteStrategy):
             min_score_default = '5.8' if is_live else '5.0'
             min_trend_score_default = '5.5' if is_live else '4.5'
             min_score = float(os.getenv('VWAP_PRO_MIN_TREND_ALIGNED_SCORE', min_trend_score_default) if trend_alignment else os.getenv('VWAP_PRO_MIN_SCORE', min_score_default))
-            if not trend_alignment:
-                min_score += conflict_penalty_applied
             if ((is_live and require_alignment_live) or ((not is_live) and require_alignment_shadow)) and not trend_alignment:
                 self._no_vote('underlying_direction_conflict')
                 return None
