@@ -39,11 +39,16 @@ class OrderFlowStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
             execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
             is_live_mode = execution_mode == 'LIVE'
-            allow_orderflow_trigger = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'false' if is_live_mode else 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
-            allow_ltp_trigger = str(os.getenv('ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
-            trigger_min_score = float(os.getenv('ORDERFLOW_TRIGGER_MIN_SCORE', '7.0' if is_live_mode else '5.0') or ('7.0' if is_live_mode else '5.0'))
-            trigger_max_spread_pct = float(os.getenv('ORDERFLOW_TRIGGER_MAX_SPREAD_PCT', '8.0' if is_live_mode else '12.0') or ('8.0' if is_live_mode else '12.0'))
+            allow_orderflow_trigger = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+            allow_ltp_trigger = str(os.getenv('ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER', os.getenv('ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER', 'false'))).strip().lower() in {'1', 'true', 'yes', 'on'}
+            trigger_min_score = float(os.getenv('ORDERFLOW_TRIGGER_MIN_SCORE_LIVE' if is_live_mode else 'ORDERFLOW_TRIGGER_MIN_SCORE', '6.5' if is_live_mode else '5.0') or ('6.5' if is_live_mode else '5.0'))
+            trigger_max_spread_pct = float(os.getenv('ORDERFLOW_TRIGGER_MAX_SPREAD_PCT_LIVE' if is_live_mode else 'ORDERFLOW_TRIGGER_MAX_SPREAD_PCT', '8.0' if is_live_mode else '12.0') or ('8.0' if is_live_mode else '12.0'))
             context_min_score = float(os.getenv('ORDERFLOW_CONTEXT_MIN_SCORE', '4.0') or '4.0')
+            require_tradable_quote_live = str(os.getenv('ORDERFLOW_REQUIRE_TRADABLE_QUOTE_LIVE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+            tradable_quote = bool(indicators.get('tradable_quote', True))
+            quote_depth_valid = bool(indicators.get('quote_depth_valid', True))
+            tick_age_ms = float(indicators.get('tick_age_ms') or 0.0)
+            max_tick_age_ms = float(os.getenv('LIVE_MAX_TICK_AGE_MS', '2500') or '2500')
 
             if bid <= 0 or ask <= 0 or ask <= bid:
                 self._no_vote('ltp_only_no_depth' if not depth else 'missing_bid_ask')
@@ -88,12 +93,13 @@ class OrderFlowStrategy(EliteStrategy):
                     return None
                 trigger_conditions_met = bool(
                     allow_ltp_trigger
+                    and not is_live_mode
                     and strategy_score >= trigger_min_score
                     and spread_pct > 0
                     and spread_pct <= trigger_max_spread_pct
                     and stale_age_s <= 2.0
                 )
-                trigger_block_reason = '' if trigger_conditions_met else 'ltp_trigger_disabled'
+                trigger_block_reason = '' if trigger_conditions_met else ('ltp_fallback_not_allowed_live' if is_live_mode else 'ltp_trigger_disabled')
                 if not trigger_conditions_met and strategy_score < trigger_min_score:
                     trigger_block_reason = 'score_below_trigger_min'
                 elif not trigger_conditions_met and (spread_pct <= 0 or spread_pct > trigger_max_spread_pct):
@@ -127,9 +133,13 @@ class OrderFlowStrategy(EliteStrategy):
                     'spread_score': 2.0 if spread_pct <= trigger_max_spread_pct else 0.0,
                     'depth_score': 0.0,
                     'tick_score': 2.0 if tick_supports else 0.0,
-                    'direction_alignment_score': 2.0 if side_aligns else 0.0,
+                    'direction_alignment_score': 2.0 if (direction in {'CE', 'PE'} and direction == side) else 0.0,
                     'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0),
                     'premium_target_rr': 1.8,
+                    'tradable_quote': tradable_quote,
+                    'depth_available': depth_available,
+                    'premium_flow_direction': tick_direction,
+                    'liquidity_score': 1.0,
                 }
                 side_aligns = direction in {'CE', 'PE'} and direction == side
                 metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'tick_supports_direction': tick_supports})
@@ -168,25 +178,34 @@ class OrderFlowStrategy(EliteStrategy):
             side_alignment_ok = direction not in {'CE', 'PE'} or side_aligns
             trigger_conditions_met = bool(
                 allow_orderflow_trigger
+                and quote_depth_valid
+                and (tradable_quote or not (is_live_mode and require_tradable_quote_live))
+                and bid > 0.0
+                and ask > 0.0
                 and depth_available
                 and strategy_score >= trigger_min_score
                 and spread_pct <= trigger_max_spread_pct
                 and side_alignment_ok
                 and tick_supports
+                and tick_age_ms <= max_tick_age_ms
             )
             trigger_block_reason = ''
             if not allow_orderflow_trigger:
                 trigger_block_reason = 'trigger_role_disabled'
-            elif not depth_available:
-                trigger_block_reason = 'quote_depth_invalid'
+            elif not quote_depth_valid or not depth_available:
+                trigger_block_reason = 'quote_depth_missing'
+            elif is_live_mode and require_tradable_quote_live and not tradable_quote:
+                trigger_block_reason = 'tradable_quote_false'
             elif strategy_score < trigger_min_score:
-                trigger_block_reason = 'score_below_trigger_min'
+                trigger_block_reason = 'score_below_live_trigger_min' if is_live_mode else 'score_below_trigger_min'
             elif spread_pct > trigger_max_spread_pct:
-                trigger_block_reason = 'spread_above_trigger_max'
+                trigger_block_reason = 'spread_too_wide'
+            elif tick_age_ms > max_tick_age_ms:
+                trigger_block_reason = 'tick_stale'
             elif not side_alignment_ok:
                 trigger_block_reason = 'direction_bias_conflict'
             elif not tick_supports:
-                trigger_block_reason = 'tick_direction_not_supportive'
+                trigger_block_reason = 'negative_premium_flow'
 
             metadata = {
                 'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'trigger' if trigger_conditions_met else 'context',
@@ -199,7 +218,7 @@ class OrderFlowStrategy(EliteStrategy):
                 'liquidity_ok': spread_pct <= 12.0, 'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0),
                 'premium_target_rr': 1.8, 'can_trigger': bool(trigger_conditions_met), 'trigger_min_score': trigger_min_score,
                 'trigger_max_spread_pct': trigger_max_spread_pct, 'trigger_conditions_met': trigger_conditions_met,
-                'trigger_block_reason': trigger_block_reason, 'quote_depth_valid': bool(depth_available),
+                'trigger_block_reason': trigger_block_reason, 'quote_depth_valid': bool(quote_depth_valid),
                 'trigger_eligible': bool(trigger_conditions_met),
                 'trigger_disqualified_by': trigger_block_reason or None,
                 'liquidity_score': 2.0 if spread_pct <= 12.0 else 0.5,
@@ -207,7 +226,12 @@ class OrderFlowStrategy(EliteStrategy):
                 'depth_score': 2.0 if depth_available else 0.0,
                 'tick_score': 2.0 if tick_supports else 0.0,
                 'direction_alignment_score': 2.0 if side_alignment_ok else 0.0,
+                'tradable_quote': tradable_quote,
+                'depth_available': depth_available,
+                'premium_flow_direction': tick_direction,
             }
+            if trigger_conditions_met:
+                metadata['approval_candidate'] = 'orderflow_live_depth_trigger'
             metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0})
             return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
         except Exception as e:
