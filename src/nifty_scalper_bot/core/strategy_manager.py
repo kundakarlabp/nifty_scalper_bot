@@ -2736,6 +2736,7 @@ class StrategyManager(_BaseStrategyManager):
                 except (TypeError, ValueError):
                     continue
             return max(0.0, _raw_score(vote))
+        mode_profile = self.get_strategy_mode_profile()
         trigger_votes: list[tuple[Signal, StrategyVote]] = []
         context_votes: list[tuple[Signal, StrategyVote]] = []
         for signal, vote in signals:
@@ -2747,7 +2748,7 @@ class StrategyManager(_BaseStrategyManager):
             else:
                 trigger_votes.append((signal, vote))
         if not trigger_votes:
-            allow_context_promotion = str(os.getenv("STRATEGY_ALLOW_CONTEXT_PROMOTION", "false")).lower() in {"1", "true", "yes", "on"}
+            allow_context_promotion = bool(mode_profile.get("allow_context_promotion", True))
             live_promotion_allowed = str(os.getenv("STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED", "false")).lower() in {"1", "true", "yes", "on"}
             execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
             allowed_strategies = {s.strip() for s in str(os.getenv("STRATEGY_CONTEXT_PROMOTION_ALLOWED_STRATEGIES", "OrderFlow,VWAPPro")).split(",") if s.strip()}
@@ -2802,7 +2803,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata = dict(best_signal.metadata or {})
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
         single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
-        allow_scalp_single = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
+        allow_scalp_single = bool(mode_profile.get("allow_single_vote", True)) and str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
         raw_trigger_score = _raw_score(best_vote)
         weighted_trigger_score = _weighted_score(best_vote)
         vetoed = False
@@ -2816,6 +2817,8 @@ class StrategyManager(_BaseStrategyManager):
         final_score = max(0.0, min(10.0, final_score))
         if opposite_context and max(_context_veto_score(v) for v in opposite_context) >= 8.0:
             vetoed = True
+        selected_ok = True
+        near_atm = indicator_near_atm
         if len(trigger_votes) == 1:
             selected_ce = str(
                 metadata.get("selected_ce")
@@ -2962,6 +2965,31 @@ class StrategyManager(_BaseStrategyManager):
                 extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "data_gate": True, "setup_score": raw_trigger_score, "setup_min": threshold, "weighted_score": weighted_trigger_score, "regime_weight": _regime_weight(best_vote), "context_bonus": context_bonus, "context_penalty": context_penalty, "final_score": final_score, "final_min": threshold, "allowed": False, "blocked_at": "strategy_manager_combine", "blocked_reason": blocked_reason},
             )
             return None
+        quality_score, quality_meta = self._compute_trade_quality_score(
+            best_vote,
+            indicator_map,
+            symbol=symbol_norm,
+            selected_ok=selected_ok,
+            near_atm_ok=near_atm,
+            context_votes=[v for _, v in context_votes],
+        )
+        quality_min_required = float(mode_profile.get("min_trade_quality", 5.0))
+        quality_pass = quality_score >= quality_min_required
+        metadata.update(quality_meta)
+        metadata["quality_min_required"] = quality_min_required
+        metadata["quality_pass"] = quality_pass
+        if not quality_pass:
+            metadata["quality_block_reason"] = str(metadata.get("quality_block_reason") or "trade_quality_below_threshold")
+            log.info(
+                "STRATEGY_QUALITY_REJECT symbol=%s strategy=%s side=%s score=%.2f reason=%s",
+                symbol_norm,
+                best_vote.strategy,
+                best_vote.side,
+                quality_score,
+                metadata["quality_block_reason"],
+            )
+            return None
+
         metadata.setdefault("trigger_strategy_score", metadata.get("strategy_score"))
         metadata["setup_score"] = round(raw_trigger_score, 3)
         metadata["raw_setup_score"] = round(raw_trigger_score, 3)
@@ -2987,6 +3015,67 @@ class StrategyManager(_BaseStrategyManager):
             take_profit=best_signal.take_profit,
             metadata=metadata,
         )
+
+    def get_strategy_mode_profile(self) -> dict[str, t.Any]:
+        """Args: none. Returns: strategy mode profile. Raises: none."""
+        execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        if execution_mode == "LIVE":
+            defaults = {"allow_context_promotion": False, "allow_single_vote": False, "min_trade_quality": 7.0}
+        elif execution_mode == "PAPER":
+            defaults = {"allow_context_promotion": True, "allow_single_vote": True, "min_trade_quality": 5.8}
+        else:
+            defaults = {"allow_context_promotion": True, "allow_single_vote": True, "min_trade_quality": 5.0}
+        return {
+            "mode": execution_mode,
+            "allow_context_promotion": str(os.getenv("STRATEGY_ALLOW_CONTEXT_PROMOTION", str(defaults["allow_context_promotion"]).lower())).lower() in {"1", "true", "yes", "on"},
+            "allow_single_vote": str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_BY_MODE", str(defaults["allow_single_vote"]).lower())).lower() in {"1", "true", "yes", "on"},
+            "min_trade_quality": float(os.getenv(f"STRATEGY_MIN_TRADE_QUALITY_{execution_mode}", str(defaults["min_trade_quality"])) or defaults["min_trade_quality"]),
+        }
+
+    def _compute_trade_quality_score(
+        self,
+        vote: StrategyVote,
+        indicators: t.Mapping[str, t.Any],
+        *,
+        symbol: str,
+        selected_ok: bool,
+        near_atm_ok: bool,
+        context_votes: list[StrategyVote],
+    ) -> tuple[float, dict[str, t.Any]]:
+        """Args: vote+indicators. Returns: trade quality score and metadata. Raises: none."""
+        payload = dict(vote.metadata or {})
+        components = {
+            "strategy_score": min(3.0, max(0.0, float(payload.get("strategy_score", vote.score or 0.0)) / 3.0)),
+            "direction_alignment": float(payload.get("direction_alignment_score", 1.0)),
+            "liquidity_spread_quality": min(2.0, max(0.0, float(payload.get("liquidity_score", 1.0)))),
+            "freshness_tick_quality": 1.0 if not bool(indicators.get("stale_data_used")) else 0.0,
+            "same_side_context_confirmation": 1.0 if any(v.side == vote.side for v in context_votes) else 0.0,
+            "market_regime_time_suitability": 1.0,
+        }
+        penalties: dict[str, float] = {}
+        if bool(indicators.get("stale_data_used")):
+            penalties["stale_data"] = -3.0
+        spread_pct = float(payload.get("spread_pct") or indicators.get("spread_pct") or 0.0)
+        if spread_pct > float(os.getenv("STRATEGY_MAX_SPREAD_PCT", "28.0")):
+            penalties["spread_above_max"] = -3.0
+        if any(v.side in {"CE", "PE"} and v.side != vote.side and float((v.metadata or {}).get("context_veto_score", v.score)) >= 8.0 for v in context_votes):
+            penalties["opposite_context_veto"] = -4.0
+        if not selected_ok and not near_atm_ok:
+            penalties["non_selected_far_otm"] = -3.0
+        if str(vote.strategy).lower() == "orderflow" and str(payload.get("role", "")).lower() == "trigger":
+            if not bool(payload.get("quote_depth_valid")):
+                penalties["orderflow_missing_depth"] = -2.0
+        score = max(0.0, min(10.0, sum(components.values()) + sum(penalties.values())))
+        block_reason = "ok" if score >= 0 else "invalid"
+        if penalties:
+            block_reason = ",".join(penalties.keys())
+        return score, {
+            "trade_quality_score": round(score, 3),
+            "trade_quality_components": components,
+            "trade_quality_penalties": penalties,
+            "quality_block_reason": block_reason,
+            "trade_quality_symbol": symbol,
+        }
 
     def increment_observability_counter(self, key: str) -> None:
         """Args: key. Returns: None. Raises: None."""
