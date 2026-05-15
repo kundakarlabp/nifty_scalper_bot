@@ -29,7 +29,7 @@ class OrderFlowStrategy(EliteStrategy):
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
-            self._no_vote("stale_or_invalid_data")
+            self._no_vote('stale_or_invalid_data')
             bid = float(indicators.get('bid') or 0.0)
             ask = float(indicators.get('ask') or 0.0)
             depth = indicators.get('depth') or {}
@@ -37,10 +37,14 @@ class OrderFlowStrategy(EliteStrategy):
             direction = str(indicators.get('direction_bias') or '').upper()
             contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
+            execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
+            is_live_mode = execution_mode == 'LIVE'
+            allow_orderflow_trigger = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'false' if is_live_mode else 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+            allow_ltp_trigger = str(os.getenv('ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
+            trigger_min_score = float(os.getenv('ORDERFLOW_TRIGGER_MIN_SCORE', '7.0' if is_live_mode else '5.0') or ('7.0' if is_live_mode else '5.0'))
+            trigger_max_spread_pct = float(os.getenv('ORDERFLOW_TRIGGER_MAX_SPREAD_PCT', '8.0' if is_live_mode else '12.0') or ('8.0' if is_live_mode else '12.0'))
+            context_min_score = float(os.getenv('ORDERFLOW_CONTEXT_MIN_SCORE', '4.0') or '4.0')
 
-            allow_orderflow_trigger = str(
-                os.getenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'false')
-            ).strip().lower() in {'1', 'true', 'yes', 'on'}
             if bid <= 0 or ask <= 0 or ask <= bid:
                 self._no_vote('ltp_only_no_depth' if not depth else 'missing_bid_ask')
                 LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=missing_bid_ask')
@@ -56,13 +60,13 @@ class OrderFlowStrategy(EliteStrategy):
             depth_available = bool(bids and asks)
             total_bid = sum(float(level.get('quantity', 0.0)) for level in bids[:5]) if depth_available else 0.0
             total_ask = sum(float(level.get('quantity', 0.0)) for level in asks[:5]) if depth_available else 0.0
+
             if total_bid + total_ask <= 0:
                 allow_fallback = str(os.getenv('ORDERFLOW_ALLOW_LTP_TICK_FALLBACK', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
                 strict_spread_required = str(os.getenv('ORDERFLOW_REQUIRE_SPREAD_IN_STRICT_MODE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
                 stale_age_s = float(indicators.get('data_age_seconds') or 0.0)
                 if not allow_fallback:
                     self._no_vote('missing_depth')
-                    LOGGER.debug('STRATEGY_NO_VOTE strategy=OrderFlow reason=depth_missing')
                     return None
                 if stale_age_s > 2.0:
                     self._no_vote('stale_tick_for_ltp_fallback')
@@ -70,30 +74,63 @@ class OrderFlowStrategy(EliteStrategy):
                 if strict_spread_required and spread_pct <= 0:
                     self._no_vote('spread_unavailable_for_ltp_fallback')
                     return None
-                tick_direction = str(indicators.get('tick_direction') or '').upper()
-                if option_premium_domain:
-                    side = contract_side
-                    positive_flow = tick_direction in {'UP', 'BUY'}
-                    if not positive_flow:
-                        self._no_vote('premium_flow_not_supportive')
-                        return None
-                else:
-                    side = 'CE' if tick_direction in {'UP', 'BUY'} else 'PE'
-                depth_imbalance = 0.0
+
+                side = contract_side if option_premium_domain else ('CE' if tick_direction in {'UP', 'BUY'} else 'PE')
+                tick_supports = tick_direction in {'UP', 'BUY'} if option_premium_domain else ((side == 'CE' and tick_direction in {'UP', 'BUY'}) or (side == 'PE' and tick_direction in {'DOWN', 'SELL'}))
                 fallback_score = 2.0 + (2.0 if spread_pct <= 12.0 else 0.0)
                 if direction in {'CE', 'PE'} and direction == side:
                     fallback_score += 1.5
                 if tick_direction in {'UP', 'DOWN', 'BUY', 'SELL'}:
                     fallback_score += 1.0
                 strategy_score = min(5.5, max(0.0, fallback_score))
-                if strategy_score < 4.0:
+                if strategy_score < context_min_score:
                     self._no_vote('weak_tick_confirmation')
                     return None
-                metadata = {'orderflow_depth_source': 'ltp_tick_fallback', 'risk_label': 'ltp_only_orderflow_reduced_confidence'}
-                metadata.update({'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'trigger' if allow_orderflow_trigger and strategy_score >= 7.0 and spread_pct <= 8.0 else 'context', 'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'trade_side': side, 'contract_side': side, 'direction_bias': direction if direction in {'CE', 'PE'} else None, 'strategy_score': strategy_score, 'spread_pct': round(spread_pct, 3), 'depth_imbalance': 0.0, 'tick_direction': tick_direction, 'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0), 'premium_target_rr': 1.8})
+                trigger_conditions_met = bool(
+                    allow_ltp_trigger
+                    and strategy_score >= trigger_min_score
+                    and spread_pct > 0
+                    and spread_pct <= trigger_max_spread_pct
+                    and stale_age_s <= 2.0
+                )
+                trigger_block_reason = '' if trigger_conditions_met else 'ltp_trigger_disabled'
+                if not trigger_conditions_met and strategy_score < trigger_min_score:
+                    trigger_block_reason = 'score_below_trigger_min'
+                elif not trigger_conditions_met and (spread_pct <= 0 or spread_pct > trigger_max_spread_pct):
+                    trigger_block_reason = 'spread_above_trigger_max'
+                elif not trigger_conditions_met and stale_age_s > 2.0:
+                    trigger_block_reason = 'stale_tick_for_ltp_trigger'
+                metadata = {
+                    'orderflow_depth_source': 'ltp_tick_fallback',
+                    'risk_label': 'ltp_only_orderflow_reduced_confidence',
+                    'strategy': 'OrderFlow',
+                    'strategy_name': 'OrderFlow',
+                    'role': 'trigger' if trigger_conditions_met else 'context',
+                    'source_domain': 'market_microstructure',
+                    'context_score': strategy_score,
+                    'side': side,
+                    'trade_side': side,
+                    'contract_side': side,
+                    'direction_bias': direction if direction in {'CE', 'PE'} else None,
+                    'strategy_score': strategy_score,
+                    'setup_quality': strategy_score,
+                    'spread_pct': round(spread_pct, 3),
+                    'depth_imbalance': 0.0,
+                    'tick_direction': tick_direction,
+                    'score_reasons': ['ltp_fallback', 'reduced_confidence'],
+                    'trigger_min_score': trigger_min_score,
+                    'trigger_max_spread_pct': trigger_max_spread_pct,
+                    'trigger_conditions_met': trigger_conditions_met,
+                    'trigger_block_reason': trigger_block_reason,
+                    'quote_depth_valid': False,
+                    'can_trigger': bool(trigger_conditions_met),
+                    'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0),
+                    'premium_target_rr': 1.8,
+                }
                 side_aligns = direction in {'CE', 'PE'} and direction == side
-                metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'can_trigger': bool(metadata['role'] == 'trigger')})
+                metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'tick_supports_direction': tick_supports})
                 return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.55, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
+
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
             side = contract_side if option_premium_domain else ('CE' if depth_imbalance > 0 else 'PE')
             if option_premium_domain and depth_imbalance <= 0 and tick_direction not in {'UP', 'BUY'}:
@@ -108,11 +145,8 @@ class OrderFlowStrategy(EliteStrategy):
             if abs(depth_imbalance) >= 0.15:
                 score += 2.0
                 reasons.append('depth_imbalance')
-            if option_premium_domain:
-                aligned = tick_direction in {'UP', 'BUY'}
-            else:
-                aligned = ((side == 'CE' and tick_direction in {'UP', 'BUY'}) or (side == 'PE' and tick_direction in {'DOWN', 'SELL'}))
-            if aligned:
+            tick_supports = tick_direction in {'UP', 'BUY'} if option_premium_domain else ((side == 'CE' and tick_direction in {'UP', 'BUY'}) or (side == 'PE' and tick_direction in {'DOWN', 'SELL'}))
+            if tick_supports:
                 score += 2.0
                 reasons.append('tick_direction_alignment')
             if direction in {'CE', 'PE'} and direction == side:
@@ -121,59 +155,41 @@ class OrderFlowStrategy(EliteStrategy):
             if not bool(indicators.get('stale_data_used')):
                 score += 1.0
             score += 1.0
-
             strategy_score = max(0.0, min(10.0, score))
-            if strategy_score < 4.0:
+            if strategy_score < context_min_score:
                 self._no_vote('low_score')
                 return None
-            metadata = {
-                'strategy': 'OrderFlow',
-                'strategy_name': 'OrderFlow',
-                'role': 'trigger' if allow_orderflow_trigger and strategy_score >= 7.0 and spread_pct <= 8.0 else 'context',
-                'source_domain': 'market_microstructure',
-                'context_score': strategy_score,
-                'side': side,
-                'trade_side': side,
-                'contract_side': side,
-                'direction_bias': direction if direction in {'CE', 'PE'} else None,
-                'strategy_score': strategy_score,
-                'setup_quality': strategy_score,
-                'setup_type': 'microstructure_imbalance',
-                'required_data_present': depth_available,
-                'stale_data_used': bool(indicators.get('stale_data_used')),
-                'candidate_symbol': symbol,
-                'score_reasons': reasons,
-                'rejection_reasons': [] if depth_available else ['depth_missing'],
-                'bid': bid,
-                'ask': ask,
-                'spread_pct': round(spread_pct, 3),
-                'depth_imbalance': round(depth_imbalance, 4),
-                'tick_direction': tick_direction,
-                'liquidity_ok': spread_pct <= 12.0,
-                'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0),
-                'premium_target_rr': 1.8,
-            }
+
             side_aligns = direction in {'CE', 'PE'} and direction == side
-            metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'can_trigger': bool(metadata['role'] == 'trigger')})
-            LOGGER.info('STRATEGY_VOTE strategy=OrderFlow side=%s score=%.2f', side, strategy_score)
-            if metadata["role"] == "trigger":
-                LOGGER.info(
-                    "ORDERFLOW_TRIGGER_ROLE_ENABLED symbol=%s score=%.2f spread_pct=%.3f",
-                    symbol,
-                    strategy_score,
-                    spread_pct,
-                )
-            return EliteSignal(
-                symbol=symbol,
-                signal='BUY',
-                confidence=max(0.1, min(0.85, strategy_score / 10.0)),
-                entry_price=current_price,
-                stop_loss=None,
-                target=None,
-                quantity=self._cfg.quantity or 1,
-                strategy_name='OrderFlow',
-                metadata=metadata,
-            )
+            side_alignment_ok = direction not in {'CE', 'PE'} or side_aligns
+            trigger_conditions_met = bool(allow_orderflow_trigger and strategy_score >= trigger_min_score and spread_pct <= trigger_max_spread_pct and side_alignment_ok and tick_supports)
+            trigger_block_reason = ''
+            if not allow_orderflow_trigger:
+                trigger_block_reason = 'trigger_role_disabled'
+            elif strategy_score < trigger_min_score:
+                trigger_block_reason = 'score_below_trigger_min'
+            elif spread_pct > trigger_max_spread_pct:
+                trigger_block_reason = 'spread_above_trigger_max'
+            elif not side_alignment_ok:
+                trigger_block_reason = 'direction_bias_conflict'
+            elif not tick_supports:
+                trigger_block_reason = 'tick_direction_not_supportive'
+
+            metadata = {
+                'strategy': 'OrderFlow', 'strategy_name': 'OrderFlow', 'role': 'trigger' if trigger_conditions_met else 'context',
+                'source_domain': 'market_microstructure', 'context_score': strategy_score, 'side': side, 'trade_side': side,
+                'contract_side': side, 'direction_bias': direction if direction in {'CE', 'PE'} else None,
+                'strategy_score': strategy_score, 'setup_quality': strategy_score, 'setup_type': 'microstructure_imbalance',
+                'required_data_present': depth_available, 'stale_data_used': bool(indicators.get('stale_data_used')), 'candidate_symbol': symbol,
+                'score_reasons': reasons, 'rejection_reasons': [] if depth_available else ['depth_missing'], 'bid': bid, 'ask': ask,
+                'spread_pct': round(spread_pct, 3), 'depth_imbalance': round(depth_imbalance, 4), 'tick_direction': tick_direction,
+                'liquidity_ok': spread_pct <= 12.0, 'premium_stop_distance': max(0.8 * atr, current_price * 0.02, 1.0),
+                'premium_target_rr': 1.8, 'can_trigger': bool(trigger_conditions_met), 'trigger_min_score': trigger_min_score,
+                'trigger_max_spread_pct': trigger_max_spread_pct, 'trigger_conditions_met': trigger_conditions_met,
+                'trigger_block_reason': trigger_block_reason, 'quote_depth_valid': bool(depth_available),
+            }
+            metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0})
+            return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
         except Exception as e:
             LOGGER.error('Failure in OrderFlowStrategy._evaluate_signal: %s', e, exc_info=e)
             return None

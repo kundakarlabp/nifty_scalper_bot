@@ -6,14 +6,38 @@ class _Dummy:
     pass
 
 
-def test_orderflow_context_metadata_contract_side() -> None:
+def _indicators() -> dict:
+    return {
+        'bid': 100.0,
+        'ask': 101.0,
+        'buy_qty': 100,
+        'sell_qty': 90,
+        'tick_direction': 'UP',
+        'spread_pct': 1.0,
+        'atr': 2.0,
+        'direction_bias': 'CE',
+        'depth': {'buy': [{'quantity': 500}], 'sell': [{'quantity': 100}]},
+    }
+
+
+def test_orderflow_context_metadata_contract_side(monkeypatch) -> None:
+    monkeypatch.setenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'false')
     strategy = OrderFlowStrategy(OrderFlowStrategyConfig(), _Dummy())
-    signal = strategy._evaluate_signal('NFO:NIFTY26FEB22500CE', {'bid': 100.0, 'ask': 101.0, 'buy_qty': 100, 'sell_qty': 90, 'tick_direction': 'UP', 'spread_pct': 5.0, 'atr': 2.0, 'direction_bias': 'UNKNOWN'}, 100.5)
+    signal = strategy._evaluate_signal('NFO:NIFTY26FEB22500CE', _indicators(), 100.5)
     assert signal is not None
     metadata = signal.metadata
     assert metadata['role'] == 'context'
     assert metadata['contract_side'] in {'CE', 'PE'}
     assert metadata['trade_side'] == metadata['contract_side']
-    assert metadata['direction_bias'] is None
-    assert 'context_bonus_score' in metadata
-    assert 'context_veto_score' in metadata
+    assert metadata['can_trigger'] is False
+
+
+def test_orderflow_trigger_role(monkeypatch) -> None:
+    monkeypatch.setenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')
+    monkeypatch.setenv('ORDERFLOW_TRIGGER_MIN_SCORE', '5.0')
+    monkeypatch.setenv('ORDERFLOW_TRIGGER_MAX_SPREAD_PCT', '12.0')
+    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(), _Dummy())
+    signal = strategy._evaluate_signal('NFO:NIFTY26FEB22500CE', _indicators(), 100.5)
+    assert signal is not None
+    assert signal.metadata['role'] == 'trigger'
+    assert signal.metadata['can_trigger'] is True

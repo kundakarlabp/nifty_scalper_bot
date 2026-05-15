@@ -33,3 +33,12 @@ def test_vwap_pro_never_emits_ce_for_pe_symbol() -> None:
     signal = strategy._evaluate_signal('NFO:NIFTY26FEB22500PE', _base_indicators('PE'), 99.0)
     assert signal is not None
     assert signal.metadata['side'] == 'PE'
+
+
+def test_vwap_pro_trend_aligned_lower_threshold(monkeypatch) -> None:
+    monkeypatch.setenv('VWAP_PRO_MIN_TREND_ALIGNED_SCORE', '4.5')
+    strategy = VWAPProStrategy(config=VWAPProStrategyConfig(), indicator_engine=_DummyEngine())
+    indicators = _base_indicators('CE')
+    indicators.update({'volume': 600.0, 'avg_volume': 1000.0, 'futures_vwap_slope': 1.0, 'futures_volume_ratio': 1.2})
+    signal = strategy._evaluate_signal('NFO:NIFTY26FEB22500CE', indicators, 101.0)
+    assert signal is not None
