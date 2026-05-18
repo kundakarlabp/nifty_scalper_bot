@@ -59,7 +59,8 @@ class SMCStrategy(EliteStrategy):
             contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
             if option_premium_domain:
                 premium_reversal = bool(bullish_sweep or indicators.get('premium_reclaim') or indicators.get('bullish_reversal'))
-                if not premium_reversal:
+                structure_flip = bool(indicators.get('choch_confirmed') or indicators.get('bos_confirmed'))
+                if not premium_reversal and not structure_flip:
                     self._no_vote('premium_not_reversing_up')
                     return None
                 side = contract_side
@@ -146,6 +147,7 @@ class SMCStrategy(EliteStrategy):
                 'underlying_invalidation_level': sweep_level,
                 'premium_stop_distance': max(atr * 1.2, current_price * 0.025, 1.0),
                 'premium_target_rr': 2.0,
+                'premium_reversal_gate_mode': 'hard' if option_premium_domain and not premium_reclaim and not structure_confirmed else 'soft',
             }
             LOGGER.info('STRATEGY_VOTE strategy=SMC side=%s score=%.2f', side, strategy_score)
             return EliteSignal(

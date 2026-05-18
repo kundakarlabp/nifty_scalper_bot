@@ -147,7 +147,8 @@ class OrderFlowStrategy(EliteStrategy):
 
             depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
             side = contract_side if option_premium_domain else ('CE' if depth_imbalance > 0 else 'PE')
-            if option_premium_domain and depth_imbalance <= 0 and tick_direction not in {'UP', 'BUY'}:
+            clear_adverse_flow = bool(option_premium_domain and quote_depth_valid and depth_available and depth_imbalance <= -0.10 and tick_direction not in {'UP', 'BUY'})
+            if clear_adverse_flow:
                 self._no_vote('negative_premium_flow')
                 return None
 
@@ -229,6 +230,7 @@ class OrderFlowStrategy(EliteStrategy):
                 'tradable_quote': tradable_quote,
                 'depth_available': depth_available,
                 'premium_flow_direction': tick_direction,
+                'negative_premium_flow_mode': 'hard' if clear_adverse_flow else 'soft',
             }
             if trigger_conditions_met:
                 metadata['approval_candidate'] = 'orderflow_live_depth_trigger'

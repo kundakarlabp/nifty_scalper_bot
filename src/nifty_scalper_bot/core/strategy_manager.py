@@ -2831,8 +2831,21 @@ class StrategyManager(_BaseStrategyManager):
         context_penalty = min(1.5, 0.60 * negative_context)
         final_score = raw_trigger_score + context_bonus - context_penalty
         final_score = max(0.0, min(10.0, final_score))
-        if opposite_context and max(self._extract_context_veto_score(v) for v in opposite_context) >= 8.0:
-            vetoed = True
+        context_confidence_floor = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MIN_CONFIDENCE", "0.80") or "0.80")
+        context_freshness_max_age_s = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MAX_AGE_SECONDS", "120") or "120")
+        now_epoch = time.time()
+        hard_veto_candidates = []
+        for vote in opposite_context:
+            md = dict(vote.metadata or {})
+            vote_ts = float(md.get("timestamp_epoch") or md.get("ts") or now_epoch)
+            age_s = max(0.0, now_epoch - vote_ts)
+            if (
+                self._extract_context_veto_score(vote) >= 8.0
+                and float(vote.confidence) >= context_confidence_floor
+                and age_s <= context_freshness_max_age_s
+            ):
+                hard_veto_candidates.append(vote)
+        vetoed = bool(hard_veto_candidates)
         selected_ok = True
         near_atm = indicator_near_atm
         if trigger_votes and len(trigger_votes) == 1:
@@ -2940,8 +2953,10 @@ class StrategyManager(_BaseStrategyManager):
                         blocked_reason = "confidence_below_min"
                     elif not selected_ok:
                         blocked_reason = "not_selected_or_near_atm"
+                    elif not bool(metadata.get("quote_depth_valid", True)):
+                        blocked_reason = "quote_depth_invalid"
                     elif vetoed:
-                        blocked_reason = "context_veto"
+                        blocked_reason = "hard_context_veto"
                     elif not allow_scalp_single:
                         blocked_reason = "single_vote_scalp_disabled"
                     else:
@@ -2979,7 +2994,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata["context_penalty"] = round(context_penalty, 3)
         metadata["final_trade_score"] = round(final_score, 3)
         if vetoed or final_score < threshold:
-            blocked_reason = "context_veto" if vetoed else "final_trade_score_below_threshold"
+            blocked_reason = "hard_context_veto" if vetoed else "final_trade_score_below_threshold"
             log.info(
                 "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s data_gate=%s setup_score=%.2f setup_min=%.2f weighted_score=%.2f regime_weight=%.2f context_bonus=%.2f context_penalty=%.2f final_score=%.2f final_min=%.2f allowed=%s blocked_at=%s blocked_reason=%s",
                 symbol_norm, best_vote.strategy, best_vote.side, True, raw_trigger_score, threshold, weighted_trigger_score, _regime_weight(best_vote), context_bonus, context_penalty, final_score, threshold, False, "strategy_manager_combine", blocked_reason,

@@ -7069,15 +7069,13 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     picked_ce, picked_pe = pick_atm_option_symbols_from_basket(basket)
     selected_ce = cast(
         str | None,
-        getattr(ctx, "selected_ce", None)
-        or basket.get("selected_ce")
+        basket.get("selected_ce")
         or basket.get("atm_ce")
         or picked_ce,
     )
     selected_pe = cast(
         str | None,
-        getattr(ctx, "selected_pe", None)
-        or basket.get("selected_pe")
+        basket.get("selected_pe")
         or basket.get("atm_pe")
         or picked_pe,
     )
@@ -7087,13 +7085,13 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         selected_pe = old_pe
     basket.update({"selected_ce": selected_ce, "selected_pe": selected_pe, "option_symbols": option_symbols, "symbols": option_symbols})
     ctx.active_trading_universe = basket
-    if selected_ce and not getattr(ctx, "selected_ce", None):
+    if selected_ce:
         ctx.selected_ce = str(selected_ce)
-    elif selected_ce is None:
+    else:
         ctx.selected_ce = None
-    if selected_pe and not getattr(ctx, "selected_pe", None):
+    if selected_pe:
         ctx.selected_pe = str(selected_pe)
-    elif selected_pe is None:
+    else:
         ctx.selected_pe = None
     ctx.atm_ce_symbol = selected_ce
     ctx.atm_pe_symbol = selected_pe
@@ -7192,7 +7190,12 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
     market_open = get_market_state() == MarketState.OPEN
     broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
-    live_orders_armed=bool(live_mode and market_open and evaluation_ready and ce_exec_ready and pe_exec_ready and context_exec_ready and broker_ready)
+    execution_ready_by_symbol = {
+        str(selected_ce or ""): bool(ce_exec_ready),
+        str(selected_pe or ""): bool(pe_exec_ready),
+    }
+    any_selected_option_exec_ready = bool(ce_exec_ready or pe_exec_ready)
+    live_orders_armed=bool(live_mode and market_open and evaluation_ready and context_exec_ready and broker_ready and any_selected_option_exec_ready)
     missing=[]
     if not selected_ce: missing.append('selected_ce_missing')
     if not selected_pe: missing.append('selected_pe_missing')
@@ -7208,9 +7211,12 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if not broker_ready: missing.append('broker_or_order_manager_not_ready')
     block_reason=None if live_orders_armed else ((f"execution_not_armed:{','.join(missing)}" if evaluation_ready else f"startup_pipeline_incomplete:{','.join(missing)}"))
     ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=live_orders_armed; ctx.live_block_reason=block_reason
-    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, block_reason)
+    ctx.execution_ready_by_symbol = execution_ready_by_symbol
+    ctx.selected_ce_exec_ready = bool(ce_exec_ready)
+    ctx.selected_pe_exec_ready = bool(pe_exec_ready)
+    LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s ce_exec_ready=%s pe_exec_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, ce_exec_ready, pe_exec_ready, execution_ready_by_symbol, block_reason)
     if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
-        ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols)
+        ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols, execution_ready_by_symbol=execution_ready_by_symbol)
 
 
 def _commit_active_dynamic_basket(

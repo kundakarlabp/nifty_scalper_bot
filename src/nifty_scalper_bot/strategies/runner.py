@@ -601,6 +601,7 @@ class StrategyRunner:
         self._runtime_data_hard_ready = False
         self._runtime_evaluation_ready = False
         self._runtime_live_orders_armed = False
+        self._runtime_execution_ready_by_symbol: dict[str, bool] = {}
         self._runtime_readiness_reason: str | None = None
         self._runtime_startup_ready = False
         self._startup_gate_last_log_ts = 0.0
@@ -1961,11 +1962,19 @@ class StrategyRunner:
         selected_pe: str | None = None,
         atm_strike: int | float | str | None = None,
         option_symbols: list[str] | tuple[str, ...] | set[str] | None = None,
+        execution_ready_by_symbol: Mapping[str, bool] | None = None,
     ) -> None:
         """Set app-level runtime readiness flags. Args: flags/reason. Returns: none. Raises: none."""
         self._runtime_data_hard_ready = bool(data_hard_ready)
         self._runtime_evaluation_ready = bool(evaluation_ready)
         self._runtime_live_orders_armed = bool(live_orders_armed)
+        normalized_execution_ready: dict[str, bool] = {}
+        if execution_ready_by_symbol:
+            for raw_symbol, ready in execution_ready_by_symbol.items():
+                normalized = normalize_symbol(str(raw_symbol or ""))
+                if normalized:
+                    normalized_execution_ready[normalized] = bool(ready)
+        self._runtime_execution_ready_by_symbol = normalized_execution_ready
         self._runtime_readiness_reason = reason
         self._runtime_startup_ready = bool(
             self._runtime_data_hard_ready and self._runtime_evaluation_ready
@@ -1983,6 +1992,21 @@ class StrategyRunner:
             self._active_selected_pe,
             len(self._active_option_symbols),
         )
+
+    def _is_symbol_execution_ready(self, symbol: str) -> bool:
+        """Return per-symbol execution readiness in live mode. Args: symbol. Returns: bool. Raises: none."""
+        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+        is_live_mode = mode == "LIVE" or (
+            str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if not is_live_mode:
+            return True
+        if not bool(self._runtime_live_orders_armed):
+            return False
+        if not self._runtime_execution_ready_by_symbol:
+            return bool(self._runtime_live_orders_armed)
+        return bool(self._runtime_execution_ready_by_symbol.get(normalize_symbol(symbol), False))
 
     def get_runtime_readiness_snapshot(self) -> dict[str, object]:
         """Return runtime readiness snapshot. Args: none. Returns: readiness map. Raises: none."""
@@ -5564,7 +5588,10 @@ class StrategyRunner:
         now_ts: float,
     ) -> str | None:
         """Return reason for intentional same-bar strategy evaluation, else None."""
-        _ = tick
+        bid = float(tick.get("bid") or 0.0)
+        ask = float(tick.get("ask") or 0.0)
+        volume_now = float(tick.get("volume") or 0.0)
+        tick_ts = float(tick.get("timestamp_epoch") or tick.get("ts") or 0.0)
         if not _env_bool("RUNNER_ENABLE_INTRABAR_STRATEGY_EVAL", True):
             self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_env_disabled"
             return None
@@ -5610,15 +5637,34 @@ class StrategyRunner:
             return None
         if is_selected_option or near_selected:
             last_price = float(self._last_eval_price_by_symbol.get(symbol, 0.0) or 0.0)
+            detail: dict[str, Any] = {}
             if last_price > 0 and price > 0:
                 move_pct = abs(price - last_price) / last_price * 100.0
                 min_move_pct = float(os.getenv("RUNNER_INTRABAR_EVAL_MIN_PRICE_MOVE_PCT", "0.12") or "0.12")
+                detail["price_move_pct"] = round(move_pct, 4)
                 if move_pct >= min_move_pct:
                     self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
                     self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
                     return "same_bar_price_move_eval"
-                self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_price_move_too_small"
-                return None
+            last_quote = self._last_same_bar_eval_block_detail_by_symbol.get(symbol, {})
+            spread_now = (ask - bid) if ask > bid > 0 else 0.0
+            last_spread = float(last_quote.get("spread_now") or 0.0)
+            spread_delta = abs(spread_now - last_spread)
+            spread_trigger = spread_delta >= float(os.getenv("RUNNER_INTRABAR_SPREAD_DELTA_MIN", "0.25") or "0.25")
+            ts_changed = tick_ts > float(last_quote.get("tick_ts") or 0.0)
+            volume_delta = max(0.0, volume_now - float(last_quote.get("volume_now") or 0.0))
+            volume_trigger = volume_delta >= float(os.getenv("RUNNER_INTRABAR_VOLUME_DELTA_MIN", "100") or "100")
+            current_score = float(tick.get("candidate_score") or 0.0)
+            prev_score = float(last_quote.get("candidate_score") or 0.0)
+            score_trigger = current_score > prev_score + float(os.getenv("RUNNER_INTRABAR_CANDIDATE_SCORE_DELTA_MIN", "0.15") or "0.15")
+            detail.update({"volume_delta": round(volume_delta, 2), "spread_now": round(spread_now, 4), "spread_delta": round(spread_delta, 4), "bid_ask_fresh": bool(ts_changed), "tick_ts": tick_ts, "volume_now": volume_now, "candidate_score": current_score})
+            if spread_trigger or ts_changed or volume_trigger or score_trigger:
+                self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
+                self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
+                return "same_bar_market_update_eval"
+            self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_conditions_not_met"
+            self._last_same_bar_eval_block_detail_by_symbol[symbol] = detail
+            return None
         self._last_same_bar_eval_block_reason_by_symbol[symbol] = "intrabar_eval_interval_not_elapsed"
         return None
 
@@ -8905,8 +8951,8 @@ class StrategyRunner:
                 str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
                 in {"1", "true", "yes", "on"}
             )
-            if is_live_mode and not bool(self._runtime_live_orders_armed):
-                self._logger.info("ORDER_PATH_BLOCKED reason=runtime_live_orders_not_armed symbol=%s trace_id=%s", base_symbol, trace_id)
+            if is_live_mode and not self._is_symbol_execution_ready(base_symbol):
+                self._logger.info("ORDER_PATH_BLOCKED reason=runtime_symbol_execution_not_ready symbol=%s trace_id=%s live_orders_armed=%s symbol_ready=%s readiness_map=%s", base_symbol, trace_id, bool(self._runtime_live_orders_armed), bool(self._runtime_execution_ready_by_symbol.get(normalize_symbol(base_symbol), False)), self._runtime_execution_ready_by_symbol)
                 self._logger.info(
                     "RUNNER_BLOCKED_RUNTIME_READINESS",
                     extra={
@@ -8915,13 +8961,14 @@ class StrategyRunner:
                         "runtime_data_hard_ready": bool(self._runtime_data_hard_ready),
                         "runtime_evaluation_ready": bool(self._runtime_evaluation_ready),
                         "runtime_live_orders_armed": bool(self._runtime_live_orders_armed),
+                        "runtime_execution_ready_by_symbol": dict(self._runtime_execution_ready_by_symbol),
                         "runtime_readiness_reason": self._runtime_readiness_reason,
                         "trace_id": trace_id,
                     },
                 )
                 self._reset_execution_state(base_symbol)
-                _trace("runtime_live_orders_not_armed")
-                return SignalExecutionResult(False, "runtime_live_orders_not_armed")
+                _trace("runtime_symbol_execution_not_ready")
+                return SignalExecutionResult(False, "runtime_symbol_execution_not_ready")
             self._logger.info("ORDER_PATH_ENTERED symbol=%s reason=%s live_orders_armed=%s trace_id=%s", base_symbol, reason_key, bool(self._runtime_live_orders_armed), trace_id)
             option_side = infer_option_side(signal.symbol, metadata)
             if is_live_mode and option_side == "UNKNOWN":
