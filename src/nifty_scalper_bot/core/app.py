@@ -2188,6 +2188,11 @@ class BotContext:
     mdm_strict_hard_ready: bool = False
     spot_ready: bool = False
     evaluation_ready: bool = False
+    execution_ready_by_symbol: dict[str, bool] = field(default_factory=dict)
+    selected_ce_exec_ready: bool = False
+    selected_pe_exec_ready: bool = False
+    context_exec_ready: bool = False
+    broker_ready: bool = False
     runner_task: asyncio.Task[Any] | None = None
     readiness_mode: str = "SHADOW"
     effective_mode: str = "SHADOW"
@@ -6974,18 +6979,26 @@ def _pick_atm_option_symbols_from_basket(basket: dict[str, object]) -> tuple[str
 
 async def _ensure_selected_options_hydrated(
     ctx: BotContext, selected_ce: str | None, selected_pe: str | None, required_bars: int, reason: str
-) -> None:
+) -> dict[str, dict[str, int | bool]]:
     """Ensure selected options have required bars in MDM and runner. Args: ctx/symbols/required_bars/reason. Returns: none. Raises: none."""
     mdm = getattr(ctx, "market_data_manager", None)
     runner = getattr(ctx, "strategy_runner", None)
+    hydration_result: dict[str, dict[str, int | bool]] = {}
     if mdm is None:
-        return
+        return hydration_result
     for sym in (selected_ce, selected_pe):
         if not sym:
             continue
         before_mdm_bars = len(mdm.get_ohlc_bars(sym) or [])
         before_runner_bars = len(runner._indicator_engine.get_history(sym) or []) if runner is not None and hasattr(runner, "_indicator_engine") else 0
         if before_mdm_bars >= required_bars and before_runner_bars >= required_bars:
+            hydration_result[sym] = {
+                "before_mdm_bars": before_mdm_bars,
+                "after_mdm_bars": before_mdm_bars,
+                "before_runner_bars": before_runner_bars,
+                "after_runner_bars": before_runner_bars,
+                "ready": True,
+            }
             continue
         hydrate_fn = getattr(mdm, "hydrate_symbol_history", None)
         if callable(hydrate_fn):
@@ -7053,10 +7066,28 @@ async def _ensure_selected_options_hydrated(
                 required_bars,
                 reason,
             )
+        ready = bool(after_mdm_bars >= required_bars and after_runner_bars >= required_bars)
+        hydration_result[sym] = {
+            "before_mdm_bars": before_mdm_bars,
+            "after_mdm_bars": after_mdm_bars,
+            "before_runner_bars": before_runner_bars,
+            "after_runner_bars": after_runner_bars,
+            "ready": ready,
+        }
         LOGGER.info(
             "SELECTED_OPTION_FORCE_HYDRATION_RESULT symbol=%s before_mdm_bars=%d after_mdm_bars=%d before_runner_bars=%d after_runner_bars=%d required_bars=%d",
             sym, before_mdm_bars, after_mdm_bars, before_runner_bars, after_runner_bars, required_bars,
         )
+        if not ready:
+            LOGGER.warning(
+                "SELECTED_OPTION_HYDRATION_NOT_READY symbol=%s after_mdm_bars=%d after_runner_bars=%d required_bars=%d reason=%s",
+                sym,
+                after_mdm_bars,
+                after_runner_bars,
+                required_bars,
+                reason,
+            )
+    return hydration_result
 
 
 async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
@@ -7173,7 +7204,9 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     option_eval_min_live_bars = int(os.getenv("READINESS_OPTION_EVAL_MIN_BARS", os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "20")) or 20)
     option_execution_min_bars = int(os.getenv("READINESS_OPTION_EXEC_MIN_BARS", os.getenv("OPTION_EXECUTION_MIN_BARS", "30")) or 30)
     context_execution_min_bars = int(os.getenv("READINESS_CONTEXT_MIN_BARS", os.getenv("CONTEXT_EXECUTION_MIN_BARS", "20")) or 20)
-    await _ensure_selected_options_hydrated(ctx, selected_ce, selected_pe, option_execution_min_bars, reason)
+    _ = await _ensure_selected_options_hydrated(
+        ctx, selected_ce, selected_pe, option_execution_min_bars, reason
+    )
     ce_bars, ce_mdm_bars, ce_runner_bars = _readiness_bars(selected_ce)
     pe_bars, pe_mdm_bars, pe_runner_bars = _readiness_bars(selected_pe)
     ce_quote_fresh=_fresh_ltp(selected_ce); pe_quote_fresh=_fresh_ltp(selected_pe)
@@ -7190,33 +7223,43 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
     live_mode = str(getattr(ctx.settings, "execution_mode", "PAPER")).upper() == "LIVE"
     market_open = get_market_state() == MarketState.OPEN
     broker_ready = bool(getattr(ctx, "broker_client", None) and getattr(ctx, "order_manager", None))
-    execution_ready_by_symbol = {
-        str(selected_ce or ""): bool(ce_exec_ready),
-        str(selected_pe or ""): bool(pe_exec_ready),
-    }
+    execution_ready_by_symbol: dict[str, bool] = {}
+    if selected_ce:
+        execution_ready_by_symbol[str(selected_ce)] = bool(ce_exec_ready)
+    if selected_pe:
+        execution_ready_by_symbol[str(selected_pe)] = bool(pe_exec_ready)
     any_selected_option_exec_ready = bool(ce_exec_ready or pe_exec_ready)
     live_orders_armed=bool(live_mode and market_open and evaluation_ready and context_exec_ready and broker_ready and any_selected_option_exec_ready)
     missing=[]
     if not selected_ce: missing.append('selected_ce_missing')
     if not selected_pe: missing.append('selected_pe_missing')
     if not spot_ready: missing.append('spot_not_ready')
-    if not ce_eval_ready: missing.append('ce_eval_not_ready')
-    if not pe_eval_ready: missing.append('pe_eval_not_ready')
+    if not evaluation_ready: missing.append('eval_not_ready')
+    if ce_runner_bars < option_eval_min_live_bars: missing.append('ce_eval_bars_missing')
+    if pe_runner_bars < option_eval_min_live_bars: missing.append('pe_eval_bars_missing')
+    if ce_runner_bars < option_execution_min_bars: missing.append('ce_exec_bars_missing')
+    if pe_runner_bars < option_execution_min_bars: missing.append('pe_exec_bars_missing')
+    if not ce_quote_fresh: missing.append('ce_quote_not_fresh')
+    if not pe_quote_fresh: missing.append('pe_quote_not_fresh')
+    if not _tradable_quote(selected_ce): missing.append('ce_depth_not_tradable')
+    if not _tradable_quote(selected_pe): missing.append('pe_depth_not_tradable')
     if not runner_running: missing.append('runner_not_running')
-    if evaluation_ready and live_mode:
+    if live_mode:
         if not market_open: missing.append('market_closed')
         if not ce_exec_ready: missing.append('ce_exec_quote_or_history_not_ready')
         if not pe_exec_ready: missing.append('pe_exec_quote_or_history_not_ready')
         if not context_exec_ready: missing.append('context_exec_not_ready')
-        if not broker_ready: missing.append('broker_or_order_manager_not_ready')
-    block_reason=None if live_orders_armed else ((f"execution_not_armed:{','.join(missing)}" if evaluation_ready else f"startup_pipeline_incomplete:{','.join(missing)}"))
+        if not broker_ready: missing.append('broker_not_ready')
+    block_reason=None if live_orders_armed else f"execution_not_armed:{','.join(dict.fromkeys(missing))}"
     ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=live_orders_armed; ctx.live_block_reason=block_reason
     ctx.execution_ready_by_symbol = execution_ready_by_symbol
     ctx.selected_ce_exec_ready = bool(ce_exec_ready)
     ctx.selected_pe_exec_ready = bool(pe_exec_ready)
+    ctx.context_exec_ready = bool(context_exec_ready)
+    ctx.broker_ready = bool(broker_ready)
     LOGGER.info("LIVE_READINESS_COMPUTED selected_ce=%s selected_pe=%s ce_ltp_fresh=%s pe_ltp_fresh=%s ce_tick_age_s=%s pe_tick_age_s=%s ce_tradable_quote=%s pe_tradable_quote=%s ce_depth_available=%s pe_depth_available=%s ce_subscription_confirmed=%s pe_subscription_confirmed=%s ce_subscription_or_live_tick=%s pe_subscription_or_live_tick=%s ce_bars_effective=%s ce_mdm_bars=%s ce_runner_bars=%s pe_bars_effective=%s pe_mdm_bars=%s pe_runner_bars=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s ce_exec_ready=%s pe_exec_ready=%s execution_ready_by_symbol=%s live_block_reason=%s", selected_ce, selected_pe, ce_quote_fresh, pe_quote_fresh, getattr(_snapshot(selected_ce),'tick_age_s',None), getattr(_snapshot(selected_pe),'tick_age_s',None), _tradable_quote(selected_ce), _tradable_quote(selected_pe), bool(getattr(_snapshot(selected_ce),'depth_available',False)), bool(getattr(_snapshot(selected_pe),'depth_available',False)), _subscription_confirmed(selected_ce), _subscription_confirmed(selected_pe), _subscription_or_live_tick(selected_ce), _subscription_or_live_tick(selected_pe), ce_bars, ce_mdm_bars, ce_runner_bars, pe_bars, pe_mdm_bars, pe_runner_bars, data_hard_ready, evaluation_ready, live_orders_armed, ce_exec_ready, pe_exec_ready, execution_ready_by_symbol, block_reason)
     if ctx.strategy_runner is not None and hasattr(ctx.strategy_runner, 'set_runtime_readiness'):
-        ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols, execution_ready_by_symbol=execution_ready_by_symbol)
+        ctx.strategy_runner.set_runtime_readiness(data_hard_ready=bool(ctx.data_hard_ready), evaluation_ready=bool(ctx.evaluation_ready), live_orders_armed=bool(ctx.live_orders_armed), reason=str(ctx.live_block_reason or reason), selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=basket.get('atm_strike'), option_symbols=option_symbols, execution_ready_by_symbol=dict(getattr(ctx, "execution_ready_by_symbol", {}) or {}))
 
 
 def _commit_active_dynamic_basket(
@@ -10231,6 +10274,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     selected_pe=cast(str | None, _selected_pe),
                                     atm_strike=_atm_strike,
                                     option_symbols=_option_symbols,
+                                    execution_ready_by_symbol=dict(getattr(ctx, "execution_ready_by_symbol", {}) or {}),
                                 )
                                 LOGGER.info(
                                     "RUNTIME_READINESS_PUSHED data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s",

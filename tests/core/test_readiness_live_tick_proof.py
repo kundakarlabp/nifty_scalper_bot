@@ -106,4 +106,5 @@ async def test_ensure_selected_options_hydrated_handles_runner_reseed_failure() 
 
     ctx = SimpleNamespace(market_data_manager=MdmStub(), strategy_runner=RunnerFailing())
 
-    await app._ensure_selected_options_hydrated(ctx, symbol, None, 1, 'test')
+    result = await app._ensure_selected_options_hydrated(ctx, symbol, None, 2, 'test')
+    assert result[symbol]['ready'] is False

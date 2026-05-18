@@ -416,9 +416,9 @@ class IndicatorEngine:
                     source,
                 )
                 with self._lock:
-                    self._histories[symbol] = PriceHistory()
-                    self._cache.pop(symbol, None)
-                return 0
+                    existing = self._histories.get(symbol)
+                    existing_count = len(existing) if existing is not None else 0
+                return existing_count
             new_history = PriceHistory()
             for bar in selected_rows:
                 new_history.add_tick(
