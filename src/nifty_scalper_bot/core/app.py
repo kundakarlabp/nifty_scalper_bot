@@ -7251,7 +7251,7 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         if not context_exec_ready: missing.append('context_exec_not_ready')
         if not broker_ready: missing.append('broker_not_ready')
     block_reason=None if live_orders_armed else f"execution_not_armed:{','.join(dict.fromkeys(missing))}"
-    ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=live_orders_armed; ctx.live_block_reason=block_reason
+    ctx.data_hard_ready=data_hard_ready; ctx.evaluation_ready=evaluation_ready; ctx.live_orders_armed=live_orders_armed; ctx.trading_ready=evaluation_ready; ctx.live_block_reason=block_reason
     ctx.execution_ready_by_symbol = execution_ready_by_symbol
     ctx.selected_ce_exec_ready = bool(ce_exec_ready)
     ctx.selected_pe_exec_ready = bool(pe_exec_ready)
@@ -7330,16 +7330,16 @@ def _commit_active_dynamic_basket(
             },
         )
         return cast(str | None, old_ce), cast(str | None, old_pe)
-    if selected_ce and not getattr(ctx, "selected_ce", None):
-        ctx.selected_ce = str(selected_ce)
-    elif selected_ce is None:
-        ctx.selected_ce = None
-    if selected_pe and not getattr(ctx, "selected_pe", None):
-        ctx.selected_pe = str(selected_pe)
-    elif selected_pe is None:
-        ctx.selected_pe = None
+    ctx.selected_ce = str(selected_ce) if selected_ce else None
+    ctx.selected_pe = str(selected_pe) if selected_pe else None
     ctx.atm_ce_symbol = selected_ce
     ctx.atm_pe_symbol = selected_pe
+    ce_symbols = [sym for sym in current_options if str(sym).endswith("CE")]
+    pe_symbols = [sym for sym in current_options if str(sym).endswith("PE")]
+    if selected_ce and selected_ce not in ce_symbols:
+        ce_symbols.append(selected_ce)
+    if selected_pe and selected_pe not in pe_symbols:
+        pe_symbols.append(selected_pe)
     committed = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
     committed.update(
         {
@@ -7348,6 +7348,8 @@ def _commit_active_dynamic_basket(
             "atm_ce": selected_ce,
             "atm_pe": selected_pe,
             "option_symbols": list(current_options),
+            "ce_symbols": list(ce_symbols),
+            "pe_symbols": list(pe_symbols),
             "symbols": list(current_symbols),
             "atm_strike": atm_strike,
             "committed_at": datetime.now(timezone.utc).isoformat(),
@@ -7358,6 +7360,45 @@ def _commit_active_dynamic_basket(
     if runner is not None and hasattr(runner, "set_active_trading_universe"):
         runner.set_active_trading_universe(committed)
     return selected_ce, selected_pe
+
+
+def _register_and_subscribe_live_symbol(
+    ctx: BotContext, symbol: str | None, token: int | None, reason: str
+) -> bool:
+    """Register and subscribe symbol in MDM/DataHub/Runner. Args: ctx/symbol/token/reason. Returns: success. Raises: none."""
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return False
+    resolved_token = token
+    if resolved_token is None:
+        resolved_token = (getattr(ctx, "active_symbol_tokens", {}) or {}).get(normalized)
+    if resolved_token is None and getattr(ctx, "instrument_manager", None) is not None:
+        try:
+            resolved_token = ctx.instrument_manager.get_token(normalized)
+        except Exception:
+            resolved_token = None
+    if resolved_token is None and getattr(ctx, "broker_client", None) is not None:
+        try:
+            resolved_token = ctx.broker_client.get_instrument_token(normalized)
+        except Exception:
+            resolved_token = None
+    LOGGER.info("LIVE_OPTION_SUBSCRIBE_REQUESTED symbol=%s token=%s reason=%s", normalized, resolved_token, reason)
+    mdm = getattr(ctx, "market_data_manager", None)
+    if mdm is not None and resolved_token is not None:
+        if hasattr(mdm, "register_symbol"):
+            mdm.register_symbol(normalized, int(resolved_token))
+        if hasattr(mdm, "request_token_subscription"):
+            mdm.request_token_subscription(int(resolved_token), symbol=normalized)
+    runner = getattr(ctx, "strategy_runner", None)
+    if runner is not None and hasattr(runner, "add_symbol"):
+        runner.add_symbol(normalized)
+    hub = getattr(ctx, "data_hub", None)
+    if hub is not None and runner is not None and hasattr(hub, "subscribe_ticks"):
+        hub.subscribe_ticks(
+            normalized, runner.on_datahub_tick, token=resolved_token, force_live=True
+        )
+    LOGGER.info("LIVE_OPTION_SUBSCRIBE_CONFIRMED symbol=%s token=%s subscribed=%s", normalized, resolved_token, bool(resolved_token))
+    return bool(resolved_token)
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
     *,
@@ -7559,6 +7600,17 @@ async def _build_and_hydrate_live_basket_from_spot(
                     "option_count": len(option_symbols),
                 },
             )
+            subscription_symbols = list(dict.fromkeys([*symbols, committed_ce, committed_pe]))
+            token_map = dict(getattr(ctx, "active_symbol_tokens", {}) or {})
+            for live_symbol in subscription_symbols:
+                if not live_symbol:
+                    continue
+                _register_and_subscribe_live_symbol(
+                    ctx,
+                    str(live_symbol),
+                    token_map.get(str(live_symbol)),
+                    "basket_commit_live_startup",
+                )
             return dict(getattr(ctx, "active_trading_universe", {}) or basket)
         except Exception as exc:
             duration_ms = int((time_module.monotonic() - start) * 1000)
@@ -8745,15 +8797,25 @@ async def startup_sequence(ctx: BotContext) -> None:
                 ctx.market_data_manager is not None
                 and "basket" in locals()
             ):
-                atm_ce = basket["ce_symbols"][len(basket["ce_symbols"]) // 2]
-                atm_pe = basket["pe_symbols"][len(basket["pe_symbols"]) // 2]
-                ctx.market_data_manager.set_readiness_requirements(
-                    spot_symbol=basket["spot_symbol"],
-                    futures_symbol=basket["futures_symbol"],
-                    atm_ce_symbol=atm_ce,
-                    atm_pe_symbol=atm_pe,
-                    option_symbols=basket["option_symbols"],
-                )
+                ce_symbols = list(basket.get("ce_symbols") or [])
+                pe_symbols = list(basket.get("pe_symbols") or [])
+                if not ce_symbols or not pe_symbols:
+                    ce_symbols = [s for s in basket.get("option_symbols", []) if str(s).endswith("CE")]
+                    pe_symbols = [s for s in basket.get("option_symbols", []) if str(s).endswith("PE")]
+                atm_ce = basket.get("selected_ce") or basket.get("atm_ce") or (ce_symbols[len(ce_symbols) // 2] if ce_symbols else None)
+                atm_pe = basket.get("selected_pe") or basket.get("atm_pe") or (pe_symbols[len(pe_symbols) // 2] if pe_symbols else None)
+                if atm_ce and atm_pe:
+                    ctx.market_data_manager.set_readiness_requirements(
+                        spot_symbol=basket["spot_symbol"],
+                        futures_symbol=basket["futures_symbol"],
+                        atm_ce_symbol=atm_ce,
+                        atm_pe_symbol=atm_pe,
+                        option_symbols=basket["option_symbols"],
+                    )
+                else:
+                    LOGGER.info(
+                        "READINESS_REQUIREMENTS_DEFERRED reason=missing_ce_pe_symbols"
+                    )
             try:
                 await ctx.market_regime_manager.refresh_from_indicators()
                 await ctx.market_regime_manager.start()
