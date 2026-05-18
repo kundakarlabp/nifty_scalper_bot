@@ -7946,13 +7946,26 @@ class TelegramBot:
             await self._reply(chat, ctx, '\n'.join(lines))
             return
 
-        changed, desired_total = self._mdm_subscribe_tokens(combined_tokens)
-        if changed < 0:
-            await self._reply(chat, ctx, "MarketDataManager unavailable for subscription.")
-            return
         if supervisor is not None:
             with suppress(Exception):
                 supervisor.ensure_started()
+            subscribe_tokens = getattr(supervisor, "subscribe_tokens", None)
+            if callable(subscribe_tokens):
+                with suppress(Exception):
+                    subscribe_tokens(combined_tokens)
+        changed, desired_total = self._mdm_subscribe_tokens(combined_tokens)
+        if changed < 0:
+            if supervisor is not None and combined_tokens:
+                status_line = ""
+                with suppress(Exception):
+                    status_line = str(supervisor.status_line())
+                lines.append(f"Added {len(combined_tokens)} token(s).")
+                fallback_status = f"tokens={len(getattr(supervisor, 'tokens', set()) or set())}"
+                lines.append(f"Poll: {status_line or fallback_status}")
+                await self._reply(chat, ctx, "\n".join(lines))
+                return
+            await self._reply(chat, ctx, "MarketDataManager unavailable for subscription.")
+            return
         if changed > 0:
             lines.append(f"Tracked via MarketDataManager: added {changed} token(s).")
         elif combined_tokens:

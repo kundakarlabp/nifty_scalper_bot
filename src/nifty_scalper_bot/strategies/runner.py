@@ -1968,13 +1968,13 @@ class StrategyRunner:
         self._runtime_data_hard_ready = bool(data_hard_ready)
         self._runtime_evaluation_ready = bool(evaluation_ready)
         self._runtime_live_orders_armed = bool(live_orders_armed)
-        normalized_execution_ready: dict[str, bool] = {}
-        if execution_ready_by_symbol:
+        if execution_ready_by_symbol is not None:
+            normalized_execution_ready: dict[str, bool] = {}
             for raw_symbol, ready in execution_ready_by_symbol.items():
                 normalized = normalize_symbol(str(raw_symbol or ""))
                 if normalized:
                     normalized_execution_ready[normalized] = bool(ready)
-        self._runtime_execution_ready_by_symbol = normalized_execution_ready
+            self._runtime_execution_ready_by_symbol = normalized_execution_ready
         self._runtime_readiness_reason = reason
         self._runtime_startup_ready = bool(
             self._runtime_data_hard_ready and self._runtime_evaluation_ready

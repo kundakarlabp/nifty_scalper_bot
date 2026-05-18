@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -37,3 +38,30 @@ def test_premium_squeeze_missing_context_logs_missing_context() -> None:
 def test_signal_evaluation_failure_logs_error_type() -> None:
     source = Path('src/nifty_scalper_bot/strategies/runner.py').read_text(encoding='utf-8')
     assert 'SIGNAL_EVALUATION_FAILURE symbol=%s phase=%s error_type=%s error=%s trace_id=%s' in source
+
+
+def test_runtime_readiness_preserves_execution_map_when_not_supplied() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._runtime_data_hard_ready = False
+    runner._runtime_evaluation_ready = False
+    runner._runtime_live_orders_armed = False
+    runner._runtime_readiness_reason = None
+    runner._runtime_startup_ready = False
+    runner._active_selected_ce = None
+    runner._active_selected_pe = None
+    runner._active_atm_strike = None
+    runner._active_option_symbols = set()
+    runner._logger = logging.getLogger('test')
+    runner.set_runtime_readiness(
+        data_hard_ready=True,
+        evaluation_ready=True,
+        live_orders_armed=True,
+        execution_ready_by_symbol={'NFO:XCE': True},
+    )
+    runner.set_runtime_readiness(
+        data_hard_ready=True,
+        evaluation_ready=True,
+        live_orders_armed=False,
+    )
+    assert runner._runtime_execution_ready_by_symbol.get('NFO:XCE') is True
