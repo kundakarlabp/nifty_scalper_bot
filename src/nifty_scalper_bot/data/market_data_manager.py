@@ -1493,6 +1493,12 @@ class MarketDataManager:
         if symbol:
             normalized_symbol = self._canonical_symbol(symbol)
             self.register_symbol(normalized_symbol, token_int)
+            if normalized_symbol.endswith(("CE", "PE")):
+                self._logger.info(
+                    "MDM_OPTION_SUBSCRIPTION_REQUESTED symbol=%s token=%s",
+                    normalized_symbol,
+                    token_int,
+                )
 
         with self._lock:
             self._desired_tokens.add(token_int)
@@ -1501,6 +1507,14 @@ class MarketDataManager:
                 self._token_to_symbol[token_int] = normalized_symbol
                 self._symbol_by_token[token_int] = normalized_symbol
         self._reconcile_ws_subscriptions()
+        if normalized_symbol and normalized_symbol.endswith(("CE", "PE")):
+            with self._lock:
+                self._active_subscribed_symbols.add(normalized_symbol)
+            self._logger.info(
+                "MDM_OPTION_SUBSCRIPTION_CONFIRMED symbol=%s token=%s",
+                normalized_symbol,
+                token_int,
+            )
         return True
 
     def request_token_subscriptions(self, tokens: Iterable[int]) -> int:
