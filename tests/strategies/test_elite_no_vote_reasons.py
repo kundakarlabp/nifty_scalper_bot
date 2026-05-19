@@ -131,3 +131,25 @@ def test_smc_uses_underlying_direction_when_direction_bias_missing(monkeypatch) 
     )
     assert signal is not None
     assert signal.metadata['underlying_direction_bias'] == 'CE'
+
+def test_smc_stale_data_sets_specific_no_vote_reason() -> None:
+    strategy = SMCStrategy(SMCStrategyConfig())
+    signal = strategy.generate_signal('NFO:NIFTY26MAY24350CE', {'high':10,'low':9,'close':9.5,'open':9.7,'atr':1,'stale_data_used':True}, 9.5, None)
+    assert signal is None
+    assert strategy.last_no_vote_reason == 'stale_or_invalid_data'
+
+
+def test_smc_low_score_sets_smc_low_score_reason(monkeypatch) -> None:
+    monkeypatch.setenv('SMC_MIN_SCORE_SHADOW', '9.9')
+    strategy = SMCStrategy(SMCStrategyConfig())
+    signal = strategy.generate_signal('NFO:NIFTY26MAY24350CE', {'high':10,'low':9,'close':9.5,'open':9.0,'atr':1,'liquidity_sweep_confirmed':True,'premium_reclaim':True,'bos_confirmed':False,'choch_confirmed':False,'data_age_seconds':1}, 9.5, None)
+    assert signal is None
+    assert strategy.last_no_vote_reason == 'smc_low_score'
+
+
+def test_smc_quality_gate_logs_specific_reason(caplog) -> None:
+    strategy = SMCStrategy(SMCStrategyConfig())
+    caplog.set_level(logging.INFO)
+    signal = strategy.generate_signal('NFO:NIFTY26MAY24350CE', {'high':10,'low':9,'close':9.5,'open':9.0,'atr':1,'liquidity_sweep_confirmed':True,'premium_reclaim':False,'bos_confirmed':False,'choch_confirmed':False,'data_age_seconds':1}, 9.5, None)
+    assert signal is None
+    assert any('smc_quality_gate_failed' in r.message for r in caplog.records)

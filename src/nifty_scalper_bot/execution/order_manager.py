@@ -665,6 +665,11 @@ class OrderManager:
         self._trade_journal = trade_journal
         self._seen_signal_ids: set[str] = set()
         self._signal_history: deque[str] = deque(maxlen=10_000)
+        self._pending_signal_ids: dict[str, float] = {}
+        self._pending_signal_ttl_seconds: float = max(
+            30.0,
+            float(os.getenv("ORDER_SIGNAL_PENDING_TTL_SECONDS", "120") or 120),
+        )
         if not hasattr(self, "_logger"):
             self._logger = get_logger(__name__)
         self._broker_circuit = CircuitBreaker()
@@ -781,6 +786,34 @@ class OrderManager:
         """Check in-memory signal idempotency. Args: signal_id; Returns: bool; Raises: None."""
         with self._lock:
             return signal_id in self._seen_signal_ids
+
+
+    def _prune_pending_signals(self) -> None:
+        now_ts = time.time()
+        ttl = float(getattr(self, "_pending_signal_ttl_seconds", 120.0) or 120.0)
+        expired = [
+            signal_id
+            for signal_id, ts in self._pending_signal_ids.items()
+            if now_ts - float(ts or 0.0) > ttl
+        ]
+        for signal_id in expired:
+            self._pending_signal_ids.pop(signal_id, None)
+
+    def _is_pending_signal(self, signal_id: str) -> bool:
+        with self._lock:
+            self._prune_pending_signals()
+            return signal_id in self._pending_signal_ids
+
+    def _mark_signal_pending(self, signal_id: str) -> None:
+        with self._lock:
+            self._prune_pending_signals()
+            self._pending_signal_ids[signal_id] = time.time()
+
+    def _clear_pending_signal(self, signal_id: str | None) -> None:
+        if not signal_id:
+            return
+        with self._lock:
+            self._pending_signal_ids.pop(signal_id, None)
 
     def _remember_signal(self, signal_id: str) -> None:
         """Record signal id to preserve idempotency. Args: signal_id; Returns: None; Raises: None."""
@@ -914,6 +947,32 @@ class OrderManager:
             self._logger.debug("EVENT|order_tick|%s", symbol)
         except Exception as e:
             self._logger.error("Failure in OrderManager.on_tick_event: %s", e)
+
+    def _subscribe_market_callback(
+        self, symbol: str, callback: Callable[[dict[str, Any]], None]
+    ) -> bool:
+        provider = self._data_hub or self._market_data
+        if provider is None:
+            return False
+        subscribe_fn = getattr(provider, "subscribe_ticks", None)
+        if not callable(subscribe_fn):
+            subscribe_fn = getattr(provider, "subscribe", None)
+        if not callable(subscribe_fn):
+            return False
+        subscribe_fn(symbol, callback)
+        return True
+
+    def _unsubscribe_market_callback(
+        self, symbol: str, callback: Callable[[dict[str, Any]], None]
+    ) -> None:
+        provider = self._data_hub or self._market_data
+        if provider is None:
+            return
+        unsubscribe_fn = getattr(provider, "unsubscribe_ticks", None)
+        if not callable(unsubscribe_fn):
+            unsubscribe_fn = getattr(provider, "unsubscribe", None)
+        if callable(unsubscribe_fn):
+            unsubscribe_fn(symbol, callback)
 
     def set_broker_client(self, broker_client: Any) -> None:
         """Swap the underlying broker client used for routing orders."""
@@ -1243,7 +1302,12 @@ class OrderManager:
             self._tp_controllers[tp_order_id] = controller
 
             # Subscribe to ticks via DataHub (SSOT), fall back to MDM if unset.
-            (self._data_hub or self._market_data).subscribe(symbol, controller.on_tick)
+            if not self._subscribe_market_callback(symbol, controller.on_tick):
+                self._logger.warning(
+                    "Dynamic TP not attached because market callback subscription is unavailable for %s",
+                    symbol,
+                )
+                return
             self._logger.info(f"🚀 Dynamic TP attached to {tp_order_id}")
 
         except Exception as e:
@@ -1256,7 +1320,7 @@ class OrderManager:
 
         controller = self._tp_controllers.pop(tp_order_id, None)
         if controller:
-            (self._data_hub or self._market_data).unsubscribe(controller.symbol, controller.on_tick)
+            self._unsubscribe_market_callback(controller.symbol, controller.on_tick)
 
     def stop_trailing(self, entry_order_id: str) -> bool:
         """Stop and remove a trailing stop controller if it exists."""
@@ -1965,7 +2029,7 @@ class OrderManager:
                 and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
                 # TIMEOUT SAFETY: Only block if order is fresh (< 45 seconds old)
                 # This prevents getting stuck forever if an order is lost in limbo
-                and (current_time - o.timestamp.timestamp() < 45)
+                and (current_time - self._timestamp_seconds(o.timestamp) < 45)
             ]
 
             broker_has_live_pending = False
@@ -2006,7 +2070,11 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 1. IDEMPOTENCY CHECK (The Fix for Duplicate Trades)
         # ---------------------------------------------------------------------
-        if signal_id and self._is_duplicate_signal(signal_id):
+        if signal_id:
+            duplicate_permanent = self._is_duplicate_signal(signal_id)
+            duplicate_pending = self._is_pending_signal(signal_id)
+            if duplicate_permanent or duplicate_pending:
+                block_reason = "duplicate_signal" if duplicate_permanent else "duplicate_signal_pending"
             self._logger.warning(
                 f"🛑 DUPLICATE BLOCKED: Signal {signal_id} already traded.",
                 extra={"symbol": normalized_symbol, "event": "duplicate_block"},
@@ -2020,7 +2088,7 @@ class OrderManager:
                 meta={"signal_id": signal_id},
             )
             self._logger.warning("ORDER_BLOCKED: duplicate_signal signal_id=%s symbol=%s", signal_id, normalized_symbol)
-            _log_order_decision(allowed=False, block_reason="duplicate_signal")
+            _log_order_decision(allowed=False, block_reason=block_reason)
             return None
 
         # --- SEMANTIC VALIDATION GATEKEEPER ---
@@ -2154,8 +2222,10 @@ class OrderManager:
         trade_id = f"TRD_{signal_id}"
         unique_client_id = f"bot_{signal_id[-12:]}"  # Max 20 chars usually
 
-        # Persist Intent to Disk
-        self._remember_signal(signal_id)
+        pending_signal_marked = False
+        if signal_id:
+            self._mark_signal_pending(signal_id)
+            pending_signal_marked = True
         self._log_trade_event(
             "ORDER_SUBMIT_ATTEMPT",
             symbol=normalized_symbol,
@@ -2756,6 +2826,7 @@ class OrderManager:
             stop_loss=stop_loss,  # ✅ Critical: Passing this satisfies the Safety Guard
             take_profit=take_profit,
             signal_id=signal_id,
+            trace_id=trace_id,
             tag=tag,
             product=product,
         )

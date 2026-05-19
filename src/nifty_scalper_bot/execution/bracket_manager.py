@@ -217,38 +217,6 @@ class ExitExecutionResult:
     reason: str
     status: str | None = None
 
-    @property
-    def stop_loss_price(self) -> float:
-        """Backward-compatible alias for stop-loss trigger."""
-        return self.sl_trigger_price
-
-    @property
-    def target_price(self) -> float:
-        """Backward-compatible alias for take-profit trigger."""
-        return self.tp_trigger_price
-
-    def rehydrate_state_from_position(self, position: Any) -> None:
-        """Rehydrate runtime state after reconnect from current position snapshot."""
-        ltp_raw = getattr(position, "ltp", None)
-        if ltp_raw is None:
-            ltp_raw = getattr(position, "last_price", None)
-        if ltp_raw is None:
-            ltp_raw = self.last_ltp
-        try:
-            ltp = float(ltp_raw or 0.0)
-        except (TypeError, ValueError):
-            ltp = 0.0
-        if ltp <= 0:
-            return
-        self.last_ltp = ltp
-        if self.side == "BUY":
-            self.highest_ltp = max(self.highest_ltp, ltp)
-            self.sl_trigger_price = max(self.sl_trigger_price, 0.0)
-        else:
-            self.lowest_ltp = min(self.lowest_ltp, ltp)
-            self.sl_trigger_price = max(self.sl_trigger_price, 0.0)
-        self.updated_at = time.time()
-
 # Mock Journal for Adaptive Controller (In-Memory)
 class MockJournal:
     def set(self, key, value): pass

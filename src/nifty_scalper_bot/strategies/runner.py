@@ -7121,6 +7121,7 @@ class StrategyRunner:
             candle_count = len(self._indicator_engine.get_history(symbol) or [])
             same_bar_eval_allowed = False
             pending_same_bar_eval_ts = 0.0
+            pending_eval_bar_ts = None
             first_hydrated_eval = (
                 candle_count > 0
                 and symbol not in self._symbol_has_completed_strategy_eval
@@ -7302,9 +7303,6 @@ class StrategyRunner:
                         last_eval = getattr(state, "_last_strategy_eval", None)
                         last_bar_ts = self._last_bar_ts.get(symbol)
                         if last_bar_ts is None:
-                            # FIX (2026-02-27): Soft skip — do NOT call _mark_symbol_unready.
-                            # That sets HYDRATING → PHASE 7 blocks → permanent cycle.
-                            # Instead seed _last_bar_ts = now and retry next tick.
                             log_throttled(
                                 self._logger,
                                 f"bar_ts_init_{symbol}",
@@ -7313,14 +7311,25 @@ class StrategyRunner:
                                 level=logging.INFO,
                             )
                             self._last_bar_ts[symbol] = now
-                            self._emit_runner_eval_decision(
-                                symbol=symbol,
-                                stage="phase9",
-                                reason="bar_ts_initialized_retry_next_tick",
-                                allowed=False,
-                                trace_id=trace_id,
-                            )
-                            return
+                            last_bar_ts = now
+                            if first_hydrated_eval:
+                                pending_eval_bar_ts = now
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="bar_ts_initialized_initial_hydrated_eval_continues",
+                                    allowed=True,
+                                    trace_id=trace_id,
+                                )
+                            else:
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="bar_ts_initialized_retry_next_tick",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
+                                return
                         # ✅ FIX K: Same-bar-skip for options with no live bars.
                         # When _symbol_history is empty (no live bars ever completed),
                         # _last_bar_ts[symbol] is the last HYDRATION bar timestamp —

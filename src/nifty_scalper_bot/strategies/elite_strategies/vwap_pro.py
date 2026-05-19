@@ -29,7 +29,28 @@ class VWAPProStrategy(EliteStrategy):
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicators set. Raises: Exception."""
-        return {'vwap', 'atr', 'close', 'open', 'high', 'low', 'volume', 'avg_volume', 'direction_bias'}
+        return {
+            "vwap",
+            "exchange_vwap",
+            "atr",
+            "close",
+            "open",
+            "high",
+            "low",
+            "volume",
+            "avg_volume",
+            "direction_bias",
+            "underlying_direction_bias",
+            "underlying_direction_confidence",
+            "context_age_seconds",
+            "futures_vwap_slope",
+            "futures_volume_ratio",
+            "spread_pct",
+            "spot_context",
+            "futures_context",
+            "stale_data_used",
+            "data_age_seconds",
+        }
 
     def _evaluate_signal(self, symbol: str, indicators: dict[str, Any], current_price: float, position: Any | None = None) -> EliteSignal | None:
         """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
