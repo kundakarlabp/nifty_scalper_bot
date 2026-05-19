@@ -61,6 +61,51 @@ def pick_atm_option_symbols_from_basket(
     return selected_ce, selected_pe
 
 
+def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, object]:
+    """Return canonical basket dict with guaranteed context and option fields."""
+    out = dict(basket or {})
+    spot_symbol = str(out.get("spot_symbol") or "NSE:NIFTY")
+    futures_symbol = str(out.get("futures_symbol") or out.get("future_symbol") or "")
+    option_symbols = [
+        str(s)
+        for s in list(out.get("option_symbols") or out.get("symbols") or [])
+        if str(s).endswith(("CE", "PE"))
+    ]
+    option_symbols = list(dict.fromkeys(option_symbols))
+    ce_symbols = list(
+        dict.fromkeys(
+            [str(s) for s in list(out.get("ce_symbols") or []) if str(s).endswith("CE")]
+            or [s for s in option_symbols if s.endswith("CE")]
+        )
+    )
+    pe_symbols = list(
+        dict.fromkeys(
+            [str(s) for s in list(out.get("pe_symbols") or []) if str(s).endswith("PE")]
+            or [s for s in option_symbols if s.endswith("PE")]
+        )
+    )
+    selected_ce, selected_pe = pick_atm_option_symbols_from_basket(
+        {
+            **out,
+            "option_symbols": option_symbols,
+            "symbols": option_symbols,
+            "ce_symbols": ce_symbols,
+            "pe_symbols": pe_symbols,
+        }
+    )
+    out["spot_symbol"] = spot_symbol
+    out["futures_symbol"] = futures_symbol
+    out["option_symbols"] = option_symbols
+    out["ce_symbols"] = ce_symbols
+    out["pe_symbols"] = pe_symbols
+    out["selected_ce"] = selected_ce
+    out["selected_pe"] = selected_pe
+    out["atm_ce"] = out.get("atm_ce") or selected_ce
+    out["atm_pe"] = out.get("atm_pe") or selected_pe
+    out["symbols"] = list(dict.fromkeys([s for s in [spot_symbol, futures_symbol, *option_symbols] if s]))
+    return out
+
+
 def build_active_trading_basket_symbols(ctx: object, basket: Mapping[str, object]) -> list[str]:
     """Build deterministic active basket. Args: ctx,basket. Returns: ordered symbols. Raises: none."""
     _ = ctx
@@ -88,4 +133,4 @@ def build_active_trading_basket_symbols(ctx: object, basket: Mapping[str, object
     return out
 
 
-__all__ = ['build_active_trading_basket_symbols', 'pick_atm_option_symbols_from_basket', 'extract_symbol_strike']
+__all__ = ['build_active_trading_basket_symbols', 'pick_atm_option_symbols_from_basket', 'extract_symbol_strike', 'normalize_active_basket_schema']

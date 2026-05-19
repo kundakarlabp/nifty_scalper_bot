@@ -50,3 +50,30 @@ async def test_off_market_live_orders_are_not_armed(monkeypatch) -> None:
     await app._recompute_and_push_runtime_readiness(ctx, reason='test')
     assert ctx.live_orders_armed is False
     assert 'market_closed' in str(ctx.live_block_reason)
+
+
+@pytest.mark.asyncio
+async def test_readiness_normalizes_context_symbols(monkeypatch, caplog) -> None:
+    async def _noop_hydrate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(app, 'get_market_state', lambda: MarketState.CLOSED)
+    monkeypatch.setattr(app, '_ensure_selected_options_hydrated', _noop_hydrate)
+    ctx = SimpleNamespace(
+        settings=SimpleNamespace(execution_mode='LIVE'),
+        market_data_manager=MDM(),
+        strategy_runner=Runner(),
+        broker_client=object(),
+        order_manager=object(),
+        selected_ce='NFO:NIFTY2460020000CE',
+        selected_pe='NFO:NIFTY2460020000PE',
+        active_trading_universe={
+            'selected_ce': 'NFO:NIFTY2460020000CE',
+            'selected_pe': 'NFO:NIFTY2460020000PE',
+            'option_symbols': ['NFO:NIFTY2460020000CE', 'NFO:NIFTY2460020000PE'],
+            'symbols': ['NFO:NIFTY2460020000CE', 'NFO:NIFTY2460020000PE'],
+        },
+    )
+    await app._recompute_and_push_runtime_readiness(ctx, reason='test')
+    assert ctx.active_trading_universe.get("spot_symbol") == "NSE:NIFTY"
+    assert "NSE:NIFTY" in list(ctx.active_trading_universe.get("symbols") or [])

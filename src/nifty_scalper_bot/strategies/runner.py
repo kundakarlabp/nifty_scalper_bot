@@ -812,6 +812,7 @@ class StrategyRunner:
         self._candle_versions: dict[str, int] = defaultdict(int)
         self._last_strategy_versions: dict[str, int] = defaultdict(int)
         self._quote_update_versions: dict[str, int] = defaultdict(int)
+        self._symbol_has_completed_strategy_eval: set[str] = set()
         self._gap_repair_inflight: set[str] = set()
         self._history_refresh_interval_seconds: float = 60.0
         self._last_history_refresh_by_symbol: dict[str, float] = {}
@@ -5558,6 +5559,18 @@ class StrategyRunner:
                 mdm_bars = len(self._market_data.get_ohlc_bars(symbol) or [])
             except Exception:
                 mdm_bars = None
+            quote_update_version = int(self._quote_update_versions.get(symbol, 0)) if hasattr(self, "_quote_update_versions") else 0
+            if quote_update_version <= 0:
+                for source in (getattr(self, "_data_hub", None), getattr(self, "_market_data", None)):
+                    fn = getattr(source, "quote_update_version", None)
+                    if callable(fn):
+                        try:
+                            value = fn(symbol)
+                        except Exception:
+                            value = None
+                        if value is not None:
+                            quote_update_version = int(value)
+                            break
             payload = {
                 "event": "RUNNER_EVAL_DECISION",
                 "symbol": symbol,
@@ -5574,7 +5587,7 @@ class StrategyRunner:
                 "indicator_history_count": candle_count,
                 "live_candle_version": current_version,
                 "last_eval_live_candle_version": last_version,
-                "quote_update_version": int(self._quote_update_versions.get(symbol, 0)) if hasattr(self, "_quote_update_versions") else None,
+                "quote_update_version": quote_update_version,
                 "last_bar_ts": last_bar_ts_iso,
                 "last_eval_bar_ts": last_eval_bar_ts,
                 "mdm_last_tick_age_s": mdm_last_tick_age,
@@ -5852,8 +5865,9 @@ class StrategyRunner:
                 )
                 return False
             required_bars = self._required_bars_for_symbol(symbol)
-            option_execution_min_bars = int(os.getenv("OPTION_EXECUTION_MIN_BARS", "5") or "5")
-            required_bars = max(required_bars, option_execution_min_bars)
+            if self._is_tradable_symbol(symbol):
+                option_execution_min_bars = int(os.getenv("OPTION_EXECUTION_MIN_BARS", "5") or "5")
+                required_bars = max(required_bars, option_execution_min_bars)
             history_count = len(self._indicator_engine.get_history(symbol) or [])
             restored_from_cache = symbol in self._restored_from_cache_symbols
             if restored_from_cache and history_count >= required_bars:
@@ -7107,7 +7121,11 @@ class StrategyRunner:
             candle_count = len(self._indicator_engine.get_history(symbol) or [])
             same_bar_eval_allowed = False
             pending_same_bar_eval_ts = 0.0
-            if current_version <= last_version:
+            first_hydrated_eval = (
+                candle_count > 0
+                and symbol not in self._symbol_has_completed_strategy_eval
+            )
+            if current_version <= last_version and not first_hydrated_eval:
                 now_eval_ts = time_module.time()
                 same_bar_eval_reason = self._same_bar_eval_reason(
                     symbol=symbol,
@@ -7153,6 +7171,17 @@ class StrategyRunner:
                             intrabar_non_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60"),
                         )
                     return
+            elif first_hydrated_eval:
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage="phase9",
+                    reason="initial_hydrated_eval",
+                    allowed=True,
+                    trace_id=trace_id,
+                    current_version=current_version,
+                    last_version=last_version,
+                    price=price,
+                )
             else:
                 self._logger.info(
                     "RUNNER_EVAL_DECISION",
@@ -7661,6 +7690,7 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        self._symbol_has_completed_strategy_eval.add(symbol)
                         if same_bar_eval_allowed and pending_same_bar_eval_ts > 0.0:
                             self._last_same_bar_eval_ts_by_symbol[symbol] = pending_same_bar_eval_ts
                         self._last_eval_price_by_symbol[symbol] = float(price)

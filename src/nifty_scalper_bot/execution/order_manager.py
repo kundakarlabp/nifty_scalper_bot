@@ -1270,8 +1270,15 @@ class OrderManager:
             if hub is not None:
                 hub.unsubscribe(controller.symbol, callback)
             self._trailing_journal.delete(controller.order_id)
-        finally:
-            return True
+        except Exception as exc:
+            self._logger.warning(
+                "TRAILING_STOP_CLEANUP_FAILED entry_order_id=%s order_id=%s error=%s",
+                entry_order_id,
+                getattr(controller, "order_id", None),
+                exc,
+                exc_info=exc,
+            )
+        return True
 
     def get_best_bid_ask_depth(self, symbol: str) -> dict[str, float | None]:
         """Return price/size snapshot at the most liquid visible levels.

@@ -508,3 +508,22 @@ def test_tick_listener_error_rate_limited(
     ]
     assert len(records_third) == 1
     assert "consecutive=3" in records_third[0].message
+
+
+def test_quote_update_version_increments_for_symbol(hub: DataHub) -> None:
+    hub.ingest_tick({"symbol": "NSE:NIFTY", "ltp": 25000.0, "timestamp": "2026-05-19T09:15:00Z", "source": "ws"})
+    assert hub.quote_update_version("NSE:NIFTY") == 1
+    hub.ingest_tick({"symbol": "NSE:NIFTY", "ltp": 25010.0, "timestamp": "2026-05-19T09:15:01Z", "source": "ws"})
+    assert hub.quote_update_version("NSE:NIFTY") == 2
+
+
+def test_quote_update_version_by_token_string(hub: DataHub) -> None:
+    hub.ingest_tick_sync(
+        {
+            "symbol": "NSE:NIFTY",
+            "ltp": 25000.0,
+            "timestamp": "2026-05-19T09:15:00+00:00",
+            "instrument_token": 256265,
+        }
+    )
+    assert hub.quote_update_version("256265") == 1

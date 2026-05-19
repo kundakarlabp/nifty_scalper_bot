@@ -44,7 +44,10 @@ import pytz
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
 
 from nifty_scalper_bot.config.paths import get_data_dir
-from nifty_scalper_bot.core.active_basket import pick_atm_option_symbols_from_basket
+from nifty_scalper_bot.core.active_basket import (
+    normalize_active_basket_schema,
+    pick_atm_option_symbols_from_basket,
+)
 
 from nifty_scalper_bot.data.robust_provider import (
     CircuitBreakerConfig,
@@ -7092,7 +7095,9 @@ async def _ensure_selected_options_hydrated(
 
 async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
     """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
-    basket = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
+    basket = normalize_active_basket_schema(
+        cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
+    )
     mdm = getattr(ctx, "market_data_manager", None)
     old_ce = getattr(ctx, "selected_ce", None)
     old_pe = getattr(ctx, "selected_pe", None)
@@ -7114,7 +7119,24 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         selected_ce = old_ce
     if not selected_pe and old_pe in option_symbols:
         selected_pe = old_pe
-    basket.update({"selected_ce": selected_ce, "selected_pe": selected_pe, "option_symbols": option_symbols, "symbols": option_symbols})
+    basket.update(
+        {
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "atm_ce": selected_ce,
+            "atm_pe": selected_pe,
+            "option_symbols": option_symbols,
+            "symbols": list(
+                dict.fromkeys(
+                    [
+                        basket.get("spot_symbol") or "NSE:NIFTY",
+                        basket.get("futures_symbol") or "",
+                        *option_symbols,
+                    ]
+                )
+            ),
+        }
+    )
     ctx.active_trading_universe = basket
     if selected_ce:
         ctx.selected_ce = str(selected_ce)
@@ -7271,6 +7293,7 @@ def _commit_active_dynamic_basket(
     atm_strike: int | float | str | None,
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
+    basket = normalize_active_basket_schema(basket)
     current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
     current_symbols = [str(sym) for sym in symbols if sym]
     local_basket = dict(basket or {})
@@ -7343,6 +7366,10 @@ def _commit_active_dynamic_basket(
     committed = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
     committed.update(
         {
+            "spot_symbol": basket.get("spot_symbol") or "NSE:NIFTY",
+            "spot_token": basket.get("spot_token"),
+            "futures_symbol": basket.get("futures_symbol") or "",
+            "futures_token": basket.get("futures_token"),
             "selected_ce": selected_ce,
             "selected_pe": selected_pe,
             "atm_ce": selected_ce,
@@ -7350,7 +7377,15 @@ def _commit_active_dynamic_basket(
             "option_symbols": list(current_options),
             "ce_symbols": list(ce_symbols),
             "pe_symbols": list(pe_symbols),
-            "symbols": list(current_symbols),
+            "symbols": list(
+                dict.fromkeys(
+                    [
+                        basket.get("spot_symbol") or "NSE:NIFTY",
+                        basket.get("futures_symbol") or "",
+                        *current_options,
+                    ]
+                )
+            ),
             "atm_strike": atm_strike,
             "committed_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -7363,7 +7398,7 @@ def _commit_active_dynamic_basket(
 
 
 def _register_and_subscribe_live_symbol(
-    ctx: BotContext, symbol: str | None, token: int | None, reason: str
+    ctx: BotContext, symbol: str | None, token: int | None, reason: str, role: str = "tradable_option"
 ) -> bool:
     """Register and subscribe symbol in MDM/DataHub/Runner. Args: ctx/symbol/token/reason. Returns: success. Raises: none."""
     normalized = str(symbol or "").strip().upper()
@@ -7382,7 +7417,9 @@ def _register_and_subscribe_live_symbol(
             resolved_token = ctx.broker_client.get_instrument_token(normalized)
         except Exception:
             resolved_token = None
-    LOGGER.info("LIVE_OPTION_SUBSCRIBE_REQUESTED symbol=%s token=%s reason=%s", normalized, resolved_token, reason)
+    LOGGER.info("LIVE_SYMBOL_SUBSCRIBE_REQUESTED symbol=%s token=%s role=%s reason=%s", normalized, resolved_token, role, reason)
+    if role == "tradable_option":
+        LOGGER.info("LIVE_OPTION_SUBSCRIBE_REQUESTED symbol=%s token=%s reason=%s", normalized, resolved_token, reason)
     mdm = getattr(ctx, "market_data_manager", None)
     if mdm is not None and resolved_token is not None:
         if hasattr(mdm, "register_symbol"):
@@ -7397,7 +7434,9 @@ def _register_and_subscribe_live_symbol(
         hub.subscribe_ticks(
             normalized, runner.on_datahub_tick, token=resolved_token, force_live=True
         )
-    LOGGER.info("LIVE_OPTION_SUBSCRIBE_CONFIRMED symbol=%s token=%s subscribed=%s", normalized, resolved_token, bool(resolved_token))
+    LOGGER.info("LIVE_SYMBOL_SUBSCRIBE_CONFIRMED symbol=%s token=%s role=%s subscribed=%s", normalized, resolved_token, role, bool(resolved_token))
+    if role == "tradable_option":
+        LOGGER.info("LIVE_OPTION_SUBSCRIBE_CONFIRMED symbol=%s token=%s subscribed=%s", normalized, resolved_token, bool(resolved_token))
     return bool(resolved_token)
 async def _deferred_basket_hydration_retry(
     ctx: BotContext,
@@ -7605,11 +7644,17 @@ async def _build_and_hydrate_live_basket_from_spot(
             for live_symbol in subscription_symbols:
                 if not live_symbol:
                     continue
+                role = "tradable_option"
+                if str(live_symbol) == str((basket or {}).get("spot_symbol") or "NSE:NIFTY"):
+                    role = "spot_context"
+                elif str(live_symbol) == str((basket or {}).get("futures_symbol") or ""):
+                    role = "futures_context"
                 _register_and_subscribe_live_symbol(
                     ctx,
                     str(live_symbol),
                     token_map.get(str(live_symbol)),
                     "basket_commit_live_startup",
+                    role,
                 )
             return dict(getattr(ctx, "active_trading_universe", {}) or basket)
         except Exception as exc:
@@ -8266,12 +8311,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
                 else:
+                    defer_reason = str(_basket_spot_exc)
                     LOGGER.info("OUT_OF_HOURS_DATA_MODE option_hydration_nonfatal=true trading_ready=false")
                     LOGGER.info(
                         "DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s",
+                        defer_reason,
+                        None,
                         extra={
                             "event": "BASKET_BUILD_DEFERRED",
-                            "reason": reason,
+                            "reason": defer_reason,
                             "market_state": market_state.value,
                         },
                     )
@@ -8601,6 +8649,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
 
+            basket = normalize_active_basket_schema(basket)
             active_option_symbols = select_active_option_symbols(
                 option_symbols=basket.get("option_symbols", []) or [],
                 atm=basket.get("atm_strike"),
@@ -8806,11 +8855,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                 atm_pe = basket.get("selected_pe") or basket.get("atm_pe") or (pe_symbols[len(pe_symbols) // 2] if pe_symbols else None)
                 if atm_ce and atm_pe:
                     ctx.market_data_manager.set_readiness_requirements(
-                        spot_symbol=basket["spot_symbol"],
-                        futures_symbol=basket["futures_symbol"],
+                        spot_symbol=str(basket.get("spot_symbol") or "NSE:NIFTY"),
+                        futures_symbol=str(basket.get("futures_symbol") or ""),
                         atm_ce_symbol=atm_ce,
                         atm_pe_symbol=atm_pe,
-                        option_symbols=basket["option_symbols"],
+                        option_symbols=list(basket.get("option_symbols") or []),
                     )
                 else:
                     LOGGER.info(
@@ -9857,7 +9906,27 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
                 startup_trade_ready = True
             else:
-                LOGGER.error("Hydration/Tracking failed: %s", e, exc_info=True)
+                norm_basket = normalize_active_basket_schema(dict(getattr(ctx, "active_trading_universe", {}) or {}))
+                LOGGER.exception(
+                    "HYDRATION_TRACKING_FAILED error_type=%s error=%s basket_keys=%s selected_ce=%s selected_pe=%s spot_symbol=%s futures_symbol=%s",
+                    type(e).__name__,
+                    e,
+                    sorted(norm_basket.keys()),
+                    norm_basket.get("selected_ce"),
+                    norm_basket.get("selected_pe"),
+                    norm_basket.get("spot_symbol"),
+                    norm_basket.get("futures_symbol"),
+                    extra={
+                        "event": "HYDRATION_TRACKING_FAILED",
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                        "basket_keys": sorted(norm_basket.keys()),
+                        "selected_ce": norm_basket.get("selected_ce"),
+                        "selected_pe": norm_basket.get("selected_pe"),
+                        "spot_symbol": norm_basket.get("spot_symbol"),
+                        "futures_symbol": norm_basket.get("futures_symbol"),
+                    },
+                )
                 ctx.live_orders_armed = False
                 ctx.trading_ready = False
                 ctx.live_block_reason = f"hydration_tracking_failed:{e}"

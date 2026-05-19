@@ -7960,6 +7960,8 @@ class TelegramBot:
                 with suppress(Exception):
                     status_line = str(supervisor.status_line())
                 lines.append(f"Added {len(combined_tokens)} token(s).")
+                if resolved_pairs:
+                    lines.append(f"Resolved: {', '.join(resolved_pairs)}")
                 fallback_status = f"tokens={len(getattr(supervisor, 'tokens', set()) or set())}"
                 lines.append(f"Poll: {status_line or fallback_status}")
                 await self._reply(chat, ctx, "\n".join(lines))

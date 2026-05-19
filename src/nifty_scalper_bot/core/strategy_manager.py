@@ -1943,6 +1943,8 @@ class StrategyManager(_BaseStrategyManager):
             "vwap_slope_negative",
             "ema_slope_positive",
             "ema_slope_negative",
+            "close_above_ema50",
+            "close_below_ema50",
         }
         has_strong_reasons = any(tag in strong_reason_tags for tag in reasons)
         raw_confidence = 0.50 + margin / max(total, 1.0) * 0.45
@@ -2283,6 +2285,26 @@ class StrategyManager(_BaseStrategyManager):
                     },
                     exc_info=e,
                 )
+        if symbol_role in {"spot_context", "futures_context"}:
+            self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
+            log_throttled(
+                log,
+                key=f"context_symbol_strategy_eval_skipped:{symbol}",
+                msg=(
+                    "CONTEXT_SYMBOL_STRATEGY_EVAL_SKIPPED "
+                    f"symbol={symbol} role={symbol_role} "
+                    "reason=context_only_no_trade_strategy_eval"
+                ),
+                interval_sec=30.0,
+                level=logging.INFO,
+                extra={
+                    "event": "CONTEXT_SYMBOL_STRATEGY_EVAL_SKIPPED",
+                    "symbol": symbol,
+                    "symbol_role": symbol_role,
+                    "reason": "context_only_no_trade_strategy_eval",
+                },
+            )
+            return None
         invalid_reason: str | None = None
         vwap = indicators.get("vwap") or indicators.get("exchange_vwap")
         volume = indicators.get("volume")
@@ -2439,22 +2461,6 @@ class StrategyManager(_BaseStrategyManager):
             no_signal_reasons.append("data_invalid")
             _emit_strategy_exit()
             return None
-        if symbol_role in {"spot_context", "futures_context"}:
-            self._update_context_snapshot(symbol=symbol, indicators=indicators, role=symbol_role)
-            log_throttled(
-                log,
-                key=f"context_symbol_strategy_eval_skipped:{symbol}",
-                msg=(
-                    "CONTEXT_SYMBOL_STRATEGY_EVAL_SKIPPED "
-                    f"symbol={symbol} role={symbol_role} "
-                    "reason=context_only_no_trade_strategy_eval"
-                ),
-                interval_sec=30.0,
-                level=logging.INFO,
-                extra={"event": "CONTEXT_SYMBOL_STRATEGY_EVAL_SKIPPED", "symbol": symbol, "symbol_role": symbol_role, "reason": "context_only_no_trade_strategy_eval"},
-            )
-            return None
-
         if symbol_role == "tradable_option":
             context_snapshots = getattr(self, "_latest_context_snapshots", {})
             spot_ctx = context_snapshots.get("spot_context", {})
