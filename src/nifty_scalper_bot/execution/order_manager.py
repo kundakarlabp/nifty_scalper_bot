@@ -815,6 +815,45 @@ class OrderManager:
         with self._lock:
             self._pending_signal_ids.pop(signal_id, None)
 
+    def _find_open_order(self, client_order_id: str) -> dict[str, Any] | None:
+        """Find a live/open broker order by client_order_id/order tag/order_id."""
+        try:
+            get_orders = getattr(self._broker, "get_orders", None)
+            if not callable(get_orders):
+                get_orders = getattr(self._broker, "orders", None)
+            if not callable(get_orders):
+                return None
+
+            orders = get_orders() or []
+            wanted = str(client_order_id or "").strip()
+
+            for order in orders:
+                if not isinstance(order, Mapping):
+                    continue
+
+                status = str(order.get("status") or "").strip().upper()
+                if status in {"CANCELLED", "CANCELED", "REJECTED", "COMPLETE", "COMPLETED"}:
+                    continue
+
+                candidates = {
+                    str(order.get("client_order_id") or "").strip(),
+                    str(order.get("tag") or "").strip(),
+                    str(order.get("order_id") or "").strip(),
+                }
+
+                if wanted and wanted in candidates:
+                    return dict(order)
+
+            return None
+        except Exception as exc:
+            self._logger.warning(
+                "ORDER_FIND_OPEN_ORDER_FAILED client_order_id=%s error=%s",
+                client_order_id,
+                exc,
+                exc_info=exc,
+            )
+            return None
+
     def _remember_signal(self, signal_id: str) -> None:
         """Record signal id to preserve idempotency. Args: signal_id; Returns: None; Raises: None."""
         with self._lock:
@@ -2459,7 +2498,11 @@ class OrderManager:
 
                 # Re-raise exceptions captured in thread
                 if isinstance(response, Exception):
-                    raise response
+                    existing_after_error = _find_existing_order_after_uncertain_submit()
+                    if existing_after_error is not None:
+                        response = existing_after_error
+                    else:
+                        raise response
 
                 # --- Success Logic ---
                 order_id = _extract_order_id(response)
