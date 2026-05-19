@@ -1934,7 +1934,22 @@ class StrategyManager(_BaseStrategyManager):
         if margin < 0.5:
             return None, min(0.55, total / 4.0), reasons + ["direction_tie"]
         side = "CE" if ce_score > pe_score else "PE"
-        confidence = min(0.95, max(0.50, 0.50 + margin / max(total, 1.0) * 0.45))
+        strong_reason_tags = {
+            "close_above_vwap",
+            "close_below_vwap",
+            "ema_fast_above_slow",
+            "ema_fast_below_slow",
+            "vwap_slope_positive",
+            "vwap_slope_negative",
+            "ema_slope_positive",
+            "ema_slope_negative",
+        }
+        has_strong_reasons = any(tag in strong_reason_tags for tag in reasons)
+        raw_confidence = 0.50 + margin / max(total, 1.0) * 0.45
+        if has_strong_reasons:
+            confidence = min(0.95, max(0.50, raw_confidence))
+        else:
+            confidence = min(0.70, max(0.55, raw_confidence))
         return side, confidence, reasons
 
     @staticmethod

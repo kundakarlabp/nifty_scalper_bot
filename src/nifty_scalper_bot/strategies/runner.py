@@ -5715,6 +5715,31 @@ class StrategyRunner:
         """Compatibility alias for option-tradability checks."""
         return self._is_tradable_symbol(symbol)
 
+    @staticmethod
+    def _tick_has_quote_update(tick: Mapping[str, Any]) -> bool:
+        """Return True when tick carries depth or valid top-of-book quote."""
+        def _safe_float(value: Any) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
+        depth_payload = tick.get("depth")
+        bid_value = _safe_float(
+            tick.get("bid")
+            or tick.get("best_bid")
+            or tick.get("best_bid_price")
+            or tick.get("buy_price")
+        )
+        ask_value = _safe_float(
+            tick.get("ask")
+            or tick.get("best_ask")
+            or tick.get("best_ask_price")
+            or tick.get("sell_price")
+        )
+        has_top_of_book = bid_value > 0.0 and ask_value > 0.0
+        return bool(depth_payload) or has_top_of_book
+
     def get_quote(self, symbol: str) -> dict[str, Any] | None:
         """Return freshest normalized quote available from DataHub/MDM."""
         normalized = normalize_symbol(symbol)
@@ -5844,10 +5869,6 @@ class StrategyRunner:
                             extra={"event": "CONTEXT_EVAL_ALLOWED_WITH_PARTIAL_BARS", "symbol": symbol, "role": role, "indicator_history_count": history_count, "required_bars": required_bars},
                         )
                         return True
-                        if symbol == "NSE:NIFTY" and self._should_log_throttled(f"spot_cold:{symbol}", 120.0):
-                            self._logger.warning("CONTEXT_SPOT_HISTORY_COLD symbol=NSE:NIFTY bars=%d required=%d", history_count, required_bars)
-                        elif self._should_log_throttled(f"fut_cold:{symbol}", 120.0):
-                            self._logger.warning("CONTEXT_FUTURES_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, required_bars)
                     elif self._is_tradable_symbol(symbol):
                         if self._should_log_throttled(f"opt_cold:{symbol}", 120.0):
                             self._logger.warning("OPTION_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, required_bars)
@@ -6469,14 +6490,7 @@ class StrategyRunner:
                     level=logging.WARNING,
                 )
                 return
-            has_quote_update = False
-            try:
-                has_quote_update = (
-                    _extract_float(tick, "bid", "best_bid", "best_bid_price", "buy_price") > 0
-                    and _extract_float(tick, "ask", "best_ask", "best_ask_price", "sell_price") > 0
-                ) or bool(tick.get("depth"))
-            except Exception:
-                has_quote_update = False
+            has_quote_update = self._tick_has_quote_update(tick)
             if has_quote_update:
                 self._quote_update_versions[symbol] = int(self._quote_update_versions.get(symbol, 0)) + 1
 

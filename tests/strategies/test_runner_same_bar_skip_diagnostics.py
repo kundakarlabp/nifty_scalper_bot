@@ -100,3 +100,8 @@ def test_quote_update_version_increments_on_full_quote(caplog):
     payload = caplog.records[-1].__dict__
     assert isinstance(payload['quote_update_version'], int)
     assert payload['quote_update_version'] >= 1
+
+
+def test_tick_has_quote_update_depth_without_bid_ask():
+    tick = {"depth": {"buy": [{"price": 100.0, "quantity": 10}], "sell": [{"price": 100.5, "quantity": 8}]}}
+    assert StrategyRunner._tick_has_quote_update(tick) is True

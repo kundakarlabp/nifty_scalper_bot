@@ -52,6 +52,7 @@ def test_context_direction_fallback_from_previous_close():
     snap = m._latest_context_snapshots.get('spot_context', {})
     assert snap.get('direction_bias') == 'CE'
     assert float(snap.get('underlying_direction_confidence') or 0) >= 0.5
+    assert float(snap.get('underlying_direction_confidence') or 0) <= 0.70
 
 
 def test_option_context_fresh_but_directionless_not_used(caplog):
