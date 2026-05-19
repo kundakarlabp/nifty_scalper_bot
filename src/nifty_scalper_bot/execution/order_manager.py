@@ -1299,7 +1299,6 @@ class OrderManager:
             # Store controller (using a new dict similar to _trailing)
             if not hasattr(self, "_tp_controllers"):
                 self._tp_controllers = {}
-            self._tp_controllers[tp_order_id] = controller
 
             # Subscribe to ticks via DataHub (SSOT), fall back to MDM if unset.
             if not self._subscribe_market_callback(symbol, controller.on_tick):
@@ -1308,6 +1307,7 @@ class OrderManager:
                     symbol,
                 )
                 return
+            self._tp_controllers[tp_order_id] = controller
             self._logger.info(f"🚀 Dynamic TP attached to {tp_order_id}")
 
         except Exception as e:
@@ -2074,22 +2074,34 @@ class OrderManager:
             duplicate_permanent = self._is_duplicate_signal(signal_id)
             duplicate_pending = self._is_pending_signal(signal_id)
             if duplicate_permanent or duplicate_pending:
-                block_reason = "duplicate_signal" if duplicate_permanent else "duplicate_signal_pending"
-            self._logger.warning(
-                f"🛑 DUPLICATE BLOCKED: Signal {signal_id} already traded.",
-                extra={"symbol": normalized_symbol, "event": "duplicate_block"},
-            )
-            self._log_trade_event(
-                "ORDER_BLOCKED_DUPLICATE",
-                symbol=normalized_symbol,
-                side=side,
-                qty=quantity,
-                price=float(price or 0.0),
-                meta={"signal_id": signal_id},
-            )
-            self._logger.warning("ORDER_BLOCKED: duplicate_signal signal_id=%s symbol=%s", signal_id, normalized_symbol)
-            _log_order_decision(allowed=False, block_reason=block_reason)
-            return None
+                block_reason = (
+                    "duplicate_signal" if duplicate_permanent else "duplicate_signal_pending"
+                )
+                self._logger.warning(
+                    "🛑 DUPLICATE BLOCKED: Signal %s already traded.",
+                    signal_id,
+                    extra={
+                        "symbol": normalized_symbol,
+                        "event": "duplicate_block",
+                        "block_reason": block_reason,
+                    },
+                )
+                self._log_trade_event(
+                    "ORDER_BLOCKED_DUPLICATE",
+                    symbol=normalized_symbol,
+                    side=side,
+                    qty=quantity,
+                    price=float(price or 0.0),
+                    meta={"signal_id": signal_id, "block_reason": block_reason},
+                )
+                self._logger.warning(
+                    "ORDER_BLOCKED: %s signal_id=%s symbol=%s",
+                    block_reason,
+                    signal_id,
+                    normalized_symbol,
+                )
+                _log_order_decision(allowed=False, block_reason=block_reason)
+                return None
 
         # --- SEMANTIC VALIDATION GATEKEEPER ---
         if price and price > 0:
@@ -2365,6 +2377,28 @@ class OrderManager:
             "variety": variety,
             "client_order_id": unique_client_id,
         }
+        def _find_existing_order_after_uncertain_submit() -> dict[str, Any] | None:
+            try:
+                existing = self._find_open_order(unique_client_id)
+                if isinstance(existing, Mapping):
+                    return dict(existing)
+            except Exception as exc:
+                self._logger.warning(
+                    "ORDER_RECONCILE_AFTER_TIMEOUT_FAILED signal_id=%s client_order_id=%s error=%s",
+                    signal_id,
+                    unique_client_id,
+                    exc,
+                    exc_info=exc,
+                )
+            return None
+
+        def _extract_order_id(response: object) -> str | None:
+            if isinstance(response, Mapping):
+                raw = response.get("order_id") or response.get("id")
+                return str(raw) if raw else None
+            if response:
+                return str(response)
+            return None
 
         for attempt in range(1, 4):
             # -----------------------------------------------------------------
@@ -2402,27 +2436,33 @@ class OrderManager:
                     )
                     t.join(timeout=2.0)
                     if t.is_alive():
-                        self._logger.critical(
-                            f"🚨 Broker API hung on attempt {attempt}! Timeout forced."
-                        )
-                        raise TimeoutError("Broker API call timed out (10s)")
+                        existing_after_timeout = _find_existing_order_after_uncertain_submit()
+                        if existing_after_timeout is not None:
+                            response = existing_after_timeout
+                        else:
+                            self._logger.critical(
+                                "🚨 Broker API hung on attempt %s and no existing order was found for client_order_id=%s",
+                                attempt,
+                                unique_client_id,
+                            )
+                            raise TimeoutError("Broker API call timed out (10s)")
                     self._logger.info(
                         "Recovered late broker response inside grace window for %s",
                         normalized_symbol,
                     )
 
                 response = result_holder["resp"]
+                if response is None:
+                    existing_after_timeout = _find_existing_order_after_uncertain_submit()
+                    if existing_after_timeout is not None:
+                        response = existing_after_timeout
 
                 # Re-raise exceptions captured in thread
                 if isinstance(response, Exception):
                     raise response
 
                 # --- Success Logic ---
-                order_id = (
-                    response.get("order_id")
-                    if isinstance(response, dict)
-                    else str(response)
-                )
+                order_id = _extract_order_id(response)
 
                 if order_id:
                     # ✅ RESET Kill Switch on success
@@ -2544,6 +2584,9 @@ class OrderManager:
                         order_id=order_id,
                     )
                     self._consecutive_failures = 0
+                    if signal_id:
+                        self._clear_pending_signal(signal_id)
+                        self._remember_signal(signal_id)
                     return order_id
 
             except Exception as e:
@@ -2613,6 +2656,8 @@ class OrderManager:
                         meta={"trade_id": trade_id, "error": str(e)},
                     )
                     _log_order_decision(allowed=False, block_reason="fatal_order_error")
+                    if pending_signal_marked:
+                        self._clear_pending_signal(signal_id)
                     return None
 
                 self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
@@ -2620,6 +2665,8 @@ class OrderManager:
 
         self._logger.error("❌ Order placement failed after retries.")
         _log_order_decision(allowed=False, block_reason="order_placement_failed_after_retries")
+        if pending_signal_marked:
+            self._clear_pending_signal(signal_id)
         return None
 
     def _get_latest_quote_safe(self, symbol: str) -> dict[str, Any] | None:
@@ -2653,11 +2700,42 @@ class OrderManager:
         return None
 
     def _extract_quote_diagnostics(self, quote: Mapping[str, Any]) -> dict[str, Any]:
-        bid = float(quote.get("best_bid") or quote.get("bid") or quote.get("best_bid_price") or 0.0)
-        ask = float(quote.get("best_ask") or quote.get("ask") or quote.get("best_ask_price") or 0.0)
-        ltp = float(quote.get("ltp") or quote.get("last_price") or 0.0)
-        bid_qty = int(float(quote.get("bid_quantity") or quote.get("bid_qty") or 0))
-        ask_qty = int(float(quote.get("ask_quantity") or quote.get("ask_qty") or 0))
+        def _safe_float(value: object, default: float = 0.0) -> float:
+            if value in (None, ""):
+                return default
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return default
+            if not math.isfinite(number):
+                return default
+            return number
+
+        def _safe_int(value: object, default: int = 0) -> int:
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return default
+
+        bid = _safe_float(
+            quote.get("best_bid")
+            or quote.get("bid")
+            or quote.get("best_bid_price")
+            or quote.get("buy_price")
+        )
+        ask = _safe_float(
+            quote.get("best_ask")
+            or quote.get("ask")
+            or quote.get("best_ask_price")
+            or quote.get("sell_price")
+        )
+        ltp = _safe_float(quote.get("ltp") or quote.get("last_price"))
+        bid_qty = _safe_int(
+            quote.get("bid_quantity") or quote.get("bid_qty") or quote.get("buy_qty")
+        )
+        ask_qty = _safe_int(
+            quote.get("ask_quantity") or quote.get("ask_qty") or quote.get("sell_qty")
+        )
         spread = max(0.0, ask - bid) if bid > 0 and ask > 0 else 0.0
         ref = ask if ask > 0 else ltp if ltp > 0 else 1.0
         spread_pct = (spread / ref) * 100.0 if ref > 0 else 999.0
@@ -10777,6 +10855,25 @@ class OrderManager:
             return float(cast(Any, value))
         except (TypeError, ValueError):
             return None
+    @staticmethod
+    def _timestamp_seconds(value: object) -> float:
+        if isinstance(value, datetime):
+            return float(value.timestamp())
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value.strip():
+            token = value.strip()
+            try:
+                return float(
+                    datetime.fromisoformat(token.replace("Z", "+00:00")).timestamp()
+                )
+            except ValueError:
+                try:
+                    return float(token)
+                except ValueError:
+                    return 0.0
+        return 0.0
+
 
     @staticmethod
     def _coerce_int(value: object | None) -> int | None:
