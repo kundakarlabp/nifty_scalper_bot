@@ -1876,6 +1876,11 @@ class StrategyManager(_BaseStrategyManager):
                 conf = 0.75
             return explicit, max(0.0, min(1.0, conf)), ["explicit_direction_bias"]
         close = _f("close") or _f("ltp") or _f("price")
+        ltp = _f("ltp") or _f("last_price") or _f("price")
+        previous_close = _f("previous_close") or _f("prev_close") or _f("previous_price")
+        day_open = _f("open") or _f("day_open") or _f("first_ltp")
+        recent_ltp_delta = _f("recent_ltp_delta") or _f("net_change") or _f("price_change_pct")
+        tick_slope = _f("tick_slope")
         vwap = _f("vwap") or _f("exchange_vwap") or _f("session_vwap")
         ema_fast = _f("ema_fast") or _f("ema_9") or _f("ema9")
         ema_slow = _f("ema_slow") or _f("ema_21") or _f("ema21")
@@ -1900,6 +1905,28 @@ class StrategyManager(_BaseStrategyManager):
         elif ema_slope < 0: pe_score += 0.5; reasons.append("ema_slope_negative")
         if role == "futures_context" and futures_volume_ratio >= 1.0:
             reasons.append("futures_volume_active")
+        if close is not None and previous_close is not None:
+            if close > previous_close:
+                ce_score += 0.8
+                reasons.append("close_above_previous_close")
+            elif close < previous_close:
+                pe_score += 0.8
+                reasons.append("close_below_previous_close")
+        if ltp is not None and day_open is not None:
+            if ltp > day_open:
+                ce_score += 0.7
+                reasons.append("ltp_above_open")
+            elif ltp < day_open:
+                pe_score += 0.7
+                reasons.append("ltp_below_open")
+        delta_signal = recent_ltp_delta if recent_ltp_delta not in (None, 0.0) else tick_slope
+        if delta_signal is not None:
+            if delta_signal > 0:
+                ce_score += 0.6
+                reasons.append("tick_slope_positive")
+            elif delta_signal < 0:
+                pe_score += 0.6
+                reasons.append("tick_slope_negative")
         total = ce_score + pe_score
         if total <= 0:
             return None, 0.0, ["direction_unavailable"]
@@ -1907,8 +1934,27 @@ class StrategyManager(_BaseStrategyManager):
         if margin < 0.5:
             return None, min(0.55, total / 4.0), reasons + ["direction_tie"]
         side = "CE" if ce_score > pe_score else "PE"
-        confidence = min(0.95, max(0.50, 0.50 + margin / max(total, 1.0) * 0.45))
+        strong_reason_tags = {
+            "close_above_vwap",
+            "close_below_vwap",
+            "ema_fast_above_slow",
+            "ema_fast_below_slow",
+            "vwap_slope_positive",
+            "vwap_slope_negative",
+            "ema_slope_positive",
+            "ema_slope_negative",
+        }
+        has_strong_reasons = any(tag in strong_reason_tags for tag in reasons)
+        raw_confidence = 0.50 + margin / max(total, 1.0) * 0.45
+        if has_strong_reasons:
+            confidence = min(0.95, max(0.50, raw_confidence))
+        else:
+            confidence = min(0.70, max(0.55, raw_confidence))
         return side, confidence, reasons
+
+    @staticmethod
+    def _context_direction_valid(ctx: t.Mapping[str, t.Any]) -> bool:
+        return str(ctx.get("direction_bias") or ctx.get("underlying_direction_bias") or "").upper() in {"CE", "PE"}
 
     def _strategy_required_indicator_union(self) -> set[str]:
         required = set(getattr(self, "_required_indicators", set()) or set())
@@ -2423,12 +2469,24 @@ class StrategyManager(_BaseStrategyManager):
                     return False
             spot_fresh = _fresh(spot_ctx)
             fut_fresh = _fresh(fut_ctx)
-            if spot_fresh:
+            spot_direction_valid = self._context_direction_valid(spot_ctx)
+            fut_direction_valid = self._context_direction_valid(fut_ctx)
+            spot_usable = spot_fresh and spot_direction_valid
+            fut_usable = fut_fresh and fut_direction_valid
+            if spot_fresh and not spot_direction_valid:
+                log_throttled(
+                    log, f"option_context_fresh_but_directionless:{symbol}",
+                    "OPTION_CONTEXT_FRESH_BUT_DIRECTIONLESS symbol=%s spot_fresh=%s spot_ctx_keys=%s",
+                    symbol, spot_fresh, sorted(list(spot_ctx.keys())),
+                    interval_sec=30.0, level=logging.INFO,
+                    extra={"event": "OPTION_CONTEXT_FRESH_BUT_DIRECTIONLESS", "symbol": symbol, "spot_fresh": spot_fresh, "spot_direction_valid": spot_direction_valid, "spot_ctx_keys": sorted(list(spot_ctx.keys()))},
+                )
+            if spot_usable:
                 indicators.setdefault("spot_context", spot_ctx)
-            if fut_fresh:
+            if fut_usable:
                 indicators.setdefault("futures_context", fut_ctx)
-            direction_bias = (indicators.get("direction_bias") or indicators.get("underlying_direction_bias") or (spot_ctx.get("direction_bias") if spot_fresh else None) or (fut_ctx.get("direction_bias") if fut_fresh else None))
-            direction_confidence = (indicators.get("underlying_direction_confidence") or (spot_ctx.get("underlying_direction_confidence") if spot_fresh else None) or (fut_ctx.get("underlying_direction_confidence") if fut_fresh else None) or 0.0)
+            direction_bias = (indicators.get("direction_bias") or indicators.get("underlying_direction_bias") or (spot_ctx.get("direction_bias") if spot_usable else None) or (fut_ctx.get("direction_bias") if fut_usable else None))
+            direction_confidence = (indicators.get("underlying_direction_confidence") or (spot_ctx.get("underlying_direction_confidence") if spot_usable else None) or (fut_ctx.get("underlying_direction_confidence") if fut_usable else None) or 0.0)
             if str(direction_bias or "").upper() in {"CE", "PE"}:
                 indicators["direction_bias"] = str(direction_bias).upper()
                 indicators["underlying_direction_bias"] = str(direction_bias).upper()
@@ -2436,15 +2494,17 @@ class StrategyManager(_BaseStrategyManager):
                     indicators["underlying_direction_confidence"] = float(direction_confidence)
                 except (TypeError, ValueError):
                     indicators["underlying_direction_confidence"] = 0.0
-                indicators["context_age_seconds"] = min(now_ts - float(spot_ctx.get("timestamp", now_ts)) if spot_fresh else max_context_age + 1, now_ts - float(fut_ctx.get("timestamp", now_ts)) if fut_fresh else max_context_age + 1)
+                indicators["context_age_seconds"] = min(now_ts - float(spot_ctx.get("timestamp", now_ts)) if spot_usable else max_context_age + 1, now_ts - float(fut_ctx.get("timestamp", now_ts)) if fut_usable else max_context_age + 1)
             else:
                 log_throttled(
                     log,
                     f"option_context_missing_direction_bias:{symbol}",
-                    "OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s",
+                    "OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s spot_direction_valid=%s fut_direction_valid=%s",
                     symbol,
                     spot_fresh,
                     fut_fresh,
+                    spot_direction_valid,
+                    fut_direction_valid,
                     interval_sec=30.0,
                     level=logging.INFO,
                     extra={
@@ -2452,6 +2512,12 @@ class StrategyManager(_BaseStrategyManager):
                         "symbol": symbol,
                         "spot_fresh": spot_fresh,
                         "fut_fresh": fut_fresh,
+                        "spot_direction_valid": spot_direction_valid,
+                        "fut_direction_valid": fut_direction_valid,
+                        "spot_direction_reasons": spot_ctx.get("direction_context_reasons"),
+                        "fut_direction_reasons": fut_ctx.get("direction_context_reasons"),
+                        "spot_ctx_keys": sorted(list(spot_ctx.keys())),
+                        "fut_ctx_keys": sorted(list(fut_ctx.keys())),
                     },
                 )
             if fut_fresh and fut_ctx.get("futures_volume_ratio") is not None:

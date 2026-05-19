@@ -59,3 +59,49 @@ def test_runner_eval_decision_visible_message_uses_clear_version_names(caplog):
     assert 'indicator_history_count' in msg
     assert 'live_candle_version' in msg
     assert 'last_eval_live_candle_version' in msg
+
+
+def test_context_symbols_bypass_min_bars_for_snapshot_update():
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._active_symbols = {'NSE:NIFTY'}
+    runner._required_bars_for_symbol = lambda _s: 50
+    runner._context_required_bars = 50
+    runner._option_required_bars = 5
+    runner._indicator_engine = type('E', (), {'get_history': lambda *_: [1, 2], 'has_min_bars': lambda *_: False})()
+    runner._is_context_symbol = lambda _s: True
+    runner._is_tradable_symbol = lambda _s: False
+    runner._symbol_role_for_runner = lambda _s: 'spot_context'
+    runner._logger = logging.getLogger('test_runner_context_bypass')
+    runner._emit_runner_eval_decision = lambda **_: None
+    assert runner._strategy_evaluation_allowed('NSE:NIFTY')
+
+
+def test_quote_update_version_increments_on_full_quote(caplog):
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = logging.getLogger('test_runner_quote_version')
+    runner._active_symbols = {'NFO:NIFTY26MAY25200CE'}
+    runner._data_phase = {'NFO:NIFTY26MAY25200CE': 'LIVE'}
+    runner._required_bars_for_symbol = lambda _s: 1
+    runner._symbol_state = {}
+    runner._symbol_states = {}
+    runner._candle_versions = {'NFO:NIFTY26MAY25200CE': 1}
+    runner._last_strategy_versions = {'NFO:NIFTY26MAY25200CE': 0}
+    runner._quote_update_versions = {}
+    runner._last_bar_ts = {}
+    runner._market_data = type('M', (), {'_last_tick_time': {}, 'get_ohlc_bars': lambda *_: []})()
+    runner._live_bar_seen = set()
+    runner._hydration_attempted_symbols = set()
+    runner._last_hydration_reason_by_symbol = {}
+    runner._indicator_engine = type('E', (), {'get_history': lambda *_: [1]})()
+    runner._should_log_throttled = lambda *_: True
+    with caplog.at_level(logging.INFO):
+        runner._quote_update_versions['NFO:NIFTY26MAY25200CE'] = runner._quote_update_versions.get('NFO:NIFTY26MAY25200CE', 0) + 1
+        runner._emit_runner_eval_decision(symbol='NFO:NIFTY26MAY25200CE',stage='phase9',reason='evaluation_no_signal',allowed=True)
+    payload = caplog.records[-1].__dict__
+    assert isinstance(payload['quote_update_version'], int)
+    assert payload['quote_update_version'] >= 1
+
+
+def test_tick_has_quote_update_depth_without_bid_ask():
+    tick = {"depth": {"buy": [{"price": 100.0, "quantity": 10}], "sell": [{"price": 100.5, "quantity": 8}]}}
+    assert StrategyRunner._tick_has_quote_update(tick) is True

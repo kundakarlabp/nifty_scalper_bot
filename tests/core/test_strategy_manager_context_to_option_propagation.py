@@ -43,3 +43,25 @@ def test_option_evaluation_receives_derived_spot_direction_bias():
     assert float(st.last.get('underlying_direction_confidence') or 0)>0
     assert float(st.last.get('context_age_seconds') or 999)<=120
     assert isinstance(st.last.get('spot_context'), dict)
+
+
+def test_context_direction_fallback_from_previous_close():
+    st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
+    ie.payload={'close':110,'previous_close':100,'volume':100,'avg_volume':100}
+    m.generate_signal('NSE:NIFTY',110)
+    snap = m._latest_context_snapshots.get('spot_context', {})
+    assert snap.get('direction_bias') == 'CE'
+    assert float(snap.get('underlying_direction_confidence') or 0) >= 0.5
+    assert float(snap.get('underlying_direction_confidence') or 0) <= 0.70
+
+
+def test_option_context_fresh_but_directionless_not_used(caplog):
+    import logging
+    st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
+    ie.payload={'close':100,'volume':100,'avg_volume':100}
+    m.generate_signal('NSE:NIFTY',100)
+    ie.payload={'vwap':102,'volume':100,'avg_volume':100}
+    with caplog.at_level(logging.INFO):
+        m.generate_signal('NFO:NIFTY26MAY23750CE',102)
+    assert any("OPTION_CONTEXT_FRESH_BUT_DIRECTIONLESS" in rec.message for rec in caplog.records)
+    assert st.last.get('direction_bias') in (None, '')
