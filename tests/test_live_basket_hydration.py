@@ -33,3 +33,27 @@ async def test_build_live_basket_does_not_double_hydrate_when_hydrate_false(monk
 
     await app._build_and_hydrate_live_basket_from_spot(ctx, spot_ltp=25000.0, configured_mode='LIVE', hydrate=False)
     assert called['fetch_history'] == 0
+
+
+def test_commit_active_dynamic_basket_persists_context_fields() -> None:
+    ctx = SimpleNamespace(active_trading_universe={}, selected_ce=None, selected_pe=None, strategy_runner=None)
+    basket = {
+        "futures_symbol": "NFO:NIFTY26MAYFUT",
+        "futures_token": 222,
+        "option_symbols": ["NFO:NIFTY26MAY25000CE", "NFO:NIFTY26MAY25000PE"],
+        "ce_symbols": ["NFO:NIFTY26MAY25000CE"],
+        "pe_symbols": ["NFO:NIFTY26MAY25000PE"],
+        "atm_strike": 25000,
+    }
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket=basket,
+        option_symbols=basket["option_symbols"],
+        symbols=basket["option_symbols"],
+        atm_strike=25000,
+    )
+    committed = ctx.active_trading_universe
+    assert committed["spot_symbol"] == "NSE:NIFTY"
+    assert "spot_symbol" in committed and "futures_symbol" in committed
+    assert "NSE:NIFTY" in committed["symbols"]
+    assert "NFO:NIFTY26MAYFUT" in committed["symbols"]

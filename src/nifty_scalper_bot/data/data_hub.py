@@ -241,7 +241,14 @@ class DataHub:
         lookup = self._canonical_quote_symbol(symbol)
         with self._lock:
             value = self._quote_update_versions.get(lookup)
-            return int(value) if value is not None else None
+            if value is not None:
+                return int(value)
+            token = self._token_by_symbol.get(lookup)
+            if token is not None:
+                mapped_symbol = self._symbol_by_token.get(int(token))
+                if mapped_symbol and mapped_symbol in self._quote_update_versions:
+                    return int(self._quote_update_versions[mapped_symbol])
+        return None
 
 
     def _token_from_symbol(self, symbol: str) -> int | None:

@@ -7095,7 +7095,9 @@ async def _ensure_selected_options_hydrated(
 
 async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str) -> None:
     """Recompute app runtime readiness and push to runner. Args: ctx/reason. Returns: none. Raises: none."""
-    basket = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
+    basket = normalize_active_basket_schema(
+        cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
+    )
     mdm = getattr(ctx, "market_data_manager", None)
     old_ce = getattr(ctx, "selected_ce", None)
     old_pe = getattr(ctx, "selected_pe", None)
@@ -7117,7 +7119,24 @@ async def _recompute_and_push_runtime_readiness(ctx: BotContext, *, reason: str)
         selected_ce = old_ce
     if not selected_pe and old_pe in option_symbols:
         selected_pe = old_pe
-    basket.update({"selected_ce": selected_ce, "selected_pe": selected_pe, "option_symbols": option_symbols, "symbols": option_symbols})
+    basket.update(
+        {
+            "selected_ce": selected_ce,
+            "selected_pe": selected_pe,
+            "atm_ce": selected_ce,
+            "atm_pe": selected_pe,
+            "option_symbols": option_symbols,
+            "symbols": list(
+                dict.fromkeys(
+                    [
+                        basket.get("spot_symbol") or "NSE:NIFTY",
+                        basket.get("futures_symbol") or "",
+                        *option_symbols,
+                    ]
+                )
+            ),
+        }
+    )
     ctx.active_trading_universe = basket
     if selected_ce:
         ctx.selected_ce = str(selected_ce)
@@ -7347,6 +7366,10 @@ def _commit_active_dynamic_basket(
     committed = cast(dict[str, object], getattr(ctx, "active_trading_universe", {}) or {})
     committed.update(
         {
+            "spot_symbol": basket.get("spot_symbol") or "NSE:NIFTY",
+            "spot_token": basket.get("spot_token"),
+            "futures_symbol": basket.get("futures_symbol") or "",
+            "futures_token": basket.get("futures_token"),
             "selected_ce": selected_ce,
             "selected_pe": selected_pe,
             "atm_ce": selected_ce,
@@ -7354,7 +7377,15 @@ def _commit_active_dynamic_basket(
             "option_symbols": list(current_options),
             "ce_symbols": list(ce_symbols),
             "pe_symbols": list(pe_symbols),
-            "symbols": list(current_symbols),
+            "symbols": list(
+                dict.fromkeys(
+                    [
+                        basket.get("spot_symbol") or "NSE:NIFTY",
+                        basket.get("futures_symbol") or "",
+                        *current_options,
+                    ]
+                )
+            ),
             "atm_strike": atm_strike,
             "committed_at": datetime.now(timezone.utc).isoformat(),
         }

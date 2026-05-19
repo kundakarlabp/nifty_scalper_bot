@@ -102,6 +102,51 @@ def test_quote_update_version_increments_on_full_quote(caplog):
     assert payload['quote_update_version'] >= 1
 
 
+def test_quote_update_version_fallback_from_datahub(caplog):
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = logging.getLogger('test_runner_quote_version_fallback')
+    runner._active_symbols = {'NFO:NIFTY26MAY25200CE'}
+    runner._data_phase = {'NFO:NIFTY26MAY25200CE': 'LIVE'}
+    runner._required_bars_for_symbol = lambda _s: 1
+    runner._symbol_state = {}
+    runner._symbol_states = {}
+    runner._candle_versions = {'NFO:NIFTY26MAY25200CE': 1}
+    runner._last_strategy_versions = {'NFO:NIFTY26MAY25200CE': 0}
+    runner._quote_update_versions = {}
+    runner._last_bar_ts = {}
+    runner._market_data = type('M', (), {'_last_tick_time': {}, 'get_ohlc_bars': lambda *_: []})()
+    runner._data_hub = type('H', (), {'quote_update_version': lambda *_: 3})()
+    runner._live_bar_seen = set()
+    runner._hydration_attempted_symbols = set()
+    runner._last_hydration_reason_by_symbol = {}
+    runner._indicator_engine = type('E', (), {'get_history': lambda *_: [1]})()
+    runner._should_log_throttled = lambda *_: True
+    with caplog.at_level(logging.INFO):
+        runner._emit_runner_eval_decision(symbol='NFO:NIFTY26MAY25200CE', stage='phase9', reason='evaluation_no_signal', allowed=True)
+    assert caplog.records[-1].__dict__['quote_update_version'] == 3
+
+
+def test_option_execution_min_bars_applies_only_to_options(monkeypatch):
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._active_symbols = {'NSE:NIFTY', 'NFO:NIFTY26MAYFUT', 'NFO:NIFTY26MAY25200CE'}
+    runner._restored_from_cache_symbols = set()
+    runner._context_required_bars = 50
+    runner._is_option_symbol_tick_fresh = lambda _s: True
+    runner._active_selected_ce = 'NFO:NIFTY26MAY25200CE'
+    runner._active_selected_pe = 'NFO:NIFTY26MAY25200PE'
+    runner._should_log_throttled = lambda *_: False
+    runner._logger = logging.getLogger('test_option_min_bars')
+    runner._emit_runner_eval_decision = lambda **_: None
+    runner._symbol_role_for_runner = lambda s: 'tradable_option' if s.endswith(('CE', 'PE')) else ('spot_context' if s == 'NSE:NIFTY' else 'futures_context')
+    runner._is_context_symbol = lambda s: runner._symbol_role_for_runner(s) in {'spot_context', 'futures_context'}
+    runner._is_tradable_symbol = lambda s: runner._symbol_role_for_runner(s) == 'tradable_option'
+    runner._required_bars_for_symbol = lambda _s: 2
+    runner._indicator_engine = type('E', (), {'get_history': lambda *_: [1, 2], 'has_min_bars': lambda *_: True})()
+    monkeypatch.setenv("OPTION_EXECUTION_MIN_BARS", "5")
+    assert runner._strategy_evaluation_allowed('NSE:NIFTY')
+    assert runner._strategy_evaluation_allowed('NFO:NIFTY26MAYFUT')
+
+
 def test_tick_has_quote_update_depth_without_bid_ask():
     tick = {"depth": {"buy": [{"price": 100.0, "quantity": 10}], "sell": [{"price": 100.5, "quantity": 8}]}}
     assert StrategyRunner._tick_has_quote_update(tick) is True

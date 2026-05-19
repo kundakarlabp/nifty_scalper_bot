@@ -55,6 +55,22 @@ def test_context_direction_fallback_from_previous_close():
     assert float(snap.get('underlying_direction_confidence') or 0) <= 0.70
 
 
+def test_spot_context_updates_without_vwap():
+    st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
+    ie.payload={'close':110,'previous_close':100,'volume':100,'avg_volume':100}
+    m.generate_signal('NSE:NIFTY',110)
+    snap = m._latest_context_snapshots.get('spot_context', {})
+    assert snap.get('direction_bias') == 'CE'
+
+
+def test_futures_context_updates_without_vwap_from_tick_slope():
+    st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
+    ie.payload={'close':100,'tick_slope':0.2,'volume':100,'avg_volume':100}
+    m.generate_signal('NFO:NIFTY26MAYFUT',100)
+    snap = m._latest_context_snapshots.get('futures_context', {})
+    assert snap.get('direction_bias') == 'CE'
+
+
 def test_option_context_fresh_but_directionless_not_used(caplog):
     import logging
     st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
