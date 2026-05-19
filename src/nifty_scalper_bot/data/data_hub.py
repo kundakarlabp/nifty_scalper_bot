@@ -249,15 +249,12 @@ class DataHub:
                 mapped_symbol = self._symbol_by_token.get(int(token))
                 if mapped_symbol and mapped_symbol in self._quote_update_versions:
                     return int(self._quote_update_versions[mapped_symbol])
-            if str(symbol).strip().isdigit():
-                try:
-                    token_int = int(str(symbol).strip())
-                except ValueError:
-                    token_int = None
-                if token_int is not None:
-                    mapped_symbol = self._symbol_by_token.get(token_int)
-                    if mapped_symbol and mapped_symbol in self._quote_update_versions:
-                        return int(self._quote_update_versions[mapped_symbol])
+            raw = str(symbol or "").strip()
+            if raw.isdigit():
+                token_int = int(raw)
+                mapped_symbol = self._symbol_by_token.get(token_int)
+                if mapped_symbol and mapped_symbol in self._quote_update_versions:
+                    return int(self._quote_update_versions[mapped_symbol])
         return None
 
 
