@@ -511,9 +511,9 @@ def test_tick_listener_error_rate_limited(
 
 
 def test_quote_update_version_increments_for_symbol(hub: DataHub) -> None:
-    hub.ingest_tick_sync({"symbol": "NSE:NIFTY", "ltp": 25000.0, "timestamp": "2026-05-19T09:15:00+00:00"})
+    hub.ingest_tick({"symbol": "NSE:NIFTY", "ltp": 25000.0, "timestamp": "2026-05-19T09:15:00Z", "source": "ws"})
     assert hub.quote_update_version("NSE:NIFTY") == 1
-    hub.ingest_tick_sync({"symbol": "NSE:NIFTY", "ltp": 25010.0, "timestamp": "2026-05-19T09:15:01+00:00"})
+    hub.ingest_tick({"symbol": "NSE:NIFTY", "ltp": 25010.0, "timestamp": "2026-05-19T09:15:01Z", "source": "ws"})
     assert hub.quote_update_version("NSE:NIFTY") == 2
 
 
