@@ -811,6 +811,7 @@ class StrategyRunner:
         self._strategy_window_trailing_updates = 0
         self._candle_versions: dict[str, int] = defaultdict(int)
         self._last_strategy_versions: dict[str, int] = defaultdict(int)
+        self._quote_update_versions: dict[str, int] = defaultdict(int)
         self._gap_repair_inflight: set[str] = set()
         self._history_refresh_interval_seconds: float = 60.0
         self._last_history_refresh_by_symbol: dict[str, float] = {}
@@ -5497,6 +5498,29 @@ class StrategyRunner:
                 )
             ):
                 return
+            if reason == "insufficient_indicator_bar_count" and str(symbol).upper().endswith(("CE", "PE")):
+                selected_set = {
+                    normalize_symbol(str(getattr(self, "_active_selected_ce", "") or "")),
+                    normalize_symbol(str(getattr(self, "_active_selected_pe", "") or "")),
+                }
+                selected_set.discard("")
+                normalized_symbol = normalize_symbol(symbol)
+                selected_option = normalized_symbol in selected_set
+                near_atm = False
+                try:
+                    sym_strike = self._extract_strike_from_symbol(normalized_symbol)
+                    atm = float(getattr(self, "_active_atm_strike", 0) or 0)
+                    near_atm = sym_strike is not None and atm > 0 and abs(float(sym_strike) - atm) <= 100.0
+                except Exception:
+                    near_atm = False
+                warmup_only = not (selected_option or near_atm)
+                if warmup_only and not self._should_log_throttled(
+                    f"runner_eval_warmup_only:{symbol}:{stage}:{reason}", 30.0
+                ):
+                    return
+                context.setdefault("selected_option", selected_option)
+                context.setdefault("near_atm", near_atm)
+                context.setdefault("warmup_only", warmup_only)
             state_obj = self._symbol_state.get(symbol)
             state_active = bool(getattr(state_obj, "active", False)) if state_obj else False
             sym_state = self._symbol_states.get(symbol)
@@ -5813,6 +5837,13 @@ class StrategyRunner:
                 soft_pass = False
                 if history_count < required_bars:
                     if self._is_context_symbol(symbol):
+                        role = self._symbol_role_for_runner(symbol)
+                        self._logger.info(
+                            "CONTEXT_EVAL_ALLOWED_WITH_PARTIAL_BARS symbol=%s role=%s indicator_history_count=%s required=%s",
+                            symbol, role, history_count, required_bars,
+                            extra={"event": "CONTEXT_EVAL_ALLOWED_WITH_PARTIAL_BARS", "symbol": symbol, "role": role, "indicator_history_count": history_count, "required_bars": required_bars},
+                        )
+                        return True
                         if symbol == "NSE:NIFTY" and self._should_log_throttled(f"spot_cold:{symbol}", 120.0):
                             self._logger.warning("CONTEXT_SPOT_HISTORY_COLD symbol=NSE:NIFTY bars=%d required=%d", history_count, required_bars)
                         elif self._should_log_throttled(f"fut_cold:{symbol}", 120.0):
@@ -6438,6 +6469,16 @@ class StrategyRunner:
                     level=logging.WARNING,
                 )
                 return
+            has_quote_update = False
+            try:
+                has_quote_update = (
+                    _extract_float(tick, "bid", "best_bid", "best_bid_price", "buy_price") > 0
+                    and _extract_float(tick, "ask", "best_ask", "best_ask_price", "sell_price") > 0
+                ) or bool(tick.get("depth"))
+            except Exception:
+                has_quote_update = False
+            if has_quote_update:
+                self._quote_update_versions[symbol] = int(self._quote_update_versions.get(symbol, 0)) + 1
 
             # Bracket tick forwarding already happened at function entry.
             # Keep a single forward per tick so protective handlers do not churn
