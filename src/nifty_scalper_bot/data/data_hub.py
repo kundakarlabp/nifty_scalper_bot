@@ -140,6 +140,7 @@ class DataHub:
         self._last_global_ws_arrival = 0.0
         self._last_arrival_mono: Dict[str, float] = {}
         self._stale_candidates: Dict[str, int] = defaultdict(int)
+        self._quote_update_versions: dict[str, int] = defaultdict(int)
         self._last_listener_error_log_ts = 0.0
         self._listener_error_streak = 0
         self._history_cache: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
@@ -235,6 +236,12 @@ class DataHub:
                 except Exception:
                     continue
         return canonical(s)
+
+    def quote_update_version(self, symbol: str) -> int | None:
+        lookup = self._canonical_quote_symbol(symbol)
+        with self._lock:
+            value = self._quote_update_versions.get(lookup)
+            return int(value) if value is not None else None
 
 
     def _token_from_symbol(self, symbol: str) -> int | None:
@@ -743,6 +750,7 @@ class DataHub:
             elif source in {"poll", "rest"}:
                 self._last_poll_arrival[symbol] = now_ms
             self._stale_candidates[symbol] = 0
+            self._quote_update_versions[symbol] = int(self._quote_update_versions.get(symbol, 0)) + 1
             token_value = canonical_tick.get("instrument_token") or canonical_tick.get("token")
             token_int = None
             try:
@@ -1044,9 +1052,13 @@ class DataHub:
             return
         trace_id = self._make_trace_id(normalized)
         if callback is not None:
+            before_primary = len(self._tick_subscribers[normalized])
             self._tick_subscribers[normalized].add(callback)
+            changed = len(self._tick_subscribers[normalized]) > before_primary
             for alias in self._symbol_aliases.get(normalized, set()):
+                before_alias = len(self._tick_subscribers[alias])
                 self._tick_subscribers[alias].add(callback)
+                changed = changed or (len(self._tick_subscribers[alias]) > before_alias)
             token_int = None
             if token is not None:
                 try:
@@ -1056,11 +1068,16 @@ class DataHub:
             if token_int is None:
                 token_int = self._token_from_symbol(normalized)
             if token_int is not None:
+                before_token = len(self._tick_subscribers_by_token[token_int])
                 self._tick_subscribers_by_token[token_int].add(callback)
+                changed = changed or (len(self._tick_subscribers_by_token[token_int]) > before_token)
                 self._token_by_symbol[normalized] = token_int
                 self._symbol_by_token[token_int] = normalized
-            LOGGER.info(
-                "DATAHUB_TICK_CALLBACK_REGISTERED symbol=%s token=%s callback=%s",
+            event = "DATAHUB_TICK_CALLBACK_REGISTERED" if changed else "DATAHUB_TICK_CALLBACK_ALREADY_REGISTERED"
+            log_fn = LOGGER.info if changed else LOGGER.debug
+            log_fn(
+                "%s symbol=%s token=%s callback=%s",
+                event,
                 normalized,
                 token_int,
                 getattr(callback, "__qualname__", repr(callback)),
