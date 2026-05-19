@@ -71,5 +71,6 @@ def test_vwap_pro_reads_direction_from_spot_context_when_top_level_missing() -> 
     signal = strategy._evaluate_signal('NFO:NIFTY26MAY23750CE', indicators, 103)
     if signal is not None:
         assert signal.metadata['context_direction_used'] == 'CE'
+        assert signal.metadata['underlying_direction_confidence'] == 0.8
     else:
         assert getattr(strategy, 'last_no_vote_reason', None) != 'unknown_contract_side'

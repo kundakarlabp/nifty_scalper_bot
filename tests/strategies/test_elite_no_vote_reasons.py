@@ -104,3 +104,30 @@ def test_smc_premium_not_reversing_up_does_not_raise_name_error(monkeypatch, cap
     assert signal is None
     assert strategy.last_no_vote_reason in {'premium_not_reversing_up', 'smc_structure_required_live', 'smc_quality_gate_failed'}
     assert any('STRATEGY_NO_VOTE strategy=SMC' in rec.message for rec in caplog.records)
+
+
+def test_smc_uses_underlying_direction_when_direction_bias_missing(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('SMC_REQUIRE_STRUCTURE_CONFIRMATION_LIVE', 'false')
+    strategy = SMCStrategy(SMCStrategyConfig())
+    signal = strategy.generate_signal(
+        symbol='NFO:NIFTY26MAY23750CE',
+        indicators={
+            'high': 102,
+            'low': 98,
+            'open': 99,
+            'close': 101,
+            'atr': 2,
+            'underlying_direction_bias': 'CE',
+            'context_age_seconds': 10,
+            'liquidity_sweep_confirmed': True,
+            'premium_reclaim': True,
+            'choch_confirmed': True,
+            'bos_confirmed': True,
+            'data_age_seconds': 1,
+        },
+        current_price=100,
+        position=None,
+    )
+    assert signal is not None
+    assert signal.metadata['underlying_direction_bias'] == 'CE'

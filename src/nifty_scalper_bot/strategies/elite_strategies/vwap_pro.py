@@ -180,11 +180,16 @@ class VWAPProStrategy(EliteStrategy):
             except (TypeError, ValueError):
                 context_age_seconds = 999.0
             try:
-                underlying_direction_confidence = float(indicators.get("underlying_direction_confidence") or 0.0)
+                underlying_direction_confidence = float(
+                    indicators.get("underlying_direction_confidence")
+                    or spot_ctx.get("underlying_direction_confidence")
+                    or fut_ctx.get("underlying_direction_confidence")
+                    or 0.0
+                )
             except (TypeError, ValueError):
                 underlying_direction_confidence = 0.0
             context_fresh = context_age_seconds <= float(os.getenv('VWAP_CONTEXT_MAX_AGE_SECONDS', '120') or '120')
-            context_strong = float(indicators.get('underlying_direction_confidence') or 0.0) >= float(os.getenv('VWAP_CONTEXT_MIN_CONFIDENCE', '0.75') or '0.75')
+            context_strong = underlying_direction_confidence >= float(os.getenv('VWAP_CONTEXT_MIN_CONFIDENCE', '0.75') or '0.75')
             hard_conflict = bool(((is_live and require_alignment_live) or ((not is_live) and require_alignment_shadow)) and not trend_alignment and context_fresh and context_strong)
             if hard_conflict:
                 self._no_vote('underlying_direction_conflict')

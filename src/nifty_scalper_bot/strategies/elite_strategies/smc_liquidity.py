@@ -37,7 +37,11 @@ class SMCStrategy(EliteStrategy):
             close = float(indicators.get('close') or current_price)
             open_price = float(indicators.get('open') or current_price)
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
-            direction = str(indicators.get('direction_bias') or '').upper()
+            direction = str(
+                indicators.get("direction_bias")
+                or indicators.get("underlying_direction_bias")
+                or ""
+            ).upper()
             stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
             try:
                 context_age_seconds = float(indicators.get("context_age_seconds") or 999.0)

@@ -3256,11 +3256,26 @@ class StrategyManager(_BaseStrategyManager):
                 context_age = float(md0.get("context_age_seconds") or indicators.get("context_age_seconds") or 999.0)
             except (TypeError, ValueError):
                 context_age = 999.0
-            quote_depth_valid = bool(
+            try:
+                bid = float(md0.get("bid") or indicators.get("bid") or 0.0)
+            except (TypeError, ValueError):
+                bid = 0.0
+            try:
+                ask = float(md0.get("ask") or indicators.get("ask") or 0.0)
+            except (TypeError, ValueError):
+                ask = 0.0
+            bid_ask_valid = bid > 0.0 and ask > 0.0 and ask >= bid
+            depth_or_tradable = bool(
                 md0.get("quote_depth_valid")
                 or indicators.get("quote_depth_valid")
-                or ((md0.get("bid") or indicators.get("bid")) and (md0.get("ask") or indicators.get("ask")))
+                or md0.get("tradable_quote")
+                or indicators.get("tradable_quote")
             )
+            quote_depth_valid = bool(bid_ask_valid and depth_or_tradable)
+            if spread_pct >= 999.0 and bid_ask_valid:
+                midpoint = (bid + ask) / 2.0
+                if midpoint > 0.0:
+                    spread_pct = ((ask - bid) / midpoint) * 100.0
             live_reject_reason = None
             if raw_score < live_min_score:
                 live_reject_reason = "live_context_score_below_min"

@@ -136,7 +136,7 @@ def test_live_context_promotion_rejects_without_depth_even_when_env_enabled(monk
     monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
     manager = _manager_stub()
     signal = _make_signal()
-    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': False, 'spread_pct': 1, 'context_age_seconds': 10}
+    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': True, 'spread_pct': 1, 'context_age_seconds': 10}
     vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
     caplog.set_level('INFO')
     out = manager._try_context_promotion('NFO:NIFTY25000CE', [(signal, vote)], {'context_age_seconds': 10}, manager.get_strategy_mode_profile())
