@@ -5566,14 +5566,18 @@ class StrategyRunner:
             if context:
                 payload.update(context)
             self._logger.info(
-                "RUNNER_EVAL_DECISION symbol=%s allowed=%s stage=%s reason=%s candle_count=%s current_version=%s last_version=%s tick_age_ms=%s data_phase=%s",
+                "RUNNER_EVAL_DECISION symbol=%s allowed=%s stage=%s reason=%s "
+                "indicator_history_count=%s live_candle_version=%s "
+                "last_eval_live_candle_version=%s quote_update_version=%s "
+                "tick_age_ms=%s data_phase=%s",
                 symbol,
                 allowed,
                 stage,
                 reason,
-                candle_count,
-                current_version,
-                last_version,
+                payload.get("indicator_history_count"),
+                payload.get("live_candle_version"),
+                payload.get("last_eval_live_candle_version"),
+                payload.get("quote_update_version"),
                 tick_age_ms,
                 payload.get("data_phase"),
                 extra=payload,

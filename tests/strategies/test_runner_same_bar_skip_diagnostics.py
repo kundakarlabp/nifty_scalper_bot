@@ -34,7 +34,7 @@ def test_same_bar_skip_diagnostics_payload(caplog):
     assert payload['intrabar_non_selected_seconds'] == '60'
 
 
-def test_runner_eval_decision_uses_clear_version_fields(caplog):
+def test_runner_eval_decision_visible_message_uses_clear_version_names(caplog):
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._logger = logging.getLogger('test_runner_versions')
     runner._symbol_state = {}
@@ -55,3 +55,7 @@ def test_runner_eval_decision_uses_clear_version_fields(caplog):
         runner._emit_runner_eval_decision(symbol='NFO:NIFTY26MAY25200CE',stage='phase9',reason='evaluation_no_signal',allowed=True)
     payload = caplog.records[-1].__dict__
     assert 'indicator_history_count' in payload and 'live_candle_version' in payload and 'last_eval_live_candle_version' in payload
+    msg = caplog.records[-1].message
+    assert 'indicator_history_count' in msg
+    assert 'live_candle_version' in msg
+    assert 'last_eval_live_candle_version' in msg

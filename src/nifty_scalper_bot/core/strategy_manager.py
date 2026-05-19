@@ -1950,6 +1950,12 @@ class StrategyManager(_BaseStrategyManager):
         )
         no_signal_reasons: list[str] = []
         error_strategies: list[str] = []
+        signals: list[Signal] = []
+        signal_votes: list[tuple[Signal, StrategyVote]] = []
+        disabled: list[str] = []
+        empty: list[str] = []
+        no_vote_reason_counts: dict[str, int] = {}
+        errors: list[str] = []
         disabled_strategies_snapshot: list[str] = []
         signal_action: str | None = None
         signal_score: float | None = None
@@ -2428,13 +2434,7 @@ class StrategyManager(_BaseStrategyManager):
 
         position = self._position_manager.get_position(symbol)
 
-        signals: list[Signal] = []
-        signal_votes: list[tuple[Signal, StrategyVote]] = []
         max_votes = max(1, int(getattr(app_settings, "MAX_STRATEGY_VOTES", 5)))
-        disabled: list[str] = []
-        empty: list[str] = []
-        no_vote_reason_counts: dict[str, int] = {}
-        errors: list[str] = []
         disabled_strategies_snapshot = disabled
         evaluation_start = time.monotonic()
         symbol_upper = symbol.upper()
@@ -2894,20 +2894,65 @@ class StrategyManager(_BaseStrategyManager):
                 approval_path = "context_promotion"
             else:
                 approval_path = "no_trade"
-                log.info("TRADE_DECISION_TRACE approval_path=%s blocked_at=%s blocked_reason=%s symbol=%s", approval_path, "no_trigger_vote", "no_trigger_vote", symbol_norm)
+                context_vote_names = [v.strategy for _, v in context_votes]
+                context_sides = [v.side for _, v in context_votes]
+                context_scores = [self._extract_raw_score(v) for _, v in context_votes]
+                context_confidences = [float(v.confidence) for _, v in context_votes]
+                log.info(
+                    "TRADE_DECISION_TRACE approval_path=%s blocked_at=%s blocked_reason=%s "
+                    "symbol=%s context_votes=%s context_sides=%s context_scores=%s "
+                    "direction_bias=%s underlying_direction_bias=%s context_age_seconds=%s",
+                    approval_path,
+                    "no_trigger_vote",
+                    "no_trigger_vote",
+                    symbol_norm,
+                    context_vote_names,
+                    context_sides,
+                    context_scores,
+                    indicator_map.get("direction_bias"),
+                    indicator_map.get("underlying_direction_bias"),
+                    indicator_map.get("context_age_seconds"),
+                    extra={
+                        "event": "TRADE_DECISION_TRACE",
+                        "symbol": symbol_norm,
+                        "approval_path": approval_path,
+                        "blocked_at": "no_trigger_vote",
+                        "blocked_reason": "no_trigger_vote",
+                        "context_vote_count": len(context_votes),
+                        "context_votes": context_vote_names,
+                        "context_sides": context_sides,
+                        "context_scores": context_scores,
+                        "context_confidences": context_confidences,
+                        "allow_context_promotion": bool(mode_profile.get("allow_context_promotion", False)),
+                        "execution_mode": mode_profile.get("mode"),
+                        "direction_bias": indicator_map.get("direction_bias"),
+                        "underlying_direction_bias": indicator_map.get("underlying_direction_bias"),
+                        "context_age_seconds": indicator_map.get("context_age_seconds"),
+                    },
+                )
                 log_throttled(
                     log,
                     f"strategy_no_trigger_vote:{symbol_norm}",
-                    "STRATEGY_NO_TRIGGER_VOTE symbol=%s context_votes=%s live_context_promotion_allowed=%s",
+                    "STRATEGY_NO_TRIGGER_VOTE symbol=%s context_votes=%s context_sides=%s live_context_promotion_allowed=%s",
                     symbol_norm,
-                    [v.strategy for _, v in context_votes],
+                    context_vote_names,
+                    context_sides,
                     bool(mode_profile.get("allow_context_promotion", False)),
                     interval_sec=30.0,
                     level=logging.INFO,
                     extra={
                         "event": "STRATEGY_NO_TRIGGER_VOTE",
                         "symbol": symbol_norm,
-                        "context_votes": [v.strategy for _, v in context_votes],
+                        "context_vote_count": len(context_votes),
+                        "context_votes": context_vote_names,
+                        "context_sides": context_sides,
+                        "context_scores": context_scores,
+                        "context_confidences": context_confidences,
+                        "allow_context_promotion": bool(mode_profile.get("allow_context_promotion", False)),
+                        "execution_mode": mode_profile.get("mode"),
+                        "direction_bias": indicator_map.get("direction_bias"),
+                        "underlying_direction_bias": indicator_map.get("underlying_direction_bias"),
+                        "context_age_seconds": indicator_map.get("context_age_seconds"),
                     },
                 )
                 return None
@@ -3189,16 +3234,97 @@ class StrategyManager(_BaseStrategyManager):
             return None
         if not bool(mode_profile.get("allow_context_promotion", True)):
             return None
-        if self._is_live_mode() and not self._env_bool("STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED", False):
-            return None
         allowed_strategies = {s.strip() for s in str(os.getenv("STRATEGY_CONTEXT_PROMOTION_ALLOWED_STRATEGIES", "OrderFlow,VWAPPro")).split(",") if s.strip()}
         min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_SCORE", 5.0)
         min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_CONFIDENCE", 0.45)
         best_signal, best_vote = max(context_votes, key=lambda pair: self._extract_raw_score(pair[1]))
-        selected_ok, selected_meta = self._is_selected_or_near_atm(symbol, dict(best_signal.metadata or {}), indicators)
+        raw_score = self._extract_raw_score(best_vote)
+        md0 = dict(best_signal.metadata or {})
+        selected_ok, selected_meta = self._is_selected_or_near_atm(symbol, md0, indicators)
+        if self._is_live_mode():
+            if not self._env_bool("STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED", False):
+                return None
+            live_min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_LIVE_MIN_SCORE", 8.5)
+            live_min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_LIVE_MIN_CONFIDENCE", 0.75)
+            max_spread = self._env_float("STRATEGY_MAX_SPREAD_PCT", 12.0)
+            max_context_age = self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0)
+            try:
+                spread_pct = float(md0.get("spread_pct") or indicators.get("spread_pct") or 999.0)
+            except (TypeError, ValueError):
+                spread_pct = 999.0
+            try:
+                context_age = float(md0.get("context_age_seconds") or indicators.get("context_age_seconds") or 999.0)
+            except (TypeError, ValueError):
+                context_age = 999.0
+            try:
+                bid = float(md0.get("bid") or indicators.get("bid") or 0.0)
+            except (TypeError, ValueError):
+                bid = 0.0
+            try:
+                ask = float(md0.get("ask") or indicators.get("ask") or 0.0)
+            except (TypeError, ValueError):
+                ask = 0.0
+            bid_ask_valid = bid > 0.0 and ask > 0.0 and ask >= bid
+            depth_or_tradable = bool(
+                md0.get("quote_depth_valid")
+                or indicators.get("quote_depth_valid")
+                or md0.get("tradable_quote")
+                or indicators.get("tradable_quote")
+            )
+            quote_depth_valid = bool(bid_ask_valid and depth_or_tradable)
+            if spread_pct >= 999.0 and bid_ask_valid:
+                midpoint = (bid + ask) / 2.0
+                if midpoint > 0.0:
+                    spread_pct = ((ask - bid) / midpoint) * 100.0
+            live_reject_reason = None
+            if raw_score < live_min_score:
+                live_reject_reason = "live_context_score_below_min"
+            elif float(best_vote.confidence) < live_min_conf:
+                live_reject_reason = "live_context_confidence_below_min"
+            elif best_vote.side not in {"CE", "PE"}:
+                live_reject_reason = "live_context_invalid_side"
+            elif not selected_ok:
+                live_reject_reason = "live_context_not_selected_or_near_atm"
+            elif not quote_depth_valid:
+                live_reject_reason = "live_context_quote_depth_missing"
+            elif spread_pct > max_spread:
+                live_reject_reason = "live_context_spread_too_wide"
+            elif context_age > max_context_age:
+                live_reject_reason = "live_context_stale"
+            if live_reject_reason:
+                log.info(
+                    "CONTEXT_PROMOTION_REJECTED_LIVE symbol=%s strategy=%s reason=%s "
+                    "raw_score=%.2f confidence=%.2f selected_ok=%s quote_depth_valid=%s "
+                    "spread_pct=%.2f context_age_seconds=%.2f",
+                    symbol,
+                    best_vote.strategy,
+                    live_reject_reason,
+                    raw_score,
+                    best_vote.confidence,
+                    selected_ok,
+                    quote_depth_valid,
+                    spread_pct,
+                    context_age,
+                    extra={
+                        "event": "CONTEXT_PROMOTION_REJECTED_LIVE",
+                        "symbol": symbol,
+                        "strategy": best_vote.strategy,
+                        "reason": live_reject_reason,
+                        "raw_score": raw_score,
+                        "min_score": live_min_score,
+                        "confidence": best_vote.confidence,
+                        "min_confidence": live_min_conf,
+                        "selected_ok": selected_ok,
+                        "quote_depth_valid": quote_depth_valid,
+                        "spread_pct": spread_pct,
+                        "max_spread": max_spread,
+                        "context_age_seconds": context_age,
+                        "max_context_age": max_context_age,
+                    },
+                )
+                return None
         opposite = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
         vetoed = bool(opposite and max(self._extract_context_veto_score(v) for v in opposite) >= 8.0)
-        raw_score = self._extract_raw_score(best_vote)
         if best_vote.strategy not in allowed_strategies or raw_score < min_score or best_vote.confidence < min_conf or best_vote.side not in {"CE", "PE"} or not selected_ok or vetoed:
             return None
         md = dict(best_signal.metadata or {})

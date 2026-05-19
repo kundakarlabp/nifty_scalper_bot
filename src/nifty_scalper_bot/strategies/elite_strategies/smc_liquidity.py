@@ -37,8 +37,21 @@ class SMCStrategy(EliteStrategy):
             close = float(indicators.get('close') or current_price)
             open_price = float(indicators.get('open') or current_price)
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
-            direction = str(indicators.get('direction_bias') or '').upper()
+            direction = str(
+                indicators.get("direction_bias")
+                or indicators.get("underlying_direction_bias")
+                or ""
+            ).upper()
             stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
+            try:
+                context_age_seconds = float(indicators.get("context_age_seconds") or 999.0)
+            except (TypeError, ValueError):
+                context_age_seconds = 999.0
+            underlying_direction = str(
+                indicators.get("underlying_direction_bias")
+                or indicators.get("direction_bias")
+                or ""
+            ).upper()
 
             if stale_data or current_price <= 0:
                 self._no_vote('no_liquidity_sweep')
@@ -62,7 +75,37 @@ class SMCStrategy(EliteStrategy):
                 structure_flip = bool(indicators.get('choch_confirmed') or indicators.get('bos_confirmed'))
                 if not premium_reversal and not structure_flip:
                     self._no_vote('premium_not_reversing_up')
-                    LOGGER.info("STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=premium_not_reversing_up bullish_sweep=%s bearish_sweep=%s premium_reclaim=%s bullish_reversal=%s choch_confirmed=%s bos_confirmed=%s direction=%s underlying_direction=%s context_age_seconds=%.2f", symbol, bullish_sweep, bearish_sweep, bool(indicators.get('premium_reclaim')), bool(indicators.get('bullish_reversal')), bool(indicators.get('choch_confirmed')), bool(indicators.get('bos_confirmed')), direction, underlying_direction, context_age_seconds)
+                    LOGGER.info(
+                        "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=premium_not_reversing_up "
+                        "bullish_sweep=%s bearish_sweep=%s premium_reclaim=%s bullish_reversal=%s "
+                        "choch_confirmed=%s bos_confirmed=%s direction=%s underlying_direction=%s "
+                        "context_age_seconds=%.2f",
+                        symbol,
+                        bullish_sweep,
+                        bearish_sweep,
+                        bool(indicators.get("premium_reclaim")),
+                        bool(indicators.get("bullish_reversal")),
+                        bool(indicators.get("choch_confirmed")),
+                        bool(indicators.get("bos_confirmed")),
+                        direction,
+                        underlying_direction,
+                        context_age_seconds,
+                        extra={
+                            "event": "STRATEGY_NO_VOTE",
+                            "strategy": "SMC",
+                            "symbol": symbol,
+                            "reason": "premium_not_reversing_up",
+                            "bullish_sweep": bullish_sweep,
+                            "bearish_sweep": bearish_sweep,
+                            "premium_reclaim": bool(indicators.get("premium_reclaim")),
+                            "bullish_reversal": bool(indicators.get("bullish_reversal")),
+                            "choch_confirmed": bool(indicators.get("choch_confirmed")),
+                            "bos_confirmed": bool(indicators.get("bos_confirmed")),
+                            "direction": direction,
+                            "underlying_direction": underlying_direction,
+                            "context_age_seconds": context_age_seconds,
+                        },
+                    )
                     return None
                 side = contract_side
             else:
@@ -106,7 +149,37 @@ class SMCStrategy(EliteStrategy):
             require_structure_live = str(os.getenv('SMC_REQUIRE_STRUCTURE_CONFIRMATION_LIVE', 'true')).lower() in {'1', 'true', 'yes', 'on'}
             if is_live and require_structure_live and not structure_confirmed:
                 self._no_vote('smc_structure_required_live')
-                LOGGER.info("STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_structure_required_live choch_confirmed=%s bos_confirmed=%s retest_confirmed=%s displacement_score=%.3f premium_reclaim=%s direction_aligned=%s", symbol, choch_confirmed, bos_confirmed, retest_confirmed, displacement_score, premium_reclaim, direction_aligned)
+                LOGGER.info(
+                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_structure_required_live "
+                    "choch_confirmed=%s bos_confirmed=%s retest_confirmed=%s displacement_score=%.3f "
+                    "premium_reclaim=%s direction_aligned=%s direction=%s underlying_direction=%s "
+                    "context_age_seconds=%.2f",
+                    symbol,
+                    choch_confirmed,
+                    bos_confirmed,
+                    retest_confirmed,
+                    displacement_score,
+                    premium_reclaim,
+                    direction_aligned,
+                    direction,
+                    underlying_direction,
+                    context_age_seconds,
+                    extra={
+                        "event": "STRATEGY_NO_VOTE",
+                        "strategy": "SMC",
+                        "symbol": symbol,
+                        "reason": "smc_structure_required_live",
+                        "choch_confirmed": choch_confirmed,
+                        "bos_confirmed": bos_confirmed,
+                        "retest_confirmed": retest_confirmed,
+                        "displacement_score": displacement_score,
+                        "premium_reclaim": premium_reclaim,
+                        "direction_aligned": direction_aligned,
+                        "direction": direction,
+                        "underlying_direction": underlying_direction,
+                        "context_age_seconds": context_age_seconds,
+                    },
+                )
                 return None
             if not (bullish_sweep or bearish_sweep or premium_reclaim) or not (displacement_score >= 0.6 or structure_confirmed) or not (direction_aligned or premium_reclaim):
                 self._no_vote('smc_quality_gate_failed')
@@ -124,6 +197,8 @@ class SMCStrategy(EliteStrategy):
                 'trade_side': side,
                 'side': side,
                 'direction_bias': side,
+                "underlying_direction_bias": underlying_direction if underlying_direction in {"CE", "PE"} else None,
+                "context_age_seconds": context_age_seconds,
                 'source_domain': 'option_premium' if option_premium_domain else 'underlying_price',
                 'preliminary_only': True,
                 'requires_runner_final_score': True,
@@ -164,7 +239,13 @@ class SMCStrategy(EliteStrategy):
                 metadata=metadata,
             )
         except Exception as e:
-            LOGGER.error('Failure in SMCStrategy._evaluate_signal: %s', e, exc_info=e)
+            LOGGER.error(
+                "Failure in SMCStrategy._evaluate_signal symbol=%s last_no_vote_reason=%s error=%s",
+                symbol,
+                getattr(self, "last_no_vote_reason", None),
+                e,
+                exc_info=e,
+            )
             return None
 
 
