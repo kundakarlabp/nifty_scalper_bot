@@ -62,3 +62,12 @@ def test_orderflow_missing_depth_no_vote_by_default(monkeypatch) -> None:
     )
     assert signal is None
     assert getattr(strategy, 'last_no_vote_reason', None) == 'missing_depth'
+
+
+def test_smc_live_structure_reject_logs_specific_reason(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('SMC_REQUIRE_STRUCTURE_CONFIRMATION_LIVE', 'true')
+    strategy = SMCStrategy(SMCStrategyConfig())
+    signal = strategy.generate_signal('NFO:NIFTY26MAY24350CE', {'high':10,'low':9,'close':9.5,'open':9.7,'atr':1,'liquidity_sweep_confirmed':True,'premium_reclaim':False,'bos_confirmed':False,'choch_confirmed':False,'retest_confirmed':False}, 9.5, None)
+    assert signal is None
+    assert getattr(strategy, 'last_no_vote_reason', None) == 'smc_structure_required_live'

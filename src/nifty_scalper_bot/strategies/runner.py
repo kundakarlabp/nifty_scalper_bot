@@ -5482,6 +5482,12 @@ class StrategyRunner:
         ``signal_forward``; ``reason`` names the specific gate.
         """
         try:
+            reason_str = str(reason or "")
+            throttle_reasons = {"evaluation_no_signal", "same_bar_market_update_eval", "same_bar_price_move_eval"}
+            if allowed and not str(stage).startswith("phase10") and reason_str in throttle_reasons and all(x not in reason_str for x in ("error","execution","risk")):
+                key = f"runner_eval_decision:{symbol}:{stage}:{reason_str}"
+                if not self._should_log_throttled(key, float(os.getenv("RUNNER_EVAL_NO_SIGNAL_LOG_INTERVAL_SECONDS", "5") or "5")):
+                    return
             if (
                 symbol == "NSE:NIFTY"
                 and reason == "insufficient_indicator_bar_count"
@@ -5541,6 +5547,10 @@ class StrategyRunner:
                 "candle_count": candle_count,
                 "current_version": current_version,
                 "last_version": last_version,
+                "indicator_history_count": candle_count,
+                "live_candle_version": current_version,
+                "last_eval_live_candle_version": last_version,
+                "quote_update_version": int(self._quote_update_versions.get(symbol, 0)) if hasattr(self, "_quote_update_versions") else None,
                 "last_bar_ts": last_bar_ts_iso,
                 "last_eval_bar_ts": last_eval_bar_ts,
                 "mdm_last_tick_age_s": mdm_last_tick_age,
