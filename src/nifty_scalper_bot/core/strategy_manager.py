@@ -1848,9 +1848,10 @@ class StrategyManager(_BaseStrategyManager):
         if derived_direction not in {"CE", "PE"}:
             log_throttled(
                 log,
-                key=f"context_direction_unavailable:{role}:{symbol}",
-                msg="CONTEXT_DIRECTION_UNAVAILABLE role=%s symbol=%s",
-                args=(role, symbol),
+                f"context_direction_unavailable:{role}:{symbol}",
+                "CONTEXT_DIRECTION_UNAVAILABLE role=%s symbol=%s",
+                role,
+                symbol,
                 interval_sec=30.0,
                 level=logging.INFO,
                 extra={"event": "CONTEXT_DIRECTION_UNAVAILABLE", "role": role, "symbol": symbol},
@@ -1976,7 +1977,20 @@ class StrategyManager(_BaseStrategyManager):
             name for name in self._required_indicators if indicators.get(name) is None
         )
         strategy_missing = sorted(name for name in required_for_eval if indicators.get(name) is None and name not in {"symbol", "selected_ce", "selected_pe"})
-        log_throttled(log, key=f"strategy_missing_indicators:{symbol}", msg="STRATEGY_REQUIRED_FIELDS_MISSING symbol=%s count=%s", args=(symbol, len(strategy_missing)), interval_sec=30.0, level=logging.DEBUG, extra={"event": "STRATEGY_REQUIRED_FIELDS_MISSING", "symbol": symbol, "strategy_missing": strategy_missing[:60]})
+        log_throttled(
+            log,
+            f"strategy_missing_indicators:{symbol}",
+            "STRATEGY_REQUIRED_FIELDS_MISSING symbol=%s count=%s",
+            symbol,
+            len(strategy_missing),
+            interval_sec=30.0,
+            level=logging.DEBUG,
+            extra={
+                "event": "STRATEGY_REQUIRED_FIELDS_MISSING",
+                "symbol": symbol,
+                "strategy_missing": strategy_missing[:60],
+            },
+        )
         log.debug(
             "STRATEGY_MANAGER_ENTER",
             extra={
@@ -2424,7 +2438,22 @@ class StrategyManager(_BaseStrategyManager):
                     indicators["underlying_direction_confidence"] = 0.0
                 indicators["context_age_seconds"] = min(now_ts - float(spot_ctx.get("timestamp", now_ts)) if spot_fresh else max_context_age + 1, now_ts - float(fut_ctx.get("timestamp", now_ts)) if fut_fresh else max_context_age + 1)
             else:
-                log_throttled(log, key=f"option_context_missing_direction_bias:{symbol}", msg="OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s", args=(symbol, spot_fresh, fut_fresh), interval_sec=30.0, level=logging.INFO, extra={"event": "OPTION_CONTEXT_MISSING_DIRECTION_BIAS", "symbol": symbol, "spot_fresh": spot_fresh, "fut_fresh": fut_fresh})
+                log_throttled(
+                    log,
+                    f"option_context_missing_direction_bias:{symbol}",
+                    "OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s",
+                    symbol,
+                    spot_fresh,
+                    fut_fresh,
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "OPTION_CONTEXT_MISSING_DIRECTION_BIAS",
+                        "symbol": symbol,
+                        "spot_fresh": spot_fresh,
+                        "fut_fresh": fut_fresh,
+                    },
+                )
             if fut_fresh and fut_ctx.get("futures_volume_ratio") is not None:
                 indicators.setdefault("futures_volume_ratio", fut_ctx.get("futures_volume_ratio"))
             if fut_fresh and fut_ctx.get("vwap") is not None:
