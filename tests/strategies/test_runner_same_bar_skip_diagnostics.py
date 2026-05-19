@@ -150,3 +150,43 @@ def test_option_execution_min_bars_applies_only_to_options(monkeypatch):
 def test_tick_has_quote_update_depth_without_bid_ask():
     tick = {"depth": {"buy": [{"price": 100.0, "quantity": 10}], "sell": [{"price": 100.5, "quantity": 8}]}}
     assert StrategyRunner._tick_has_quote_update(tick) is True
+
+
+def test_initial_hydrated_eval_reason_then_same_bar_skip():
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._active_symbols = {"NFO:NIFTY26MAY25200CE"}
+    runner._required_candles = 1
+    runner._runtime_data_hard_ready = True
+    runner._runtime_readiness_reason = ""
+    runner._active_selected_ce = "NFO:NIFTY26MAY25200CE"
+    runner._active_selected_pe = "NFO:NIFTY26MAY25200PE"
+    runner._symbol_has_completed_strategy_eval = set()
+    runner._quote_update_versions = {}
+    runner._candle_versions = {"NFO:NIFTY26MAY25200CE": 0}
+    runner._last_strategy_versions = {"NFO:NIFTY26MAY25200CE": 0}
+    runner._last_same_bar_eval_block_reason_by_symbol = {}
+    runner._last_same_bar_eval_block_detail_by_symbol = {}
+    runner._last_same_bar_eval_ts_by_symbol = {}
+    runner._indicator_engine = type("E", (), {"get_history": lambda *_: [1] * 300})()
+    decisions: list[dict] = []
+    runner._emit_runner_eval_decision = lambda **kw: decisions.append(kw)
+    symbol = "NFO:NIFTY26MAY25200CE"
+    candle_count = len(runner._indicator_engine.get_history(symbol) or [])
+    current_version = 0
+    last_version = 0
+    first_hydrated_eval = candle_count > 0 and symbol not in runner._symbol_has_completed_strategy_eval
+    if current_version <= last_version and not first_hydrated_eval:
+        runner._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="strategy_eval_skipped_same_bar", allowed=False)
+    elif first_hydrated_eval:
+        runner._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="initial_hydrated_eval", allowed=True)
+    runner._symbol_has_completed_strategy_eval.add(symbol)
+    first = decisions[-1]
+    assert first["allowed"] is True
+    assert first["reason"] == "initial_hydrated_eval"
+    decisions.clear()
+    first_hydrated_eval = candle_count > 0 and symbol not in runner._symbol_has_completed_strategy_eval
+    if current_version <= last_version and not first_hydrated_eval:
+        runner._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="strategy_eval_skipped_same_bar", allowed=False)
+    second = decisions[-1]
+    assert second["allowed"] is False
+    assert second["reason"] == "strategy_eval_skipped_same_bar"

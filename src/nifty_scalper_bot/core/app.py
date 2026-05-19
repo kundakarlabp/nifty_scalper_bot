@@ -8311,12 +8311,15 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
                 else:
+                    defer_reason = str(_basket_spot_exc)
                     LOGGER.info("OUT_OF_HOURS_DATA_MODE option_hydration_nonfatal=true trading_ready=false")
                     LOGGER.info(
                         "DEFERRED_BASKET_RETRY_SCHEDULED reason=%s spot_ltp=%s",
+                        defer_reason,
+                        None,
                         extra={
                             "event": "BASKET_BUILD_DEFERRED",
-                            "reason": reason,
+                            "reason": defer_reason,
                             "market_state": market_state.value,
                         },
                     )

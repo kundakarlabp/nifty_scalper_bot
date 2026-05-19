@@ -812,6 +812,7 @@ class StrategyRunner:
         self._candle_versions: dict[str, int] = defaultdict(int)
         self._last_strategy_versions: dict[str, int] = defaultdict(int)
         self._quote_update_versions: dict[str, int] = defaultdict(int)
+        self._symbol_has_completed_strategy_eval: set[str] = set()
         self._gap_repair_inflight: set[str] = set()
         self._history_refresh_interval_seconds: float = 60.0
         self._last_history_refresh_by_symbol: dict[str, float] = {}
@@ -7120,7 +7121,11 @@ class StrategyRunner:
             candle_count = len(self._indicator_engine.get_history(symbol) or [])
             same_bar_eval_allowed = False
             pending_same_bar_eval_ts = 0.0
-            if current_version <= last_version:
+            first_hydrated_eval = (
+                candle_count > 0
+                and symbol not in self._symbol_has_completed_strategy_eval
+            )
+            if current_version <= last_version and not first_hydrated_eval:
                 now_eval_ts = time_module.time()
                 same_bar_eval_reason = self._same_bar_eval_reason(
                     symbol=symbol,
@@ -7166,6 +7171,17 @@ class StrategyRunner:
                             intrabar_non_selected_seconds=os.getenv("RUNNER_INTRABAR_EVAL_NON_SELECTED_SECONDS", "60"),
                         )
                     return
+            elif first_hydrated_eval:
+                self._emit_runner_eval_decision(
+                    symbol=symbol,
+                    stage="phase9",
+                    reason="initial_hydrated_eval",
+                    allowed=True,
+                    trace_id=trace_id,
+                    current_version=current_version,
+                    last_version=last_version,
+                    price=price,
+                )
             else:
                 self._logger.info(
                     "RUNNER_EVAL_DECISION",
@@ -7674,6 +7690,7 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        self._symbol_has_completed_strategy_eval.add(symbol)
                         if same_bar_eval_allowed and pending_same_bar_eval_ts > 0.0:
                             self._last_same_bar_eval_ts_by_symbol[symbol] = pending_same_bar_eval_ts
                         self._last_eval_price_by_symbol[symbol] = float(price)
