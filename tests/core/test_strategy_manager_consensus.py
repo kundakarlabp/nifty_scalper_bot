@@ -129,3 +129,40 @@ def test_live_context_only_vote_is_rejected_with_diagnostics(monkeypatch, caplog
     out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000CE', signals=[(signal,vote)], indicators={'context_age_seconds':10})
     assert out is None
     assert any('no_trigger_vote' in r.message for r in caplog.records)
+
+
+def test_live_context_promotion_rejects_without_depth_even_when_env_enabled(monkeypatch, caplog) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': False, 'spread_pct': 1, 'context_age_seconds': 10}
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    caplog.set_level('INFO')
+    out = manager._try_context_promotion('NFO:NIFTY25000CE', [(signal, vote)], {'context_age_seconds': 10}, manager.get_strategy_mode_profile())
+    assert out is None
+    assert any('CONTEXT_PROMOTION_REJECTED_LIVE' in r.message and 'live_context_quote_depth_missing' in r.message for r in caplog.records)
+
+
+def test_live_context_promotion_passes_only_with_strict_quality(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_MIN_SCORE', '8.5')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_MIN_CONFIDENCE', '0.75')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {
+        'role': 'context',
+        'strategy': 'OrderFlow',
+        'side': 'CE',
+        'strategy_score': 9,
+        'quote_depth_valid': True,
+        'bid': 100,
+        'ask': 101,
+        'spread_pct': 1,
+        'context_age_seconds': 10,
+        'is_selected_option': True,
+    }
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    out = manager._try_context_promotion('NFO:NIFTY25000CE', [(signal, vote)], {'context_age_seconds': 10}, manager.get_strategy_mode_profile())
+    assert out is not None

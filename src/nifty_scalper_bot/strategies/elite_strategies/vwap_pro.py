@@ -45,8 +45,24 @@ class VWAPProStrategy(EliteStrategy):
             vol = float(indicators.get('volume') or 0.0)
             avg_vol = float(indicators.get('avg_volume') or 0.0)
             spread_pct = float(indicators.get('spread_pct') or 0.0)
-            direction = str(indicators.get('direction_bias') or '').upper()
-            underlying_direction = str(indicators.get('underlying_direction_bias') or '').upper()
+            spot_ctx = indicators.get("spot_context") if isinstance(indicators.get("spot_context"), dict) else {}
+            fut_ctx = indicators.get("futures_context") if isinstance(indicators.get("futures_context"), dict) else {}
+            direction = str(
+                indicators.get("direction_bias")
+                or indicators.get("underlying_direction_bias")
+                or spot_ctx.get("direction_bias")
+                or fut_ctx.get("direction_bias")
+                or ""
+            ).upper()
+            underlying_direction = str(
+                indicators.get("underlying_direction_bias")
+                or indicators.get("direction_bias")
+                or spot_ctx.get("underlying_direction_bias")
+                or spot_ctx.get("direction_bias")
+                or fut_ctx.get("underlying_direction_bias")
+                or fut_ctx.get("direction_bias")
+                or ""
+            ).upper()
             futures_vwap_slope = float(indicators.get('futures_vwap_slope') or 0.0)
             futures_volume_ratio = float(indicators.get('futures_volume_ratio') or 0.0)
             if current_price <= 0 or vwap <= 0:
@@ -178,19 +194,62 @@ class VWAPProStrategy(EliteStrategy):
             if score < min_score:
                 self._no_vote('weak_score')
                 LOGGER.info(
-                    'STRATEGY_NO_VOTE strategy=VWAPPro reason=weak_score score=%.2f direction=%s contract_side=%s current_price=%.2f vwap=%.2f distance_pct=%.4f atr=%.2f volume=%.2f avg_volume=%.2f trend_alignment=%s pullback_flag=%s',
+                    "STRATEGY_NO_VOTE strategy=VWAPPro reason=weak_score "
+                    "symbol=%s score=%.2f min_score=%.2f threshold_source=%s "
+                    "direction=%s underlying_direction=%s contract_side=%s current_price=%.2f "
+                    "vwap=%.2f distance_pct=%.4f allowed_distance=%.4f atr=%.2f "
+                    "volume=%.2f avg_volume=%.2f trend_alignment=%s pullback_flag=%s "
+                    "context_age_seconds=%.2f context_fresh=%s context_confidence=%.2f "
+                    "futures_vwap_slope=%.4f futures_volume_ratio=%.2f slope_support=%s "
+                    "premium_above_vwap=%s continuation_confirmed=%s reasons=%s",
+                    symbol,
                     score,
+                    min_score,
+                    threshold_source,
                     direction,
+                    underlying_direction,
                     contract_side,
                     current_price,
                     vwap,
                     distance_pct,
+                    allowed_distance,
                     atr_safe,
                     vol,
                     avg_vol,
                     trend_alignment,
                     pullback_flag,
-                    extra={'score_reasons': reasons},
+                    context_age_seconds,
+                    context_fresh,
+                    underlying_direction_confidence,
+                    futures_vwap_slope,
+                    futures_volume_ratio,
+                    slope_support,
+                    premium_above_vwap,
+                    continuation_confirmed,
+                    reasons,
+                    extra={
+                        "event": "STRATEGY_NO_VOTE",
+                        "strategy": "VWAPPro",
+                        "reason": "weak_score",
+                        "symbol": symbol,
+                        "score": score,
+                        "min_score": min_score,
+                        "threshold_source": threshold_source,
+                        "direction": direction,
+                        "underlying_direction": underlying_direction,
+                        "contract_side": contract_side,
+                        "score_reasons": reasons,
+                        "context_age_seconds": context_age_seconds,
+                        "context_fresh": context_fresh,
+                        "underlying_direction_confidence": underlying_direction_confidence,
+                        "futures_vwap_slope": futures_vwap_slope,
+                        "futures_volume_ratio": futures_volume_ratio,
+                        "slope_support": slope_support,
+                        "premium_above_vwap": premium_above_vwap,
+                        "continuation_confirmed": continuation_confirmed,
+                        "trend_alignment": trend_alignment,
+                        "pullback_flag": pullback_flag,
+                    },
                 )
                 return None
 
@@ -207,6 +266,11 @@ class VWAPProStrategy(EliteStrategy):
                 'contract_side': contract_side,
                 'premium_above_vwap': premium_above_vwap,
                 'direction_bias': direction if direction in {'CE', 'PE'} else None,
+                "underlying_direction_bias": underlying_direction if underlying_direction in {"CE", "PE"} else None,
+                "underlying_direction_confidence": underlying_direction_confidence,
+                "context_age_seconds": context_age_seconds,
+                "context_fresh": context_fresh,
+                "context_direction_used": direction if direction in {"CE", "PE"} else underlying_direction if underlying_direction in {"CE", "PE"} else None,
                 'preliminary_only': True,
                 'requires_runner_final_score': True,
                 'raw_setup_score': strategy_score,

@@ -49,3 +49,27 @@ def test_vwap_pro_uses_context_direction_when_direct_direction_missing() -> None
     indicators = {'vwap':200,'atr':4,'close':205,'open':203,'high':206,'low':202,'volume':10000,'avg_volume':9000,'spread_pct':1,'spot_context':{'direction_bias':'CE','underlying_direction_confidence':0.8},'context_age_seconds':10,'futures_vwap_slope':1,'futures_volume_ratio':1.2}
     signal = strategy._evaluate_signal('NFO:NIFTY26MAY23750CE', indicators, 205)
     assert signal is not None or getattr(strategy, 'last_no_vote_reason', '') != 'weak_score'
+
+
+def test_vwap_pro_reads_direction_from_spot_context_when_top_level_missing() -> None:
+    strategy = VWAPProStrategy(config=VWAPProStrategyConfig(), indicator_engine=_DummyEngine())
+    indicators = {
+        'vwap': 100,
+        'atr': 2,
+        'close': 103,
+        'open': 101,
+        'high': 104,
+        'low': 100,
+        'volume': 1000,
+        'avg_volume': 800,
+        'spread_pct': 1,
+        'spot_context': {'direction_bias': 'CE', 'underlying_direction_confidence': 0.8},
+        'context_age_seconds': 10,
+        'futures_vwap_slope': 1,
+        'futures_volume_ratio': 1.2,
+    }
+    signal = strategy._evaluate_signal('NFO:NIFTY26MAY23750CE', indicators, 103)
+    if signal is not None:
+        assert signal.metadata['context_direction_used'] == 'CE'
+    else:
+        assert getattr(strategy, 'last_no_vote_reason', None) != 'unknown_contract_side'
