@@ -30,3 +30,16 @@ def test_context_propagates_direction_and_futures_fields():
     assert 'spot_context' in st.last
     assert st.last.get('futures_volume_ratio')==1.7
     assert st.last.get('futures_vwap')==101
+
+
+def test_option_evaluation_receives_derived_spot_direction_bias():
+    st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
+    ie.payload={'close':110,'vwap':100,'ema_fast':105,'ema_slow':100,'ema_50':95,'vwap_slope':1.0,'volume':100,'avg_volume':100}
+    m.generate_signal('NSE:NIFTY',110)
+    ie.payload={'vwap':102,'exchange_vwap':102,'volume':100,'avg_volume':100}
+    m.generate_signal('NFO:NIFTY26MAY23750CE',102)
+    assert st.last.get('direction_bias')=='CE'
+    assert st.last.get('underlying_direction_bias')=='CE'
+    assert float(st.last.get('underlying_direction_confidence') or 0)>0
+    assert float(st.last.get('context_age_seconds') or 999)<=120
+    assert isinstance(st.last.get('spot_context'), dict)

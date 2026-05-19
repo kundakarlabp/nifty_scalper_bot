@@ -1820,6 +1820,7 @@ class StrategyManager(_BaseStrategyManager):
                     continue
             return None
 
+        derived_direction, derived_confidence, derived_reasons = self._derive_context_direction(indicators, role=role)
         context_kind = (
             "price_direction"
             if role == "spot_context"
@@ -1836,10 +1837,87 @@ class StrategyManager(_BaseStrategyManager):
             "adx": _num("adx"), "atr": _num("atr"), "volume": _num("volume"),
             "avg_volume": _num("avg_volume"), "futures_volume_ratio": _num("futures_volume_ratio"),
             "vwap_slope": _num("vwap_slope"), "ema_slope": _num("ema_slope"),
-            "direction_bias": indicators.get("direction_bias") or indicators.get("underlying_direction_bias"),
+            "direction_bias": derived_direction,
+            "underlying_direction_bias": derived_direction,
+            "underlying_direction_confidence": derived_confidence,
+            "direction_context_reasons": derived_reasons,
+            "context_timestamp_epoch": time.time(),
             "regime": indicators.get("regime") or indicators.get("market_regime"),
         }
         self._latest_context_snapshots[role] = snapshot
+        if derived_direction not in {"CE", "PE"}:
+            log_throttled(
+                log,
+                key=f"context_direction_unavailable:{role}:{symbol}",
+                msg="CONTEXT_DIRECTION_UNAVAILABLE role=%s symbol=%s",
+                args=(role, symbol),
+                interval_sec=30.0,
+                level=logging.INFO,
+                extra={"event": "CONTEXT_DIRECTION_UNAVAILABLE", "role": role, "symbol": symbol},
+            )
+
+    def _derive_context_direction(
+        self, indicators: t.Mapping[str, t.Any], *, role: str
+    ) -> tuple[str | None, float, list[str]]:
+        def _f(key: str) -> float | None:
+            value = indicators.get(key)
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+        explicit = str(indicators.get("direction_bias") or indicators.get("underlying_direction_bias") or "").upper()
+        if explicit in {"CE", "PE"}:
+            try:
+                conf = float(indicators.get("underlying_direction_confidence") or indicators.get("direction_confidence") or 0.75)
+            except (TypeError, ValueError):
+                conf = 0.75
+            return explicit, max(0.0, min(1.0, conf)), ["explicit_direction_bias"]
+        close = _f("close") or _f("ltp") or _f("price")
+        vwap = _f("vwap") or _f("exchange_vwap") or _f("session_vwap")
+        ema_fast = _f("ema_fast") or _f("ema_9") or _f("ema9")
+        ema_slow = _f("ema_slow") or _f("ema_21") or _f("ema21")
+        ema_50 = _f("ema_50") or _f("ema50")
+        vwap_slope = _f("vwap_slope") or 0.0
+        ema_slope = _f("ema_slope") or 0.0
+        futures_volume_ratio = _f("futures_volume_ratio") or 0.0
+        ce_score = pe_score = 0.0
+        reasons: list[str] = []
+        if close is not None and vwap is not None and vwap > 0:
+            if close >= vwap: ce_score += 1.0; reasons.append("close_above_vwap")
+            else: pe_score += 1.0; reasons.append("close_below_vwap")
+        if ema_fast is not None and ema_slow is not None:
+            if ema_fast >= ema_slow: ce_score += 1.0; reasons.append("ema_fast_above_slow")
+            else: pe_score += 1.0; reasons.append("ema_fast_below_slow")
+        if close is not None and ema_50 is not None:
+            if close >= ema_50: ce_score += 0.5; reasons.append("close_above_ema50")
+            else: pe_score += 0.5; reasons.append("close_below_ema50")
+        if vwap_slope > 0: ce_score += 0.5; reasons.append("vwap_slope_positive")
+        elif vwap_slope < 0: pe_score += 0.5; reasons.append("vwap_slope_negative")
+        if ema_slope > 0: ce_score += 0.5; reasons.append("ema_slope_positive")
+        elif ema_slope < 0: pe_score += 0.5; reasons.append("ema_slope_negative")
+        if role == "futures_context" and futures_volume_ratio >= 1.0:
+            reasons.append("futures_volume_active")
+        total = ce_score + pe_score
+        if total <= 0:
+            return None, 0.0, ["direction_unavailable"]
+        margin = abs(ce_score - pe_score)
+        if margin < 0.5:
+            return None, min(0.55, total / 4.0), reasons + ["direction_tie"]
+        side = "CE" if ce_score > pe_score else "PE"
+        confidence = min(0.95, max(0.50, 0.50 + margin / max(total, 1.0) * 0.45))
+        return side, confidence, reasons
+
+    def _strategy_required_indicator_union(self) -> set[str]:
+        required = set(getattr(self, "_required_indicators", set()) or set())
+        try:
+            for names in getattr(self, "_strategy_required_indicators", {}).values():
+                required.update(str(name) for name in names if name)
+        except Exception as exc:
+            log.warning("STRATEGY_REQUIRED_INDICATOR_UNION_FAILED error=%s", exc, extra={"event": "STRATEGY_REQUIRED_INDICATOR_UNION_FAILED"})
+        required.update({"symbol","ltp","price","close","open","high","low","vwap","exchange_vwap","atr","volume","avg_volume","direction_bias","underlying_direction_bias","underlying_direction_confidence","context_age_seconds","futures_volume_ratio","futures_vwap","futures_vwap_slope","ema_fast","ema_slow","ema_50","ema_slope","vwap_slope","bos_confirmed","choch_confirmed","retest_confirmed","premium_reclaim","bullish_reversal","liquidity_sweep_confirmed","liquidity_sweep_confirmed_bear","prior_swing_low","prior_swing_high","spread_pct","bid","ask","selected_ce","selected_pe","is_selected_option","strike_distance_from_atm","data_age_seconds","stale_data_used"})
+        return required
 
     def generate_signal(
         self,
@@ -1883,15 +1961,16 @@ class StrategyManager(_BaseStrategyManager):
         hub_ready = None
         if self._data_hub is not None:
             hub_ready = bool(getattr(self._data_hub, "indicators_ready", False))
-        indicators_raw = self._indicator_engine.get_indicators(
-            symbol, self._required_indicators
-        )
+        required_for_eval = self._strategy_required_indicator_union()
+        indicators_raw = self._indicator_engine.get_indicators(symbol, required_for_eval)
         indicators: dict[str, t.Any] = dict(indicators_raw)
         vwap = indicators.get("vwap")
         avg_volume = indicators.get("avg_volume")
         required_missing = sorted(
             name for name in self._required_indicators if indicators.get(name) is None
         )
+        strategy_missing = sorted(name for name in required_for_eval if indicators.get(name) is None and name not in {"symbol", "selected_ce", "selected_pe"})
+        log_throttled(log, key=f"strategy_missing_indicators:{symbol}", msg="STRATEGY_REQUIRED_FIELDS_MISSING symbol=%s count=%s", args=(symbol, len(strategy_missing)), interval_sec=30.0, level=logging.DEBUG, extra={"event": "STRATEGY_REQUIRED_FIELDS_MISSING", "symbol": symbol, "strategy_missing": strategy_missing[:60]})
         log.debug(
             "STRATEGY_MANAGER_ENTER",
             extra={
@@ -1906,6 +1985,9 @@ class StrategyManager(_BaseStrategyManager):
                 "avg_volume": avg_volume,
                 "required_indicators_missing": required_missing,
                 "active_strategies_count": len(self._strategies),
+                "required_indicator_count": len(required_for_eval),
+                "strategy_required_indicator_count": len(required_for_eval - set(self._required_indicators)),
+                "required_indicators_sample": sorted(required_for_eval)[:40],
             },
         )
         if not indicators_ready:
@@ -2311,22 +2393,37 @@ class StrategyManager(_BaseStrategyManager):
             context_snapshots = getattr(self, "_latest_context_snapshots", {})
             spot_ctx = context_snapshots.get("spot_context", {})
             fut_ctx = context_snapshots.get("futures_context", {})
-            indicators.setdefault("spot_context", spot_ctx)
-            indicators.setdefault("futures_context", fut_ctx)
-            direction_bias = (
-                indicators.get("direction_bias")
-                or indicators.get("underlying_direction_bias")
-                or spot_ctx.get("direction_bias")
-                or fut_ctx.get("direction_bias")
-            )
+            max_context_age = self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0)
+            now_ts = time.time()
+            def _fresh(ctx: t.Mapping[str, t.Any]) -> bool:
+                try:
+                    ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
+                    return ts > 0 and (now_ts - ts) <= max_context_age
+                except (TypeError, ValueError):
+                    return False
+            spot_fresh = _fresh(spot_ctx)
+            fut_fresh = _fresh(fut_ctx)
+            if spot_fresh:
+                indicators.setdefault("spot_context", spot_ctx)
+            if fut_fresh:
+                indicators.setdefault("futures_context", fut_ctx)
+            direction_bias = (indicators.get("direction_bias") or indicators.get("underlying_direction_bias") or (spot_ctx.get("direction_bias") if spot_fresh else None) or (fut_ctx.get("direction_bias") if fut_fresh else None))
+            direction_confidence = (indicators.get("underlying_direction_confidence") or (spot_ctx.get("underlying_direction_confidence") if spot_fresh else None) or (fut_ctx.get("underlying_direction_confidence") if fut_fresh else None) or 0.0)
             if str(direction_bias or "").upper() in {"CE", "PE"}:
                 indicators["direction_bias"] = str(direction_bias).upper()
                 indicators["underlying_direction_bias"] = str(direction_bias).upper()
-            if fut_ctx.get("futures_volume_ratio") is not None:
+                try:
+                    indicators["underlying_direction_confidence"] = float(direction_confidence)
+                except (TypeError, ValueError):
+                    indicators["underlying_direction_confidence"] = 0.0
+                indicators["context_age_seconds"] = min(now_ts - float(spot_ctx.get("timestamp", now_ts)) if spot_fresh else max_context_age + 1, now_ts - float(fut_ctx.get("timestamp", now_ts)) if fut_fresh else max_context_age + 1)
+            else:
+                log_throttled(log, key=f"option_context_missing_direction_bias:{symbol}", msg="OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s", args=(symbol, spot_fresh, fut_fresh), interval_sec=30.0, level=logging.INFO, extra={"event": "OPTION_CONTEXT_MISSING_DIRECTION_BIAS", "symbol": symbol, "spot_fresh": spot_fresh, "fut_fresh": fut_fresh})
+            if fut_fresh and fut_ctx.get("futures_volume_ratio") is not None:
                 indicators.setdefault("futures_volume_ratio", fut_ctx.get("futures_volume_ratio"))
-            if fut_ctx.get("vwap") is not None:
+            if fut_fresh and fut_ctx.get("vwap") is not None:
                 indicators.setdefault("futures_vwap", fut_ctx.get("vwap"))
-            if fut_ctx.get("vwap_slope") is not None:
+            if fut_fresh and fut_ctx.get("vwap_slope") is not None:
                 indicators.setdefault("futures_vwap_slope", fut_ctx.get("vwap_slope"))
 
         position = self._position_manager.get_position(symbol)

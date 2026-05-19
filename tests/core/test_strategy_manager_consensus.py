@@ -116,3 +116,16 @@ def test_context_only_vote_returns_none_and_logs(caplog) -> None:
     )
     assert combined is None
     assert any('STRATEGY_NO_TRIGGER_VOTE' in rec.message for rec in caplog.records)
+
+
+def test_live_context_only_vote_is_rejected_with_diagnostics(monkeypatch, caplog) -> None:
+    from nifty_scalper_bot.core.strategy_manager import StrategyVote
+    monkeypatch.setenv('EXECUTION_MODE','LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED','false')
+    manager = _manager_stub()
+    signal = _make_signal()
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.9, reasons=[], metadata={'role':'context'})
+    caplog.set_level('INFO')
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000CE', signals=[(signal,vote)], indicators={'context_age_seconds':10})
+    assert out is None
+    assert any('no_trigger_vote' in r.message for r in caplog.records)

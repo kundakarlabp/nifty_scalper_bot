@@ -159,7 +159,15 @@ class VWAPProStrategy(EliteStrategy):
             min_score_default = '5.8' if is_live else '5.0'
             min_trend_score_default = '5.5' if is_live else '4.5'
             min_score = float(os.getenv('VWAP_PRO_MIN_TREND_ALIGNED_SCORE', min_trend_score_default) if trend_alignment else os.getenv('VWAP_PRO_MIN_SCORE', min_score_default))
-            context_fresh = float(indicators.get('context_age_seconds') or 0.0) <= float(os.getenv('VWAP_CONTEXT_MAX_AGE_SECONDS', '120') or '120')
+            try:
+                context_age_seconds = float(indicators.get("context_age_seconds") or 999.0)
+            except (TypeError, ValueError):
+                context_age_seconds = 999.0
+            try:
+                underlying_direction_confidence = float(indicators.get("underlying_direction_confidence") or 0.0)
+            except (TypeError, ValueError):
+                underlying_direction_confidence = 0.0
+            context_fresh = context_age_seconds <= float(os.getenv('VWAP_CONTEXT_MAX_AGE_SECONDS', '120') or '120')
             context_strong = float(indicators.get('underlying_direction_confidence') or 0.0) >= float(os.getenv('VWAP_CONTEXT_MIN_CONFIDENCE', '0.75') or '0.75')
             hard_conflict = bool(((is_live and require_alignment_live) or ((not is_live) and require_alignment_shadow)) and not trend_alignment and context_fresh and context_strong)
             if hard_conflict:
