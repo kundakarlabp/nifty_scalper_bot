@@ -29,7 +29,7 @@ def test_no_trigger_vote_logs_context_trigger_details(caplog):
     assert out is None
     assert 'blocked_at=no_trigger_vote' in caplog.text
     assert 'context_trigger_details' in caplog.text
-    assert 'negative_premium_flow' in caplog.text
+    assert 'trigger_block_reason' in caplog.text
 
 
 def test_context_promotion_live_default_false(monkeypatch):
