@@ -389,6 +389,30 @@ class BracketManager:
                             return True, float(avg_price) if avg_price else None
                         except (TypeError, ValueError):
                             return True, None
+        get_orders = getattr(broker, "get_orders", None)
+        if not callable(get_orders):
+            get_orders = getattr(broker, "orders", None)
+        if callable(get_orders):
+            try:
+                orders = get_orders() or []
+            except Exception:
+                orders = []
+            for order in orders:
+                if not isinstance(order, Mapping):
+                    continue
+                if str(order.get("order_id") or "") != str(order_id):
+                    continue
+                status_text = str(order.get("status") or "").upper()
+                if status_text in _FILLED_STATUSES:
+                    avg_price = (
+                        order.get("average_price")
+                        or order.get("avg_price")
+                        or order.get("price")
+                    )
+                    try:
+                        return True, float(avg_price) if avg_price else None
+                    except (TypeError, ValueError):
+                        return True, None
         return False, None
 
     def _reconcile_pending_entry(self, bracket: BracketState) -> None:

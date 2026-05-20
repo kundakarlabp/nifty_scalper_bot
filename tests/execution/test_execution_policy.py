@@ -39,3 +39,33 @@ def test_build_plan_rejects_wide_spread() -> None:
 
     with pytest.raises(OrderPlacementError):
         policy.build_plan("TEST", "SELL")
+
+
+def test_execution_policy_allows_configured_option_spread(monkeypatch) -> None:
+    monkeypatch.setenv("OPTION_EXEC_MAX_SPREAD_ATM_PCT", "0.03")
+    monkeypatch.setenv("OPTION_EXEC_MAX_SPREAD_LOW_PREMIUM_PCT", "0.06")
+    monkeypatch.setenv("OPTION_EXEC_MAX_SPREAD_HARD_CAP_PCT", "0.10")
+    monkeypatch.setenv("OPTION_LOW_PREMIUM_CUTOFF", "50")
+    hub = DummyHub({"best_bid": 9.0, "best_ask": 9.5, "ltp": 10.0})
+    policy = ExecutionPolicy(hub, max_spread_pct=0.015)
+    plan = policy.build_plan("NFO:NIFTY26MAY23750CE", "BUY")
+    assert plan.spread_pct > 0
+
+
+def test_execution_policy_rejects_option_spread_above_hard_cap(monkeypatch) -> None:
+    monkeypatch.setenv("OPTION_EXEC_MAX_SPREAD_ATM_PCT", "0.03")
+    monkeypatch.setenv("OPTION_EXEC_MAX_SPREAD_LOW_PREMIUM_PCT", "0.06")
+    monkeypatch.setenv("OPTION_EXEC_MAX_SPREAD_HARD_CAP_PCT", "0.10")
+    monkeypatch.setenv("OPTION_LOW_PREMIUM_CUTOFF", "50")
+    hub = DummyHub({"best_bid": 10.0, "best_ask": 12.0, "ltp": 10.0})
+    policy = ExecutionPolicy(hub, max_spread_pct=0.015)
+    with pytest.raises(OrderPlacementError):
+        policy.build_plan("NFO:NIFTY26MAY23750CE", "BUY")
+
+
+def test_execution_policy_keeps_strict_index_spread(monkeypatch) -> None:
+    monkeypatch.setenv("OPTION_EXEC_MAX_SPREAD_ATM_PCT", "0.03")
+    hub = DummyHub({"best_bid": 100.0, "best_ask": 103.0, "ltp": 101.0})
+    policy = ExecutionPolicy(hub, max_spread_pct=0.015)
+    with pytest.raises(OrderPlacementError):
+        policy.build_plan("NSE:NIFTY", "BUY")
