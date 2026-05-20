@@ -7348,7 +7348,8 @@ class StrategyRunner:
                             )
                         disable_same_bar_skip = phase != "LIVE"
                         if (
-                            not same_bar_eval_allowed
+                            not first_hydrated_eval
+                            and not same_bar_eval_allowed
                             and not disable_same_bar_skip
                             and _effective_last_bar_ts
                             and state._last_eval_bar_ts
@@ -7684,7 +7685,11 @@ class StrategyRunner:
                             market_open = get_market_state() == MarketState.OPEN
                         except Exception:
                             market_open = True
-                        if symbol_role in {"spot_context", "futures_context"} and not market_open:
+                        if (
+                            symbol_role in {"spot_context", "futures_context"}
+                            and not market_open
+                            and not _env_bool("ALLOW_OFFMARKET_CONTEXT_DIAGNOSTICS", False)
+                        ):
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
                                 stage="phase9",

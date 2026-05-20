@@ -2161,11 +2161,15 @@ class StrategyManager(_BaseStrategyManager):
         regime_snapshot: RegimeSnapshot | None = None
         adjustments: dict[str, t.Any] = {}
         regime_scale = 1.0
+        regime_allowed: bool | None = None
+        regime_reasons: tuple[str, ...] = ()
         if regime_manager is not None:
             gate_context = {"component": "strategy_manager", "symbol": symbol}
             try:
                 allowed = regime_manager.can_trade(context=gate_context)
                 reasons = tuple(regime_manager.get_filter_reasons())
+                regime_allowed = bool(allowed)
+                regime_reasons = tuple(reasons)
                 regime_snapshot = regime_manager.get_latest_snapshot()
                 self._log_regime_gate_decision(
                     symbol=symbol,
@@ -2232,12 +2236,7 @@ class StrategyManager(_BaseStrategyManager):
         if regime_manager is not None:
             try:
                 if (
-                    not regime_manager.can_trade(
-                        context={
-                            "component": "strategy_manager_fallback",
-                            "symbol": symbol,
-                        }
-                    )
+                    regime_allowed is False
                     and self._use_regime_adaptive
                 ):
                     regime_scale = min(
