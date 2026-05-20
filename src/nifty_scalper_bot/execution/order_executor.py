@@ -109,7 +109,9 @@ class OrderExecutor:
             "symbol": symbol,
             "side": side.upper(),
             "qty": qty,
-            "type": "MARKET",
+            "quantity": qty,
+            "type": "LIMIT",
+            "order_type": "LIMIT",
             "price": rounded_price,
             "client_order_id": client_order_id,
         }
@@ -117,7 +119,7 @@ class OrderExecutor:
         last_error: Exception | None = None
         for attempt in range(1, 4):
             try:
-                response = self._broker.place_order(payload)
+                response = self._submit_broker_order(payload)
                 break
             except BrokerError as exc:
                 last_error = exc
@@ -159,6 +161,23 @@ class OrderExecutor:
         }
         self._nonce_cache.pop(key, None)
         return order_id
+
+    def _submit_broker_order(self, payload: dict[str, object]) -> dict[str, object]:
+        kwargs_payload = dict(payload)
+        if "qty" in kwargs_payload and "quantity" not in kwargs_payload:
+            kwargs_payload["quantity"] = kwargs_payload["qty"]
+        if "type" in kwargs_payload and "order_type" not in kwargs_payload:
+            kwargs_payload["order_type"] = kwargs_payload["type"]
+        try:
+            response = self._broker.place_order(**kwargs_payload)
+        except TypeError as exc:
+            try:
+                response = self._broker.place_order(payload)
+            except TypeError:
+                raise exc
+        if not isinstance(response, dict):
+            raise ExecutionError("Invalid broker response payload")
+        return response
 
     def _quote_context(
         self, symbol: str, fallback_price: float

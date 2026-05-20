@@ -74,3 +74,9 @@ def test_vwap_pro_reads_direction_from_spot_context_when_top_level_missing() -> 
         assert signal.metadata['underlying_direction_confidence'] == 0.8
     else:
         assert getattr(strategy, 'last_no_vote_reason', None) != 'unknown_contract_side'
+
+def test_vwap_pro_required_indicators_include_context_fields() -> None:
+    strategy = VWAPProStrategy(config=VWAPProStrategyConfig(), indicator_engine=_DummyEngine())
+    required = strategy.get_required_indicators()
+    for key in {"underlying_direction_bias","underlying_direction_confidence","context_age_seconds","futures_vwap_slope","futures_volume_ratio","spread_pct","spot_context","futures_context"}:
+        assert key in required

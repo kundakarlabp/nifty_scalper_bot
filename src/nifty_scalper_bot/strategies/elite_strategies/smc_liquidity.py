@@ -54,8 +54,19 @@ class SMCStrategy(EliteStrategy):
             ).upper()
 
             if stale_data or current_price <= 0:
-                self._no_vote('no_liquidity_sweep')
-                LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=stale_or_invalid_data')
+                self._no_vote("stale_or_invalid_data")
+                LOGGER.debug(
+                    "STRATEGY_NO_VOTE strategy=SMC reason=stale_or_invalid_data symbol=%s",
+                    symbol,
+                    extra={
+                        "event": "STRATEGY_NO_VOTE",
+                        "strategy": "SMC",
+                        "symbol": symbol,
+                        "reason": "stale_or_invalid_data",
+                        "stale_data": stale_data,
+                        "current_price": current_price,
+                    },
+                )
                 return None
 
             body = abs(close - open_price)
@@ -183,10 +194,55 @@ class SMCStrategy(EliteStrategy):
                 return None
             if not (bullish_sweep or bearish_sweep or premium_reclaim) or not (displacement_score >= 0.6 or structure_confirmed) or not (direction_aligned or premium_reclaim):
                 self._no_vote('smc_quality_gate_failed')
+                LOGGER.info(
+                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_quality_gate_failed "
+                    "bullish_sweep=%s bearish_sweep=%s premium_reclaim=%s "
+                    "displacement_score=%.3f structure_confirmed=%s direction_aligned=%s",
+                    symbol,
+                    bullish_sweep,
+                    bearish_sweep,
+                    premium_reclaim,
+                    displacement_score,
+                    structure_confirmed,
+                    direction_aligned,
+                    extra={
+                        "event": "STRATEGY_NO_VOTE",
+                        "strategy": "SMC",
+                        "symbol": symbol,
+                        "reason": "smc_quality_gate_failed",
+                        "bullish_sweep": bullish_sweep,
+                        "bearish_sweep": bearish_sweep,
+                        "premium_reclaim": premium_reclaim,
+                        "displacement_score": displacement_score,
+                        "structure_confirmed": structure_confirmed,
+                        "direction_aligned": direction_aligned,
+                    },
+                )
                 return None
             if strategy_score < min_score:
-                self._no_vote('no_liquidity_sweep')
-                LOGGER.debug('STRATEGY_NO_VOTE strategy=SMC reason=low_quality')
+                self._no_vote("smc_low_score")
+                LOGGER.info(
+                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_low_score "
+                    "score=%.2f min_score=%.2f reasons=%s direction=%s underlying_direction=%s",
+                    symbol,
+                    strategy_score,
+                    min_score,
+                    reasons,
+                    direction,
+                    underlying_direction,
+                    extra={
+                        "event": "STRATEGY_NO_VOTE",
+                        "strategy": "SMC",
+                        "symbol": symbol,
+                        "reason": "smc_low_score",
+                        "score": strategy_score,
+                        "min_score": min_score,
+                        "score_reasons": reasons,
+                        "direction": direction,
+                        "underlying_direction": underlying_direction,
+                        "context_age_seconds": context_age_seconds,
+                    },
+                )
                 return None
 
             metadata = {

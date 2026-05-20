@@ -2019,6 +2019,8 @@ class StrategyManager(_BaseStrategyManager):
         required_for_eval = self._strategy_required_indicator_union()
         indicators_raw = self._indicator_engine.get_indicators(symbol, required_for_eval)
         indicators: dict[str, t.Any] = dict(indicators_raw)
+        symbol_role = classify_symbol_role(symbol)
+        indicators["symbol_role"] = symbol_role
         vwap = indicators.get("vwap")
         avg_volume = indicators.get("avg_volume")
         required_missing = sorted(
@@ -2186,14 +2188,35 @@ class StrategyManager(_BaseStrategyManager):
                         },
                     )
                 if not allowed and not self._use_regime_adaptive:
-                    _log_reject(
-                        "regime_gate_block",
-                        {"gate_reasons": reasons, "gate": "regime_manager"},
-                    )
-                    _emit_no_signal("regime_gate_block", {"gate_reasons": reasons})
-                    no_signal_reasons.append("regime_gate_block")
-                    _emit_strategy_exit()
-                    return None
+                    if symbol_role in {"spot_context", "futures_context"}:
+                        log_throttled(
+                            log,
+                            f"context_regime_gate_bypassed:{symbol}",
+                            (
+                                "CONTEXT_REGIME_GATE_BYPASSED "
+                                "symbol=%s role=%s reason=context_snapshot_update_not_trade_entry"
+                            ),
+                            symbol,
+                            symbol_role,
+                            interval_sec=60.0,
+                            level=logging.INFO,
+                            extra={
+                                "event": "CONTEXT_REGIME_GATE_BYPASSED",
+                                "symbol": symbol,
+                                "symbol_role": symbol_role,
+                                "gate_reasons": list(reasons),
+                                "reason": "context_snapshot_update_not_trade_entry",
+                            },
+                        )
+                    else:
+                        _log_reject(
+                            "regime_gate_block",
+                            {"gate_reasons": reasons, "gate": "regime_manager"},
+                        )
+                        _emit_no_signal("regime_gate_block", {"gate_reasons": reasons})
+                        no_signal_reasons.append("regime_gate_block")
+                        _emit_strategy_exit()
+                        return None
             except Exception as exc:  # noqa: BLE001
                 log.error(
                     "Failure in StrategyManager regime gate: %s",
@@ -2243,7 +2266,6 @@ class StrategyManager(_BaseStrategyManager):
         )
         score_map = self._recompute_scores()
         indicators = dict(indicators)
-        symbol_role = classify_symbol_role(symbol)
         indicators["symbol_role"] = symbol_role
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
