@@ -98,6 +98,15 @@ def test_context_vote_logs_context_trigger_details(caplog):
     assert "score_below_live_trigger_min" in caplog.text
 
 
+def test_option_underlying_context_missing_log(caplog):
+    import logging
+    st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
+    ie.payload={'vwap':102,'volume':100,'avg_volume':100}
+    with caplog.at_level(logging.INFO):
+        m.generate_signal('NFO:NIFTY26MAY23750CE',102)
+    assert "OPTION_UNDERLYING_CONTEXT_MISSING" in caplog.text
+
+
 def test_futures_snapshot_derives_slope_and_volume_ratio():
     st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
     ie.payload={'vwap':100,'close':100,'volume':1000,'avg_volume':1000}

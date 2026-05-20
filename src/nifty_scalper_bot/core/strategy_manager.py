@@ -2563,6 +2563,20 @@ class StrategyManager(_BaseStrategyManager):
             else:
                 log_throttled(
                     log,
+                    f"option_underlying_context_missing:{symbol}",
+                    "OPTION_UNDERLYING_CONTEXT_MISSING symbol=%s spot_ctx_present=%s futures_ctx_present=%s spot_ctx_age=%s futures_ctx_age=%s selected_ce=%s selected_pe=%s",
+                    symbol,
+                    bool(spot_ctx),
+                    bool(fut_ctx),
+                    (now_ts - float(spot_ctx.get("timestamp", now_ts))) if spot_ctx else None,
+                    (now_ts - float(fut_ctx.get("timestamp", now_ts))) if fut_ctx else None,
+                    indicators.get("selected_ce"),
+                    indicators.get("selected_pe"),
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                )
+                log_throttled(
+                    log,
                     f"option_context_missing_direction_bias:{symbol}",
                     "OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s spot_direction_valid=%s fut_direction_valid=%s",
                     symbol,

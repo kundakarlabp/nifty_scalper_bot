@@ -666,6 +666,21 @@ class IndicatorEngine:
             context = self._runtime_context.get(symbol, {})
             for key, value in context.items():
                 requested.setdefault(key, value)
+            if "tick_direction" in all_names or "tick_direction" in requested:
+                runtime_tick = str(context.get("tick_direction") or "").upper()
+                if runtime_tick:
+                    requested["tick_direction"] = runtime_tick
+                    requested["tick_direction_source"] = "runtime_context"
+                elif history is not None:
+                    closes = history.get_closes(2)
+                    if len(closes) >= 2:
+                        if closes[-1] > closes[-2]:
+                            requested["tick_direction"] = "UP"
+                        elif closes[-1] < closes[-2]:
+                            requested["tick_direction"] = "DOWN"
+                        else:
+                            requested["tick_direction"] = "FLAT"
+                        requested["tick_direction_source"] = "history_close_delta"
             return requested
         except Exception as e:
             LOGGER.error(

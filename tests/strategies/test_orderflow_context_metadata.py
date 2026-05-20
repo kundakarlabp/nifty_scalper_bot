@@ -41,3 +41,26 @@ def test_orderflow_trigger_role(monkeypatch) -> None:
     assert signal is not None
     assert signal.metadata['role'] == 'trigger'
     assert signal.metadata['can_trigger'] is True
+
+
+def test_orderflow_missing_tick_direction_reports_reason(monkeypatch) -> None:
+    monkeypatch.setenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')
+    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(), _Dummy())
+    inds = _indicators()
+    inds['tick_direction'] = ''
+    signal = strategy._evaluate_signal('NFO:NIFTY26FEB22500CE', inds, 100.5)
+    assert signal is not None
+    assert signal.metadata['role'] == 'context'
+    assert signal.metadata['trigger_block_reason'] == 'tick_direction_missing_or_neutral'
+
+
+def test_orderflow_live_requires_direction_context(monkeypatch) -> None:
+    monkeypatch.setenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(), _Dummy())
+    inds = _indicators()
+    inds['direction_bias'] = None
+    signal = strategy._evaluate_signal('NFO:NIFTY26FEB22500CE', inds, 100.5)
+    assert signal is not None
+    assert signal.metadata['role'] == 'context'
+    assert signal.metadata['trigger_block_reason'] == 'direction_context_missing_live'

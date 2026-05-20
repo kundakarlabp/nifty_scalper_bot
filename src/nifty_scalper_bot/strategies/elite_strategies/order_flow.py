@@ -177,6 +177,10 @@ class OrderFlowStrategy(EliteStrategy):
 
             side_aligns = direction in {'CE', 'PE'} and direction == side
             side_alignment_ok = direction not in {'CE', 'PE'} or side_aligns
+            tick_direction_missing = tick_direction not in {'UP', 'DOWN', 'BUY', 'SELL'}
+            direction_context_missing = direction not in {'CE', 'PE'}
+            allow_without_direction_live = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_WITHOUT_DIRECTION_LIVE', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
+            direction_context_ok = (direction in {'CE', 'PE'}) or (not is_live_mode) or allow_without_direction_live
             trigger_conditions_met = bool(
                 allow_orderflow_trigger
                 and quote_depth_valid
@@ -187,6 +191,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and strategy_score >= trigger_min_score
                 and spread_pct <= trigger_max_spread_pct
                 and side_alignment_ok
+                and direction_context_ok
                 and tick_supports
                 and tick_age_ms <= max_tick_age_ms
             )
@@ -197,14 +202,18 @@ class OrderFlowStrategy(EliteStrategy):
                 trigger_block_reason = 'quote_depth_missing'
             elif is_live_mode and require_tradable_quote_live and not tradable_quote:
                 trigger_block_reason = 'tradable_quote_false'
-            elif strategy_score < trigger_min_score:
-                trigger_block_reason = 'score_below_live_trigger_min' if is_live_mode else 'score_below_trigger_min'
-            elif spread_pct > trigger_max_spread_pct:
-                trigger_block_reason = 'spread_too_wide'
             elif tick_age_ms > max_tick_age_ms:
                 trigger_block_reason = 'tick_stale'
+            elif tick_direction_missing:
+                trigger_block_reason = 'tick_direction_missing_or_neutral'
+            elif not direction_context_ok:
+                trigger_block_reason = 'direction_context_missing_live'
             elif not side_alignment_ok:
                 trigger_block_reason = 'direction_bias_conflict'
+            elif spread_pct > trigger_max_spread_pct:
+                trigger_block_reason = 'spread_too_wide'
+            elif strategy_score < trigger_min_score:
+                trigger_block_reason = 'score_below_live_trigger_min' if is_live_mode else 'score_below_trigger_min'
             elif not tick_supports:
                 trigger_block_reason = 'negative_premium_flow'
 
@@ -220,6 +229,8 @@ class OrderFlowStrategy(EliteStrategy):
                 'premium_target_rr': 1.8, 'can_trigger': bool(trigger_conditions_met), 'trigger_min_score': trigger_min_score,
                 'trigger_max_spread_pct': trigger_max_spread_pct, 'trigger_conditions_met': trigger_conditions_met,
                 'trigger_block_reason': trigger_block_reason, 'quote_depth_valid': bool(quote_depth_valid),
+                'tick_direction_missing': tick_direction_missing, 'direction_context_missing': direction_context_missing,
+                'direction_context_ok': direction_context_ok,
                 'trigger_eligible': bool(trigger_conditions_met),
                 'trigger_disqualified_by': trigger_block_reason or None,
                 'liquidity_score': 2.0 if spread_pct <= 12.0 else 0.5,
