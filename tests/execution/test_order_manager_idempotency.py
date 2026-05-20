@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 
@@ -65,3 +66,14 @@ def test_timestamp_seconds_variants():
     assert OrderManager._timestamp_seconds(now) > 0
     assert OrderManager._timestamp_seconds('2026-05-19T10:00:00Z') > 0
     assert OrderManager._timestamp_seconds('bad-ts') == 0.0
+
+
+def test_place_order_fast_fill_bracket_without_trailing_fields_does_not_raise(monkeypatch):
+    om = _om('ok')
+    monkeypatch.setattr(om, '_lot_size_for_symbol', lambda s: 1)
+    monkeypatch.setattr(om, '_validate_live_execution_safety', lambda: True)
+    monkeypatch.setattr(om, '_confirm_fill_fast', lambda order_id, timeout_ms=300: True)
+    om._bracket_manager = SimpleNamespace(
+        get_bracket=lambda order_id: SimpleNamespace(entry_price=100.0, virtual_sl_id="SL1")
+    )
+    assert om.place_order('NFO:NIFTY26MAY23750CE', 'BUY', 1, order_type=OrderType.MARKET, stop_loss=10) == 'OID1'

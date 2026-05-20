@@ -2680,22 +2680,39 @@ class OrderManager:
                     fill_confirmed = self._confirm_fill_fast(order_id, timeout_ms=300)
                     if fill_confirmed and self._bracket_manager:
                         bracket = self._bracket_manager.get_bracket(order_id)
-                        if bracket and bracket.stop_order_id and bracket.trailing_spec:
-                            try:
-                                self.attach_trailing_stop(
-                                    entry_order_id=order_id,
-                                    sl_order_id=bracket.stop_order_id,
-                                    symbol=normalized_symbol,
-                                    side=normalized_side,
-                                    entry_price=bracket.entry_price,
-                                    spec=bracket.trailing_spec,
-                                )
-                                self._logger.info(
-                                    f"📈 TRAILING SL ATTACHED | {normalized_symbol} | order={order_id}"
-                                )
-                            except Exception as exc:
-                                self._logger.error(
-                                    f"Trailing attach failed for {order_id}: {exc}"
+                        if bracket:
+                            stop_order_id = (
+                                getattr(bracket, "stop_order_id", None)
+                                or getattr(bracket, "virtual_sl_id", None)
+                            )
+                            trailing_spec = getattr(bracket, "trailing_spec", None)
+
+                            if stop_order_id and trailing_spec:
+                                try:
+                                    self.attach_trailing_stop(
+                                        entry_order_id=order_id,
+                                        sl_order_id=stop_order_id,
+                                        symbol=normalized_symbol,
+                                        side=normalized_side,
+                                        entry_price=bracket.entry_price,
+                                        spec=trailing_spec,
+                                    )
+                                    self._logger.info(
+                                        "📈 TRAILING SL ATTACHED | %s | order=%s",
+                                        normalized_symbol,
+                                        order_id,
+                                    )
+                                except Exception as exc:
+                                    self._logger.error(
+                                        "Trailing attach failed for %s: %s",
+                                        order_id,
+                                        exc,
+                                    )
+                            else:
+                                self._logger.debug(
+                                    "TRAILING_ATTACH_SKIPPED order_id=%s symbol=%s reason=no_stop_order_or_trailing_spec",
+                                    order_id,
+                                    normalized_symbol,
                                 )
 
                     if fill_confirmed:

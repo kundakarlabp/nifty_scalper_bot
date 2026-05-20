@@ -80,4 +80,30 @@ def test_option_context_fresh_but_directionless_not_used(caplog):
     with caplog.at_level(logging.INFO):
         m.generate_signal('NFO:NIFTY26MAY23750CE',102)
     assert any("OPTION_CONTEXT_FRESH_BUT_DIRECTIONLESS" in rec.message for rec in caplog.records)
+    assert any("direction_tie" in rec.message for rec in caplog.records)
     assert st.last.get('direction_bias') in (None, '')
+
+
+def test_context_vote_logs_context_trigger_details(caplog):
+    import logging
+    from nifty_scalper_bot.core.strategy_manager import StrategyVote
+    from nifty_scalper_bot.strategies.signal_generator import Signal
+    m = StrategyManager([], _IE(), _PM())
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26MAY23750PE', quantity=1, confidence=0.8, metadata={'role': 'context', 'trigger_block_reason': 'score_below_live_trigger_min'})
+    vote = StrategyVote(strategy='OrderFlow', side='PE', confidence=0.8, score=8.0, metadata={'role': 'context', 'trigger_block_reason': 'score_below_live_trigger_min'})
+    with caplog.at_level(logging.INFO):
+        out = m._combine_strategy_votes(symbol='NFO:NIFTY26MAY23750PE', signals=[(signal, vote)], indicators={})
+    assert out is None
+    assert "context_trigger_details" in caplog.text
+    assert "score_below_live_trigger_min" in caplog.text
+
+
+def test_futures_snapshot_derives_slope_and_volume_ratio():
+    st=_S(); ie=_IE(); m=StrategyManager([st], ie, _PM())
+    ie.payload={'vwap':100,'close':100,'volume':1000,'avg_volume':1000}
+    m.generate_signal('NFO:NIFTY26MAYFUT',100)
+    ie.payload={'vwap':101,'close':102,'volume':2000,'avg_volume':1000}
+    m.generate_signal('NFO:NIFTY26MAYFUT',102)
+    snap = m._latest_context_snapshots.get('futures_context', {})
+    assert float(snap.get('futures_volume_ratio') or 0.0) == 2.0
+    assert float(snap.get('vwap_slope') or 0.0) > 0.0

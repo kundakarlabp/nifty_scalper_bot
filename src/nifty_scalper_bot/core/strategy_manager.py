@@ -1808,6 +1808,7 @@ class StrategyManager(_BaseStrategyManager):
         """Store latest spot/futures context snapshots for option strategies."""
         if not hasattr(self, "_latest_context_snapshots"):
             self._latest_context_snapshots: dict[str, dict[str, t.Any]] = {}
+        previous_snapshot = dict(self._latest_context_snapshots.get(role, {}) or {})
 
         def _num(*keys: str) -> float | None:
             for key in keys:
@@ -1828,6 +1829,40 @@ class StrategyManager(_BaseStrategyManager):
             if role == "futures_context"
             else "unknown"
         )
+        current_volume = _num("volume")
+        current_avg_volume = _num("avg_volume")
+        current_vwap = _num("vwap", "exchange_vwap", "session_vwap")
+        current_close = _num("close", "ltp", "price")
+        futures_volume_ratio = _num("futures_volume_ratio")
+        futures_volume_ratio_source = "indicator"
+        if role == "futures_context" and (futures_volume_ratio is None or futures_volume_ratio <= 0):
+            if (
+                current_volume is not None
+                and current_avg_volume is not None
+                and current_avg_volume > 0
+            ):
+                futures_volume_ratio = current_volume / max(current_avg_volume, 1e-9)
+                futures_volume_ratio_source = "derived_volume_avg"
+        vwap_slope = _num("vwap_slope")
+        vwap_slope_source = "indicator"
+        if role == "futures_context" and (vwap_slope is None or abs(vwap_slope) <= 1e-12):
+            prev_vwap = previous_snapshot.get("vwap")
+            try:
+                prev_vwap_f = float(prev_vwap) if prev_vwap is not None else None
+            except (TypeError, ValueError):
+                prev_vwap_f = None
+            if current_vwap is not None and prev_vwap_f and prev_vwap_f > 0:
+                vwap_slope = (current_vwap - prev_vwap_f) / prev_vwap_f
+                vwap_slope_source = "derived_previous_snapshot"
+        ema_slope = _num("ema_slope")
+        if role == "futures_context" and (ema_slope is None or abs(ema_slope) <= 1e-12):
+            prev_close = previous_snapshot.get("close") or previous_snapshot.get("ltp")
+            try:
+                prev_close_f = float(prev_close) if prev_close is not None else None
+            except (TypeError, ValueError):
+                prev_close_f = None
+            if current_close is not None and prev_close_f and prev_close_f > 0:
+                ema_slope = (current_close - prev_close_f) / prev_close_f
         snapshot = {
             "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
             "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
@@ -1835,14 +1870,16 @@ class StrategyManager(_BaseStrategyManager):
             "ema_fast": _num("ema_fast", "ema_9", "ema9"),
             "ema_slow": _num("ema_slow", "ema_21", "ema21"), "ema_50": _num("ema_50", "ema50"),
             "adx": _num("adx"), "atr": _num("atr"), "volume": _num("volume"),
-            "avg_volume": _num("avg_volume"), "futures_volume_ratio": _num("futures_volume_ratio"),
-            "vwap_slope": _num("vwap_slope"), "ema_slope": _num("ema_slope"),
+            "avg_volume": _num("avg_volume"), "futures_volume_ratio": futures_volume_ratio,
+            "vwap_slope": vwap_slope, "ema_slope": ema_slope,
             "direction_bias": derived_direction,
             "underlying_direction_bias": derived_direction,
             "underlying_direction_confidence": derived_confidence,
             "direction_context_reasons": derived_reasons,
             "context_timestamp_epoch": time.time(),
             "regime": indicators.get("regime") or indicators.get("market_regime"),
+            "futures_volume_ratio_source": futures_volume_ratio_source,
+            "vwap_slope_source": vwap_slope_source,
         }
         self._latest_context_snapshots[role] = snapshot
         if derived_direction not in {"CE", "PE"}:
@@ -2501,12 +2538,13 @@ class StrategyManager(_BaseStrategyManager):
             spot_usable = spot_fresh and spot_direction_valid
             fut_usable = fut_fresh and fut_direction_valid
             if spot_fresh and not spot_direction_valid:
+                spot_direction_reasons = spot_ctx.get("direction_context_reasons")
                 log_throttled(
                     log, f"option_context_fresh_but_directionless:{symbol}",
-                    "OPTION_CONTEXT_FRESH_BUT_DIRECTIONLESS symbol=%s spot_fresh=%s spot_ctx_keys=%s",
-                    symbol, spot_fresh, sorted(list(spot_ctx.keys())),
+                    "OPTION_CONTEXT_FRESH_BUT_DIRECTIONLESS symbol=%s spot_fresh=%s spot_direction_bias=%s spot_underlying_direction_bias=%s spot_confidence=%s spot_direction_reasons=%s spot_ctx_keys=%s",
+                    symbol, spot_fresh, spot_ctx.get("direction_bias"), spot_ctx.get("underlying_direction_bias"), spot_ctx.get("underlying_direction_confidence"), spot_direction_reasons, sorted(list(spot_ctx.keys())),
                     interval_sec=30.0, level=logging.INFO,
-                    extra={"event": "OPTION_CONTEXT_FRESH_BUT_DIRECTIONLESS", "symbol": symbol, "spot_fresh": spot_fresh, "spot_direction_valid": spot_direction_valid, "spot_ctx_keys": sorted(list(spot_ctx.keys()))},
+                    extra={"event": "OPTION_CONTEXT_FRESH_BUT_DIRECTIONLESS", "symbol": symbol, "spot_fresh": spot_fresh, "spot_direction_valid": spot_direction_valid, "spot_ctx_keys": sorted(list(spot_ctx.keys())), "spot_direction_bias": spot_ctx.get("direction_bias"), "spot_underlying_direction_bias": spot_ctx.get("underlying_direction_bias"), "spot_confidence": spot_ctx.get("underlying_direction_confidence"), "spot_direction_reasons": spot_direction_reasons, "spot_ltp": spot_ctx.get("ltp"), "spot_close": spot_ctx.get("close"), "spot_vwap": spot_ctx.get("vwap"), "spot_ema_fast": spot_ctx.get("ema_fast"), "spot_ema_slow": spot_ctx.get("ema_slow"), "spot_ema_50": spot_ctx.get("ema_50"), "spot_vwap_slope": spot_ctx.get("vwap_slope"), "spot_ema_slope": spot_ctx.get("ema_slope"), "fut_fresh": fut_fresh, "fut_direction_valid": fut_direction_valid, "fut_direction_bias": fut_ctx.get("direction_bias"), "fut_underlying_direction_bias": fut_ctx.get("underlying_direction_bias"), "fut_confidence": fut_ctx.get("underlying_direction_confidence"), "fut_direction_reasons": fut_ctx.get("direction_context_reasons"), "fut_ctx_keys": sorted(list(fut_ctx.keys())), "fut_ltp": fut_ctx.get("ltp"), "fut_close": fut_ctx.get("close"), "fut_vwap": fut_ctx.get("vwap"), "fut_ema_fast": fut_ctx.get("ema_fast"), "fut_ema_slow": fut_ctx.get("ema_slow"), "fut_ema_50": fut_ctx.get("ema_50"), "fut_vwap_slope": fut_ctx.get("vwap_slope"), "fut_ema_slope": fut_ctx.get("ema_slope")},
                 )
             if spot_usable:
                 indicators.setdefault("spot_context", spot_ctx)
@@ -2790,8 +2828,16 @@ class StrategyManager(_BaseStrategyManager):
         elif combined is None:
             log_throttled(
                 log,
-                key=f"strategy_manager_no_combined:{symbol}",
-                msg="strategy_manager_no_combined_signal",
+                f"strategy_manager_no_combined:{symbol}",
+                (
+                    "strategy_manager_no_combined_signal symbol=%s no_vote_reason_counts=%s "
+                    "direction_bias=%s underlying_direction_bias=%s context_age_seconds=%s"
+                ),
+                symbol,
+                no_vote_reason_counts,
+                indicators.get("direction_bias"),
+                indicators.get("underlying_direction_bias"),
+                indicators.get("context_age_seconds"),
                 interval_sec=30.0,
                 extra={
                     "event": "strategy_manager_no_combined_signal",
@@ -3020,6 +3066,29 @@ class StrategyManager(_BaseStrategyManager):
                 context_sides = [v.side for _, v in context_votes]
                 context_scores = [self._extract_raw_score(v) for _, v in context_votes]
                 context_confidences = [float(v.confidence) for _, v in context_votes]
+                context_trigger_details = []
+                for signal, vote in context_votes:
+                    md = dict(getattr(signal, "metadata", {}) or {})
+                    vote_md = dict(getattr(vote, "metadata", {}) or {})
+                    merged_md = {**md, **vote_md}
+                    context_trigger_details.append(
+                        {
+                            "strategy": vote.strategy,
+                            "side": vote.side,
+                            "score": self._extract_raw_score(vote),
+                            "confidence": float(vote.confidence),
+                            "role": merged_md.get("role"),
+                            "can_trigger": merged_md.get("can_trigger"),
+                            "trigger_conditions_met": merged_md.get("trigger_conditions_met"),
+                            "trigger_block_reason": merged_md.get("trigger_block_reason"),
+                            "quote_depth_valid": merged_md.get("quote_depth_valid"),
+                            "tradable_quote": merged_md.get("tradable_quote"),
+                            "spread_pct": merged_md.get("spread_pct"),
+                            "tick_age_ms": merged_md.get("tick_age_ms") or indicator_map.get("tick_age_ms"),
+                            "depth_available": merged_md.get("depth_available"),
+                            "tick_direction": merged_md.get("tick_direction"),
+                        }
+                    )
                 log.info(
                     "TRADE_DECISION_TRACE approval_path=%s blocked_at=%s blocked_reason=%s "
                     "symbol=%s context_votes=%s context_sides=%s context_scores=%s "
@@ -3045,6 +3114,7 @@ class StrategyManager(_BaseStrategyManager):
                         "context_sides": context_sides,
                         "context_scores": context_scores,
                         "context_confidences": context_confidences,
+                        "context_trigger_details": context_trigger_details,
                         "allow_context_promotion": bool(mode_profile.get("allow_context_promotion", False)),
                         "execution_mode": mode_profile.get("mode"),
                         "direction_bias": indicator_map.get("direction_bias"),
@@ -3055,11 +3125,12 @@ class StrategyManager(_BaseStrategyManager):
                 log_throttled(
                     log,
                     f"strategy_no_trigger_vote:{symbol_norm}",
-                    "STRATEGY_NO_TRIGGER_VOTE symbol=%s context_votes=%s context_sides=%s live_context_promotion_allowed=%s",
+                    "STRATEGY_NO_TRIGGER_VOTE symbol=%s context_votes=%s context_sides=%s live_context_promotion_allowed=%s context_trigger_details=%s",
                     symbol_norm,
                     context_vote_names,
                     context_sides,
                     bool(mode_profile.get("allow_context_promotion", False)),
+                    context_trigger_details,
                     interval_sec=30.0,
                     level=logging.INFO,
                     extra={
@@ -3070,6 +3141,7 @@ class StrategyManager(_BaseStrategyManager):
                         "context_sides": context_sides,
                         "context_scores": context_scores,
                         "context_confidences": context_confidences,
+                        "context_trigger_details": context_trigger_details,
                         "allow_context_promotion": bool(mode_profile.get("allow_context_promotion", False)),
                         "execution_mode": mode_profile.get("mode"),
                         "direction_bias": indicator_map.get("direction_bias"),

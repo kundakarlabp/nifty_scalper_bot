@@ -26,6 +26,14 @@ class VWAPProStrategy(EliteStrategy):
         self._slack_atr_mult = float(os.getenv('VWAP_SLACK_ATR_MULT', '1.5') or 1.5)
         self._max_distance_pct = float(os.getenv('VWAP_MAX_OPTION_DISTANCE_PCT', '0.18') or 0.18)
         self._max_atr_distance_mult = float(os.getenv('VWAP_MAX_ATR_DISTANCE_MULT', '1.5') or 1.5)
+        self._futures_slope_neutral_eps = float(os.getenv("VWAP_FUTURES_SLOPE_NEUTRAL_EPS", "0.00005") or 0.00005)
+        self._allow_early_trend_pullback = str(
+            os.getenv("VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK_LIVE", "false")
+            if str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
+            else os.getenv("VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._early_trend_min_context_conf = float(os.getenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.90") or 0.90)
+        self._early_trend_max_context_age = float(os.getenv("VWAP_EARLY_TREND_MAX_CONTEXT_AGE", "2.0") or 2.0)
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicators set. Raises: Exception."""
@@ -177,12 +185,17 @@ class VWAPProStrategy(EliteStrategy):
                     score -= 2.0
                     reasons.append('direction_conflict')
 
-            slope_support = (contract_side == 'CE' and futures_vwap_slope > 0) or (contract_side == 'PE' and futures_vwap_slope < 0)
-            if slope_support:
-                score += 1.0
-                reasons.append('futures_slope_alignment')
+            slope_available = abs(futures_vwap_slope) > self._futures_slope_neutral_eps
+            if slope_available:
+                slope_support = (contract_side == 'CE' and futures_vwap_slope > 0) or (contract_side == 'PE' and futures_vwap_slope < 0)
+                if slope_support:
+                    score += 1.0
+                    reasons.append('futures_slope_alignment')
+                else:
+                    reasons.append('futures_slope_conflict')
             else:
-                reasons.append('futures_slope_conflict')
+                slope_support = False
+                reasons.append('futures_slope_neutral')
             if not trend_alignment and bias in {'CE', 'PE'}:
                 if 'direction_conflict' not in reasons:
                     conflict_penalty_applied = float(os.getenv('VWAP_PRO_CONFLICT_PENALTY', '2.0') or '2.0')
@@ -215,6 +228,20 @@ class VWAPProStrategy(EliteStrategy):
             if hard_conflict:
                 self._no_vote('underlying_direction_conflict')
                 return None
+            early_trend_pullback = bool(
+                self._allow_early_trend_pullback
+                and trend_alignment
+                and context_fresh
+                and context_age_seconds <= self._early_trend_max_context_age
+                and underlying_direction_confidence >= self._early_trend_min_context_conf
+                and not premium_above_vwap
+                and not pullback_flag
+                and distance_pct <= min(self._max_distance_pct * 0.15, 0.03)
+                and spread_pct <= float(os.getenv("VWAP_EARLY_TREND_MAX_SPREAD_PCT", "8.0") or 8.0)
+            )
+            if early_trend_pullback:
+                score += 1.2
+                reasons.append("early_trend_pullback_context")
             threshold_source = 'trend_aligned' if trend_alignment else 'base'
 
             if score < min_score:
@@ -275,6 +302,7 @@ class VWAPProStrategy(EliteStrategy):
                         "continuation_confirmed": continuation_confirmed,
                         "trend_alignment": trend_alignment,
                         "pullback_flag": pullback_flag,
+                        "early_trend_pullback": early_trend_pullback,
                     },
                 )
                 return None
@@ -335,6 +363,7 @@ class VWAPProStrategy(EliteStrategy):
                 'futures_volume_ratio': futures_volume_ratio,
                 'trigger_block_reason': '' if strategy_score >= min_score else 'weak_score',
                 'continuation_confirmed': continuation_confirmed,
+                'early_trend_pullback': early_trend_pullback,
                 'setup_invalidation_premium': current_price - atr_safe,
                 'premium_stop_distance': atr_safe,
                 'premium_target_rr': 2.0,
