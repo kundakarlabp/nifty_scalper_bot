@@ -3788,6 +3788,23 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         fingerprint["release"],
         extra={"event": "startup_fingerprint", **fingerprint},
     )
+    effective_mode = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper()
+    live_enabled = _is_live_execution_mode(effective_mode) or str(os.getenv("ENABLE_LIVE_TRADING", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    LOGGER.info(
+        "BOT_INSTANCE_FINGERPRINT deployment_id=%s replica_id=%s commit_sha=%s live_execution=%s",
+        str(os.getenv("RAILWAY_DEPLOYMENT_ID", "")).strip() or "unknown",
+        str(os.getenv("RAILWAY_REPLICA_ID", "")).strip() or "unknown",
+        str(os.getenv("RAILWAY_GIT_COMMIT_SHA", "")).strip() or fingerprint["release"],
+        bool(live_enabled),
+        extra={
+            "event": "BOT_INSTANCE_FINGERPRINT",
+            "deployment_id": str(os.getenv("RAILWAY_DEPLOYMENT_ID", "")).strip() or "unknown",
+            "replica_id": str(os.getenv("RAILWAY_REPLICA_ID", "")).strip() or "unknown",
+            "commit_sha": str(os.getenv("RAILWAY_GIT_COMMIT_SHA", "")).strip() or fingerprint["release"],
+            "live_execution": bool(live_enabled),
+        },
+    )
+    _enforce_live_single_replica_safety(is_live_execution=bool(live_enabled))
     config = settings.app
     raw_ws_disabled = os.getenv("WEBSOCKET__DISABLED")
     if raw_ws_disabled is None:
@@ -6192,6 +6209,34 @@ def _allow_synthetic_market_data() -> bool:
     return flag in {"1", "true", "yes", "on"}
 
 
+def _enforce_live_single_replica_safety(*, is_live_execution: bool) -> None:
+    """Warn/fail-fast when multiple live replicas/workers are configured."""
+    replica_count_raw = str(os.getenv("RAILWAY_REPLICA_COUNT", "")).strip()
+    worker_raw = (
+        str(os.getenv("WEB_CONCURRENCY", "")).strip()
+        or str(os.getenv("GUNICORN_WORKERS", "")).strip()
+    )
+    replica_count = int(replica_count_raw) if replica_count_raw.isdigit() else 0
+    workers = int(worker_raw) if worker_raw.isdigit() else 0
+    multi_runner = max(replica_count, workers) > 1
+    if not is_live_execution or not multi_runner:
+        return
+    LOGGER.warning(
+        "LIVE_EXECUTION_MULTI_REPLICA_RISK replicas=%s workers=%s reason=single_live_runner_required",
+        replica_count_raw or "unknown",
+        worker_raw or "unknown",
+        extra={
+            "event": "LIVE_EXECUTION_MULTI_REPLICA_RISK",
+            "replicas": replica_count_raw or "unknown",
+            "workers": worker_raw or "unknown",
+            "reason": "single_live_runner_required",
+        },
+    )
+    fail_fast = str(os.getenv("BOT_FAIL_FAST_ON_MULTI_REPLICA_LIVE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    if fail_fast:
+        raise RuntimeError("Multiple live trading replicas are unsafe")
+
+
 def _coerce_spot_price(tick: Mapping[str, Any] | None) -> float | None:
     """Pull a positive spot price out of an MDM tick payload."""
 
@@ -8553,34 +8598,39 @@ async def startup_sequence(ctx: BotContext) -> None:
                     sym_token = active_symbol_tokens.get(sym)
                 except Exception:
                     sym_token = None
-                mdm_bars = list(ctx.market_data_manager.get_ohlc_bars(sym, limit=hydration_max_bars) or [])
+                canonical_sym = canonical(sym)
+                mdm_bars = list(ctx.market_data_manager.get_ohlc_bars(canonical_sym, limit=hydration_max_bars) or [])
                 count = len(mdm_bars)
                 runner_ingested = 0
-                for bar in mdm_bars:
-                    if getattr(ctx, "strategy_runner", None) is not None and hasattr(ctx.strategy_runner, "ingest_historical_bar"):
-                        try:
-                            ctx.strategy_runner.ingest_historical_bar({**dict(bar), "symbol": sym})
-                            runner_ingested += 1
-                        except Exception as runner_ingest_exc:
-                            LOGGER.warning("startup_runner_hydration_ingest_failed symbol=%s err=%s",sym,runner_ingest_exc)
+                runner_history_count = 0
+                if getattr(ctx, "strategy_runner", None) is not None:
+                    required_bars = int(getattr(ctx.strategy_runner, "_context_required_bars", 0) or getattr(ctx.strategy_runner, "_required_candles", 0) or 50)
+                    try:
+                        ctx.strategy_runner._indicator_engine.replace_history(canonical_sym, mdm_bars, source="startup_hydration", min_bars=required_bars)
+                        runner_ingested = len(mdm_bars)
+                        runner_history_count = ctx.strategy_runner._indicator_engine.history_count(canonical_sym)
+                    except Exception as runner_ingest_exc:
+                        LOGGER.warning("startup_runner_hydration_replace_failed symbol=%s err=%s", canonical_sym, runner_ingest_exc)
                 LOGGER.info("RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d", sym, count, runner_ingested,extra={"event":"RUNNER_MDM_HYDRATION_SYNC","symbol":sym,"mdm_bars":count,"runner_ingested":runner_ingested})
                 hydrated_counts[sym] = count
                 LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
                 if getattr(ctx, "strategy_runner", None) is not None:
-                    try:
-                        runner_history_count = len(
-                            ctx.strategy_runner._indicator_engine.get_history(sym) or []
-                        )
-                    except Exception:
-                        runner_history_count = 0
                     mdm_history_count = 0
                     if ctx.market_data_manager is not None:
                         mdm_history_count = len(
-                            ctx.market_data_manager.get_ohlc_bars(sym) or []
+                            ctx.market_data_manager.get_ohlc_bars(canonical_sym) or []
                         )
                     LOGGER.info(
+                        "RUNNER_HISTORY_CONSISTENCY symbol=%s mdm_bars=%d indicator_bars=%d consistent=%s",
+                        canonical_sym,
+                        mdm_history_count,
+                        runner_history_count,
+                        bool(runner_history_count >= required_bars and mdm_history_count >= required_bars),
+                        extra={"event": "RUNNER_HISTORY_CONSISTENCY", "symbol": canonical_sym, "mdm_bars": mdm_history_count, "indicator_bars": runner_history_count, "consistent": bool(runner_history_count >= required_bars and mdm_history_count >= required_bars)},
+                    )
+                    LOGGER.info(
                         "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d source=%s runner_history_count=%d mdm_history_count=%d",
-                        sym,
+                        canonical_sym,
                         sym_token,
                         runner_ingested,
                         "startup_hydration",
@@ -8596,8 +8646,23 @@ async def startup_sequence(ctx: BotContext) -> None:
                             "mdm_history_count": mdm_history_count,
                         },
                     )
-                    if sym == "NSE:NIFTY":
-                        required = int(getattr(ctx.strategy_runner, "_context_required_bars", 0) or 0)
+                    if canonical_sym == "NSE:NIFTY":
+                        required = int(
+                            getattr(ctx.strategy_runner, "_context_required_bars", 0)
+                            or getattr(ctx.strategy_runner, "_required_candles", 0)
+                            or 50
+                        )
+                        if mdm_history_count >= required and runner_history_count < required:
+                            runner_before = runner_history_count
+                            ctx.strategy_runner._indicator_engine.replace_history(canonical_sym, mdm_bars, source="startup_hydration", min_bars=required)
+                            runner_history_count = ctx.strategy_runner._indicator_engine.history_count(canonical_sym)
+                            LOGGER.info(
+                                "SPOT_CONTEXT_HISTORY_RESEEDED symbol=NSE:NIFTY mdm_bars=%d runner_before=%d runner_after=%d success=%s",
+                                mdm_history_count,
+                                runner_before,
+                                runner_history_count,
+                                bool(runner_history_count >= required),
+                            )
                         success = runner_history_count >= required and mdm_history_count >= required
                         reason = "hydrated" if success else "insufficient_bars_after_hydration"
                         LOGGER.info(
@@ -8618,9 +8683,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             },
                         )
                 if ctx.market_data_manager:
-                    bars_snapshot = ctx.market_data_manager.get_ohlc_bars(sym)
+                    bars_snapshot = ctx.market_data_manager.get_ohlc_bars(canonical_sym)
                     ctx.market_data_manager.update_hydration_status(
-                        sym, bars_snapshot or records
+                        canonical_sym, bars_snapshot or records
                     )
 
             LOGGER.info(

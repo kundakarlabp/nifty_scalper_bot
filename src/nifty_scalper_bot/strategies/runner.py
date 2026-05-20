@@ -2973,7 +2973,7 @@ class StrategyRunner:
         for _sym in symbols:
             norm_sym = enforce_canonical(normalize_symbol(_sym))
             try:
-                _bc = len(self._indicator_engine.get_history(norm_sym) or [])
+                _bc = int(self._indicator_engine.history_count(norm_sym))
                 _ok = self._indicator_engine.has_min_bars(
                     norm_sym, self._required_candles
                 )
