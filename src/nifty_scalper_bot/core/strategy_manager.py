@@ -3092,7 +3092,7 @@ class StrategyManager(_BaseStrategyManager):
                 log.info(
                     "TRADE_DECISION_TRACE approval_path=%s blocked_at=%s blocked_reason=%s "
                     "symbol=%s context_votes=%s context_sides=%s context_scores=%s "
-                    "direction_bias=%s underlying_direction_bias=%s context_age_seconds=%s",
+                    "direction_bias=%s underlying_direction_bias=%s context_age_seconds=%s context_trigger_details=%s",
                     approval_path,
                     "no_trigger_vote",
                     "no_trigger_vote",
@@ -3103,6 +3103,7 @@ class StrategyManager(_BaseStrategyManager):
                     indicator_map.get("direction_bias"),
                     indicator_map.get("underlying_direction_bias"),
                     indicator_map.get("context_age_seconds"),
+                    context_trigger_details,
                     extra={
                         "event": "TRADE_DECISION_TRACE",
                         "symbol": symbol_norm,
