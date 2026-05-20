@@ -8625,8 +8625,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                         canonical_sym,
                         mdm_history_count,
                         runner_history_count,
-                        bool(mdm_history_count == runner_history_count),
-                        extra={"event": "RUNNER_HISTORY_CONSISTENCY", "symbol": canonical_sym, "mdm_bars": mdm_history_count, "indicator_bars": runner_history_count, "consistent": bool(mdm_history_count == runner_history_count)},
+                        bool(runner_history_count >= required_bars and mdm_history_count >= required_bars),
+                        extra={"event": "RUNNER_HISTORY_CONSISTENCY", "symbol": canonical_sym, "mdm_bars": mdm_history_count, "indicator_bars": runner_history_count, "consistent": bool(runner_history_count >= required_bars and mdm_history_count >= required_bars)},
                     )
                     LOGGER.info(
                         "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d source=%s runner_history_count=%d mdm_history_count=%d",
@@ -8647,7 +8647,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                         },
                     )
                     if canonical_sym == "NSE:NIFTY":
-                        required = int(getattr(ctx.strategy_runner, "_context_required_bars", 0) or 0)
+                        required = int(
+                            getattr(ctx.strategy_runner, "_context_required_bars", 0)
+                            or getattr(ctx.strategy_runner, "_required_candles", 0)
+                            or 50
+                        )
                         if mdm_history_count >= required and runner_history_count < required:
                             runner_before = runner_history_count
                             ctx.strategy_runner._indicator_engine.replace_history(canonical_sym, mdm_bars, source="startup_hydration", min_bars=required)
@@ -8679,9 +8683,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                             },
                         )
                 if ctx.market_data_manager:
-                    bars_snapshot = ctx.market_data_manager.get_ohlc_bars(sym)
+                    bars_snapshot = ctx.market_data_manager.get_ohlc_bars(canonical_sym)
                     ctx.market_data_manager.update_hydration_status(
-                        sym, bars_snapshot or records
+                        canonical_sym, bars_snapshot or records
                     )
 
             LOGGER.info(

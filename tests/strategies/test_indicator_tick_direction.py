@@ -1,9 +1,22 @@
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+from datetime import datetime, timedelta, timezone
 
 
 def _seed(engine, closes):
+    symbol = "NFO:NIFTY26MAY23750CE"
+    base = datetime(2026, 5, 20, 9, 15, tzinfo=timezone.utc)
     for idx, close in enumerate(closes):
-        engine.update_price('NFO:NIFTY26MAY23750CE', close, volume=100, timestamp=idx + 1, open_price=close, high=close, low=close)
+        engine.update_price(
+            symbol,
+            {
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+            },
+            volume=100,
+            timestamp=base + timedelta(minutes=idx),
+        )
 
 
 def test_tick_direction_derived_from_history():
