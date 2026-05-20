@@ -16,6 +16,7 @@ and to enforce the overall timeout budget.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 from nifty_scalper_bot.data.data_hub import DataHub
@@ -118,9 +119,10 @@ class ExecutionPolicy:
         spread_pct = 0.0
         if mid > 0:
             spread_pct = spread / mid
-        if self.max_spread_pct and spread_pct > self.max_spread_pct:
+        effective_max_spread_pct = self._effective_max_spread_pct(normalized, last_price, mid)
+        if effective_max_spread_pct and spread_pct > effective_max_spread_pct:
             raise OrderPlacementError(
-                f"Spread too wide ({spread_pct:.3f} > {self.max_spread_pct:.3f})"
+                f"Spread too wide ({spread_pct:.3f} > {effective_max_spread_pct:.3f})"
             )
 
         if spread <= 0:
@@ -131,6 +133,27 @@ class ExecutionPolicy:
         return ExecutionPlan(
             limit_prices=tuple(prices), spread_pct=spread_pct, step_timeout=step_timeout
         )
+
+    def _effective_max_spread_pct(self, symbol: str, last_price: float, mid: float) -> float:
+        base = float(self.max_spread_pct or 0.0)
+        upper = symbol.upper()
+        is_option = upper.endswith("CE") or upper.endswith("PE")
+        if not is_option:
+            return base
+        try:
+            atm_limit = float(os.getenv("OPTION_EXEC_MAX_SPREAD_ATM_PCT", "0.03") or "0.03")
+            low_premium_limit = float(os.getenv("OPTION_EXEC_MAX_SPREAD_LOW_PREMIUM_PCT", "0.06") or "0.06")
+            hard_cap = float(os.getenv("OPTION_EXEC_MAX_SPREAD_HARD_CAP_PCT", "0.10") or "0.10")
+            low_premium_cutoff = float(os.getenv("OPTION_LOW_PREMIUM_CUTOFF", "50") or "50")
+        except ValueError:
+            atm_limit = 0.03
+            low_premium_limit = 0.06
+            hard_cap = 0.10
+            low_premium_cutoff = 50.0
+        reference = float(last_price or mid or 0.0)
+        if reference > 0 and reference <= low_premium_cutoff:
+            return min(max(base, low_premium_limit), hard_cap)
+        return min(max(base, atm_limit), hard_cap)
 
     # Internal helpers ---------------------------------------------------
     def _ladder_prices(self, mid: float, spread: float, side: Side) -> Sequence[float]:

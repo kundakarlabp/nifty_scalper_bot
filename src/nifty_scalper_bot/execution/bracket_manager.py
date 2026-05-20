@@ -278,6 +278,10 @@ class BracketManager:
         
         # Configuration
         self._auto_reduce_sl = True
+        self._pending_entry_reconcile_after_sec = max(
+            1.0,
+            float(os.getenv("BRACKET_PENDING_ENTRY_RECONCILE_AFTER_SEC", "5") or "5"),
+        )
         self._stale_cleanup_age = 86400  # 24 hours
         # Cache tiered-trailing thresholds once at startup — avoids os.getenv()
         # on every tick (100-300 ticks/sec × N active brackets = hot path).
@@ -312,8 +316,10 @@ class BracketManager:
         while self._running:
             try:
                 pending: list[tuple[BracketState, dict[str, Any]]] = []
+                reconcile_candidates: list[BracketState] = []
                 with self._lock:
                     for bracket in self._brackets.values():
+                        reconcile_candidates.append(bracket)
                         ltp = float(bracket.last_ltp or 0.0)
                         if (
                             not bracket.active
@@ -348,6 +354,8 @@ class BracketManager:
                                 'qty': bracket.remaining_quantity,
                                 'reason': 'WATCHDOG_HARD_SL',
                             }))
+                for bracket in reconcile_candidates:
+                    self._reconcile_pending_entry(bracket)
                 if pending:
                     self._log_throttled(
                         'critical',
@@ -361,6 +369,61 @@ class BracketManager:
             except Exception as e:
                 LOGGER.error('Failure in _watchdog_exit_loop: %s', e)
                 time.sleep(0.25)
+
+    def _broker_order_filled(self, order_id: str) -> tuple[bool, float | None]:
+        broker = getattr(self.order_manager, "_broker", None)
+        if broker is None:
+            return False, None
+        for attr in ("get_order_status", "order_status"):
+            fn = getattr(broker, attr, None)
+            if callable(fn):
+                try:
+                    status = fn(order_id)
+                except Exception:
+                    continue
+                if isinstance(status, Mapping):
+                    status_text = str(status.get("status") or "").upper()
+                    if status_text in _FILLED_STATUSES:
+                        avg_price = status.get("average_price") or status.get("avg_price") or status.get("price")
+                        try:
+                            return True, float(avg_price) if avg_price else None
+                        except (TypeError, ValueError):
+                            return True, None
+        get_orders = getattr(broker, "get_orders", None)
+        if not callable(get_orders):
+            get_orders = getattr(broker, "orders", None)
+        if callable(get_orders):
+            try:
+                orders = get_orders() or []
+            except Exception:
+                orders = []
+            for order in orders:
+                if not isinstance(order, Mapping):
+                    continue
+                if str(order.get("order_id") or "") != str(order_id):
+                    continue
+                status_text = str(order.get("status") or "").upper()
+                if status_text in _FILLED_STATUSES:
+                    avg_price = (
+                        order.get("average_price")
+                        or order.get("avg_price")
+                        or order.get("price")
+                    )
+                    try:
+                        return True, float(avg_price) if avg_price else None
+                    except (TypeError, ValueError):
+                        return True, None
+        return False, None
+
+    def _reconcile_pending_entry(self, bracket: BracketState) -> None:
+        if bracket.entry_confirmed or bracket.monitoring_only:
+            return
+        age = time.time() - float(bracket.created_at or 0.0)
+        if age < self._pending_entry_reconcile_after_sec:
+            return
+        filled, fill_price = self._broker_order_filled(bracket.entry_order_id)
+        if filled:
+            self.confirm_entry_fill(bracket.entry_order_id, fill_price or bracket.entry_price)
 
     def _log_throttled(
         self,

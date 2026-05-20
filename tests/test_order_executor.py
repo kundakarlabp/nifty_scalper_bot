@@ -61,3 +61,49 @@ def test_order_executor_invalid_response_raises() -> None:
     executor = OrderExecutor(BadBroker(), risk, DummyMDM())
     with pytest.raises(ExecutionError):
         executor.place_market_order(symbol="NIFTY", side="BUY", qty=1, price=100.0)
+
+
+def test_order_executor_kwargs_payload_uses_strict_keys() -> None:
+    risk = RiskConfig(max_daily_trades=5, max_order_notional=1_000_000.0, allow_short=True)
+    broker = KwargsBroker()
+    executor = OrderExecutor(broker, risk, DummyMDM())
+    executor.place_market_order(symbol="NIFTY", side="BUY", qty=1, price=100.0)
+    assert "qty" not in broker.kwargs
+    assert "type" not in broker.kwargs
+    assert broker.kwargs["quantity"] == 1
+    assert broker.kwargs["order_type"] == "LIMIT"
+
+
+def test_order_executor_quote_context_handles_malformed_quote() -> None:
+    class BadMDM:
+        def get_last_quote(self, symbol: str): return {"bid": "bad", "ask": None, "ts_ns": "bad"}
+    risk = RiskConfig(max_daily_trades=5, max_order_notional=1_000_000.0, allow_short=True)
+    executor = OrderExecutor(KwargsBroker(), risk, BadMDM())
+    assert executor.place_market_order(symbol="NIFTY", side="BUY", qty=1, price=100.0) == "K1"
+
+
+def test_order_executor_find_open_order_scans_get_orders() -> None:
+    class B:
+        def get_orders(self):
+            return [{"client_order_id": "CID1", "status": "OPEN", "order_id": "OID1"}]
+    ex = OrderExecutor(B(), RiskConfig(max_daily_trades=5, max_order_notional=1_000_000.0, allow_short=True), DummyMDM())
+    assert ex._find_open_order("CID1")["order_id"] == "OID1"
+
+
+def test_order_executor_find_open_order_ignores_terminal_statuses() -> None:
+    class B:
+        def get_orders(self):
+            return [
+                {"client_order_id": "CID1", "status": "COMPLETE", "order_id": "OID1"},
+                {"client_order_id": "CID1", "status": "REJECTED", "order_id": "OID2"},
+            ]
+    ex = OrderExecutor(B(), RiskConfig(max_daily_trades=5, max_order_notional=1_000_000.0, allow_short=True), DummyMDM())
+    assert ex._find_open_order("CID1") is None
+
+
+def test_order_executor_find_open_order_matches_tag_suffix() -> None:
+    class B:
+        def get_orders(self):
+            return [{"tag": "BOT_ABCD1234", "status": "OPEN", "order_id": "OID3"}]
+    ex = OrderExecutor(B(), RiskConfig(max_daily_trades=5, max_order_notional=1_000_000.0, allow_short=True), DummyMDM())
+    assert ex._find_open_order("bot_abcd1234")["order_id"] == "OID3"

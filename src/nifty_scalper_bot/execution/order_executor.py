@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from itertools import count
+import math
 import time
 from typing import Any, Dict, Iterable, Optional, Sequence, cast
 
@@ -16,6 +17,26 @@ from nifty_scalper_bot.utils.logging import get_logger
 class ExecutionError(OrderPlacementError):
     """Raised when broker execution fails hard."""
 
+
+def _safe_float(value: object, default: float) -> float:
+    if value in (None, ""):
+        return float(default)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(number):
+        return float(default)
+    return number
+
+
+def _safe_int(value: object, default: int) -> int:
+    if value in (None, ""):
+        return int(default)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
 
 class OrderExecutor:
     """Execute orders while enforcing risk limits."""
@@ -105,21 +126,26 @@ class OrderExecutor:
             )
         else:
             self._nonce_cache.pop(key, None)
-        payload: Dict[str, object] = {
+        broker_payload: Dict[str, object] = {
             "symbol": symbol,
             "side": side.upper(),
-            "qty": qty,
             "quantity": qty,
-            "type": "LIMIT",
             "order_type": "LIMIT",
             "price": rounded_price,
             "client_order_id": client_order_id,
+        }
+        legacy_payload: Dict[str, object] = {
+            **broker_payload,
+            "qty": qty,
+            "type": "LIMIT",
         }
         response: Dict[str, object] | None = None
         last_error: Exception | None = None
         for attempt in range(1, 4):
             try:
-                response = self._submit_broker_order(payload)
+                response = self._submit_broker_order(
+                    broker_payload, legacy_payload=legacy_payload
+                )
                 break
             except BrokerError as exc:
                 last_error = exc
@@ -162,17 +188,16 @@ class OrderExecutor:
         self._nonce_cache.pop(key, None)
         return order_id
 
-    def _submit_broker_order(self, payload: dict[str, object]) -> dict[str, object]:
-        kwargs_payload = dict(payload)
-        if "qty" in kwargs_payload and "quantity" not in kwargs_payload:
-            kwargs_payload["quantity"] = kwargs_payload["qty"]
-        if "type" in kwargs_payload and "order_type" not in kwargs_payload:
-            kwargs_payload["order_type"] = kwargs_payload["type"]
+    def _submit_broker_order(
+        self, payload: dict[str, object], *, legacy_payload: dict[str, object] | None = None
+    ) -> dict[str, object]:
         try:
-            response = self._broker.place_order(**kwargs_payload)
+            response = self._broker.place_order(**payload)
         except TypeError as exc:
+            if legacy_payload is None:
+                raise
             try:
-                response = self._broker.place_order(payload)
+                response = self._broker.place_order(legacy_payload)
             except TypeError:
                 raise exc
         if not isinstance(response, dict):
@@ -197,11 +222,22 @@ class OrderExecutor:
         quote = quote_getter(symbol)
         if not isinstance(quote, dict):
             return bid, ask, ts_ns
-        bid = float(quote.get("bid", bid))
-        ask = float(quote.get("ask", ask))
-        ts_val = quote.get("ts_ns")
-        if ts_val is not None:
-            ts_ns = int(ts_val)
+        bid = _safe_float(
+            quote.get("bid")
+            or quote.get("best_bid")
+            or quote.get("best_bid_price")
+            or quote.get("buy_price"),
+            bid,
+        )
+        ask = _safe_float(
+            quote.get("ask")
+            or quote.get("best_ask")
+            or quote.get("best_ask_price")
+            or quote.get("sell_price"),
+            ask,
+        )
+        ts_val = quote.get("ts_ns") or quote.get("timestamp_ns")
+        ts_ns = _safe_int(ts_val, ts_ns)
         return bid, ask, ts_ns
 
 
@@ -349,12 +385,47 @@ class OrderExecutor:
                 self._logger.warning("Failed to cancel order %s", order_id)
 
     def _find_open_order(self, client_order_id: str) -> Optional[Dict[str, object]]:
+        wanted = str(client_order_id or "").strip()
+        if not wanted:
+            return None
         for attr in ("get_order_by_client_order_id", "find_order_by_client_order_id"):
             finder = getattr(self._broker, attr, None)
             if callable(finder):
-                result = finder(client_order_id)
-                if result:
+                result = finder(wanted)
+                if isinstance(result, dict):
                     return result
+        get_orders = getattr(self._broker, "get_orders", None)
+        if not callable(get_orders):
+            get_orders = getattr(self._broker, "orders", None)
+        if not callable(get_orders):
+            return None
+        try:
+            orders = get_orders() or []
+        except Exception:
+            return None
+        terminal = {"CANCELLED", "CANCELED", "REJECTED", "COMPLETE", "COMPLETED"}
+        wanted_upper = wanted.upper()
+        wanted_suffix = wanted_upper[-8:]
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            status = str(order.get("status") or "").strip().upper()
+            if status in terminal:
+                continue
+            values = [
+                order.get("client_order_id"),
+                order.get("tag"),
+                order.get("order_id"),
+                order.get("guid"),
+                order.get("exchange_order_id"),
+                order.get("parent_order_id"),
+            ]
+            candidates = {str(v or "").strip().upper() for v in values if v}
+            if wanted_upper in candidates:
+                return dict(order)
+            tag_value = str(order.get("tag") or "").strip().upper()
+            if tag_value and wanted_suffix and wanted_suffix in tag_value:
+                return dict(order)
         return None
 
 

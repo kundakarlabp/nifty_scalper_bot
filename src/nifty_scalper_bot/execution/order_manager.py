@@ -670,6 +670,11 @@ class OrderManager:
             30.0,
             float(os.getenv("ORDER_SIGNAL_PENDING_TTL_SECONDS", "120") or 120),
         )
+        self._uncertain_client_order_ids: dict[str, float] = {}
+        self._uncertain_order_ttl_seconds: float = max(
+            15.0,
+            float(os.getenv("ORDER_UNCERTAIN_TTL_SECONDS", "60") or 60),
+        )
         if not hasattr(self, "_logger"):
             self._logger = get_logger(__name__)
         self._broker_circuit = CircuitBreaker()
@@ -815,6 +820,37 @@ class OrderManager:
         with self._lock:
             self._pending_signal_ids.pop(signal_id, None)
 
+    def _prune_uncertain_orders(self) -> None:
+        now_ts = time.time()
+        ttl = float(getattr(self, "_uncertain_order_ttl_seconds", 60.0) or 60.0)
+        expired = [
+            client_order_id
+            for client_order_id, ts in self._uncertain_client_order_ids.items()
+            if now_ts - float(ts or 0.0) > ttl
+        ]
+        for client_order_id in expired:
+            self._uncertain_client_order_ids.pop(client_order_id, None)
+
+    def _mark_order_uncertain(self, client_order_id: str) -> None:
+        if not client_order_id:
+            return
+        with self._lock:
+            self._prune_uncertain_orders()
+            self._uncertain_client_order_ids[str(client_order_id)] = time.time()
+
+    def _clear_uncertain_order(self, client_order_id: str | None) -> None:
+        if not client_order_id:
+            return
+        with self._lock:
+            self._uncertain_client_order_ids.pop(str(client_order_id), None)
+
+    def _is_uncertain_order(self, client_order_id: str) -> bool:
+        if not client_order_id:
+            return False
+        with self._lock:
+            self._prune_uncertain_orders()
+            return str(client_order_id) in self._uncertain_client_order_ids
+
     def _find_open_order(self, client_order_id: str) -> dict[str, Any] | None:
         """Find a live/open broker order by client_order_id/order tag/order_id."""
         try:
@@ -826,6 +862,7 @@ class OrderManager:
 
             orders = get_orders() or []
             wanted = str(client_order_id or "").strip()
+            wanted_upper = wanted.upper()
 
             for order in orders:
                 if not isinstance(order, Mapping):
@@ -836,12 +873,19 @@ class OrderManager:
                     continue
 
                 candidates = {
-                    str(order.get("client_order_id") or "").strip(),
-                    str(order.get("tag") or "").strip(),
-                    str(order.get("order_id") or "").strip(),
+                    str(order.get("client_order_id") or "").strip().upper(),
+                    str(order.get("tag") or "").strip().upper(),
+                    str(order.get("order_id") or "").strip().upper(),
+                    str(order.get("guid") or "").strip().upper(),
+                    str(order.get("exchange_order_id") or "").strip().upper(),
+                    str(order.get("parent_order_id") or "").strip().upper(),
                 }
-
-                if wanted and wanted in candidates:
+                if wanted and wanted_upper in candidates:
+                    return dict(order)
+                tag_value_upper = str(order.get("tag") or "").strip().upper()
+                if wanted_upper and tag_value_upper and (
+                    wanted_upper in tag_value_upper or wanted_upper[-8:] in tag_value_upper
+                ):
                     return dict(order)
 
             return None
@@ -2272,6 +2316,13 @@ class OrderManager:
 
         trade_id = f"TRD_{signal_id}"
         unique_client_id = f"bot_{signal_id[-12:]}"  # Max 20 chars usually
+        suffix = unique_client_id[-8:]
+        base_tag = str(tag or "bot").strip() or "bot"
+        safe_base = "".join(ch for ch in base_tag if ch.isalnum() or ch in {"_", "-"})
+        if not safe_base:
+            safe_base = "bot"
+        safe_base = safe_base[: max(1, 19 - len(suffix))]
+        broker_tag = f"{safe_base}_{suffix}"[:20]
 
         pending_signal_marked = False
         if signal_id:
@@ -2412,7 +2463,7 @@ class OrderManager:
             "order_type": final_order_type,
             "price": price,
             "trigger_price": trigger_price,
-            "tag": tag,
+            "tag": broker_tag,
             "variety": variety,
             "client_order_id": unique_client_id,
         }
@@ -2439,7 +2490,44 @@ class OrderManager:
                 return str(response)
             return None
 
+        if self._is_uncertain_order(unique_client_id):
+            existing_uncertain = self._find_open_order(unique_client_id)
+            if existing_uncertain is not None:
+                existing_order_id = _extract_order_id(existing_uncertain)
+                if existing_order_id:
+                    self._clear_uncertain_order(unique_client_id)
+                    if pending_signal_marked:
+                        self._clear_pending_signal(signal_id)
+                    if signal_id:
+                        self._remember_signal(signal_id)
+                    return existing_order_id
+            _log_order_decision(
+                allowed=False,
+                block_reason="uncertain_order_reconciliation_pending",
+            )
+            if pending_signal_marked:
+                self._clear_pending_signal(signal_id)
+            return None
+
         for attempt in range(1, 4):
+            if self._is_uncertain_order(unique_client_id):
+                existing_uncertain = self._find_open_order(unique_client_id)
+                if existing_uncertain is not None:
+                    existing_order_id = _extract_order_id(existing_uncertain)
+                    if existing_order_id:
+                        self._clear_uncertain_order(unique_client_id)
+                        if pending_signal_marked:
+                            self._clear_pending_signal(signal_id)
+                        if signal_id:
+                            self._remember_signal(signal_id)
+                        return existing_order_id
+                _log_order_decision(
+                    allowed=False,
+                    block_reason="uncertain_order_reconciliation_pending",
+                )
+                if pending_signal_marked:
+                    self._clear_pending_signal(signal_id)
+                return None
             # -----------------------------------------------------------------
             # ✅ FIX: Re-hydrate Enums to prevent Adapter Crash
             # The broker adapter expects Enum objects (e.g. OrderType.MARKET).
@@ -2479,12 +2567,19 @@ class OrderManager:
                         if existing_after_timeout is not None:
                             response = existing_after_timeout
                         else:
+                            self._mark_order_uncertain(unique_client_id)
                             self._logger.critical(
-                                "🚨 Broker API hung on attempt %s and no existing order was found for client_order_id=%s",
+                                "🚨 Broker API hung on attempt %s and no existing order was found for client_order_id=%s; marking uncertain and blocking retry",
                                 attempt,
                                 unique_client_id,
                             )
-                            raise TimeoutError("Broker API call timed out (10s)")
+                            _log_order_decision(
+                                allowed=False,
+                                block_reason="uncertain_order_reconciliation_pending",
+                            )
+                            if pending_signal_marked:
+                                self._clear_pending_signal(signal_id)
+                            return None
                     self._logger.info(
                         "Recovered late broker response inside grace window for %s",
                         normalized_symbol,
@@ -2508,6 +2603,7 @@ class OrderManager:
                 order_id = _extract_order_id(response)
 
                 if order_id:
+                    self._clear_uncertain_order(unique_client_id)
                     # ✅ RESET Kill Switch on success
                     self._consecutive_failures = 0
                     self._logger.info(
@@ -2707,6 +2803,7 @@ class OrderManager:
                 time.sleep(0.5 * attempt)
 
         self._logger.error("❌ Order placement failed after retries.")
+        self._clear_uncertain_order(unique_client_id)
         _log_order_decision(allowed=False, block_reason="order_placement_failed_after_retries")
         if pending_signal_marked:
             self._clear_pending_signal(signal_id)
