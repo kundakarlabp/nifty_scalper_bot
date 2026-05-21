@@ -3788,8 +3788,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         fingerprint["release"],
         extra={"event": "startup_fingerprint", **fingerprint},
     )
-    effective_mode = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper()
-    live_enabled = _is_live_execution_mode(effective_mode) or str(os.getenv("ENABLE_LIVE_TRADING", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    live_enabled = _compute_live_execution_enabled()
     LOGGER.info(
         "BOT_INSTANCE_FINGERPRINT deployment_id=%s replica_id=%s commit_sha=%s live_execution=%s",
         str(os.getenv("RAILWAY_DEPLOYMENT_ID", "")).strip() or "unknown",
@@ -6237,6 +6236,17 @@ def _enforce_live_single_replica_safety(*, is_live_execution: bool) -> None:
         raise RuntimeError("Multiple live trading replicas are unsafe")
 
 
+def _compute_live_execution_enabled() -> bool:
+    """Compute whether this instance should be treated as live-execution capable."""
+    truthy = {"1", "true", "yes", "on", "live"}
+    effective_mode = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper()
+    return (
+        _is_live_execution_mode(effective_mode)
+        or str(os.getenv("ENABLE_LIVE_TRADING", "false")).strip().lower() in truthy
+        or str(os.getenv("ENABLE_LIVE", "false")).strip().lower() in truthy
+    )
+
+
 def _coerce_spot_price(tick: Mapping[str, Any] | None) -> float | None:
     """Pull a positive spot price out of an MDM tick payload."""
 
@@ -8611,8 +8621,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                         runner_history_count = ctx.strategy_runner._indicator_engine.history_count(canonical_sym)
                     except Exception as runner_ingest_exc:
                         LOGGER.warning("startup_runner_hydration_replace_failed symbol=%s err=%s", canonical_sym, runner_ingest_exc)
-                LOGGER.info("RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d", sym, count, runner_ingested,extra={"event":"RUNNER_MDM_HYDRATION_SYNC","symbol":sym,"mdm_bars":count,"runner_ingested":runner_ingested})
-                hydrated_counts[sym] = count
+                LOGGER.info("RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d", canonical_sym, count, runner_ingested,extra={"event":"RUNNER_MDM_HYDRATION_SYNC","symbol":canonical_sym,"mdm_bars":count,"runner_ingested":runner_ingested})
+                hydrated_counts[canonical_sym] = count
                 LOGGER.info(f"✅ Hydrated {sym}: {count} bars")
                 if getattr(ctx, "strategy_runner", None) is not None:
                     mdm_history_count = 0
@@ -8638,7 +8648,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                         mdm_history_count,
                         extra={
                             "event": "RUNNER_HISTORY_INGESTED",
-                            "symbol": sym,
+                            "symbol": canonical_sym,
                             "token": sym_token,
                             "bars_ingested": runner_ingested,
                             "source": "startup_hydration",
