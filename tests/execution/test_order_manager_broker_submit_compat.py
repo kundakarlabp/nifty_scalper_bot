@@ -28,6 +28,15 @@ class _PayloadBroker:
         return {"order_id": "OID_PAYLOAD"}
 
 
+class _InternalTypeErrorBroker:
+    def __init__(self):
+        self.calls = 0
+
+    def place_order(self, **kwargs):
+        self.calls += 1
+        raise TypeError("unsupported operand type after broker response")
+
+
 class _RejectBroker:
     def __init__(self):
         self.calls = 0
@@ -57,6 +66,16 @@ def test_submit_broker_order_supports_payload_dict_broker():
     assert broker.payloads == [{"symbol": "NFO:NIFTY", "quantity": 75}]
 
 
+def test_signature_type_error_allows_payload_fallback():
+    broker = _PayloadBroker()
+    om = OrderManager(broker, _Pos(), _Limiter())
+
+    result = om._submit_broker_order({"symbol": "NFO:NIFTY", "quantity": 75})
+
+    assert result["order_id"] == "OID_PAYLOAD"
+    assert broker.payloads == [{"symbol": "NFO:NIFTY", "quantity": 75}]
+
+
 def test_submit_broker_order_does_not_swallow_real_rejection():
     broker = _RejectBroker()
     om = OrderManager(broker, _Pos(), _Limiter())
@@ -67,6 +86,20 @@ def test_submit_broker_order_does_not_swallow_real_rejection():
         assert str(exc) == "insufficient margin"
     else:
         raise AssertionError("ValueError should propagate")
+
+    assert broker.calls == 1
+
+
+def test_submit_broker_order_does_not_fallback_on_internal_type_error():
+    broker = _InternalTypeErrorBroker()
+    om = OrderManager(broker, _Pos(), _Limiter())
+
+    try:
+        om._submit_broker_order({"symbol": "NFO:NIFTY", "quantity": 75})
+    except TypeError as exc:
+        assert "unsupported operand type" in str(exc)
+    else:
+        raise AssertionError("internal TypeError should propagate")
 
     assert broker.calls == 1
 
