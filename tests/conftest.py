@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from contextlib import suppress
+
+# Set default mock credentials for tests to prevent ConfigurationError during Settings initialization
+os.environ.setdefault("BROKER_API_KEY", "mock_api_key")
+os.environ.setdefault("BROKER_API_SECRET", "mock_api_secret")
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator

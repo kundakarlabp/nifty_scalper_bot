@@ -20,7 +20,10 @@ class BracketStore:
         self._init_db()
 
     def _get_connection(self):
-        return sqlite3.connect(self.db_path, timeout=10)
+        conn = sqlite3.connect(self.db_path, timeout=60)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        return conn
 
     def _init_db(self):
         """Creates the table if it doesn't exist."""

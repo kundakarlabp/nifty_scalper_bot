@@ -231,7 +231,7 @@ class TradeJournal:
 
         conn = sqlite3.connect(
             str(self._db_path),
-            timeout=2.0,
+            timeout=60.0,
             check_same_thread=False,
             isolation_level=None,  # 🔴 manual transactions
         )

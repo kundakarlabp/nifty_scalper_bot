@@ -29,6 +29,7 @@ def runner_with_mocks() -> StrategyRunner:
         risk_manager=risk_manager,
         order_manager=order_manager,
         position_manager=position_manager,
+        message_bus=MagicMock(),
         config=cfg,
         data_hub=None,
         strike_selector=None,

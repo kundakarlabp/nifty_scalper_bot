@@ -2933,7 +2933,7 @@ class ZerodhaKiteWebSocket:
             raise ConfigurationError("WebSocket credentials missing")
 
         # Force websocket-client to prefer IPv4. Some container networks hang on AAAA.
-        os.environ.setdefault("WEBSOCKET_CLIENT_ENABLE_IPV6", "0")
+        os.environ["WEBSOCKET_CLIENT_ENABLE_IPV6"] = "0"
 
         self._api_key = api_key.strip()
         self._access_token = _sanitize_access_token(access_token)

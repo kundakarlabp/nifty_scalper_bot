@@ -49,3 +49,5 @@ ujson>=5.8
 uvloop>=0.19
 httptools>=0.6
 
+# 2FA automated login
+pyotp>=2.9.0

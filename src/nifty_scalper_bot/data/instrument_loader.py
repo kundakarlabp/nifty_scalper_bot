@@ -103,8 +103,11 @@ def ensure_sqlite(path: str) -> sqlite3.Connection:
             str(db_path),
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
             check_same_thread=False,
+            timeout=60.0,
         )
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
         with conn:
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
