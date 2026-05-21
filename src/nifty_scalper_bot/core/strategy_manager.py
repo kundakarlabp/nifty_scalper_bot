@@ -3128,7 +3128,8 @@ class StrategyManager(_BaseStrategyManager):
                             "quote_depth_valid": merged_md.get("quote_depth_valid"),
                             "tradable_quote": merged_md.get("tradable_quote"),
                             "spread_pct": merged_md.get("spread_pct"),
-                            "tick_age_ms": merged_md.get("tick_age_ms") or indicator_map.get("tick_age_ms"),
+                            "tick_age_ms": merged_md.get("tick_age_ms") or indicator_map.get("tick_age_ms") or merged_md.get("context", {}).get("tick_age_ms"),
+                            "quote_update_version": merged_md.get("quote_update_version") or indicator_map.get("quote_update_version") or merged_md.get("context", {}).get("quote_update_version"),
                             "depth_available": merged_md.get("depth_available"),
                             "tick_direction": merged_md.get("tick_direction"),
                         }

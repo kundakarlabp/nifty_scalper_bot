@@ -1187,3 +1187,163 @@ def test_runner_on_tick_error_log_includes_error_type_phase(caplog):
     with caplog.at_level(logging.ERROR):
         runner._on_tick("NFO:X", {"ltp": "bad"})
     assert "RUNNER_ON_TICK_ERROR" in caplog.text
+
+
+def test_final_readiness_uses_selected_symbol_after_quote_revalidation() -> None:
+    runner = _build_runner()
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._is_symbol_execution_ready = MagicMock(return_value=False)
+    runner._ensure_symbol_execution_ready_for_order = MagicMock(return_value=True)
+    runner._transition_execution_state = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    runner._order_manager.submit_trade_plan = MagicMock(return_value="oid-selected")  # type: ignore[attr-defined]
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=376.0, bid=375.0, ask=376.0, tick_age_s=0.2, real_ticks_last_60s=8, tradable_quote=True, source='ws'
+    )
+    selected_symbol = "NFO:NIFTY26MAY23650PE"
+    runner._trade_candidate_selector.select_best_candidate = MagicMock(
+        return_value=SimpleNamespace(
+            symbol=selected_symbol,
+            stop_loss=350.0,
+            target=430.0,
+            score=8.0,
+            data_quality_score=9.0,
+            spread_pct=0.1,
+            rr=2.0,
+            side="PE",
+            entry_price=376.0,
+            tick_age_s=0.2,
+        )
+    )
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26MAY23750PE',
+        quantity=1,
+        confidence=0.9,
+        reason='OrderFlow',
+        stop_loss=350.0,
+        take_profit=430.0,
+        metadata={'candidate_snapshots': [{'symbol': selected_symbol, 'side': 'PE', 'strike': 23650, 'atm_strike': 23650, 'bid': 375.0, 'ask': 376.0, 'tradable_quote': True}]},
+    )
+    result = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=376.0, timestamp=datetime.now(timezone.utc), trace_id='trace-selected-ready')
+    assert result.accepted is True
+    assert runner._ensure_symbol_execution_ready_for_order.call_args_list[-1].args[0] == selected_symbol
+
+
+def test_invalid_lot_cooldown_applies_to_selected_symbol() -> None:
+    runner = _build_runner()
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._exec_reject_invalid_lot_seconds = 300.0
+    selected_symbol = "NFO:NIFTY26MAY23650PE"
+    runner._ensure_symbol_execution_ready_for_order = MagicMock(return_value=True)
+    runner._is_symbol_execution_ready = MagicMock(return_value=False)
+    runner._order_manager.resolve_lot_size = MagicMock(side_effect=RuntimeError("boom"))
+    runner._trade_candidate_selector.select_best_candidate = MagicMock(
+        return_value=SimpleNamespace(symbol=selected_symbol, stop_loss=300.0, target=420.0, score=8.0, data_quality_score=8.5, spread_pct=0.1, rr=2.0, side="PE", entry_price=360.0, tick_age_s=0.2)
+    )
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=360.0, bid=359.0, ask=360.0, tick_age_s=0.2, real_ticks_last_60s=5, tradable_quote=True, source='ws'
+    )
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26MAY23750PE',
+        quantity=1,
+        confidence=0.9,
+        reason='OrderFlow',
+        stop_loss=300.0,
+        take_profit=420.0,
+        metadata={'candidate_snapshots': [{'symbol': selected_symbol, 'side': 'PE', 'strike': 23650, 'atm_strike': 23650, 'bid': 359.0, 'ask': 360.0, 'tradable_quote': True}]},
+    )
+    first = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id='trace-invalid-lot-1')
+    second = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id='trace-invalid-lot-2')
+    assert first.reason == "invalid_lot_quantity"
+    assert second.reason == "invalid_lot_quantity_reject_cooldown"
+
+
+def test_order_readiness_revalidation_tries_raw_and_normalized_symbols() -> None:
+    runner = _build_runner()
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._runtime_live_orders_armed = True
+    lot_attempts: list[str] = []
+    raw_symbol = "NFO:NIFTY26MAY23650PE"
+    normalized = "NIFTY26MAY23650PE"
+    attempts: list[str] = []
+
+    def _case_a(symbol: str):
+        attempts.append(symbol)
+        if symbol == raw_symbol:
+            return SimpleNamespace(bid=100.0, ask=101.0, tradable_quote=True, tick_age_s=0.2)
+        raise RuntimeError("missing")
+
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.side_effect = _case_a
+    runner._order_manager.resolve_lot_size = MagicMock(
+        side_effect=lambda s: (_ for _ in ()).throw(RuntimeError("lot missing"))
+        if s == normalized
+        else (65 if s == raw_symbol else (_ for _ in ()).throw(RuntimeError("lot missing")))
+    )
+    assert runner._ensure_symbol_execution_ready_for_order(normalized, trace_id="lookup-1") is True
+    assert normalized in attempts
+    assert raw_symbol in attempts
+    for call in runner._order_manager.resolve_lot_size.call_args_list:
+        lot_attempts.append(call.args[0])
+    assert normalized in lot_attempts
+    assert raw_symbol in lot_attempts
+
+    runner._runtime_execution_ready_by_symbol = {}
+    attempts.clear()
+    lot_attempts.clear()
+
+    def _case_b(symbol: str):
+        attempts.append(symbol)
+        if symbol == normalized:
+            return SimpleNamespace(bid=100.0, ask=101.0, tradable_quote=True, tick_age_s=0.2)
+        raise RuntimeError("missing")
+
+    runner._market_data.get_symbol_snapshot.side_effect = _case_b
+    runner._order_manager.resolve_lot_size = MagicMock(
+        side_effect=lambda s: (_ for _ in ()).throw(RuntimeError("lot missing"))
+        if s == raw_symbol
+        else (65 if s == normalized else (_ for _ in ()).throw(RuntimeError("lot missing")))
+    )
+    assert runner._ensure_symbol_execution_ready_for_order(raw_symbol, trace_id="lookup-2") is True
+    assert raw_symbol in attempts
+    assert normalized in attempts
+    for call in runner._order_manager.resolve_lot_size.call_args_list:
+        lot_attempts.append(call.args[0])
+    assert raw_symbol in lot_attempts
+    assert normalized in lot_attempts
+
+
+def test_early_runtime_not_ready_cooldown_resets_execution_state() -> None:
+    runner = _build_runner()
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._execution_reject_cooldown_ts = {}
+    runner._reset_execution_state = MagicMock()
+    base_symbol = "NFO:NIFTY26MAY23650PE"
+    reason_key = "OrderFlow"
+    runner._execution_reject_cooldown_ts[
+        f"{base_symbol}:{reason_key}:runtime_symbol_execution_not_ready"
+    ] = datetime.now(timezone.utc).timestamp()
+
+    signal = Signal(
+        action='BUY',
+        symbol=base_symbol,
+        quantity=1,
+        confidence=0.8,
+        reason=reason_key,
+        stop_loss=300.0,
+        take_profit=420.0,
+        metadata={},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol=base_symbol,
+        trade_symbol=base_symbol,
+        trade_price=360.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='trace-cooldown-early',
+    )
+    assert result.reason == "runtime_symbol_execution_not_ready_reject_cooldown"
+    runner._reset_execution_state.assert_called()
