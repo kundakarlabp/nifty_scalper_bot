@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 import importlib
 
+import pytest
+
 from nifty_scalper_bot.utils import market_hours
 
 
@@ -20,6 +22,15 @@ def _set_now(monkeypatch, dt: datetime) -> None:
 
 
 def _clear_caches() -> None:
+    market_hours._cached_market_hours_check.cache_clear()
+    market_hours._cached_time_status_check.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_market_hours_module(monkeypatch):
+    yield
+    monkeypatch.delenv("SAFE_END_TIME", raising=False)
+    importlib.reload(market_hours)
     market_hours._cached_market_hours_check.cache_clear()
     market_hours._cached_time_status_check.cache_clear()
 
@@ -82,3 +93,17 @@ def test_live_mode_disables_offhours_override(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
     assert market_hours.allow_offhours_testing_safe() is False
+
+
+def test_get_time_status_cached_respects_safe_end_env(monkeypatch):
+    monkeypatch.setenv("SAFE_END_TIME", "15:20")
+    reloaded = importlib.reload(market_hours)
+    monkeypatch.setattr(reloaded, "_now_ist", lambda: datetime(2026, 5, 21, 15, 21, tzinfo=reloaded.IST))
+    reloaded._cached_time_status_check.cache_clear()
+    assert reloaded.get_time_status_cached()[0] is False
+
+    monkeypatch.setenv("SAFE_END_TIME", "15:25")
+    reloaded = importlib.reload(reloaded)
+    monkeypatch.setattr(reloaded, "_now_ist", lambda: datetime(2026, 5, 21, 15, 21, tzinfo=reloaded.IST))
+    reloaded._cached_time_status_check.cache_clear()
+    assert reloaded.get_time_status_cached()[0] is True

@@ -301,10 +301,18 @@ def _cached_time_status_check(minute_key: int, override_flag: str) -> tuple[bool
 def get_time_status_cached() -> tuple[bool, str]:
     now = datetime.now(IST)
     minute_key = now.hour * 60 + now.minute
-    override_flag = (
-        os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower()
-        + "|"
-        + os.getenv("ALLOW_OFFHOURS_TESTING", "").lower()
+    override_flag = "|".join(
+        [
+            os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower(),
+            os.getenv("ALLOW_OFFHOURS_TESTING", "").lower(),
+            os.getenv("EXECUTION_MODE", "").lower(),
+            os.getenv("ENABLE_LIVE", "").lower(),
+            os.getenv("ENABLE_LIVE_TRADING", "").lower(),
+            os.getenv("SAFE_START_TIME", "").lower(),
+            os.getenv("SAFE_END_TIME", "").lower(),
+            os.getenv("MARKET_OPEN_TIME", "").lower(),
+            os.getenv("MARKET_CLOSE_TIME", "").lower(),
+        ]
     )
     return _cached_time_status_check(minute_key, override_flag)
 
@@ -316,7 +324,19 @@ def is_market_hours_cached() -> bool:
     """
     now = datetime.now(IST)
     minute_key = now.hour * 60 + now.minute
-    override_flag = os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower()
+    override_flag = "|".join(
+        [
+            os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower(),
+            os.getenv("ALLOW_OFFHOURS_TESTING", "").lower(),
+            os.getenv("EXECUTION_MODE", "").lower(),
+            os.getenv("ENABLE_LIVE", "").lower(),
+            os.getenv("ENABLE_LIVE_TRADING", "").lower(),
+            os.getenv("SAFE_START_TIME", "").lower(),
+            os.getenv("SAFE_END_TIME", "").lower(),
+            os.getenv("MARKET_OPEN_TIME", "").lower(),
+            os.getenv("MARKET_CLOSE_TIME", "").lower(),
+        ]
+    )
     return _cached_market_hours_check(minute_key, override_flag)
 
 

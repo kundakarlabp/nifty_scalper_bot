@@ -147,4 +147,9 @@ def test_orchestrator_sets_detailed_entry_time_skip_reason(monkeypatch: pytest.M
 
     assert result is None
     assert "EOD safety cutoff" in orchestrator.get_skip_reason()
-    assert "orchestrator_entry_time_blocked" in caplog.text
+    assert "Entry time filter active" in caplog.text
+    assert "EOD safety cutoff" in caplog.text
+    assert any(
+        getattr(record, "event", None) == "orchestrator_entry_time_blocked"
+        for record in caplog.records
+    )
