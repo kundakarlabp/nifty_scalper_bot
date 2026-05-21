@@ -1904,6 +1904,33 @@ class OrderManager:
         normalized = (int(quantity) // lot_size) * lot_size
         return lot_size, normalized
 
+    def _looks_like_signature_type_error(self, exc: TypeError) -> bool:
+        """Return True only for TypeError raised by incompatible call signature."""
+        text = str(exc).lower()
+        signature_markers = (
+            "unexpected keyword argument",
+            "got an unexpected keyword",
+            "missing 1 required positional argument",
+            "missing required positional argument",
+            "takes",
+            "positional argument",
+            "positional arguments",
+            "required keyword-only argument",
+        )
+        return any(marker in text for marker in signature_markers)
+
+    def _submit_broker_order(self, call_args: dict[str, Any]) -> Any:
+        """Submit broker order supporting kwargs and single-payload broker adapters safely."""
+        try:
+            return self._broker.place_order(**call_args)
+        except TypeError as kwargs_exc:
+            if not self._looks_like_signature_type_error(kwargs_exc):
+                raise
+            try:
+                return self._broker.place_order(dict(call_args))
+            except TypeError:
+                raise kwargs_exc
+
     def place_order(
         self,
         symbol: str,
@@ -2449,7 +2476,7 @@ class OrderManager:
         # Helper for threaded execution
         def _broker_call(kwargs):
             try:
-                return self._broker.place_order(**kwargs)
+                return self._submit_broker_order(kwargs)
             except Exception as exc:
                 return exc
 
