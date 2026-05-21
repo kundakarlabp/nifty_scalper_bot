@@ -1964,6 +1964,23 @@ class StrategyManager(_BaseStrategyManager):
             elif delta_signal < 0:
                 pe_score += 0.6
                 reasons.append("tick_slope_negative")
+                if (
+                    ce_score + pe_score <= 0
+                    and ltp is not None
+                    and close is not None
+                    and close > 0
+                ):
+                    ltp_close_delta_pct = (ltp - close) / close * 100.0
+                    min_delta_pct = self._env_float(
+                        "STRATEGY_CONTEXT_MIN_LTP_CLOSE_DELTA_PCT", 0.03
+                    )
+                    if ltp_close_delta_pct >= min_delta_pct:
+                        ce_score += 0.5
+                        reasons.append("ltp_above_close_fallback")
+                    elif ltp_close_delta_pct <= -min_delta_pct:
+                        pe_score += 0.5
+                        reasons.append("ltp_below_close_fallback")
+                
         total = ce_score + pe_score
         if total <= 0:
             return None, 0.0, ["direction_unavailable"]
@@ -2948,8 +2965,21 @@ class StrategyManager(_BaseStrategyManager):
 
 
     def _is_live_mode(self) -> bool:
-        """Args: none. Returns: live mode bool. Raises: none."""
-        return str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE"
+        """Return True only when strategy logic is allowed to behave as live."""
+        execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        enable_live = self._env_bool("ENABLE_LIVE", False) or self._env_bool(
+            "ENABLE_LIVE_TRADING", False
+        )
+        paper_enabled = self._env_bool("PAPER__ENABLED", False) or self._env_bool(
+            "PAPER_MODE", False
+        )
+        shadow_enabled = self._env_bool("SHADOW_MODE", False)
+        return (
+            execution_mode == "LIVE"
+            and enable_live
+            and not paper_enabled
+            and not shadow_enabled
+        )
 
     def _env_bool(self, name: str, default: bool) -> bool:
         """Args: env key/default. Returns: parsed bool. Raises: none."""
@@ -3416,19 +3446,67 @@ class StrategyManager(_BaseStrategyManager):
         )
 
     def get_strategy_mode_profile(self) -> dict[str, t.Any]:
-        """Args: none. Returns: strategy mode profile. Raises: none."""
-        execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        """Return strategy gating profile based on effective execution mode."""
+        raw_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        live_effective = self._is_live_mode()
+        execution_mode = "LIVE" if live_effective else raw_mode
+        if execution_mode not in {"LIVE", "PAPER", "SHADOW", "SIMULATION"}:
+            execution_mode = "SHADOW"
+
         if execution_mode == "LIVE":
-            defaults = {"allow_context_promotion": False, "allow_single_vote": True, "min_trade_quality": 7.0}
+            defaults = {
+                "allow_context_promotion": False,
+                "allow_single_vote": True,
+                "min_trade_quality": 7.0,
+            }
         elif execution_mode == "PAPER":
-            defaults = {"allow_context_promotion": True, "allow_single_vote": True, "min_trade_quality": 5.8}
+            defaults = {
+                "allow_context_promotion": True,
+                "allow_single_vote": True,
+                "min_trade_quality": 5.8,
+            }
         else:
-            defaults = {"allow_context_promotion": True, "allow_single_vote": True, "min_trade_quality": 5.0}
+            defaults = {
+                "allow_context_promotion": True,
+                "allow_single_vote": True,
+                "min_trade_quality": 5.0,
+            }
+
+        allow_context_key = (
+            "STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED"
+            if execution_mode == "LIVE"
+            else "STRATEGY_ALLOW_CONTEXT_PROMOTION"
+        )
+        allow_single_key = (
+            "STRATEGY_ALLOW_SINGLE_VOTE_LIVE"
+            if execution_mode == "LIVE"
+            else "STRATEGY_ALLOW_SINGLE_VOTE_BY_MODE"
+        )
+
+        try:
+            min_quality = float(
+                os.getenv(
+                    f"STRATEGY_MIN_TRADE_QUALITY_{execution_mode}",
+                    str(defaults["min_trade_quality"]),
+                )
+                or defaults["min_trade_quality"]
+            )
+        except (TypeError, ValueError):
+            min_quality = float(defaults["min_trade_quality"])
+
         return {
             "mode": execution_mode,
-            "allow_context_promotion": str(os.getenv("STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED" if execution_mode == "LIVE" else "STRATEGY_ALLOW_CONTEXT_PROMOTION", str(defaults["allow_context_promotion"]).lower())).lower() in {"1", "true", "yes", "on"},
-            "allow_single_vote": str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_LIVE" if execution_mode == "LIVE" else "STRATEGY_ALLOW_SINGLE_VOTE_BY_MODE", str(defaults["allow_single_vote"]).lower())).lower() in {"1", "true", "yes", "on"},
-            "min_trade_quality": float(os.getenv(f"STRATEGY_MIN_TRADE_QUALITY_{execution_mode}", str(defaults["min_trade_quality"])) or defaults["min_trade_quality"]),
+            "raw_mode": raw_mode,
+            "live_effective": live_effective,
+            "allow_context_promotion": self._env_bool(
+                allow_context_key,
+                bool(defaults["allow_context_promotion"]),
+            ),
+            "allow_single_vote": self._env_bool(
+                allow_single_key,
+                bool(defaults["allow_single_vote"]),
+            ),
+            "min_trade_quality": min_quality,
         }
 
     def _try_context_promotion(
