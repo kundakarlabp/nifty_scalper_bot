@@ -125,3 +125,31 @@ def test_orchestrator_does_not_set_underlying_cooldown_before_submission() -> No
     second = orchestrator.filter_signal(signal, {}, pos_manager)
     assert first is signal
     assert second is signal
+
+
+def test_orchestrator_sets_detailed_entry_time_skip_reason(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.orchestrator.get_settings",
+        lambda: SimpleNamespace(allow_offmarket_trading=False),
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.utils.market_hours.get_time_status_cached",
+        lambda: (False, "EOD safety cutoff (No new entries after 15:25)"),
+    )
+
+    risk = _RiskStub(balance=100_000.0)
+    orchestrator = StrategyOrchestrator(risk_manager=risk)
+    signal = _make_signal("unknown")
+    pos_manager = _PositionManagerStub()
+
+    with caplog.at_level("WARNING"):
+        result = orchestrator.filter_signal(signal, {}, pos_manager)
+
+    assert result is None
+    assert "EOD safety cutoff" in orchestrator.get_skip_reason()
+    assert "Entry time filter active" in caplog.text
+    assert "EOD safety cutoff" in caplog.text
+    assert any(
+        getattr(record, "event", None) == "orchestrator_entry_time_blocked"
+        for record in caplog.records
+    )
