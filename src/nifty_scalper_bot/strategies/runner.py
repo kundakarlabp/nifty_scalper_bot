@@ -8945,6 +8945,8 @@ class StrategyRunner:
         Returns: None. Raises: Exception.
         """
         try:
+            is_live_mode = False
+            execution_mode = "SHADOW"
             self._logger.debug(
                 "Entered StrategyRunner._handle_entry_signal_inner (Direct OrderManager Flow)",
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
@@ -8965,6 +8967,38 @@ class StrategyRunner:
                 )
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "invalid_quantity")
+
+            mode_source = getattr(self._order_manager, "is_live_mode", None)
+            if callable(mode_source):
+                try:
+                    is_live_mode = bool(mode_source())
+                except Exception:
+                    is_live_mode = False
+            mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+            env_live_enabled = str(
+                os.getenv("ENABLE_LIVE_TRADING", os.getenv("ENABLE_LIVE", "false"))
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            paper_enabled = str(
+                os.getenv("PAPER__ENABLED", os.getenv("PAPER_MODE", "false"))
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            shadow_mode_enabled = str(os.getenv("SHADOW_MODE", "false")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if not callable(mode_source):
+                is_live_mode = mode == "LIVE" or env_live_enabled
+            if paper_enabled or shadow_mode_enabled:
+                is_live_mode = False
+            execution_mode = "LIVE" if is_live_mode else "SHADOW"
+            self._logger.info(
+                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s",
+                base_symbol,
+                trace_id,
+                is_live_mode,
+                execution_mode,
+            )
 
             # Cooldown + burst guard
             now_epoch = time.time()
@@ -9059,11 +9093,6 @@ class StrategyRunner:
                     executor_called,
                     stop_reason,
                 )
-            mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-            is_live_mode = mode == "LIVE" or (
-                str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
-                in {"1", "true", "yes", "on"}
-            )
             if is_live_mode and not self._is_symbol_execution_ready(base_symbol):
                 self._logger.info("ORDER_PATH_BLOCKED reason=runtime_symbol_execution_not_ready symbol=%s trace_id=%s live_orders_armed=%s symbol_ready=%s readiness_map=%s", base_symbol, trace_id, bool(self._runtime_live_orders_armed), bool(self._runtime_execution_ready_by_symbol.get(normalize_symbol(base_symbol), False)), self._runtime_execution_ready_by_symbol)
                 self._logger.info(
@@ -9764,6 +9793,13 @@ class StrategyRunner:
             allow_market_entry = str(os.getenv("ALLOW_MARKET_ENTRY", "false")).strip().lower() in {"1", "true", "yes", "on"}
             order_symbol = trade_symbol or signal.symbol or base_symbol
             plan = TradePlan(symbol=order_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry)
+            self._logger.info(
+                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s",
+                order_symbol,
+                trace_id,
+                is_live_mode,
+                execution_mode,
+            )
             order_id = self._order_manager.submit_trade_plan(plan)
 
             if order_id:
