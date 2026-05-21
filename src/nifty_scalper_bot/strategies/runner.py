@@ -8974,19 +8974,18 @@ class StrategyRunner:
                     is_live_mode = bool(mode_source())
                 except Exception:
                     is_live_mode = False
+            def _env_truthy(name: str) -> bool:
+                return str(os.getenv(name, "false")).strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "y",
+                    "on",
+                }
             mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-            env_live_enabled = str(
-                os.getenv("ENABLE_LIVE_TRADING", os.getenv("ENABLE_LIVE", "false"))
-            ).strip().lower() in {"1", "true", "yes", "on"}
-            paper_enabled = str(
-                os.getenv("PAPER__ENABLED", os.getenv("PAPER_MODE", "false"))
-            ).strip().lower() in {"1", "true", "yes", "on"}
-            shadow_mode_enabled = str(os.getenv("SHADOW_MODE", "false")).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
+            env_live_enabled = _env_truthy("ENABLE_LIVE_TRADING") or _env_truthy("ENABLE_LIVE")
+            paper_enabled = _env_truthy("PAPER__ENABLED") or _env_truthy("PAPER_MODE")
+            shadow_mode_enabled = _env_truthy("SHADOW_MODE")
             if not callable(mode_source):
                 is_live_mode = (
                     mode == "LIVE"

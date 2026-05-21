@@ -143,3 +143,53 @@ def test_live_mode_requires_callable_true_and_env_alignment(monkeypatch):
     assert 'is_live_mode=True' in log_line
     assert 'execution_mode=LIVE' in log_line
     assert any('runtime_symbol_execution_not_ready' in (m or '') for m in runner._logger.info_messages)
+
+
+def test_live_mode_uses_enable_live_fallback_with_callable_true(monkeypatch):
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'false')
+    monkeypatch.setenv('ENABLE_LIVE', 'true')
+    monkeypatch.setenv('PAPER__ENABLED', 'false')
+    monkeypatch.setenv('PAPER_MODE', 'false')
+    monkeypatch.setenv('SHADOW_MODE', 'false')
+    runner = _build_runner(_OrderManagerWithLiveMode())
+    log_line = _run_and_get_mode_log(runner)
+    assert 'is_live_mode=True' in log_line
+    assert 'execution_mode=LIVE' in log_line
+
+
+def test_live_mode_uses_enable_live_fallback_without_callable_source(monkeypatch):
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'false')
+    monkeypatch.setenv('ENABLE_LIVE', 'true')
+    monkeypatch.setenv('PAPER__ENABLED', 'false')
+    monkeypatch.setenv('PAPER_MODE', 'false')
+    monkeypatch.setenv('SHADOW_MODE', 'false')
+    runner = _build_runner(_OrderManagerNoMode())
+    log_line = _run_and_get_mode_log(runner)
+    assert 'is_live_mode=True' in log_line
+    assert 'execution_mode=LIVE' in log_line
+
+
+def test_paper_mode_true_overrides_paper_enabled_false(monkeypatch):
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'true')
+    monkeypatch.setenv('ENABLE_LIVE', 'false')
+    monkeypatch.setenv('PAPER__ENABLED', 'false')
+    monkeypatch.setenv('PAPER_MODE', 'true')
+    monkeypatch.setenv('SHADOW_MODE', 'false')
+    runner = _build_runner(_OrderManagerNoMode())
+    log_line = _run_and_get_mode_log(runner)
+    assert 'is_live_mode=False' in log_line
+
+
+def test_shadow_mode_y_forces_non_live(monkeypatch):
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'true')
+    monkeypatch.setenv('ENABLE_LIVE', 'false')
+    monkeypatch.setenv('PAPER__ENABLED', 'false')
+    monkeypatch.setenv('PAPER_MODE', 'false')
+    monkeypatch.setenv('SHADOW_MODE', 'y')
+    runner = _build_runner(_OrderManagerNoMode())
+    log_line = _run_and_get_mode_log(runner)
+    assert 'is_live_mode=False' in log_line
