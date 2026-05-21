@@ -1964,22 +1964,22 @@ class StrategyManager(_BaseStrategyManager):
             elif delta_signal < 0:
                 pe_score += 0.6
                 reasons.append("tick_slope_negative")
-                if (
-                    ce_score + pe_score <= 0
-                    and ltp is not None
-                    and close is not None
-                    and close > 0
-                ):
-                    ltp_close_delta_pct = (ltp - close) / close * 100.0
-                    min_delta_pct = self._env_float(
-                        "STRATEGY_CONTEXT_MIN_LTP_CLOSE_DELTA_PCT", 0.03
-                    )
-                    if ltp_close_delta_pct >= min_delta_pct:
-                        ce_score += 0.5
-                        reasons.append("ltp_above_close_fallback")
-                    elif ltp_close_delta_pct <= -min_delta_pct:
-                        pe_score += 0.5
-                        reasons.append("ltp_below_close_fallback")
+        if (
+            ce_score + pe_score <= 0
+            and ltp is not None
+            and close is not None
+            and close > 0
+        ):
+            ltp_close_delta_pct = (ltp - close) / close * 100.0
+            min_delta_pct = self._env_float(
+                "STRATEGY_CONTEXT_MIN_LTP_CLOSE_DELTA_PCT", 0.03
+            )
+            if ltp_close_delta_pct >= min_delta_pct:
+                ce_score += 0.5
+                reasons.append("ltp_above_close_fallback")
+            elif ltp_close_delta_pct <= -min_delta_pct:
+                pe_score += 0.5
+                reasons.append("ltp_below_close_fallback")
                 
         total = ce_score + pe_score
         if total <= 0:
