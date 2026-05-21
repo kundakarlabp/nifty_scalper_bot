@@ -696,7 +696,8 @@ class OrderManager:
 
         self._broker = broker_client
         self._execution_mode = self._execution_mode_env()
-        if execution_mode == "LIVE" and not self._live_flag_enabled():
+        self._logger = get_logger(__name__)
+        if self._execution_mode == "LIVE" and not self._live_flag_enabled():
             raise RuntimeError(
                 "LIVE mode requires ENABLE_LIVE=true or ENABLE_LIVE_TRADING=true"
             )
