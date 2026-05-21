@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any, Callable
 
 from nifty_scalper_bot.config import settings as app_settings
@@ -22,8 +24,18 @@ def resolve_lot_size(symbol: str, lookup: Callable[[str], int] | None = None) ->
             lot = int(resolved)
             if lot > 0:
                 return lot, 'instrument_dump'
-    if 'NIFTY' in normalized_symbol and ('CE' in normalized_symbol or 'PE' in normalized_symbol):
-        return 65, 'fallback'
+    compact_symbol = candidates[-1]
+    option_match = re.match(r"^(?P<underlying>NIFTY)\d{1,2}[A-Z]{3}\d+(?P<option_type>CE|PE)$", compact_symbol)
+    if option_match:
+        env_fallback = os.getenv("NIFTY_LOT_SIZE") or os.getenv("INSTRUMENTS__NIFTY_LOT_SIZE")
+        if env_fallback:
+            try:
+                lot = int(env_fallback)
+                if lot > 0:
+                    return lot, "env_fallback"
+            except ValueError:
+                pass
+        return 65, "fallback_default"
     fallback_settings = app_settings.get_settings()
     fallback_lot = int(getattr(fallback_settings, 'contract_lot_size', 0) or 0)
     if fallback_lot > 0:

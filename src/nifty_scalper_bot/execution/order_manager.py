@@ -68,6 +68,7 @@ from nifty_scalper_bot.utils.pricing import canonical_price_source
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import canonical
 from nifty_scalper_bot.utils.symbols import is_strategy_instrument, normalize_symbol
+from nifty_scalper_bot.utils.lot_size import resolve_lot_size as resolve_lot_size_with_source
 
 SOFT_BLOCK_CODES: set[str] = {
     "STALE",
@@ -11039,8 +11040,29 @@ class OrderManager:
         try:
             lot_size, source = resolve_lot_size_with_source(normalized_symbol, lookup)
         except Exception as exc:  # noqa: BLE001
-            self._logger.debug("lot_size_lookup_failed", exc_info=True)
+            compact_symbol = normalized_symbol.split(":", 1)[-1] if ":" in normalized_symbol else normalized_symbol
+            self._logger.warning(
+                "LOT_SIZE_RESOLUTION_FAILED symbol=%s normalized_symbol=%s underlying=%s expiry=%s strike=%s option_type=%s cache_loaded=%s cache_size=%s reason=%s",
+                symbol,
+                normalized_symbol,
+                "NIFTY" if "NIFTY" in compact_symbol else "UNKNOWN",
+                compact_symbol[5:12] if compact_symbol.startswith("NIFTY") and len(compact_symbol) >= 12 else None,
+                "".join(ch for ch in compact_symbol if ch.isdigit()) or None,
+                compact_symbol[-2:] if compact_symbol.endswith(("CE", "PE")) else None,
+                bool(lookup is not None),
+                None,
+                str(exc),
+            )
             raise OrderPlacementError("Failed to resolve lot size") from exc
+        if source in {"env_fallback", "fallback_default"}:
+            self._logger.info(
+                "LOT_SIZE_FALLBACK_USED symbol=%s normalized_symbol=%s underlying=%s lot_size=%s source=%s",
+                symbol,
+                normalized_symbol,
+                "NIFTY" if "NIFTY" in normalized_symbol else "UNKNOWN",
+                lot_size,
+                source,
+            )
         self._logger.info(
             "LOT_SIZE_RESOLVED underlying=%s symbol=%s lot_size=%s source=%s",
             "NIFTY" if "NIFTY" in normalized_symbol else normalized_symbol,
