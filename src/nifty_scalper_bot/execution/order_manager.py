@@ -347,33 +347,7 @@ class GuardPair:
             target_order_id=str(payload.get("target_order_id") or ""),
             created_at=created_dt,
         )
-    @staticmethod
-    def _env_truthy(name: str) -> bool:
-        """Return True for common truthy env values."""
-        return str(os.getenv(name, "false") or "false").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-            "live",
-        }
-
-    @staticmethod
-    def _execution_mode_env() -> str:
-        """Return normalized execution mode."""
-        return (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
-
-    @classmethod
-    def _live_flag_enabled(cls) -> bool:
-        """Return True if either supported live flag is enabled."""
-        return cls._env_truthy("ENABLE_LIVE") or cls._env_truthy("ENABLE_LIVE_TRADING")
-
-    @classmethod
-    def _order_live_execution_enabled(cls) -> bool:
-        """Return True only when actual live order execution is enabled."""
-        return cls._execution_mode_env() == "LIVE" and cls._live_flag_enabled()
-
-
+    
 def resolve_reference_price(
     symbol: str,
     *,
@@ -651,6 +625,51 @@ class OrderManager:
         OrderStatus.REJECTED,
         OrderStatus.EXPIRED,
     )
+    @staticmethod
+    def _execution_mode_env() -> str:
+        """Return normalized execution mode from environment."""
+        mode = str(os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
+        if mode in {"LIVE", "PAPER", "SHADOW", "SIMULATION"}:
+            return mode
+        return "SHADOW"
+
+    @classmethod
+    def _live_flag_enabled(cls) -> bool:
+        """Return True if either supported live flag is enabled."""
+        return cls._env_truthy("ENABLE_LIVE") or cls._env_truthy("ENABLE_LIVE_TRADING")
+
+    @classmethod
+    def _shadow_mode_enabled(cls) -> bool:
+        """Return True when shadow mode is explicitly enabled."""
+        return cls._env_truthy("SHADOW_MODE")
+
+    @classmethod
+    def _paper_mode_enabled(cls) -> bool:
+        """Return True when paper mode is explicitly enabled."""
+        return cls._env_truthy("PAPER__ENABLED") or cls._env_truthy("PAPER_MODE")
+
+    @classmethod
+    def _order_live_execution_enabled(cls) -> bool:
+        """Return True only when actual live order execution is enabled."""
+        return (
+            cls._execution_mode_env() == "LIVE"
+            and cls._live_flag_enabled()
+            and not cls._shadow_mode_enabled()
+            and not cls._paper_mode_enabled()
+        )
+
+    @property
+    def execution_mode(self) -> str:
+        """Public execution-mode API."""
+        return self._execution_mode
+
+    def get_execution_mode(self) -> str:
+        """Return current execution mode."""
+        return self.execution_mode
+
+    def is_live_mode(self) -> bool:
+        """Return True only when this manager is allowed to place live orders."""
+        return self.execution_mode == "LIVE" and self._order_live_execution_enabled()
 
     def __init__(
         self,
@@ -670,8 +689,14 @@ class OrderManager:
             raise RuntimeError(
                 "LIVE mode requires ENABLE_LIVE=true or ENABLE_LIVE_TRADING=true"
             )
+        if self._execution_mode == "LIVE" and (
+            self._shadow_mode_enabled() or self._paper_mode_enabled()
+        ):
+            raise RuntimeError(
+                "LIVE mode blocked because SHADOW_MODE or PAPER mode is enabled"
+            )
         
-        if execution_mode == "SIMULATION":
+        if self._execution_mode == "SIMULATION":
             try:
                 from nifty_scalper_bot.testing.simulated_broker import (
                     SimulatedZerodhaBroker,
@@ -700,8 +725,17 @@ class OrderManager:
             15.0,
             float(os.getenv("ORDER_UNCERTAIN_TTL_SECONDS", "60") or 60),
         )
-        if not hasattr(self, "_logger"):
-            self._logger = get_logger(__name__)
+        self._logger.info(
+            "OrderManager execution mode resolved",
+            extra={
+                "event": "order_manager_execution_mode_resolved",
+                "execution_mode": self._execution_mode,
+                "live_flag_enabled": self._live_flag_enabled(),
+                "shadow_mode": self._shadow_mode_enabled(),
+                "paper_mode": self._paper_mode_enabled(),
+                "live_order_execution_enabled": self._order_live_execution_enabled(),
+            },
+        )
         self._broker_circuit = CircuitBreaker()
         _data_dir = get_data_dir()
         self._history_path = Path(history_path or _data_dir / "order_history.json")
@@ -766,7 +800,6 @@ class OrderManager:
         self._guard_state_path = self._history_path.parent / "guard_pairs.json"
         self._load_guard_pairs()
         self._persistent_state: PersistentStateManager | None = None
-        timeout_override = os.getenv("NSB__BRACKET_ENTRY_TIMEOUT_SEC")
         # 4. Add Missing Initialization Safety (The Fix)
         # Clean Initialization
         if override := os.getenv("NSB__BRACKET_ENTRY_TIMEOUT_SEC"):
