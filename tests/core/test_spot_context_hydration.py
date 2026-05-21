@@ -21,3 +21,11 @@ def test_spot_required_falls_back_to_required_candles():
     src = open('src/nifty_scalper_bot/core/app.py', encoding='utf-8').read()
     assert 'getattr(ctx.strategy_runner, "_required_candles", 0)' in src
     assert 'or 50' in src
+
+
+def test_hydration_diagnostics_use_canonical_symbol():
+    src = open('src/nifty_scalper_bot/core/app.py', encoding='utf-8').read()
+    assert "hydrated_counts[canonical_sym] = count" in src
+    assert '"RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d", canonical_sym' in src
+    assert '"event": "RUNNER_HISTORY_INGESTED"' in src
+    assert '"symbol": canonical_sym' in src
