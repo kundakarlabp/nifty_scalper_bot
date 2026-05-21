@@ -768,12 +768,20 @@ class StrikeSelector:
     def _select_expiry(
         self, contracts: Iterable[_OptionContract], now: datetime
     ) -> datetime | None:
+        def _to_utc_aware(dt: Any) -> datetime:
+            if not isinstance(dt, datetime) and isinstance(dt, date):
+                dt = datetime.combine(dt, datetime.min.time())
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        now_aware = _to_utc_aware(now)
         expiry_dates = sorted(
-            {contract.expiry for contract in contracts if contract.expiry is not None}
+            {_to_utc_aware(contract.expiry) for contract in contracts if contract.expiry is not None}
         )
         if not expiry_dates:
             return None
-        upcoming = [candidate for candidate in expiry_dates if candidate >= now]
+        upcoming = [candidate for candidate in expiry_dates if candidate >= now_aware]
         pool = upcoming or expiry_dates
         regime = (
             (
@@ -794,7 +802,7 @@ class StrikeSelector:
             if parsed is not None
         }
         selection, reason = self._resolve_expiry_target(
-            pool, regime, now, roll_minutes, special_dates
+            pool, regime, now_aware, roll_minutes, special_dates
         )
         if selection is None:
             return None

@@ -3003,18 +3003,63 @@ class OrderManager:
         ref = ask if ask > 0 else ltp if ltp > 0 else 1.0
         spread_pct = (spread / ref) * 100.0 if ref > 0 else 999.0
         age_ms = None
-        ts_raw = quote.get("received_at") or quote.get("wallclock") or quote.get("exchange_timestamp") or quote.get("timestamp") or quote.get("ts") or quote.get("last_trade_time")
+        ts_raw = None
+        ts_key = None
+        for key in (
+            "received_at",
+            "wallclock",
+            "exchange_timestamp",
+            "timestamp",
+            "ts",
+            "last_trade_time",
+        ):
+            val = quote.get(key)
+            if val not in (None, ""):
+                ts_raw = val
+                ts_key = key
+                break
+
         try:
             parsed_ts = None
             if isinstance(ts_raw, datetime):
-                parsed_ts = ts_raw.timestamp()
+                if ts_raw.tzinfo is None:
+                    ts_utc = ts_raw.replace(tzinfo=timezone.utc).timestamp()
+                    ts_ist = ts_raw.replace(tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
+                    now = time.time()
+                    if ts_key in ("received_at", "wallclock"):
+                        if abs(now - ts_ist) < abs(now - ts_utc) and abs(now - ts_ist) < 60.0:
+                            parsed_ts = ts_ist
+                        else:
+                            parsed_ts = ts_utc
+                    else:
+                        if abs(now - ts_utc) < abs(now - ts_ist) and abs(now - ts_utc) < 60.0:
+                            parsed_ts = ts_utc
+                        else:
+                            parsed_ts = ts_ist
+                else:
+                    parsed_ts = ts_raw.timestamp()
             elif isinstance(ts_raw, (int, float)):
                 raw_val = float(ts_raw)
                 parsed_ts = raw_val / 1000.0 if raw_val > 1_000_000_000_000 else raw_val
             elif isinstance(ts_raw, str) and ts_raw.strip():
                 iso = ts_raw.strip().replace("Z", "+00:00")
                 parsed_dt = datetime.fromisoformat(iso)
-                parsed_ts = parsed_dt.timestamp()
+                if parsed_dt.tzinfo is None:
+                    ts_utc = parsed_dt.replace(tzinfo=timezone.utc).timestamp()
+                    ts_ist = parsed_dt.replace(tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
+                    now = time.time()
+                    if ts_key in ("received_at", "wallclock"):
+                        if abs(now - ts_ist) < abs(now - ts_utc) and abs(now - ts_ist) < 60.0:
+                            parsed_ts = ts_ist
+                        else:
+                            parsed_ts = ts_utc
+                    else:
+                        if abs(now - ts_utc) < abs(now - ts_ist) and abs(now - ts_utc) < 60.0:
+                            parsed_ts = ts_utc
+                        else:
+                            parsed_ts = ts_ist
+                else:
+                    parsed_ts = parsed_dt.timestamp()
             if parsed_ts is not None:
                 age_ms = max(0.0, (time.time() - float(parsed_ts)) * 1000.0)
         except Exception:
