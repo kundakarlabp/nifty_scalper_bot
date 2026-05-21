@@ -1,5 +1,3 @@
-import os
-
 from nifty_scalper_bot.utils.lot_size import resolve_lot_size
 
 
@@ -24,3 +22,11 @@ def test_unknown_symbol_does_not_use_nifty_fallback(monkeypatch):
     lot, source = resolve_lot_size("NFO:BANKNIFTY26MAY52000PE", lookup=lambda _s: 30)
     assert lot == 30
     assert source == "instrument_dump"
+
+
+def test_unknown_symbol_uses_settings_fallback_when_enabled(monkeypatch):
+    monkeypatch.delenv("NIFTY_LOT_SIZE", raising=False)
+    monkeypatch.delenv("INSTRUMENTS__NIFTY_LOT_SIZE", raising=False)
+    lot, source = resolve_lot_size("UNKNOWN", lookup=lambda _s: None)
+    assert lot > 0
+    assert source == "settings"
