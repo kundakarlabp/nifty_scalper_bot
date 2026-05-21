@@ -1265,7 +1265,7 @@ def test_order_readiness_revalidation_tries_raw_and_normalized_symbols() -> None
     runner = _build_runner()
     runner._runtime_execution_ready_by_symbol = {}
     runner._runtime_live_orders_armed = True
-    runner._order_manager.resolve_lot_size = MagicMock(return_value=65)
+    lot_attempts: list[str] = []
     raw_symbol = "NFO:NIFTY26MAY23650PE"
     normalized = "NIFTY26MAY23650PE"
     attempts: list[str] = []
@@ -1278,12 +1278,22 @@ def test_order_readiness_revalidation_tries_raw_and_normalized_symbols() -> None
 
     runner._market_data = MagicMock()
     runner._market_data.get_symbol_snapshot.side_effect = _case_a
+    runner._order_manager.resolve_lot_size = MagicMock(
+        side_effect=lambda s: (_ for _ in ()).throw(RuntimeError("lot missing"))
+        if s == normalized
+        else (65 if s == raw_symbol else (_ for _ in ()).throw(RuntimeError("lot missing")))
+    )
     assert runner._ensure_symbol_execution_ready_for_order(normalized, trace_id="lookup-1") is True
     assert normalized in attempts
     assert raw_symbol in attempts
+    for call in runner._order_manager.resolve_lot_size.call_args_list:
+        lot_attempts.append(call.args[0])
+    assert normalized in lot_attempts
+    assert raw_symbol in lot_attempts
 
     runner._runtime_execution_ready_by_symbol = {}
     attempts.clear()
+    lot_attempts.clear()
 
     def _case_b(symbol: str):
         attempts.append(symbol)
@@ -1292,9 +1302,18 @@ def test_order_readiness_revalidation_tries_raw_and_normalized_symbols() -> None
         raise RuntimeError("missing")
 
     runner._market_data.get_symbol_snapshot.side_effect = _case_b
+    runner._order_manager.resolve_lot_size = MagicMock(
+        side_effect=lambda s: (_ for _ in ()).throw(RuntimeError("lot missing"))
+        if s == raw_symbol
+        else (65 if s == normalized else (_ for _ in ()).throw(RuntimeError("lot missing")))
+    )
     assert runner._ensure_symbol_execution_ready_for_order(raw_symbol, trace_id="lookup-2") is True
     assert raw_symbol in attempts
     assert normalized in attempts
+    for call in runner._order_manager.resolve_lot_size.call_args_list:
+        lot_attempts.append(call.args[0])
+    assert raw_symbol in lot_attempts
+    assert normalized in lot_attempts
 
 
 def test_early_runtime_not_ready_cooldown_resets_execution_state() -> None:

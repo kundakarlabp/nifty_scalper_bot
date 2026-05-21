@@ -2025,20 +2025,20 @@ class StrategyRunner:
         lot_size_resolved = False
         max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
         snapshot_key_used: str | None = None
+        candidate_keys: list[str] = []
+        for key in (symbol, normalized):
+            if key and key not in candidate_keys:
+                candidate_keys.append(key)
+        if normalized and ":" not in normalized:
+            prefixed = f"NFO:{normalized}"
+            if prefixed not in candidate_keys:
+                candidate_keys.append(prefixed)
+        if symbol and ":" in symbol:
+            unprefixed = symbol.split(":", 1)[-1]
+            if unprefixed not in candidate_keys:
+                candidate_keys.append(unprefixed)
         if self._market_data is not None and normalized:
             snap = None
-            candidate_keys: list[str] = []
-            for key in (symbol, normalized):
-                if key and key not in candidate_keys:
-                    candidate_keys.append(key)
-            if normalized and ":" not in normalized:
-                prefixed = f"NFO:{normalized}"
-                if prefixed not in candidate_keys:
-                    candidate_keys.append(prefixed)
-            if symbol and ":" in symbol:
-                unprefixed = symbol.split(":", 1)[-1]
-                if unprefixed not in candidate_keys:
-                    candidate_keys.append(unprefixed)
             for candidate_symbol in candidate_keys:
                 try:
                     snap = self._market_data.get_symbol_snapshot(candidate_symbol)
@@ -2053,15 +2053,24 @@ class StrategyRunner:
                 tick_age_ms = int(max(0.0, float(getattr(snap, "tick_age_s", 9999.0)) * 1000.0))
             else:
                 reason = "snapshot_unavailable"
+        lot_size_key_used: str | None = None
         if self._order_manager is not None and hasattr(self._order_manager, "resolve_lot_size"):
-            try:
-                lot_size_resolved = int(self._order_manager.resolve_lot_size(normalized)) > 0
-            except Exception:
+            for lot_key in candidate_keys or [symbol, normalized]:
+                if not lot_key:
+                    continue
+                try:
+                    lot_size_resolved = int(self._order_manager.resolve_lot_size(lot_key)) > 0
+                    if lot_size_resolved:
+                        lot_size_key_used = lot_key
+                        break
+                except Exception:
+                    continue
+            if not lot_size_resolved:
                 reason = "lot_size_unresolved"
         final_ready = bool(self._runtime_live_orders_armed and tradable_quote and lot_size_resolved and tick_age_ms is not None and tick_age_ms <= max_quote_age_ms)
         if final_ready and normalized:
             self._runtime_execution_ready_by_symbol[normalized] = True
-        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, trace_id, was_ready, True, final_ready, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, bid, ask, tradable_quote, lot_size_resolved)
+        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, trace_id, was_ready, True, final_ready, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, tradable_quote, lot_size_resolved)
         return final_ready
 
     def _execution_reject_cooldown_result(
