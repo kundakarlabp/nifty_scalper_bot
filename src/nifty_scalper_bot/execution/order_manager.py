@@ -626,6 +626,17 @@ class OrderManager:
         OrderStatus.EXPIRED,
     )
     @staticmethod
+    def _env_truthy(name: str) -> bool:
+        """Return True for common truthy environment values."""
+        return str(os.getenv(name, "false") or "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+            "live",
+        }
+    @staticmethod
     def _execution_mode_env() -> str:
         """Return normalized execution mode from environment."""
         mode = str(os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
@@ -684,7 +695,7 @@ class OrderManager:
         """Initialize with broker client and position manager."""
 
         self._broker = broker_client
-        execution_mode = self._execution_mode_env()
+        self._execution_mode = self._execution_mode_env()
         if execution_mode == "LIVE" and not self._live_flag_enabled():
             raise RuntimeError(
                 "LIVE mode requires ENABLE_LIVE=true or ENABLE_LIVE_TRADING=true"
