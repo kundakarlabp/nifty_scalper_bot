@@ -2027,9 +2027,19 @@ class StrategyRunner:
         snapshot_key_used: str | None = None
         if self._market_data is not None and normalized:
             snap = None
-            for candidate_symbol in [symbol, normalized]:
-                if not candidate_symbol:
-                    continue
+            candidate_keys: list[str] = []
+            for key in (symbol, normalized):
+                if key and key not in candidate_keys:
+                    candidate_keys.append(key)
+            if normalized and ":" not in normalized:
+                prefixed = f"NFO:{normalized}"
+                if prefixed not in candidate_keys:
+                    candidate_keys.append(prefixed)
+            if symbol and ":" in symbol:
+                unprefixed = symbol.split(":", 1)[-1]
+                if unprefixed not in candidate_keys:
+                    candidate_keys.append(unprefixed)
+            for candidate_symbol in candidate_keys:
                 try:
                     snap = self._market_data.get_symbol_snapshot(candidate_symbol)
                     snapshot_key_used = candidate_symbol
@@ -9181,6 +9191,7 @@ class StrategyRunner:
                 base_symbol, reason_key, now_epoch, trace_id
             )
             if reject_cooldown_result is not None:
+                self._reset_execution_state(base_symbol)
                 return reject_cooldown_result
             def _trace(stop_reason: str, executor_called: bool = False, risk_allowed: bool = False) -> None:
                 self._logger.info(

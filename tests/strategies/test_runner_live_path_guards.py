@@ -1268,21 +1268,63 @@ def test_order_readiness_revalidation_tries_raw_and_normalized_symbols() -> None
     runner._order_manager.resolve_lot_size = MagicMock(return_value=65)
     raw_symbol = "NFO:NIFTY26MAY23650PE"
     normalized = "NIFTY26MAY23650PE"
+    attempts: list[str] = []
 
-    def _get(symbol: str):
+    def _case_a(symbol: str):
+        attempts.append(symbol)
         if symbol == raw_symbol:
             return SimpleNamespace(bid=100.0, ask=101.0, tradable_quote=True, tick_age_s=0.2)
         raise RuntimeError("missing")
 
     runner._market_data = MagicMock()
-    runner._market_data.get_symbol_snapshot.side_effect = _get
+    runner._market_data.get_symbol_snapshot.side_effect = _case_a
     assert runner._ensure_symbol_execution_ready_for_order(normalized, trace_id="lookup-1") is True
+    assert normalized in attempts
+    assert raw_symbol in attempts
 
-    def _get2(symbol: str):
+    runner._runtime_execution_ready_by_symbol = {}
+    attempts.clear()
+
+    def _case_b(symbol: str):
+        attempts.append(symbol)
         if symbol == normalized:
             return SimpleNamespace(bid=100.0, ask=101.0, tradable_quote=True, tick_age_s=0.2)
         raise RuntimeError("missing")
 
-    runner._runtime_execution_ready_by_symbol = {}
-    runner._market_data.get_symbol_snapshot.side_effect = _get2
+    runner._market_data.get_symbol_snapshot.side_effect = _case_b
     assert runner._ensure_symbol_execution_ready_for_order(raw_symbol, trace_id="lookup-2") is True
+    assert raw_symbol in attempts
+    assert normalized in attempts
+
+
+def test_early_runtime_not_ready_cooldown_resets_execution_state() -> None:
+    runner = _build_runner()
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._execution_reject_cooldown_ts = {}
+    runner._reset_execution_state = MagicMock()
+    base_symbol = "NFO:NIFTY26MAY23650PE"
+    reason_key = "OrderFlow"
+    runner._execution_reject_cooldown_ts[
+        f"{base_symbol}:{reason_key}:runtime_symbol_execution_not_ready"
+    ] = datetime.now(timezone.utc).timestamp()
+
+    signal = Signal(
+        action='BUY',
+        symbol=base_symbol,
+        quantity=1,
+        confidence=0.8,
+        reason=reason_key,
+        stop_loss=300.0,
+        take_profit=420.0,
+        metadata={},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol=base_symbol,
+        trade_symbol=base_symbol,
+        trade_price=360.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='trace-cooldown-early',
+    )
+    assert result.reason == "runtime_symbol_execution_not_ready_reject_cooldown"
+    runner._reset_execution_state.assert_called()
