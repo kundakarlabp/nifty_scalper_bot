@@ -140,6 +140,8 @@ class OrderFlowStrategy(EliteStrategy):
                     'depth_available': depth_available,
                     'premium_flow_direction': tick_direction,
                     'liquidity_score': 1.0,
+                    'tick_age_ms': tick_age_ms,
+                    'quote_update_version': indicators.get('quote_update_version'),
                 }
                 side_aligns = direction in {'CE', 'PE'} and direction == side
                 metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0, 'tick_supports_direction': tick_supports})
@@ -242,6 +244,8 @@ class OrderFlowStrategy(EliteStrategy):
                 'depth_available': depth_available,
                 'premium_flow_direction': tick_direction,
                 'negative_premium_flow_mode': 'hard' if clear_adverse_flow else 'soft',
+                'tick_age_ms': tick_age_ms,
+                'quote_update_version': indicators.get('quote_update_version'),
             }
             if trigger_conditions_met:
                 metadata['approval_candidate'] = 'orderflow_live_depth_trigger'
