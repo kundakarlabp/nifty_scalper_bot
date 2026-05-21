@@ -1904,6 +1904,16 @@ class OrderManager:
         normalized = (int(quantity) // lot_size) * lot_size
         return lot_size, normalized
 
+    def _submit_broker_order(self, call_args: dict[str, Any]) -> Any:
+        """Submit broker order supporting both kwargs and single-payload broker adapters."""
+        try:
+            return self._broker.place_order(**call_args)
+        except TypeError as kwargs_exc:
+            try:
+                return self._broker.place_order(dict(call_args))
+            except TypeError:
+                raise kwargs_exc
+
     def place_order(
         self,
         symbol: str,
@@ -2449,7 +2459,7 @@ class OrderManager:
         # Helper for threaded execution
         def _broker_call(kwargs):
             try:
-                return self._broker.place_order(**kwargs)
+                return self._submit_broker_order(kwargs)
             except Exception as exc:
                 return exc
 
