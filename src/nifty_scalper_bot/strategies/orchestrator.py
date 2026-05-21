@@ -133,19 +133,28 @@ class StrategyOrchestrator:
         # 🛡️ FIX 1: EARLY TIME GUARD
         # ═══════════════════════════════════════════════════════════
         try:
-            from nifty_scalper_bot.utils.market_hours import is_market_hours_cached
+            from nifty_scalper_bot.utils.market_hours import (
+                get_current_ist_time,
+                get_time_status_cached,
+            )
 
             settings = get_settings()
             if not settings.allow_offmarket_trading:
-                if not is_market_hours_cached():
+                allowed, time_reason = get_time_status_cached()
+                if not allowed:
+                    now_ist = get_current_ist_time()
                     self._logger.warning(
-                        "⛔ BLOCKED: Market hours filter active",
+                        "⛔ BLOCKED: Entry time filter active: %s",
+                        time_reason,
                         extra={
-                            "event": "orchestrator_market_hours_blocked",
+                            "event": "orchestrator_entry_time_blocked",
                             "symbol": symbol,
+                            "time_reason": time_reason,
+                            "now_ist": now_ist.isoformat(),
+                            "allow_offmarket_trading": bool(settings.allow_offmarket_trading),
                         },
                     )
-                    self._set_skip_reason("market_closed")
+                    self._set_skip_reason(time_reason)
                     return None
             else:
                 self._logger.warning(

@@ -27,10 +27,36 @@ LOGGER = get_logger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
 # Market timing constants
-MARKET_OPEN = dtime(9, 15)      # NSE opens
-SAFE_START = dtime(9, 20)       # Avoid opening volatility (was 9:30, now 9:20)
-SAFE_END = dtime(15, 15)        # Stop new entries 15 mins before close
-MARKET_CLOSE = dtime(15, 30)    # NSE closes
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def _env_time(name: str, default: dtime) -> dtime:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        hour_s, minute_s = raw.strip().split(":", 1)
+        hour = int(hour_s)
+        minute = int(minute_s)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return default
+        return dtime(hour, minute)
+    except Exception:
+        return default
+
+
+# Market timing constants
+MARKET_OPEN = _env_time("MARKET_OPEN_TIME", dtime(9, 15))
+SAFE_START = _env_time("SAFE_START_TIME", dtime(9, 20))
+SAFE_END = _env_time("SAFE_END_TIME", dtime(15, 25))
+MARKET_CLOSE = _env_time("MARKET_CLOSE_TIME", dtime(15, 30))
 
 
 class MarketState(Enum):
@@ -50,22 +76,12 @@ def _override_enabled() -> bool:
 def allow_offhours_testing_safe() -> bool:
     """Args: none; Returns: safe off-hours override state; Raises: none."""
     execution_mode = os.getenv("EXECUTION_MODE", "SHADOW").strip().upper()
-    enable_live = os.getenv("ENABLE_LIVE", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if execution_mode == "LIVE" or enable_live:
+    live_enabled = _env_truthy("ENABLE_LIVE") or _env_truthy("ENABLE_LIVE_TRADING")
+    if execution_mode == "LIVE" or live_enabled:
         return False
-    return os.getenv(
-        "ALLOW_OFFHOURS_TESTING", os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "")
-    ).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return _env_truthy("ALLOW_OFFHOURS_TESTING") or _env_truthy(
+        "SESSION_ALLOW_OUT_OF_HOURS"
+    )
 
 
 def _now_ist() -> datetime:
@@ -92,26 +108,29 @@ def get_market_state() -> MarketState:
     return MarketState.CLOSED
 
 
-def is_market_hours(allow_override: bool = True) -> bool:
-    """
-    Check if current time is within safe trading hours.
-    
-    Args:
-        allow_override: If True, checks SESSION_ALLOW_OUT_OF_HOURS env var
-        
-    Returns:
-        True if trading is allowed, False otherwise
-    """
-    # Check environment override for testing
+def is_market_open_session(allow_override: bool = True) -> bool:
     if allow_override and _override_enabled():
         return True
-
     now_dt = _now_ist()
     if now_dt.weekday() >= 5:
         return False
+    now = now_dt.time()
+    return MARKET_OPEN <= now <= MARKET_CLOSE
 
+
+def is_safe_entry_window(allow_override: bool = True) -> bool:
+    if allow_override and _override_enabled():
+        return True
+    now_dt = _now_ist()
+    if now_dt.weekday() >= 5:
+        return False
     now = now_dt.time()
     return SAFE_START <= now <= SAFE_END
+
+
+def is_market_hours(allow_override: bool = True) -> bool:
+    """Backward-compatible alias for safe new-entry window."""
+    return is_safe_entry_window(allow_override=allow_override)
 
 
 def is_market_open() -> bool:
@@ -249,12 +268,12 @@ def get_time_status() -> Tuple[bool, str]:
         return False, f"Opening volatility buffer (Wait until {SAFE_START.strftime('%H:%M')})"
     
     if SAFE_START <= now <= SAFE_END:
-        return True, "Within safe trading window"
-    
+        return True, "Within safe entry window"
+
     if SAFE_END < now <= MARKET_CLOSE:
-        return False, f"EOD safety cutoff (No trades after {SAFE_END.strftime('%H:%M')})"
-    
-    return False, f"Market closed ({now.strftime('%H:%M')} > {MARKET_CLOSE.strftime('%H:%M')})"
+        return False, f"EOD safety cutoff (No new entries after {SAFE_END.strftime('%H:%M')})"
+
+    return False, f"Market closed after {MARKET_CLOSE.strftime('%H:%M')}"
 
 
 def get_current_ist_time() -> datetime:
@@ -274,6 +293,22 @@ def _cached_market_hours_check(minute_key: int, override_flag: str) -> bool:
     return is_market_hours(allow_override=True)
 
 
+@lru_cache(maxsize=128)
+def _cached_time_status_check(minute_key: int, override_flag: str) -> tuple[bool, str]:
+    return get_time_status()
+
+
+def get_time_status_cached() -> tuple[bool, str]:
+    now = datetime.now(IST)
+    minute_key = now.hour * 60 + now.minute
+    override_flag = (
+        os.getenv("SESSION_ALLOW_OUT_OF_HOURS", "").lower()
+        + "|"
+        + os.getenv("ALLOW_OFFHOURS_TESTING", "").lower()
+    )
+    return _cached_time_status_check(minute_key, override_flag)
+
+
 def is_market_hours_cached() -> bool:
     """
     Cached version of is_market_hours for high-frequency tick processing.
@@ -287,10 +322,13 @@ def is_market_hours_cached() -> bool:
 
 __all__ = [
     "is_market_hours",
+    "is_market_open_session",
+    "is_safe_entry_window",
     "is_market_open",
     "is_market_open_now",
     "is_market_hours_cached",
     "get_time_status",
+    "get_time_status_cached",
     "get_current_ist_time",
     "format_time_for_log",
     "get_market_session_state",
