@@ -347,6 +347,31 @@ class GuardPair:
             target_order_id=str(payload.get("target_order_id") or ""),
             created_at=created_dt,
         )
+    @staticmethod
+    def _env_truthy(name: str) -> bool:
+        """Return True for common truthy env values."""
+        return str(os.getenv(name, "false") or "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+            "live",
+        }
+
+    @staticmethod
+    def _execution_mode_env() -> str:
+        """Return normalized execution mode."""
+        return (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
+
+    @classmethod
+    def _live_flag_enabled(cls) -> bool:
+        """Return True if either supported live flag is enabled."""
+        return cls._env_truthy("ENABLE_LIVE") or cls._env_truthy("ENABLE_LIVE_TRADING")
+
+    @classmethod
+    def _order_live_execution_enabled(cls) -> bool:
+        """Return True only when actual live order execution is enabled."""
+        return cls._execution_mode_env() == "LIVE" and cls._live_flag_enabled()
 
 
 def resolve_reference_price(
@@ -640,12 +665,12 @@ class OrderManager:
         """Initialize with broker client and position manager."""
 
         self._broker = broker_client
-        execution_mode = (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
-        enable_live = (
-            os.getenv("ENABLE_LIVE", "false") or "false"
-        ).strip().lower() == "true"
-        if execution_mode == "LIVE" and enable_live is False:
-            raise RuntimeError("LIVE mode requires ENABLE_LIVE=true")
+        execution_mode = self._execution_mode_env()
+        if execution_mode == "LIVE" and not self._live_flag_enabled():
+            raise RuntimeError(
+                "LIVE mode requires ENABLE_LIVE=true or ENABLE_LIVE_TRADING=true"
+            )
+        
         if execution_mode == "SIMULATION":
             try:
                 from nifty_scalper_bot.testing.simulated_broker import (
@@ -1804,16 +1829,16 @@ class OrderManager:
     def _validate_live_execution_safety(self) -> bool:
         """Validate live execution preconditions. Args: none. Returns: bool. Raises: None."""
         try:
-            enable_live = (
-                os.getenv("ENABLE_LIVE", "false") or "false"
-            ).strip().lower() == "true"
-            execution_mode = (os.getenv("EXECUTION_MODE") or "SHADOW").strip().upper()
-            if not enable_live or execution_mode != "LIVE":
+            execution_mode = self._execution_mode_env()
+            if not self._order_live_execution_enabled():
                 self._logger.error(
                     "live_execution_guard_block",
                     extra={
                         "event": "live_execution_guard_block",
                         "reason": "mode_or_flag",
+                        "execution_mode": execution_mode,
+                        "enable_live": os.getenv("ENABLE_LIVE"),
+                        "enable_live_trading": os.getenv("ENABLE_LIVE_TRADING"),
                     },
                 )
                 return False
@@ -1919,17 +1944,25 @@ class OrderManager:
         )
         return any(marker in text for marker in signature_markers)
 
-    def _submit_broker_order(self, call_args: dict[str, Any]) -> Any:
-        """Submit broker order supporting kwargs and single-payload broker adapters safely."""
+    def _submit_broker_order(
+        self,
+        payload: dict[str, object],
+        *,
+        legacy_payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         try:
-            return self._broker.place_order(**call_args)
-        except TypeError as kwargs_exc:
-            if not self._looks_like_signature_type_error(kwargs_exc):
+            response = self._broker.place_order(**payload)
+        except TypeError as exc:
+            if legacy_payload is None or not self._looks_like_signature_type_error(exc):
                 raise
             try:
-                return self._broker.place_order(dict(call_args))
+                response = self._broker.place_order(legacy_payload)
             except TypeError:
-                raise kwargs_exc
+                raise exc
+
+        if not isinstance(response, dict):
+            raise ExecutionError("Invalid broker response payload")
+        return response
 
     def place_order(
         self,
