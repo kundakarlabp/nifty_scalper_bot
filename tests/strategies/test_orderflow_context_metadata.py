@@ -64,3 +64,15 @@ def test_orderflow_live_requires_direction_context(monkeypatch) -> None:
     assert signal is not None
     assert signal.metadata['role'] == 'context'
     assert signal.metadata['trigger_block_reason'] == 'direction_context_missing_live'
+
+
+def test_orderflow_depth_path_includes_tick_age_and_quote_update_version(monkeypatch) -> None:
+    monkeypatch.setenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')
+    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(), _Dummy())
+    inds = _indicators()
+    inds['tick_age_ms'] = 321.0
+    inds['quote_update_version'] = 7
+    signal = strategy._evaluate_signal('NFO:NIFTY26FEB22500CE', inds, 100.5)
+    assert signal is not None
+    assert signal.metadata['tick_age_ms'] == 321.0
+    assert signal.metadata['quote_update_version'] == 7

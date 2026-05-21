@@ -8988,16 +8988,32 @@ class StrategyRunner:
                 "on",
             }
             if not callable(mode_source):
-                is_live_mode = mode == "LIVE" or env_live_enabled
-            if paper_enabled or shadow_mode_enabled:
-                is_live_mode = False
-            execution_mode = "LIVE" if is_live_mode else "SHADOW"
+                is_live_mode = (
+                    mode == "LIVE"
+                    and env_live_enabled
+                    and not paper_enabled
+                    and not shadow_mode_enabled
+                )
+            else:
+                is_live_mode = (
+                    bool(is_live_mode)
+                    and mode == "LIVE"
+                    and env_live_enabled
+                    and not paper_enabled
+                    and not shadow_mode_enabled
+                )
+            execution_mode = "LIVE" if is_live_mode else mode
+            if execution_mode not in {"LIVE", "PAPER", "SHADOW", "SIMULATION"}:
+                execution_mode = "SHADOW"
             self._logger.info(
-                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s",
+                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s",
                 base_symbol,
                 trace_id,
                 is_live_mode,
                 execution_mode,
+                env_live_enabled,
+                paper_enabled,
+                shadow_mode_enabled,
             )
 
             # Cooldown + burst guard
@@ -9794,11 +9810,14 @@ class StrategyRunner:
             order_symbol = trade_symbol or signal.symbol or base_symbol
             plan = TradePlan(symbol=order_symbol, side=signal.action, quantity=qty, entry_price=price, stop_loss=stop_loss, take_profit=take_profit, strategy_name=strategy_name, signal_id=signal.deterministic_id, trace_id=trace_id, tag=f"runner_{signal.action.lower()}", product="MIS", variety="regular", max_quote_age_ms=max_quote_age_ms, max_spread_pct=max_spread_pct, min_depth_qty=min_depth_qty, allow_market_entry=allow_market_entry)
             self._logger.info(
-                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s",
+                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s",
                 order_symbol,
                 trace_id,
                 is_live_mode,
                 execution_mode,
+                env_live_enabled,
+                paper_enabled,
+                shadow_mode_enabled,
             )
             order_id = self._order_manager.submit_trade_plan(plan)
 
