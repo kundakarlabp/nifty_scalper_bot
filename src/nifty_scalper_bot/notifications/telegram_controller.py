@@ -4409,6 +4409,7 @@ class TelegramBot:
                     ("selftest", self.cmd_selftest, ()),
                     ("assess", self.cmd_assess, ()),
                     ("reset_kill", self.cmd_reset_kill, ("riskreset", "reset_kill_switch")),
+                    ("killstatus", self.cmd_killstatus, ("kill_status",)),
                     ("cooldown", self.cmd_cooldown, ()),
                     ("pause", self.cmd_pause, ()),
                     ("resume", self.cmd_resume, ()),
@@ -7990,6 +7991,15 @@ class TelegramBot:
         tokens, invalid = self._parse_token_args(ctx.args)
         streamer = getattr(self.deps, 'streamer', None)
         supervisor = self._stream_supervisor()
+        if supervisor is not None and hasattr(supervisor, "unsubscribe_tokens"):
+            supervisor.unsubscribe_tokens(tokens)
+            tracked = list(getattr(supervisor, "tokens", set()) or set())
+            lines = [f'Unsubscribed {len(tokens)} token(s).', f'Now tracking {len(tracked)} token(s).']
+            lines.append(f"Poll: tokens={len(tracked)}")
+            if invalid:
+                lines.append(f"ignored: {', '.join(invalid)}")
+            await self._reply(chat, ctx, '\n'.join(lines))
+            return
         if supervisor is None and streamer is not None and hasattr(streamer, 'unsubscribe'):
             streamer.unsubscribe(tokens)
             tracked = []
@@ -8474,7 +8484,7 @@ class TelegramBot:
                 )
                 return
             raw_symbol = args[0].strip()
-            symbol = DataHub.normalize(raw_symbol) or raw_symbol.upper()
+            symbol = canonical(raw_symbol) or raw_symbol.upper()
             hub = getattr(self.deps, "data_hub", None)
             if hub is None or not hasattr(hub, "get_iv"):
                 message = (
@@ -8668,7 +8678,7 @@ class TelegramBot:
         ):
             raw = raw[1:-1]
         symbol = raw.strip()
-        normalized = DataHub.normalize(symbol)
+        normalized = canonical(symbol)
 
         hub = self.deps.data_hub
         mdm = self.deps.market_data_manager
@@ -10591,6 +10601,26 @@ class TelegramBot:
         except Exception as exc:  # noqa: BLE001
             log.error("Failure in cmd_reset_kill: %s", exc, extra={"event": "telegram_cmd_reset_kill_error"})
             await self._reply(chat, ctx, f"Reset failed: {exc}")
+
+    @command_meta("/killstatus", "Show order-manager kill switch status.")
+    async def cmd_killstatus(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = await self._guard(update)
+        if chat is None:
+            return
+        om = getattr(self.deps, "safe_order_manager", None) or getattr(self.deps, "order_manager", None)
+        if om is None or not hasattr(om, "get_kill_switch_status"):
+            await self._reply(chat, ctx, "Kill switch status unavailable.")
+            return
+        try:
+            ks = om.get_kill_switch_status()
+            await self._reply(
+                chat,
+                ctx,
+                f"Kill switch: {'ON' if ks.get('active') else 'OFF'} | reason={ks.get('kill_reason') or 'none'} | failures={ks.get('consecutive_failures')} | engaged_at={ks.get('engaged_at')}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failure in cmd_killstatus: %s", exc, extra={"event": "telegram_cmd_killstatus_error"})
+            await self._reply(chat, ctx, f"Kill status failed: {exc}")
 
     @command_meta("/report", "Latest nightly replay automation summary.")
     async def cmd_report(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -14407,7 +14437,7 @@ class TelegramBot:
         if hub is None or safe_manager is None:
             await self._reply(chat, ctx, "Paper environment unavailable.")
             return
-        normalized = DataHub.normalize(args[0])
+        normalized = canonical(args[0])
         if not normalized:
             await self._reply(chat, ctx, "Invalid symbol")
             return

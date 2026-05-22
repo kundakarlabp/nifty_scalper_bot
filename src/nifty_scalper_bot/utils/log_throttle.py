@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import defaultdict
@@ -39,7 +40,7 @@ class LogThrottle:
                 self._suppressed[key] = 0
             return value
 
-    def maybe_emit_summary(self, logger: logging.Logger, *, interval_seconds: float = 60.0) -> None:
+    def maybe_emit_summary(self, logger: logging.Logger, *, interval_seconds: float = 60.0, top_n: int = 10) -> None:
         """Emit periodic aggregate suppression summary."""
         now = time.monotonic()
         with self._lock:
@@ -49,15 +50,17 @@ class LogThrottle:
             pending = {k: v for k, v in self._suppressed.items() if int(v) > 0}
             for key in pending:
                 self._suppressed[key] = 0
-        for key, suppressed in pending.items():
-            event = key.split(":", 1)[0]
-            logger.info(
-                "LOG_THROTTLE_SUMMARY event=%s suppressed=%s key=%s",
-                event,
-                suppressed,
-                key,
-                extra={"event": "LOG_THROTTLE_SUMMARY", "throttled_event": event, "suppressed": suppressed, "key": key},
-            )
+        if not pending:
+            return
+        top = sorted(pending.items(), key=lambda item: item[1], reverse=True)[: max(1, int(top_n))]
+        total_suppressed = sum(int(v) for v in pending.values())
+        keys = ",".join(f"{k}:{v}" for k, v in top)
+        logger.info(
+            "LOG_THROTTLE_SUMMARY total_suppressed=%s top_keys=%s",
+            total_suppressed,
+            keys,
+            extra={"event": "LOG_THROTTLE_SUMMARY", "total_suppressed": total_suppressed, "top_keys": keys, "keys_count": len(top)},
+        )
 
 
 DEFAULT_LOG_THROTTLE = LogThrottle()
@@ -81,7 +84,13 @@ def log_throttled(
         extra.setdefault("event", event)
         extra["suppressed_count"] = suppressed
         logger.log(level, message, *args, extra=extra, **kwargs)
-        throttle.maybe_emit_summary(logger, interval_seconds=60.0)
+        enabled = os.getenv("LOG_THROTTLE_SUMMARY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if enabled:
+            throttle.maybe_emit_summary(
+                logger,
+                interval_seconds=float(os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "120") or "120"),
+                top_n=int(os.getenv("LOG_THROTTLE_SUMMARY_TOP_N", "10") or "10"),
+            )
         return True
     throttle.record_suppressed(key)
     return False

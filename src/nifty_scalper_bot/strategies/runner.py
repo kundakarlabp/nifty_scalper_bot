@@ -1994,7 +1994,9 @@ class StrategyRunner:
         )
         if any(value is not None for value in (selected_ce, selected_pe, atm_strike, option_symbols)):
             self.set_active_option_context(selected_ce=selected_ce, selected_pe=selected_pe, atm_strike=atm_strike, option_symbols=option_symbols)
-        self._logger.info(
+        log_throttled(
+            self._logger,
+            "runner_startup_readiness_update",
             "RUNNER_STARTUP_READINESS_UPDATE startup_ready=%s data_hard_ready=%s evaluation_ready=%s live_orders_armed=%s reason=%s selected_ce=%s selected_pe=%s option_count=%s",
             self._runtime_startup_ready,
             self._runtime_data_hard_ready,
@@ -2004,6 +2006,19 @@ class StrategyRunner:
             self._active_selected_ce,
             self._active_selected_pe,
             len(self._active_option_symbols),
+            interval_sec=60.0,
+            level=logging.INFO,
+            extra={
+                "event": "RUNNER_STARTUP_READINESS_UPDATE",
+                "startup_ready": self._runtime_startup_ready,
+                "data_hard_ready": self._runtime_data_hard_ready,
+                "evaluation_ready": self._runtime_evaluation_ready,
+                "live_orders_armed": self._runtime_live_orders_armed,
+                "reason": self._runtime_readiness_reason,
+                "selected_ce": self._active_selected_ce,
+                "selected_pe": self._active_selected_pe,
+                "option_count": len(self._active_option_symbols),
+            },
         )
 
     def _is_symbol_execution_ready(self, symbol: str) -> bool:
@@ -5735,9 +5750,11 @@ class StrategyRunner:
             }
             if context:
                 payload.update(context)
+            verbose_eval = str(os.getenv("LOG_VERBOSE_RUNNER_EVAL", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            log_level = logging.DEBUG if ((not allowed) and reason_str == "strategy_eval_skipped_same_bar" and not verbose_eval) else logging.INFO
             log_throttled_live(
                 self._logger,
-                logging.INFO,
+                log_level,
                 "RUNNER_EVAL_DECISION",
                 f"RUNNER_EVAL_DECISION:{symbol}:{reason}:{stage}",
                 float(os.getenv("LOG_THROTTLE_RUNNER_EVAL_SECONDS", "15") or "15"),
@@ -6404,7 +6421,7 @@ class StrategyRunner:
                             self._logger,
                             f"orphan_guard_{symbol}",
                             f"🛡️ ORPHAN GUARD: {symbol} is unmanaged. Adopting (tick continues)...",
-                            interval_sec=30.0,
+                            interval_sec=60.0,
                             level=logging.DEBUG,
                         )
                         if hasattr(self, "_adopt_orphan_positions"):
@@ -6515,7 +6532,7 @@ class StrategyRunner:
                         symbol,
                         raw_volume_delta,
                         raw_volume_cumulative,
-                        interval_sec=30.0,
+                        interval_sec=60.0,
                         level=logging.WARNING,
                         extra={
                             "event": "RUNNER_REJECTED_CUMULATIVE_VOLUME",
@@ -6557,7 +6574,7 @@ class StrategyRunner:
                         symbol,
                         volume,
                         max_runner_delta,
-                        interval_sec=30.0,
+                        interval_sec=60.0,
                         level=logging.WARNING,
                         extra={
                             "event": "RUNNER_OPTION_VOLUME_CLAMPED",
@@ -6737,7 +6754,7 @@ class StrategyRunner:
                             f"⏰ STALE TICK: {symbol} ({tick_age:.1f}s old, "
                             f"threshold={stale_threshold}s)"
                         ),
-                        interval_sec=30.0,
+                        interval_sec=60.0,
                         level=logging.WARNING,
                     )
                 skip_strategy = True
@@ -6813,7 +6830,7 @@ class StrategyRunner:
                     self._logger,
                     "runner_post_grace_blocked",
                     "RUNNER_POST_GRACE_STILL_BLOCKED",
-                    interval_sec=30.0,
+                    interval_sec=60.0,
                     level=logging.INFO,
                     extra={
                         "event": "RUNNER_POST_GRACE_STILL_BLOCKED",
@@ -7390,7 +7407,7 @@ class StrategyRunner:
                     f"freshness_backoff_{symbol}",
                     f"⏰ Freshness backoff: {symbol} remaining={remaining:.1f}s "
                     f"detail={getattr(self,'_data_freshness_backoff_detail',None)}",
-                    interval_sec=30.0,
+                    interval_sec=60.0,
                     level=logging.WARNING,
                 )
                 self._emit_runner_eval_decision(
@@ -7591,7 +7608,7 @@ class StrategyRunner:
                         self._logger,
                         f"strategy_eval_{symbol}",
                         f"🎯 EVALUATING STRATEGIES: {symbol} | min_bars={self._required_candles}",
-                        interval_sec=30.0,
+                        interval_sec=60.0,
                         level=logging.DEBUG,
                     )
                     # ✅ DIAGNOSTIC LOG: Confirm indicators are ready
@@ -8941,7 +8958,7 @@ class StrategyRunner:
                     self._logger,
                     f"missing_chain_{base_symbol}",
                     f"🛑 MISSING CHAIN DATA: Cannot select strike for {base_symbol}. DataHub returned no chain.",
-                    interval_sec=30.0,
+                    interval_sec=60.0,
                     level=logging.ERROR,
                 )
                 return None
