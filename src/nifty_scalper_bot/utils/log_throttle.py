@@ -47,6 +47,8 @@ class LogThrottle:
                 return
             self._summary_last_emit_mono = now
             pending = {k: v for k, v in self._suppressed.items() if int(v) > 0}
+            for key in pending:
+                self._suppressed[key] = 0
         for key, suppressed in pending.items():
             event = key.split(":", 1)[0]
             logger.info(
