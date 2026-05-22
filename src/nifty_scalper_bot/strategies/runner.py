@@ -93,6 +93,7 @@ from nifty_scalper_bot.strategies.signal_quality import (
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.errors import OrderPlacementError
+from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
@@ -3531,24 +3532,26 @@ class StrategyRunner:
             if gap_count > 1:
                 reason = "repeated_missing_candles" if recent_tick else "no_recent_tick_for_gap_assessment"
                 log_level = logging.INFO if is_option and recent_tick else logging.WARNING
-                log_throttled(
+                log_throttled_live(
                     self._logger,
-                    f"soft_data_issue:{symbol}",
+                    log_level,
+                    "SOFT_DATA_ISSUE",
+                    f"SOFT_DATA_ISSUE:{symbol}:{reason}",
+                    float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
                     f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
-                    interval_sec=60.0,
-                    level=log_level,
                     extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}, "gaps": gap_count},
                 )
                 if gap_count > 1 and recent_tick:
                     return self._set_symbol_hydration_state(symbol, SymbolState.DEGRADED)
             else:
                 reason = "single_missing_candle" if recent_tick else "no_recent_tick_for_gap_assessment"
-                log_throttled(
+                log_throttled_live(
                     self._logger,
-                    f"soft_data_issue:{symbol}",
+                    logging.INFO,
+                    "SOFT_DATA_ISSUE",
+                    f"SOFT_DATA_ISSUE:{symbol}:{reason}",
+                    float(os.getenv("LOG_THROTTLE_SOFT_DATA_SECONDS", "60") or "60"),
                     f"SOFT_DATA_ISSUE symbol={symbol} reason={reason} source=candle_gap_detector age_s={tick_age_s}",
-                    interval_sec=60.0,
-                    level=logging.INFO,
                     extra={"event": "SOFT_DATA_ISSUE", "symbol": symbol, "reason": reason, "source": "candle_gap_detector", "age_s": tick_age_s, "details": {"gaps": gap_count}},
                 )
                 if gap_count > 1 and recent_tick:
@@ -5732,7 +5735,12 @@ class StrategyRunner:
             }
             if context:
                 payload.update(context)
-            self._logger.info(
+            log_throttled_live(
+                self._logger,
+                logging.INFO,
+                "RUNNER_EVAL_DECISION",
+                f"RUNNER_EVAL_DECISION:{symbol}:{reason}:{stage}",
+                float(os.getenv("LOG_THROTTLE_RUNNER_EVAL_SECONDS", "15") or "15"),
                 "RUNNER_EVAL_DECISION symbol=%s allowed=%s stage=%s reason=%s "
                 "indicator_history_count=%s live_candle_version=%s "
                 "last_eval_live_candle_version=%s quote_update_version=%s "
@@ -9148,13 +9156,19 @@ class StrategyRunner:
                 prev_rank_score = float(prev.get("rank_score", 0.0) or 0.0)
                 if (rank_score - prev_rank_score) < self._signal_direction_dedup_min_improvement:
                     remaining = max(0.0, self._signal_direction_dedup_seconds - elapsed)
-                    self._logger.info(
+                    log_throttled_live(
+                        self._logger,
+                        logging.INFO,
+                        "SIGNAL_DEDUP_BLOCKED",
+                        f"SIGNAL_DEDUP_BLOCKED:{underlying}:{option_side}:{reason}",
+                        float(os.getenv("LOG_THROTTLE_DEDUP_SECONDS", "15") or "15"),
                         "SIGNAL_DEDUP_BLOCKED symbol=%s direction=%s reason=%s key=%s seconds_remaining=%.2f",
                         selected_symbol,
                         option_side,
                         reason,
                         key,
                         remaining,
+                        extra={"event": "SIGNAL_DEDUP_BLOCKED", "symbol": selected_symbol, "direction": option_side, "reason": reason},
                     )
                     return SignalExecutionResult(
                         False, "signal_duplicate_direction_cooldown"

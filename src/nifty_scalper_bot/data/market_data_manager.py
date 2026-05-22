@@ -39,6 +39,7 @@ from nifty_scalper_bot.streaming.websocket_manager import (
 )
 from nifty_scalper_bot.utils.env import get_str
 from nifty_scalper_bot.utils.async_helpers import safe_task
+from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
@@ -4318,7 +4319,9 @@ class MarketDataManager:
                     last_logged = float(self._ws_raw_tick_log_at.get(symbol_resolved, 0.0))
                     if last_logged <= 0.0 or (now - last_logged) >= 60.0:
                         self._ws_raw_tick_log_at[symbol_resolved] = now
-                        self._logger.info(
+                        verbose_ticks = str(os.getenv("LOG_VERBOSE_TICKS", "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+                        self._logger.log(
+                            logging.INFO if verbose_ticks else logging.DEBUG,
                             "WS_RAW_TICK_RECEIVED token=%s symbol_resolved=%s ltp=%s",
                             token_int,
                             symbol_resolved,
@@ -4789,9 +4792,12 @@ class MarketDataManager:
             return
         self._ingest_normalized_tick(normalized_live)
         if bool(normalized_live.get("tradable_quote")):
-            log_throttled(
+            log_throttled_live(
                 self._logger,
-                f"ws_full_quote_proof:{symbol}",
+                logging.INFO,
+                "WS_FULL_QUOTE_PROOF",
+                f"WS_FULL_QUOTE_PROOF:{symbol}",
+                float(os.getenv("LOG_THROTTLE_WS_PROOF_SECONDS", "60") or "60"),
                 "WS_FULL_QUOTE_PROOF symbol=%s token=%s ltp=%s bid=%s ask=%s spread=%s depth_available=%s tradable_quote=%s",
                 symbol,
                 token_value,
@@ -4801,8 +4807,7 @@ class MarketDataManager:
                 normalized_live.get("spread"),
                 normalized_live.get("depth_available"),
                 normalized_live.get("tradable_quote"),
-                interval_sec=30.0,
-                level=logging.INFO,
+                extra={"event": "WS_FULL_QUOTE_PROOF", "symbol": symbol},
             )
         if candle:
             bar = {
@@ -4817,7 +4822,9 @@ class MarketDataManager:
             }
             self._ohlc[symbol].append(bar)
             self._publish_closed_bar(bar)
-            self._logger.info(
+            verbose_candles = str(os.getenv("LOG_VERBOSE_CANDLES", "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+            self._logger.log(
+                logging.INFO if verbose_candles else logging.DEBUG,
                 "LIVE_CANDLE_CLOSED symbol=%s source=ws_candle close=%s",
                 symbol,
                 bar["close"],
