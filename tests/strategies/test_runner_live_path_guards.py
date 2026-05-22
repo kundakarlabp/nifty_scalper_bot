@@ -57,6 +57,9 @@ def _build_runner() -> StrategyRunner:
     runner._cooldown_log_throttle_seconds = 1.0
     runner._order_attempt_window = deque()
     runner._max_order_attempts_per_minute = 100
+    runner._signal_direction_dedup_seconds = 45.0
+    runner._signal_direction_dedup_min_improvement = 2.0
+    runner._signal_direction_last_emit = {}
     runner._record_trade = lambda *args, **kwargs: None
     runner._reset_execution_state = lambda *_args, **_kwargs: None
     runner._entry_lock = threading.Lock()
@@ -1347,3 +1350,149 @@ def test_early_runtime_not_ready_cooldown_resets_execution_state() -> None:
     )
     assert result.reason == "runtime_symbol_execution_not_ready_reject_cooldown"
     runner._reset_execution_state.assert_called()
+
+
+def test_directional_dedup_blocks_second_pe_same_reason_within_window() -> None:
+    runner = _build_runner()
+    now_epoch = 1000.0
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    metadata = {'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.8}
+    first = runner._apply_directional_signal_dedup(signal=signal, metadata=metadata, underlying='NIFTY', now_epoch=now_epoch, selected_symbol=signal.symbol, option_side='PE', selected_snapshot={})
+    second = runner._apply_directional_signal_dedup(signal=signal, metadata=metadata, underlying='NIFTY', now_epoch=now_epoch + 10.0, selected_symbol='NFO:NIFTY26APR23850PE', option_side='PE', selected_snapshot={})
+    assert first is None
+    assert second is not None
+    assert second.reason == 'signal_duplicate_direction_cooldown'
+
+
+def test_directional_dedup_separates_pe_and_ce_keys() -> None:
+    runner = _build_runner()
+    now_epoch = 1000.0
+    pe = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    ce = Signal(action='BUY', symbol='NFO:NIFTY26APR23800CE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    metadata = {'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.8}
+    runner._apply_directional_signal_dedup(signal=pe, metadata=metadata, underlying='NIFTY', now_epoch=now_epoch, selected_symbol=pe.symbol, option_side='PE', selected_snapshot={})
+    result = runner._apply_directional_signal_dedup(signal=ce, metadata=metadata, underlying='NIFTY', now_epoch=now_epoch + 5.0, selected_symbol=ce.symbol, option_side='CE', selected_snapshot={})
+    assert result is None
+
+
+def test_directional_dedup_separates_reason_keys() -> None:
+    runner = _build_runner()
+    now_epoch = 1000.0
+    s1 = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    s2 = Signal(action='BUY', symbol='NFO:NIFTY26APR23850PE', quantity=1, confidence=0.9, reason='Momentum', stop_loss=100.0, take_profit=120.0, metadata={})
+    metadata = {'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.8}
+    runner._apply_directional_signal_dedup(signal=s1, metadata=metadata, underlying='NIFTY', now_epoch=now_epoch, selected_symbol=s1.symbol, option_side='PE', selected_snapshot={})
+    result = runner._apply_directional_signal_dedup(signal=s2, metadata=metadata, underlying='NIFTY', now_epoch=now_epoch + 5.0, selected_symbol=s2.symbol, option_side='PE', selected_snapshot={})
+    assert result is None
+
+
+def test_directional_dedup_allows_better_candidate_within_window() -> None:
+    runner = _build_runner()
+    now_epoch = 1000.0
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    weaker = {'candidate_score': 6.0, 'tradable_quote': True, 'candidate_spread_pct': 1.2, 'candidate_tick_age_s': 2.0}
+    stronger = {'candidate_score': 8.5, 'tradable_quote': True, 'candidate_spread_pct': 0.5, 'candidate_tick_age_s': 0.5}
+    first = runner._apply_directional_signal_dedup(signal=signal, metadata=weaker, underlying='NIFTY', now_epoch=now_epoch, selected_symbol=signal.symbol, option_side='PE', selected_snapshot={'depth_available': False, 'distance_from_atm': 100})
+    second = runner._apply_directional_signal_dedup(signal=signal, metadata=stronger, underlying='NIFTY', now_epoch=now_epoch + 5.0, selected_symbol='NFO:NIFTY26APR23850PE', option_side='PE', selected_snapshot={'depth_available': True, 'distance_from_atm': 50})
+    assert first is None
+    assert second is None
+
+
+def test_directional_dedup_blocks_tiny_score_bump_if_quality_worse() -> None:
+    runner = _build_runner()
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    first = runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.4, 'candidate_tick_age_ms': 10.0},
+        underlying='NIFTY',
+        now_epoch=1000.0,
+        selected_symbol=signal.symbol,
+        option_side='PE',
+        selected_snapshot={'depth_available': True, 'distance_from_atm': 10},
+    )
+    second = runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 8.1, 'tradable_quote': False, 'candidate_spread_pct': 8.0, 'candidate_tick_age_ms': 7000.0},
+        underlying='NIFTY',
+        now_epoch=1003.0,
+        selected_symbol='NFO:NIFTY26APR23850PE',
+        option_side='PE',
+        selected_snapshot={'depth_available': False, 'distance_from_atm': 300},
+    )
+    assert first is None
+    assert second is not None
+    assert second.reason == 'signal_duplicate_direction_cooldown'
+
+
+def test_dedup_prefers_tick_age_ms_over_candidate_tick_age_s() -> None:
+    runner = _build_runner()
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.5, 'candidate_tick_age_ms': 0.0, 'candidate_tick_age_s': 9.0},
+        underlying='NIFTY',
+        now_epoch=1000.0,
+        selected_symbol=signal.symbol,
+        option_side='PE',
+        selected_snapshot={},
+    )
+    state = runner._signal_direction_last_emit['NIFTY:PE:OrderFlow']
+    assert state['ranking_fields']['tick_age_ms'] == 0.0
+
+
+def test_dedup_uses_zero_candidate_tick_age_s_without_fallback_default() -> None:
+    runner = _build_runner()
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.5, 'candidate_tick_age_s': 0.0},
+        underlying='NIFTY',
+        now_epoch=1000.0,
+        selected_symbol=signal.symbol,
+        option_side='PE',
+        selected_snapshot={},
+    )
+    state = runner._signal_direction_last_emit['NIFTY:PE:OrderFlow']
+    assert state['ranking_fields']['tick_age_ms'] == 0.0
+
+
+def test_mark_directional_dedup_failed_clears_reservation() -> None:
+    runner = _build_runner()
+    runner._signal_direction_last_emit['NIFTY:PE:OrderFlow'] = {'status': 'reserved', 'rank_score': 10.0}
+    runner._mark_directional_dedup_failed(underlying='NIFTY', option_side='PE', reason='OrderFlow')
+    assert 'NIFTY:PE:OrderFlow' not in runner._signal_direction_last_emit
+
+
+def test_directional_dedup_fallback_selected_symbol_snapshot_without_candidates(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
+    captured: dict[str, object] = {}
+
+    def _capture_dedup(**kwargs):
+        captured['selected_symbol'] = kwargs.get('selected_symbol')
+        captured['selected_snapshot'] = kwargs.get('selected_snapshot')
+        return SignalExecutionResult(False, 'dedup_test_stop')
+
+    runner._apply_directional_signal_dedup = _capture_dedup  # type: ignore[method-assign]
+
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.9,
+        reason='OrderFlow',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={'strategy_score': 7, 'option_score': 7, 'data_score': 7, 'rr_score': 7},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NFO:NIFTY26APR23800PE',
+        trade_symbol='NFO:NIFTY26APR23800PE',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='dedup-fallback',
+    )
+    assert result.reason == 'dedup_test_stop'
+    assert captured['selected_symbol'] == 'NFO:NIFTY26APR23800PE'
+    assert captured['selected_snapshot'] == {}

@@ -597,6 +597,13 @@ class StrategyRunner:
         self._exec_reject_runtime_not_ready_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_RUNTIME_NOT_READY_SECONDS", "10") or 10))
         self._exec_reject_invalid_lot_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_INVALID_LOT_SECONDS", "300") or 300))
         self._order_attempt_window: Deque[float] = deque()
+        self._signal_direction_dedup_seconds = max(
+            1.0, float(os.getenv("SIGNAL_DIRECTION_DEDUP_SECONDS", "45") or 45)
+        )
+        self._signal_direction_dedup_min_improvement = float(
+            os.getenv("SIGNAL_DIRECTION_DEDUP_MIN_IMPROVEMENT", "2.0") or 2.0
+        )
+        self._signal_direction_last_emit: dict[str, dict[str, Any]] = {}
         self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "60") or 60))
         self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "120") or 120))
         self._max_order_attempts_per_minute = max(1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "3") or 3))
@@ -2354,6 +2361,22 @@ class StrategyRunner:
             },
         )
         return SignalExecutionResult(False, reason, details=payload)
+
+    def _directional_dedup_key(
+        self, *, underlying: str, option_side: str, reason: str
+    ) -> str:
+        return f"{underlying}:{option_side}:{reason}"
+
+    def _mark_directional_dedup_failed(
+        self, *, underlying: str, option_side: str, reason: str
+    ) -> None:
+        key = self._directional_dedup_key(
+            underlying=underlying, option_side=option_side, reason=reason
+        )
+        state = self._signal_direction_last_emit.get(key)
+        if isinstance(state, dict):
+            state["status"] = "failed"
+            self._signal_direction_last_emit.pop(key, None)
 
     def _resolve_candidate_contracts(
         self, *, side: str, target_strikes: set[int]
@@ -9036,6 +9059,115 @@ class StrategyRunner:
         finally:
             self._entry_lock.release()
 
+    def _apply_directional_signal_dedup(
+        self,
+        *,
+        signal: Signal,
+        metadata: dict[str, Any],
+        underlying: str,
+        now_epoch: float,
+        selected_symbol: str,
+        option_side: str,
+        selected_snapshot: dict[str, Any],
+    ) -> SignalExecutionResult | None:
+        reason = str(signal.reason or "unknown")
+        key = self._directional_dedup_key(
+            underlying=underlying, option_side=option_side, reason=reason
+        )
+        prev = self._signal_direction_last_emit.get(key)
+        score_raw = metadata.get("candidate_score")
+        if score_raw is None:
+            score_raw = metadata.get("strategy_score")
+        if score_raw is None:
+            score_raw = signal.confidence
+        score = float(score_raw) if score_raw is not None else 0.0
+        tradable_quote = bool(metadata.get("tradable_quote"))
+        spread_pct_raw = metadata.get("candidate_spread_pct")
+        if spread_pct_raw is None:
+            spread_pct_raw = metadata.get("spread_pct")
+        spread_pct = float(spread_pct_raw) if spread_pct_raw is not None else 999.0
+        tick_age_ms_raw = metadata.get("candidate_tick_age_ms")
+        if tick_age_ms_raw is None:
+            tick_age_ms_raw = metadata.get("tick_age_ms")
+        if tick_age_ms_raw is not None:
+            tick_age_ms = float(tick_age_ms_raw)
+        else:
+            tick_age_s_raw = metadata.get("candidate_tick_age_s")
+            if tick_age_s_raw is None:
+                tick_age_s_raw = metadata.get("tick_age_s")
+            tick_age_ms = float(tick_age_s_raw) * 1000.0 if tick_age_s_raw is not None else 999000.0
+        depth_available = bool(
+            selected_snapshot.get("depth_available") or selected_snapshot.get("depth")
+        )
+        premium_ok = bool(selected_snapshot.get("premium_within_range", True))
+        distance_raw = selected_snapshot.get("distance_from_atm")
+        if distance_raw is None:
+            distance_raw = selected_snapshot.get("strike_distance_from_atm")
+        if distance_raw is None:
+            distance_raw = metadata.get("strike_distance_from_atm")
+        distance_atm = abs(float(distance_raw)) if distance_raw is not None else 999.0
+        rank_score = (
+            score * 10.0
+            + (2.0 if tradable_quote else -5.0)
+            + (1.0 if depth_available else 0.0)
+            + (1.0 if premium_ok else -2.0)
+            - min(spread_pct, 10.0) * 1.5
+            - min(tick_age_ms / 1000.0, 10.0) * 0.5
+            - min(distance_atm / 100.0, 10.0) * 0.5
+        )
+        ranking_fields = {
+            "score": score,
+            "tradable_quote": tradable_quote,
+            "spread_pct": spread_pct,
+            "tick_age_ms": tick_age_ms,
+            "depth_available": depth_available,
+            "premium_within_range": premium_ok,
+            "distance_from_atm": distance_atm,
+            "rank_score": rank_score,
+        }
+        rejected_symbols: list[str] = []
+        snapshots = metadata.get("candidate_snapshots")
+        if isinstance(snapshots, list):
+            rejected_symbols = [
+                str(snap.get("symbol"))
+                for snap in snapshots
+                if isinstance(snap, dict)
+                and normalize_symbol(str(snap.get("symbol") or ""))
+                != normalize_symbol(selected_symbol)
+            ]
+        self._logger.info(
+            "SIGNAL_CANDIDATE_SELECTED direction=%s selected_symbol=%s rejected_symbols=%s ranking_fields=%s",
+            option_side,
+            selected_symbol,
+            rejected_symbols,
+            ranking_fields,
+        )
+        if prev is not None:
+            elapsed = now_epoch - float(prev.get("ts", 0.0))
+            if elapsed < self._signal_direction_dedup_seconds:
+                prev_rank_score = float(prev.get("rank_score", 0.0) or 0.0)
+                if (rank_score - prev_rank_score) < self._signal_direction_dedup_min_improvement:
+                    remaining = max(0.0, self._signal_direction_dedup_seconds - elapsed)
+                    self._logger.info(
+                        "SIGNAL_DEDUP_BLOCKED symbol=%s direction=%s reason=%s key=%s seconds_remaining=%.2f",
+                        selected_symbol,
+                        option_side,
+                        reason,
+                        key,
+                        remaining,
+                    )
+                    return SignalExecutionResult(
+                        False, "signal_duplicate_direction_cooldown"
+                    )
+        self._signal_direction_last_emit[key] = {
+            "ts": now_epoch,
+            "symbol": selected_symbol,
+            "status": "reserved",
+            "rank_score": rank_score,
+            "ranking_fields": ranking_fields,
+        }
+        return None
+
     def _handle_entry_signal_inner(
         self,
         signal: Signal,
@@ -9229,6 +9361,10 @@ class StrategyRunner:
                 return SignalExecutionResult(False, "unknown_option_side")
             candidate_snapshots_obj = metadata.get("candidate_snapshots")
             is_directional_option = option_side in {"CE", "PE"}
+            selected_symbol = normalize_symbol(
+                trade_symbol or base_symbol or signal.symbol
+            )
+            selected_snapshot: dict[str, Any] = {}
             if is_live_mode and is_directional_option and not isinstance(
                 candidate_snapshots_obj, list
             ):
@@ -9438,9 +9574,24 @@ class StrategyRunner:
                 if reject_cooldown_result is not None:
                     self._reset_execution_state(base_symbol)
                     return reject_cooldown_result
+                dedup_result = self._apply_directional_signal_dedup(
+                    signal=signal,
+                    metadata=metadata,
+                    underlying=underlying,
+                    now_epoch=now_epoch,
+                    selected_symbol=selected_symbol,
+                    option_side=option_side,
+                    selected_snapshot=selected_snapshot,
+                )
+                if dedup_result is not None:
+                    self._reset_execution_state(base_symbol)
+                    return dedup_result
                 if is_live_mode and not self._ensure_symbol_execution_ready_for_order(
                     trade_symbol or base_symbol, trace_id=trace_id
                 ):
+                    self._mark_directional_dedup_failed(
+                        underlying=underlying, option_side=option_side, reason=reason_key
+                    )
                     self._execution_reject_cooldown_ts[
                         f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:runtime_symbol_execution_not_ready"
                     ] = now_epoch
@@ -9687,6 +9838,12 @@ class StrategyRunner:
                     )
                     self._reset_execution_state(base_symbol)
                     _trace(final_score_block_reason)
+                    if final_score_block_reason == "quote_not_usable_for_order_plan":
+                        self._mark_directional_dedup_failed(
+                            underlying=underlying,
+                            option_side=option_side,
+                            reason=reason_key,
+                        )
                     return SignalExecutionResult(False, final_score_block_reason)
             missing_components = missing_score_components(metadata)
             if missing_components and reason_key == "premium_momentum_squeeze":
@@ -9850,6 +10007,9 @@ class StrategyRunner:
                 )
             except Exception as lot_exc:
                 self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s error=%s", trade_symbol or base_symbol, lot_exc)
+                self._mark_directional_dedup_failed(
+                    underlying=underlying, option_side=option_side, reason=reason_key
+                )
                 self._execution_reject_cooldown_ts[f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:invalid_lot_quantity"] = now_epoch
                 self._reset_execution_state(base_symbol)
                 return self._reject_signal_execution(
@@ -9858,6 +10018,9 @@ class StrategyRunner:
             qty = final_qty
             if qty <= 0 or (lot_size > 0 and qty % lot_size != 0):
                 self._logger.warning("ORDER_BLOCKED: invalid_lot_quantity symbol=%s qty=%s lot_size=%s", trade_symbol or base_symbol, qty, lot_size)
+                self._mark_directional_dedup_failed(
+                    underlying=underlying, option_side=option_side, reason=reason_key
+                )
                 self._execution_reject_cooldown_ts[f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:invalid_lot_quantity"] = now_epoch
                 self._reset_execution_state(base_symbol)
                 return self._reject_signal_execution(
