@@ -115,3 +115,14 @@ def test_place_order_live_option_signal_calls_broker_once_and_propagates_order_i
 
     assert broker.calls == 1
     assert order_id == 'OID1'
+
+
+def test_unexpected_exception_increments_failure_and_engages_kill_switch(monkeypatch, caplog):
+    om = _om('ok')
+    om._max_failures = 1
+    monkeypatch.setattr(om, '_lot_size_for_symbol', lambda s: 1)
+    monkeypatch.setattr(om, '_submit_broker_order', lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    with caplog.at_level("CRITICAL"):
+        assert om.place_order('NFO:NIFTY26MAY23750CE', 'BUY', 1, order_type=OrderType.MARKET, stop_loss=10) is None
+    assert om._consecutive_failures == 1
+    assert any("ORDER_KILL_SWITCH_ENGAGED" in rec.message for rec in caplog.records)

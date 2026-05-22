@@ -1944,6 +1944,19 @@ class OrderManager:
             reason,
             extra={"event": "ORDER_KILL_SWITCH_RESET", "reason": reason},
         )
+        self._log_kill_switch_status()
+
+    def _log_kill_switch_status(self) -> None:
+        status = self.get_kill_switch_status()
+        self._logger.info(
+            "ORDER_KILL_SWITCH_STATUS active=%s reason=%s failures=%s engaged_at=%s auto_reset_allowed=%s",
+            status.get("active"),
+            status.get("kill_reason"),
+            status.get("consecutive_failures"),
+            status.get("engaged_at"),
+            status.get("auto_reset_allowed"),
+            extra={"event": "ORDER_KILL_SWITCH_STATUS", **status},
+        )
 
     def get_kill_switch_status(self) -> dict[str, Any]:
         """Return kill switch diagnostics. Args: none. Returns: status map. Raises: none."""
@@ -2883,12 +2896,17 @@ class OrderManager:
                     self._kill_switch_reason = failure_class
                     self._last_kill_switch_log_ts = time.time()
                     self._logger.critical(
-                        "ORDER_KILL_SWITCH_ENGAGED consecutive_failures=%s reason=%s symbol=%s",
-                        self._consecutive_failures,
+                        "ORDER_KILL_SWITCH_ENGAGED reason=%s failures=%s exception_type=%s exception=%s trace_id=%s symbol=%s",
                         self._kill_switch_reason,
+                        self._consecutive_failures,
+                        type(e).__name__,
+                        str(e),
+                        trace_id,
                         normalized_symbol,
-                        extra={"event": "ORDER_KILL_SWITCH_ENGAGED", "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason, "symbol": normalized_symbol},
+                        extra={"event": "ORDER_KILL_SWITCH_ENGAGED", "reason": self._kill_switch_reason, "failures": self._consecutive_failures, "exception_type": type(e).__name__, "exception": str(e), "trace_id": trace_id, "symbol": normalized_symbol},
+                        exc_info=(failure_class == "unexpected_exception"),
                     )
+                    self._log_kill_switch_status()
 
                 # Fail Fast logic
                 if any(
