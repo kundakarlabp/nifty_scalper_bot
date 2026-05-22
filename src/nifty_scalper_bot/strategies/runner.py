@@ -9361,6 +9361,10 @@ class StrategyRunner:
                 return SignalExecutionResult(False, "unknown_option_side")
             candidate_snapshots_obj = metadata.get("candidate_snapshots")
             is_directional_option = option_side in {"CE", "PE"}
+            selected_symbol = normalize_symbol(
+                trade_symbol or base_symbol or signal.symbol
+            )
+            selected_snapshot: dict[str, Any] = {}
             if is_live_mode and is_directional_option and not isinstance(
                 candidate_snapshots_obj, list
             ):

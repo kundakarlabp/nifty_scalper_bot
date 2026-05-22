@@ -1461,3 +1461,38 @@ def test_mark_directional_dedup_failed_clears_reservation() -> None:
     runner._signal_direction_last_emit['NIFTY:PE:OrderFlow'] = {'status': 'reserved', 'rank_score': 10.0}
     runner._mark_directional_dedup_failed(underlying='NIFTY', option_side='PE', reason='OrderFlow')
     assert 'NIFTY:PE:OrderFlow' not in runner._signal_direction_last_emit
+
+
+def test_directional_dedup_fallback_selected_symbol_snapshot_without_candidates(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
+    captured: dict[str, object] = {}
+
+    def _capture_dedup(**kwargs):
+        captured['selected_symbol'] = kwargs.get('selected_symbol')
+        captured['selected_snapshot'] = kwargs.get('selected_snapshot')
+        return SignalExecutionResult(False, 'dedup_test_stop')
+
+    runner._apply_directional_signal_dedup = _capture_dedup  # type: ignore[method-assign]
+
+    signal = Signal(
+        action='BUY',
+        symbol='NFO:NIFTY26APR23800PE',
+        quantity=1,
+        confidence=0.9,
+        reason='OrderFlow',
+        stop_loss=100.0,
+        take_profit=120.0,
+        metadata={'strategy_score': 7, 'option_score': 7, 'data_score': 7, 'rr_score': 7},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol='NFO:NIFTY26APR23800PE',
+        trade_symbol='NFO:NIFTY26APR23800PE',
+        trade_price=110.0,
+        timestamp=datetime.now(timezone.utc),
+        trace_id='dedup-fallback',
+    )
+    assert result.reason == 'dedup_test_stop'
+    assert captured['selected_symbol'] == 'NFO:NIFTY26APR23800PE'
+    assert captured['selected_snapshot'] == {}
