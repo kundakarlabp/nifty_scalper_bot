@@ -597,6 +597,10 @@ class StrategyRunner:
         self._exec_reject_runtime_not_ready_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_RUNTIME_NOT_READY_SECONDS", "10") or 10))
         self._exec_reject_invalid_lot_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_INVALID_LOT_SECONDS", "300") or 300))
         self._order_attempt_window: Deque[float] = deque()
+        self._signal_direction_dedup_seconds = max(
+            1.0, float(os.getenv("SIGNAL_DIRECTION_DEDUP_SECONDS", "45") or 45)
+        )
+        self._signal_direction_last_emit: dict[str, dict[str, Any]] = {}
         self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "60") or 60))
         self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "120") or 120))
         self._max_order_attempts_per_minute = max(1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "3") or 3))
@@ -2354,6 +2358,11 @@ class StrategyRunner:
             },
         )
         return SignalExecutionResult(False, reason, details=payload)
+
+    def _directional_dedup_key(
+        self, *, underlying: str, option_side: str, reason: str
+    ) -> str:
+        return f"{underlying}:{option_side}:{reason}"
 
     def _resolve_candidate_contracts(
         self, *, side: str, target_strikes: set[int]
@@ -9036,6 +9045,103 @@ class StrategyRunner:
         finally:
             self._entry_lock.release()
 
+    def _apply_directional_signal_dedup(
+        self,
+        *,
+        signal: Signal,
+        metadata: dict[str, Any],
+        underlying: str,
+        now_epoch: float,
+        selected_symbol: str,
+        option_side: str,
+        selected_snapshot: dict[str, Any],
+    ) -> SignalExecutionResult | None:
+        reason = str(signal.reason or "unknown")
+        key = self._directional_dedup_key(
+            underlying=underlying, option_side=option_side, reason=reason
+        )
+        prev = self._signal_direction_last_emit.get(key)
+        score = float(
+            metadata.get("candidate_score")
+            or metadata.get("strategy_score")
+            or signal.confidence
+            or 0.0
+        )
+        tradable_quote = bool(metadata.get("tradable_quote"))
+        spread_pct = float(
+            metadata.get("candidate_spread_pct") or metadata.get("spread_pct") or 999.0
+        )
+        tick_age_ms = float(metadata.get("candidate_tick_age_s") or 999.0) * 1000.0
+        depth_available = bool(
+            selected_snapshot.get("depth_available") or selected_snapshot.get("depth")
+        )
+        premium_ok = bool(selected_snapshot.get("premium_within_range", True))
+        distance_atm = abs(
+            float(
+                selected_snapshot.get("distance_from_atm")
+                or selected_snapshot.get("strike_distance_from_atm")
+                or metadata.get("strike_distance_from_atm")
+                or 999.0
+            )
+        )
+        ranking = (
+            score,
+            1.0 if tradable_quote else 0.0,
+            -spread_pct,
+            -tick_age_ms,
+            1.0 if depth_available else 0.0,
+            1.0 if premium_ok else 0.0,
+            -distance_atm,
+        )
+        rejected_symbols: list[str] = []
+        snapshots = metadata.get("candidate_snapshots")
+        if isinstance(snapshots, list):
+            rejected_symbols = [
+                str(snap.get("symbol"))
+                for snap in snapshots
+                if isinstance(snap, dict)
+                and normalize_symbol(str(snap.get("symbol") or ""))
+                != normalize_symbol(selected_symbol)
+            ]
+        self._logger.info(
+            "SIGNAL_CANDIDATE_SELECTED direction=%s selected_symbol=%s rejected_symbols=%s ranking_fields=%s",
+            option_side,
+            selected_symbol,
+            rejected_symbols,
+            {
+                "score": score,
+                "tradable_quote": tradable_quote,
+                "spread_pct": spread_pct,
+                "tick_age_ms": tick_age_ms,
+                "depth_available": depth_available,
+                "premium_within_range": premium_ok,
+                "distance_from_atm": distance_atm,
+            },
+        )
+        if prev is not None:
+            elapsed = now_epoch - float(prev.get("ts", 0.0))
+            if elapsed < self._signal_direction_dedup_seconds:
+                prev_rank = tuple(prev.get("ranking", ()))
+                if ranking <= prev_rank:
+                    remaining = max(0.0, self._signal_direction_dedup_seconds - elapsed)
+                    self._logger.info(
+                        "SIGNAL_DEDUP_BLOCKED symbol=%s direction=%s reason=%s key=%s seconds_remaining=%.2f",
+                        selected_symbol,
+                        option_side,
+                        reason,
+                        key,
+                        remaining,
+                    )
+                    return SignalExecutionResult(
+                        False, "signal_duplicate_direction_cooldown"
+                    )
+        self._signal_direction_last_emit[key] = {
+            "ts": now_epoch,
+            "symbol": selected_symbol,
+            "ranking": ranking,
+        }
+        return None
+
     def _handle_entry_signal_inner(
         self,
         signal: Signal,
@@ -9438,6 +9544,18 @@ class StrategyRunner:
                 if reject_cooldown_result is not None:
                     self._reset_execution_state(base_symbol)
                     return reject_cooldown_result
+                dedup_result = self._apply_directional_signal_dedup(
+                    signal=signal,
+                    metadata=metadata,
+                    underlying=underlying,
+                    now_epoch=now_epoch,
+                    selected_symbol=selected_symbol,
+                    option_side=option_side,
+                    selected_snapshot=selected_snapshot,
+                )
+                if dedup_result is not None:
+                    self._reset_execution_state(base_symbol)
+                    return dedup_result
                 if is_live_mode and not self._ensure_symbol_execution_ready_for_order(
                     trade_symbol or base_symbol, trace_id=trace_id
                 ):
