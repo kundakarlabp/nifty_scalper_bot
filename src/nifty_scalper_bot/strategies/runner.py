@@ -1987,7 +1987,12 @@ class StrategyRunner:
             for raw_symbol, ready in execution_ready_by_symbol.items():
                 runtime_key = self._runtime_ready_key(str(raw_symbol or ""))
                 if runtime_key:
-                    normalized_execution_ready[runtime_key] = bool(ready)
+                    is_ready = bool(ready)
+                    normalized_execution_ready[runtime_key] = is_ready
+                    if is_ready:
+                        self._runtime_symbol_last_ready_at[runtime_key] = time.time()
+                    else:
+                        self._runtime_symbol_last_ready_at.pop(runtime_key, None)
             self._runtime_execution_ready_by_symbol = normalized_execution_ready
         self._runtime_readiness_reason = reason
         self._runtime_startup_ready = bool(

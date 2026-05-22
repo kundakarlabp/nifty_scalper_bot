@@ -1547,7 +1547,7 @@ def test_runtime_not_ready_cooldown_short_circuits(monkeypatch) -> None:
     base_symbol = 'NFO:NIFTY26MAY23700PE'
     reason_key = 'OrderFlow'
     now = datetime.now(timezone.utc).timestamp()
-    runner._execution_reject_cooldown_ts[f'NIFTY26MAY23700PE:{reason_key}:runtime_symbol_execution_not_ready'] = now
+    runner._execution_reject_cooldown_ts[f'NFO:NIFTY26MAY23700PE:{reason_key}:runtime_symbol_execution_not_ready'] = now
     runner._order_manager.submit_trade_plan = MagicMock(return_value='oid-should-not')
     signal = Signal(action='BUY', symbol=base_symbol, quantity=1, confidence=0.9, reason=reason_key, stop_loss=300.0, take_profit=420.0, metadata={'candidate_snapshots': []})
     result = runner._handle_entry_signal_inner(signal, base_symbol=base_symbol, trade_symbol=base_symbol, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id='trace-cool')
@@ -1615,6 +1615,24 @@ def test_runtime_ready_key_maps_prefixed_and_unprefixed_option_to_same_key() -> 
     runner = _build_runner()
     assert runner._runtime_ready_key('NIFTY26MAY23700PE') == 'NFO:NIFTY26MAY23700PE'
     assert runner._runtime_ready_key('NFO:NIFTY26MAY23700PE') == 'NFO:NIFTY26MAY23700PE'
+
+
+def test_set_runtime_readiness_populates_last_ready_timestamp(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('RUNNER_EXECUTION_READY_TTL_SECONDS', '60')
+    now_ts = 1700000000.0
+    monkeypatch.setattr('nifty_scalper_bot.strategies.runner.time.time', lambda: now_ts)
+    symbol = 'NFO:NIFTY26MAY23700PE'
+    runner.set_runtime_readiness(
+        data_hard_ready=True,
+        evaluation_ready=True,
+        live_orders_armed=False,
+        execution_ready_by_symbol={symbol: True},
+    )
+    runtime_key = runner._runtime_ready_key(symbol)
+    assert runner._runtime_symbol_last_ready_at.get(runtime_key) == now_ts
+    assert runner._is_symbol_execution_ready(symbol) is True
 
 
 def test_dynamic_revalidation_resolves_lot_size_once(monkeypatch) -> None:
