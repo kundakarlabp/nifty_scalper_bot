@@ -613,6 +613,7 @@ class StrategyRunner:
         self._runtime_evaluation_ready = False
         self._runtime_live_orders_armed = False
         self._runtime_execution_ready_by_symbol: dict[str, bool] = {}
+        self._runtime_symbol_last_ready_at: dict[str, float] = {}
         self._runtime_readiness_reason: str | None = None
         self._runtime_startup_ready = False
         self._startup_gate_last_log_ts = 0.0
@@ -1984,9 +1985,14 @@ class StrategyRunner:
         if execution_ready_by_symbol is not None:
             normalized_execution_ready: dict[str, bool] = {}
             for raw_symbol, ready in execution_ready_by_symbol.items():
-                normalized = normalize_symbol(str(raw_symbol or ""))
-                if normalized:
-                    normalized_execution_ready[normalized] = bool(ready)
+                runtime_key = self._runtime_ready_key(str(raw_symbol or ""))
+                if runtime_key:
+                    is_ready = bool(ready)
+                    normalized_execution_ready[runtime_key] = is_ready
+                    if is_ready:
+                        self._runtime_symbol_last_ready_at[runtime_key] = time.time()
+                    else:
+                        self._runtime_symbol_last_ready_at.pop(runtime_key, None)
             self._runtime_execution_ready_by_symbol = normalized_execution_ready
         self._runtime_readiness_reason = reason
         self._runtime_startup_ready = bool(
@@ -2030,13 +2036,39 @@ class StrategyRunner:
         )
         if not is_live_mode:
             return True
-        if not self._runtime_execution_ready_by_symbol:
-            return bool(self._runtime_live_orders_armed)
-        return bool(self._runtime_execution_ready_by_symbol.get(normalize_symbol(symbol), False))
+        runtime_key = self._runtime_ready_key(symbol)
+        if not runtime_key:
+            return False
+        if not bool(self._runtime_execution_ready_by_symbol.get(runtime_key, False)):
+            return False
+        ttl_seconds = float(os.getenv("RUNNER_EXECUTION_READY_TTL_SECONDS", "60") or "60")
+        if ttl_seconds > 0:
+            last_ready_at = float(
+                self._runtime_symbol_last_ready_at.get(runtime_key, 0.0) or 0.0
+            )
+            if last_ready_at <= 0.0 or (time.time() - last_ready_at) > ttl_seconds:
+                self._runtime_execution_ready_by_symbol.pop(runtime_key, None)
+                self._runtime_symbol_last_ready_at.pop(runtime_key, None)
+                return False
+        return True
+
+    def _runtime_ready_key(self, symbol: str) -> str:
+        raw = str(symbol or "").strip()
+        if not raw:
+            return ""
+        canonical_symbol = canonical(raw) or enforce_canonical(raw)
+        normalized = normalize_symbol(canonical_symbol or raw)
+        if ":" in normalized:
+            return normalized
+        option_or_fut = bool(re.match(r"^NIFTY\d{1,2}[A-Z]{3}(\d{5})(CE|PE)$", normalized) or normalized.endswith("FUT"))
+        if option_or_fut:
+            return f"NFO:{normalized}"
+        return normalized
 
     def _ensure_symbol_execution_ready_for_order(self, symbol: str, *, trace_id: str | None = None) -> bool:
         normalized = normalize_symbol(symbol)
-        was_ready = self._is_symbol_execution_ready(normalized)
+        runtime_key = self._runtime_ready_key(normalized)
+        was_ready = self._is_symbol_execution_ready(runtime_key)
         if was_ready:
             return True
         reason = "runtime_not_marked_ready"
@@ -2044,8 +2076,10 @@ class StrategyRunner:
         bid = ask = None
         tradable_quote = False
         lot_size_resolved = False
+        lot_size = 0
         max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
         snapshot_key_used: str | None = None
+        snap = None
         candidate_keys: list[str] = []
         for key in (symbol, normalized):
             if key and key not in candidate_keys:
@@ -2062,11 +2096,14 @@ class StrategyRunner:
             snap = None
             for candidate_symbol in candidate_keys:
                 try:
-                    snap = self._market_data.get_symbol_snapshot(candidate_symbol)
-                    snapshot_key_used = candidate_symbol
-                    break
+                    candidate_snap = self._market_data.get_symbol_snapshot(candidate_symbol)
                 except Exception:
                     continue
+                if candidate_snap is None:
+                    continue
+                snap = candidate_snap
+                snapshot_key_used = candidate_symbol
+                break
             if snap is not None:
                 bid = float(snap.bid or 0.0)
                 ask = float(snap.ask or 0.0)
@@ -2080,8 +2117,10 @@ class StrategyRunner:
                 if not lot_key:
                     continue
                 try:
-                    lot_size_resolved = int(self._order_manager.resolve_lot_size(lot_key)) > 0
-                    if lot_size_resolved:
+                    resolved_lot = int(self._order_manager.resolve_lot_size(lot_key) or 0)
+                    if resolved_lot > 0:
+                        lot_size = resolved_lot
+                        lot_size_resolved = True
                         lot_size_key_used = lot_key
                         break
                 except Exception:
@@ -2090,10 +2129,10 @@ class StrategyRunner:
                 reason = "lot_size_unresolved"
         quote_source = None
         history_count = 0
-        lot_size = 0
-        startup_marked_ready = bool(self._runtime_execution_ready_by_symbol.get(normalized, False))
+        startup_marked_ready = bool(self._runtime_execution_ready_by_symbol.get(runtime_key, False))
         dynamic_revalidation_attempted = True
         dynamic_revalidation_passed = False
+        history_fallback = "none"
         if snap is not None:
             quote_source = getattr(snap, "source", None)
             try:
@@ -2104,27 +2143,30 @@ class StrategyRunner:
         else:
             spread_ok = False
         min_history = int(os.getenv("RUNNER_MIN_REAL_TICKS_60S", "1") or "1")
-        if lot_size_resolved and self._order_manager is not None and lot_size_key_used is not None:
-            with suppress(Exception):
-                lot_size = int(self._order_manager.resolve_lot_size(lot_size_key_used) or 0)
+        allow_fresh_without_tick_count = _env_flag("RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT", default=True)
         if not tradable_quote:
             reason = "quote_not_tradable"
         elif tick_age_ms is None or tick_age_ms > max_quote_age_ms:
             reason = "quote_stale"
         elif not spread_ok:
             reason = "spread_too_wide"
-        elif not lot_size_resolved:
+        elif not lot_size_resolved or lot_size <= 0:
             reason = "lot_size_unresolved"
-        elif history_count < min_history:
-            reason = "option_ohlc_insufficient"
+        elif history_count < min_history and not allow_fresh_without_tick_count:
+            reason = "option_history_insufficient"
+        elif history_count < min_history and allow_fresh_without_tick_count:
+            history_fallback = "fresh_quote"
+            dynamic_revalidation_passed = True
+            reason = "fresh_runtime_revalidation"
         else:
             dynamic_revalidation_passed = True
             reason = "fresh_runtime_revalidation"
         final_ready = bool(dynamic_revalidation_passed)
-        if final_ready and normalized:
-            self._runtime_execution_ready_by_symbol[normalized] = True
-            self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s reason=%s trace_id=%s", normalized, reason, trace_id)
-        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, tradable_quote, lot_size_resolved)
+        if final_ready and runtime_key:
+            self._runtime_execution_ready_by_symbol[runtime_key] = True
+            self._runtime_symbol_last_ready_at[runtime_key] = time.time()
+            self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s runtime_key=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s", normalized, runtime_key, reason, tick_age_ms, bid, ask, lot_size, history_count, trace_id)
+        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, runtime_key, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, history_fallback, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, tradable_quote, lot_size_resolved)
         return final_ready
 
     def _execution_reject_cooldown_result(
@@ -2142,12 +2184,16 @@ class StrategyRunner:
                 continue
             remaining = seconds - (now_epoch - float(last_ts))
             if remaining > 0:
-                self._logger.info(
+                log_throttled(
+                    self._logger,
+                    f"exec_reject_cooldown_active_{normalized_reject_symbol}_{reason_key}_{reject_reason}",
                     "EXEC_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s seconds_remaining=%.2f trace_id=%s",
                     normalized_reject_symbol,
                     reject_reason,
                     remaining,
                     trace_id,
+                    interval_sec=15.0,
+                    level=logging.INFO,
                 )
                 return SignalExecutionResult(False, f"{reject_reason}_reject_cooldown")
         return None
@@ -9417,9 +9463,12 @@ class StrategyRunner:
             if reject_cooldown_result is not None:
                 self._reset_execution_state(base_symbol)
                 return reject_cooldown_result
+            candidate_ready_before = None
+            candidate_ready_after = None
+            selected_candidate_trace = None
             def _trace(stop_reason: str, executor_called: bool = False, risk_allowed: bool = False) -> None:
                 self._logger.info(
-                    "TRADING_PATH_TRACE symbol=%s strategy_name=%s live_orders_armed=%s selected_or_near_atm=%s history_bars_effective=%s signal_generated=%s consensus_side=%s quality_final=%s quality_threshold=%s quality_allowed=%s candidate_selected=%s candidate_snapshots_present=%s risk_allowed=%s executor_called=%s stop_reason=%s",
+                    "TRADING_PATH_TRACE symbol=%s strategy_name=%s live_orders_armed=%s selected_or_near_atm=%s history_bars_effective=%s signal_generated=%s consensus_side=%s quality_final=%s quality_threshold=%s quality_allowed=%s candidate_selected=%s candidate_snapshots_present=%s selected_candidate=%s candidate_ready_before=%s candidate_ready_after=%s risk_allowed=%s executor_called=%s stop_reason=%s",
                     signal.symbol,
                     metadata.get("strategy_name") or metadata.get("strategy") or signal.reason,
                     bool(self._runtime_live_orders_armed),
@@ -9432,6 +9481,9 @@ class StrategyRunner:
                     (quality.allowed if quality is not None else None),
                     bool(metadata.get("candidate_selected") or metadata.get("is_selected_option")),
                     isinstance(metadata.get("candidate_snapshots"), list) and bool(metadata.get("candidate_snapshots")),
+                    selected_candidate_trace,
+                    candidate_ready_before,
+                    candidate_ready_after,
                     risk_allowed,
                     executor_called,
                     stop_reason,
@@ -9514,12 +9566,17 @@ class StrategyRunner:
                     candidate = None
                     for ranked in ranked_candidates:
                         ranked_symbol = normalize_symbol(ranked.symbol)
-                        if self._is_symbol_execution_ready(ranked_symbol):
+                        selected_candidate_trace = ranked_symbol
+                        candidate_ready_before = self._is_symbol_execution_ready(ranked_symbol)
+                        if candidate_ready_before:
+                            candidate_ready_after = True
                             candidate = ranked
                             break
                         if is_live_mode and self._ensure_symbol_execution_ready_for_order(ranked_symbol, trace_id=trace_id):
+                            candidate_ready_after = True
                             candidate = ranked
                             break
+                        candidate_ready_after = False
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in trade candidate selection: %s",

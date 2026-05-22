@@ -1507,7 +1507,7 @@ def test_dynamic_revalidation_marks_symbol_ready_when_fresh_quote(monkeypatch) -
         bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
     )
     assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='dyn-1') is True
-    assert runner._runtime_execution_ready_by_symbol.get('NIFTY26MAY23700PE') is True
+    assert runner._runtime_execution_ready_by_symbol.get('NFO:NIFTY26MAY23700PE') is True
 
 
 def test_dynamic_revalidation_rejects_missing_lot_size(monkeypatch) -> None:
@@ -1525,7 +1525,7 @@ def test_dynamic_revalidation_rejects_missing_lot_size(monkeypatch) -> None:
 def test_candidate_selection_tries_next_ready_candidate(monkeypatch) -> None:
     runner = _build_runner()
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
-    runner._runtime_execution_ready_by_symbol = {'NIFTY26MAY23650PE': True}
+    runner._runtime_execution_ready_by_symbol = {'NFO:NIFTY26MAY23650PE': True}
     runner._order_manager.submit_trade_plan = MagicMock(return_value='oid-next')
     runner._market_data = MagicMock()
     runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
@@ -1547,8 +1547,147 @@ def test_runtime_not_ready_cooldown_short_circuits(monkeypatch) -> None:
     base_symbol = 'NFO:NIFTY26MAY23700PE'
     reason_key = 'OrderFlow'
     now = datetime.now(timezone.utc).timestamp()
-    runner._execution_reject_cooldown_ts[f'NIFTY26MAY23700PE:{reason_key}:runtime_symbol_execution_not_ready'] = now
+    runner._execution_reject_cooldown_ts[f'NFO:NIFTY26MAY23700PE:{reason_key}:runtime_symbol_execution_not_ready'] = now
     runner._order_manager.submit_trade_plan = MagicMock(return_value='oid-should-not')
     signal = Signal(action='BUY', symbol=base_symbol, quantity=1, confidence=0.9, reason=reason_key, stop_loss=300.0, take_profit=420.0, metadata={'candidate_snapshots': []})
     result = runner._handle_entry_signal_inner(signal, base_symbol=base_symbol, trade_symbol=base_symbol, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id='trace-cool')
     assert result.reason == 'runtime_symbol_execution_not_ready_reject_cooldown'
+
+
+def test_order_readiness_revalidation_log_includes_dynamic_fields(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    logs: list[str] = []
+    runner._logger.info = lambda msg, *args, **kwargs: logs.append((msg % args) if args else str(msg))  # type: ignore[method-assign]
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+    )
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='dyn-log') is True
+    joined = "\n".join(logs)
+    assert 'ORDER_READINESS_REVALIDATION' in joined
+    assert 'dynamic_revalidation_attempted=' in joined
+    assert 'dynamic_revalidation_passed=' in joined
+    assert 'runtime_key=' in joined
+    assert 'history_fallback=' in joined
+
+
+def test_dynamic_revalidation_allows_fresh_quote_when_tick_count_missing(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT', 'true')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=None
+    )
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='dyn-fallback') is True
+
+
+def test_is_symbol_execution_ready_false_when_map_empty_even_if_live_orders_armed(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_live_orders_armed = True
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._runtime_symbol_last_ready_at = {}
+    assert runner._is_symbol_execution_ready('NFO:NIFTY26MAY23700PE') is False
+
+
+def test_is_symbol_execution_ready_expires_by_ttl(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('RUNNER_EXECUTION_READY_TTL_SECONDS', '1')
+    key = 'NFO:NIFTY26MAY23700PE'
+    runner._runtime_execution_ready_by_symbol = {key: True}
+    runner._runtime_symbol_last_ready_at = {key: 1.0}
+    monkeypatch.setattr('nifty_scalper_bot.strategies.runner.time.time', lambda: 5.0)
+    assert runner._is_symbol_execution_ready(key) is False
+    assert key not in runner._runtime_execution_ready_by_symbol
+
+
+def test_runtime_ready_key_keeps_spot_symbol_not_nfo() -> None:
+    runner = _build_runner()
+    assert runner._runtime_ready_key('NSE:NIFTY') == 'NSE:NIFTY'
+
+
+def test_runtime_ready_key_maps_prefixed_and_unprefixed_option_to_same_key() -> None:
+    runner = _build_runner()
+    assert runner._runtime_ready_key('NIFTY26MAY23700PE') == 'NFO:NIFTY26MAY23700PE'
+    assert runner._runtime_ready_key('NFO:NIFTY26MAY23700PE') == 'NFO:NIFTY26MAY23700PE'
+
+
+def test_set_runtime_readiness_populates_last_ready_timestamp(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('RUNNER_EXECUTION_READY_TTL_SECONDS', '60')
+    now_ts = 1700000000.0
+    monkeypatch.setattr('nifty_scalper_bot.strategies.runner.time.time', lambda: now_ts)
+    symbol = 'NFO:NIFTY26MAY23700PE'
+    runner.set_runtime_readiness(
+        data_hard_ready=True,
+        evaluation_ready=True,
+        live_orders_armed=False,
+        execution_ready_by_symbol={symbol: True},
+    )
+    runtime_key = runner._runtime_ready_key(symbol)
+    assert runner._runtime_symbol_last_ready_at.get(runtime_key) == now_ts
+    assert runner._is_symbol_execution_ready(symbol) is True
+
+
+def test_dynamic_revalidation_resolves_lot_size_once(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+    )
+    runner._order_manager.resolve_lot_size = MagicMock(return_value=65)
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='lot-once') is True
+    assert runner._order_manager.resolve_lot_size.call_count == 1
+
+
+def test_dynamic_revalidation_snapshot_alias_continues_after_none(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    raw_symbol = 'NFO:NIFTY26MAY23700PE'
+    normalized = 'NIFTY26MAY23700PE'
+
+    def _snap(symbol: str):
+        if symbol == raw_symbol:
+            return None
+        if symbol == normalized:
+            return SimpleNamespace(
+                bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+            )
+        raise RuntimeError('missing')
+
+    runner._market_data.get_symbol_snapshot.side_effect = _snap
+    assert runner._ensure_symbol_execution_ready_for_order(raw_symbol, trace_id='alias-none') is True
+
+
+def test_dynamic_revalidation_rejects_lot_size_zero(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+    )
+    runner._order_manager.resolve_lot_size = MagicMock(return_value=0)
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='lot-zero') is False
+
+
+def test_dynamic_revalidation_rejects_missing_tick_count_when_fallback_disabled(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT', 'false')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=None
+    )
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='hist-off') is False
