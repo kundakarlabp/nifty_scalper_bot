@@ -2583,6 +2583,8 @@ class StrategyManager(_BaseStrategyManager):
                 indicators.setdefault("futures_context", fut_ctx)
             direction_bias = (indicators.get("direction_bias") or indicators.get("underlying_direction_bias") or (spot_ctx.get("direction_bias") if spot_usable else None) or (fut_ctx.get("direction_bias") if fut_usable else None))
             direction_confidence = (indicators.get("underlying_direction_confidence") or (spot_ctx.get("underlying_direction_confidence") if spot_usable else None) or (fut_ctx.get("underlying_direction_confidence") if fut_usable else None) or 0.0)
+            context_resolved = False
+            direction_context_source: str | None = None
             if str(direction_bias or "").upper() in {"CE", "PE"}:
                 indicators["direction_bias"] = str(direction_bias).upper()
                 indicators["underlying_direction_bias"] = str(direction_bias).upper()
@@ -2593,6 +2595,8 @@ class StrategyManager(_BaseStrategyManager):
                 indicators["context_age_seconds"] = min(now_ts - float(spot_ctx.get("timestamp", now_ts)) if spot_usable else max_context_age + 1, now_ts - float(fut_ctx.get("timestamp", now_ts)) if fut_usable else max_context_age + 1)
                 indicators["context_fresh"] = True
                 indicators["direction_context_source"] = "primary"
+                context_resolved = True
+                direction_context_source = "primary"
                 log_throttled(
                     log,
                     f"direction_context_resolved_primary:{symbol}",
@@ -2627,6 +2631,8 @@ class StrategyManager(_BaseStrategyManager):
                     indicators["context_fresh"] = bool(indicators["context_age_seconds"] <= max_context_age)
                     indicators["direction_context_source"] = "fallback"
                     indicators["direction_context_reasons"] = fallback_reasons
+                    direction_context_source = "fallback"
+                    context_resolved = bool(indicators["context_fresh"])
                     log_throttled(
                         log,
                         f"direction_context_resolved_fallback:{symbol}",
@@ -2639,46 +2645,48 @@ class StrategyManager(_BaseStrategyManager):
                         interval_sec=30.0,
                         level=logging.INFO,
                     )
-                log_throttled(
-                    log,
-                    f"option_underlying_context_missing:{symbol}",
-                    "OPTION_UNDERLYING_CONTEXT_MISSING symbol=%s spot_ctx_present=%s futures_ctx_present=%s spot_ctx_age=%s futures_ctx_age=%s selected_ce=%s selected_pe=%s",
-                    symbol,
-                    bool(spot_ctx),
-                    bool(fut_ctx),
-                    (now_ts - float(spot_ctx.get("timestamp", now_ts))) if spot_ctx else None,
-                    (now_ts - float(fut_ctx.get("timestamp", now_ts))) if fut_ctx else None,
-                    indicators.get("selected_ce"),
-                    indicators.get("selected_pe"),
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                )
-                log_throttled(
-                    log,
-                    f"option_context_missing_direction_bias:{symbol}",
-                    "OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s spot_direction_valid=%s fut_direction_valid=%s",
-                    symbol,
-                    spot_fresh,
-                    fut_fresh,
-                    spot_direction_valid,
-                    fut_direction_valid,
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                    extra={
-                        "event": "OPTION_CONTEXT_MISSING_DIRECTION_BIAS",
-                        "symbol": symbol,
-                        "spot_fresh": spot_fresh,
-                        "fut_fresh": fut_fresh,
-                        "spot_direction_valid": spot_direction_valid,
-                        "fut_direction_valid": fut_direction_valid,
-                        "spot_direction_reasons": spot_ctx.get("direction_context_reasons"),
-                        "fut_direction_reasons": fut_ctx.get("direction_context_reasons"),
-                        "spot_ctx_keys": sorted(list(spot_ctx.keys())),
-                        "fut_ctx_keys": sorted(list(fut_ctx.keys())),
-                        "spot_tick_age_ms": spot_ctx.get("tick_age_ms"),
-                        "futures_tick_age_ms": fut_ctx.get("tick_age_ms"),
-                    },
-                )
+                if not context_resolved:
+                    log_throttled(
+                        log,
+                        f"option_underlying_context_missing:{symbol}",
+                        "OPTION_UNDERLYING_CONTEXT_MISSING symbol=%s spot_ctx_present=%s futures_ctx_present=%s spot_ctx_age=%s futures_ctx_age=%s selected_ce=%s selected_pe=%s",
+                        symbol,
+                        bool(spot_ctx),
+                        bool(fut_ctx),
+                        (now_ts - float(spot_ctx.get("timestamp", now_ts))) if spot_ctx else None,
+                        (now_ts - float(fut_ctx.get("timestamp", now_ts))) if fut_ctx else None,
+                        indicators.get("selected_ce"),
+                        indicators.get("selected_pe"),
+                        interval_sec=30.0,
+                        level=logging.INFO,
+                    )
+                    log_throttled(
+                        log,
+                        f"option_context_missing_direction_bias:{symbol}",
+                        "OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s spot_direction_valid=%s fut_direction_valid=%s",
+                        symbol,
+                        spot_fresh,
+                        fut_fresh,
+                        spot_direction_valid,
+                        fut_direction_valid,
+                        interval_sec=30.0,
+                        level=logging.INFO,
+                        extra={
+                            "event": "OPTION_CONTEXT_MISSING_DIRECTION_BIAS",
+                            "symbol": symbol,
+                            "spot_fresh": spot_fresh,
+                            "fut_fresh": fut_fresh,
+                            "spot_direction_valid": spot_direction_valid,
+                            "fut_direction_valid": fut_direction_valid,
+                            "spot_direction_reasons": spot_ctx.get("direction_context_reasons"),
+                            "fut_direction_reasons": fut_ctx.get("direction_context_reasons"),
+                            "spot_ctx_keys": sorted(list(spot_ctx.keys())),
+                            "fut_ctx_keys": sorted(list(fut_ctx.keys())),
+                            "spot_tick_age_ms": spot_ctx.get("tick_age_ms"),
+                            "futures_tick_age_ms": fut_ctx.get("tick_age_ms"),
+                            "direction_context_source": direction_context_source,
+                        },
+                    )
             if fut_fresh and fut_ctx.get("futures_volume_ratio") is not None:
                 indicators.setdefault("futures_volume_ratio", fut_ctx.get("futures_volume_ratio"))
             if fut_fresh and fut_ctx.get("vwap") is not None:
@@ -3603,6 +3611,7 @@ class StrategyManager(_BaseStrategyManager):
         allowed_strategies = {s.strip() for s in str(os.getenv("STRATEGY_CONTEXT_PROMOTION_ALLOWED_STRATEGIES", "OrderFlow,VWAPPro")).split(",") if s.strip()}
         min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_SCORE", 5.0)
         min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_CONFIDENCE", 0.45)
+        min_direction_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_DIRECTION_CONF", 0.05)
         best_signal, best_vote = max(context_votes, key=lambda pair: self._extract_raw_score(pair[1]))
         raw_score = self._extract_raw_score(best_vote)
         md0 = dict(best_signal.metadata or {})
@@ -3699,18 +3708,54 @@ class StrategyManager(_BaseStrategyManager):
             or ""
         ).upper()
         direction_aligned = direction_bias in {"CE", "PE"} and direction_bias == str(best_vote.side).upper()
-        if best_vote.strategy not in allowed_strategies or raw_score < min_score or best_vote.confidence < min_conf or best_vote.side not in {"CE", "PE"} or not selected_ok or vetoed or not direction_aligned:
+        try:
+            context_age_seconds = float(
+                md0.get("context_age_seconds")
+                or indicators.get("context_age_seconds")
+                or 999.0
+            )
+        except (TypeError, ValueError):
+            context_age_seconds = 999.0
+        context_fresh = bool(
+            md0.get("context_fresh")
+            if md0.get("context_fresh") is not None
+            else indicators.get("context_fresh")
+        ) and context_age_seconds <= self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0)
+        try:
+            direction_conf = float(
+                md0.get("underlying_direction_confidence")
+                or indicators.get("underlying_direction_confidence")
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            direction_conf = 0.0
+        if best_vote.strategy not in allowed_strategies or raw_score < min_score or best_vote.confidence < min_conf or best_vote.side not in {"CE", "PE"} or not selected_ok or vetoed or not direction_aligned or not context_fresh or direction_conf < min_direction_conf:
             return None
         md = dict(best_signal.metadata or {})
         md.update(selected_meta)
-        md.update({"role": "trigger", "promoted_from_context": True, "consensus_stage": "context_promoted_controlled", "promotion_reason": "context_only_quality_pass"})
+        md.update({
+            "role": "trigger",
+            "promoted_from_context": True,
+            "consensus_stage": "context_promoted_controlled",
+            "promotion_reason": "direction_context_aligned",
+            "direction_bias": indicators.get("direction_bias"),
+            "underlying_direction_bias": indicators.get("underlying_direction_bias"),
+            "underlying_direction_confidence": indicators.get("underlying_direction_confidence"),
+            "context_age_seconds": indicators.get("context_age_seconds"),
+            "context_fresh": indicators.get("context_fresh"),
+            "direction_context_source": indicators.get("direction_context_source"),
+            "direction_context_reasons": indicators.get("direction_context_reasons"),
+        })
         promoted = Signal(action="BUY", symbol=best_signal.symbol, quantity=best_signal.quantity, confidence=best_signal.confidence, reason=best_signal.reason, stop_loss=best_signal.stop_loss, take_profit=best_signal.take_profit, metadata=md)
         promoted_vote = StrategyVote(strategy=best_vote.strategy, side=best_vote.side, score=best_vote.score, confidence=best_vote.confidence, reasons=list(best_vote.reasons), metadata=md)
         log.info(
-            "ORDERFLOW_TRIGGER_PROMOTED side=%s score=%.2f reason=direction_context_aligned symbol=%s",
+            "ORDERFLOW_TRIGGER_PROMOTED side=%s score=%.2f reason=direction_context_aligned symbol=%s direction_context_source=%s context_age_seconds=%.2f underlying_direction_confidence=%.2f",
             best_vote.side,
             raw_score,
             symbol,
+            md.get("direction_context_source"),
+            context_age_seconds,
+            direction_conf,
             extra={
                 "event": "ORDERFLOW_TRIGGER_PROMOTED",
                 "symbol": symbol,
