@@ -7991,6 +7991,15 @@ class TelegramBot:
         tokens, invalid = self._parse_token_args(ctx.args)
         streamer = getattr(self.deps, 'streamer', None)
         supervisor = self._stream_supervisor()
+        if supervisor is not None and hasattr(supervisor, "unsubscribe_tokens"):
+            supervisor.unsubscribe_tokens(tokens)
+            tracked = list(getattr(supervisor, "tokens", set()) or set())
+            lines = [f'Unsubscribed {len(tokens)} token(s).', f'Now tracking {len(tracked)} token(s).']
+            lines.append(f"Poll: tokens={len(tracked)}")
+            if invalid:
+                lines.append(f"ignored: {', '.join(invalid)}")
+            await self._reply(chat, ctx, '\n'.join(lines))
+            return
         if supervisor is None and streamer is not None and hasattr(streamer, 'unsubscribe'):
             streamer.unsubscribe(tokens)
             tracked = []
@@ -8475,7 +8484,7 @@ class TelegramBot:
                 )
                 return
             raw_symbol = args[0].strip()
-            symbol = DataHub.normalize(raw_symbol) or raw_symbol.upper()
+            symbol = canonical(raw_symbol) or raw_symbol.upper()
             hub = getattr(self.deps, "data_hub", None)
             if hub is None or not hasattr(hub, "get_iv"):
                 message = (
@@ -8669,7 +8678,7 @@ class TelegramBot:
         ):
             raw = raw[1:-1]
         symbol = raw.strip()
-        normalized = DataHub.normalize(symbol)
+        normalized = canonical(symbol)
 
         hub = self.deps.data_hub
         mdm = self.deps.market_data_manager
@@ -14428,7 +14437,7 @@ class TelegramBot:
         if hub is None or safe_manager is None:
             await self._reply(chat, ctx, "Paper environment unavailable.")
             return
-        normalized = DataHub.normalize(args[0])
+        normalized = canonical(args[0])
         if not normalized:
             await self._reply(chat, ctx, "Invalid symbol")
             return

@@ -65,3 +65,28 @@ def test_runtime_readiness_preserves_execution_map_when_not_supplied() -> None:
         live_orders_armed=False,
     )
     assert runner._runtime_execution_ready_by_symbol.get('NFO:XCE') is True
+
+
+def test_set_runtime_readiness_logs_without_typeerror(caplog) -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._runtime_data_hard_ready = False
+    runner._runtime_evaluation_ready = False
+    runner._runtime_live_orders_armed = False
+    runner._runtime_readiness_reason = None
+    runner._runtime_startup_ready = False
+    runner._active_selected_ce = None
+    runner._active_selected_pe = None
+    runner._active_atm_strike = None
+    runner._active_option_symbols = set()
+    runner._logger = logging.getLogger('test.readiness.log')
+    with caplog.at_level(logging.INFO):
+        runner.set_runtime_readiness(
+            data_hard_ready=True,
+            evaluation_ready=True,
+            live_orders_armed=True,
+            reason="ok",
+            selected_ce="NFO:NIFTY26MAY24200CE",
+            selected_pe="NFO:NIFTY26MAY24200PE",
+        )
+    assert any("RUNNER_STARTUP_READINESS_UPDATE" in rec.message for rec in caplog.records)
