@@ -1583,3 +1583,48 @@ def test_dynamic_revalidation_allows_fresh_quote_when_tick_count_missing(monkeyp
         bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=None
     )
     assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='dyn-fallback') is True
+
+
+def test_is_symbol_execution_ready_false_when_map_empty_even_if_live_orders_armed(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_live_orders_armed = True
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._runtime_symbol_last_ready_at = {}
+    assert runner._is_symbol_execution_ready('NFO:NIFTY26MAY23700PE') is False
+
+
+def test_is_symbol_execution_ready_expires_by_ttl(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('RUNNER_EXECUTION_READY_TTL_SECONDS', '1')
+    key = 'NFO:NIFTY26MAY23700PE'
+    runner._runtime_execution_ready_by_symbol = {key: True}
+    runner._runtime_symbol_last_ready_at = {key: 1.0}
+    monkeypatch.setattr('nifty_scalper_bot.strategies.runner.time.time', lambda: 5.0)
+    assert runner._is_symbol_execution_ready(key) is False
+    assert key not in runner._runtime_execution_ready_by_symbol
+
+
+def test_runtime_ready_key_keeps_spot_symbol_not_nfo() -> None:
+    runner = _build_runner()
+    assert runner._runtime_ready_key('NSE:NIFTY') == 'NSE:NIFTY'
+
+
+def test_runtime_ready_key_maps_prefixed_and_unprefixed_option_to_same_key() -> None:
+    runner = _build_runner()
+    assert runner._runtime_ready_key('NIFTY26MAY23700PE') == 'NFO:NIFTY26MAY23700PE'
+    assert runner._runtime_ready_key('NFO:NIFTY26MAY23700PE') == 'NFO:NIFTY26MAY23700PE'
+
+
+def test_dynamic_revalidation_resolves_lot_size_once(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+    )
+    runner._order_manager.resolve_lot_size = MagicMock(return_value=65)
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='lot-once') is True
+    assert runner._order_manager.resolve_lot_size.call_count == 1

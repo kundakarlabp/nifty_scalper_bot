@@ -2031,13 +2031,36 @@ class StrategyRunner:
         )
         if not is_live_mode:
             return True
-        if not self._runtime_execution_ready_by_symbol:
-            return bool(self._runtime_live_orders_armed)
-        return bool(self._runtime_execution_ready_by_symbol.get(self._runtime_ready_key(symbol), False))
+        runtime_key = self._runtime_ready_key(symbol)
+        if not runtime_key:
+            return False
+        if not bool(self._runtime_execution_ready_by_symbol.get(runtime_key, False)):
+            return False
+        ttl_seconds = max(
+            1.0,
+            float(os.getenv("RUNNER_EXECUTION_READY_TTL_SECONDS", "60") or 60.0),
+        )
+        last_ready_at = float(self._runtime_symbol_last_ready_at.get(runtime_key, 0.0) or 0.0)
+        if last_ready_at <= 0.0:
+            self._runtime_execution_ready_by_symbol.pop(runtime_key, None)
+            self._runtime_symbol_last_ready_at.pop(runtime_key, None)
+            return False
+        if (time.time() - last_ready_at) > ttl_seconds:
+            self._runtime_execution_ready_by_symbol.pop(runtime_key, None)
+            self._runtime_symbol_last_ready_at.pop(runtime_key, None)
+            return False
+        return True
 
     def _runtime_ready_key(self, symbol: str) -> str:
-        normalized = normalize_symbol(symbol)
-        if normalized and ":" not in normalized:
+        raw = str(symbol or "").strip()
+        if not raw:
+            return ""
+        canonical_symbol = canonical(raw) or enforce_canonical(raw)
+        normalized = normalize_symbol(canonical_symbol or raw)
+        if ":" in normalized:
+            return normalized
+        option_or_fut = bool(re.match(r"^NIFTY\d{1,2}[A-Z]{3}(\d{5})(CE|PE)$", normalized) or normalized.endswith("FUT"))
+        if option_or_fut:
             return f"NFO:{normalized}"
         return normalized
 
@@ -2052,6 +2075,7 @@ class StrategyRunner:
         bid = ask = None
         tradable_quote = False
         lot_size_resolved = False
+        lot_size = 0
         max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
         snapshot_key_used: str | None = None
         snap = None
@@ -2089,8 +2113,10 @@ class StrategyRunner:
                 if not lot_key:
                     continue
                 try:
-                    lot_size_resolved = int(self._order_manager.resolve_lot_size(lot_key)) > 0
-                    if lot_size_resolved:
+                    resolved_lot = int(self._order_manager.resolve_lot_size(lot_key) or 0)
+                    if resolved_lot > 0:
+                        lot_size = resolved_lot
+                        lot_size_resolved = True
                         lot_size_key_used = lot_key
                         break
                 except Exception:
@@ -2099,7 +2125,6 @@ class StrategyRunner:
                 reason = "lot_size_unresolved"
         quote_source = None
         history_count = 0
-        lot_size = 0
         startup_marked_ready = bool(self._runtime_execution_ready_by_symbol.get(runtime_key, False))
         dynamic_revalidation_attempted = True
         dynamic_revalidation_passed = False
@@ -2115,9 +2140,6 @@ class StrategyRunner:
             spread_ok = False
         min_history = int(os.getenv("RUNNER_MIN_REAL_TICKS_60S", "1") or "1")
         allow_fresh_without_tick_count = _env_flag("RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT", default=True)
-        if lot_size_resolved and self._order_manager is not None and lot_size_key_used is not None:
-            with suppress(Exception):
-                lot_size = int(self._order_manager.resolve_lot_size(lot_size_key_used) or 0)
         if not tradable_quote:
             reason = "quote_not_tradable"
         elif tick_age_ms is None or tick_age_ms > max_quote_age_ms:
