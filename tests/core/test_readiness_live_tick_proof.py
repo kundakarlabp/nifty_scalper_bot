@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -46,10 +47,15 @@ def make_ctx(mdm, live: bool = True):
     )
 
 
+def _fresh_tick_ts() -> dict[str, str]:
+    now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return {'NFO:CE': now_iso, 'NFO:PE': now_iso}
+
+
 @pytest.mark.asyncio
 async def test_runtime_readiness_uses_live_tick_proof_when_confirmed_subscription_missing() -> None:
     snaps = {'NSE:NIFTY': Snap(25000, 2), 'NFO:CE': Snap(100, 2), 'NFO:PE': Snap(110, 3)}
-    mdm = SimpleNamespace(get_symbol_snapshot=lambda s: snaps.get(s), get_ohlc_bars=lambda s, **k: list(range(60)), _confirmed_subscriptions=set(), _symbol_to_token={'NFO:CE': 1, 'NFO:PE': 2}, _last_tick_ts={'NFO:CE': '2026-05-12T00:00:00Z', 'NFO:PE': '2026-05-12T00:00:00Z'})
+    mdm = SimpleNamespace(get_symbol_snapshot=lambda s: snaps.get(s), get_ohlc_bars=lambda s, **k: list(range(60)), _confirmed_subscriptions=set(), _symbol_to_token={'NFO:CE': 1, 'NFO:PE': 2}, _last_tick_ts=_fresh_tick_ts())
     ctx = make_ctx(mdm)
     await app._recompute_and_push_runtime_readiness(ctx, reason='test')
     assert ctx.data_hard_ready is True
@@ -62,7 +68,7 @@ async def test_runtime_readiness_uses_live_tick_proof_when_confirmed_subscriptio
 @pytest.mark.asyncio
 async def test_live_orders_not_armed_without_tradable_quote() -> None:
     snaps = {'NSE:NIFTY': Snap(25000, 2), 'NFO:CE': Snap(100, 2), 'NFO:PE': Snap(110, 2)}
-    mdm = SimpleNamespace(get_symbol_snapshot=lambda s: snaps.get(s), get_ohlc_bars=lambda s, **k: list(range(60)), _confirmed_subscriptions=set(), _symbol_to_token={'NFO:CE': 1, 'NFO:PE': 2}, _last_tick_ts={'NFO:CE': '2026-05-12T00:00:00Z', 'NFO:PE': '2026-05-12T00:00:00Z'})
+    mdm = SimpleNamespace(get_symbol_snapshot=lambda s: snaps.get(s), get_ohlc_bars=lambda s, **k: list(range(60)), _confirmed_subscriptions=set(), _symbol_to_token={'NFO:CE': 1, 'NFO:PE': 2}, _last_tick_ts=_fresh_tick_ts())
     ctx = make_ctx(mdm)
     await app._recompute_and_push_runtime_readiness(ctx, reason='test')
     assert ctx.data_hard_ready is True
@@ -72,9 +78,10 @@ async def test_live_orders_not_armed_without_tradable_quote() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_orders_armed_with_fresh_ltp_bars_and_tradable_depth() -> None:
+async def test_live_orders_armed_with_fresh_ltp_bars_and_tradable_depth(monkeypatch) -> None:
+    monkeypatch.setattr(app, 'get_market_state', lambda: app.MarketState.OPEN)
     snaps = {'NSE:NIFTY': Snap(25000, 2, True, 24999, 25001, True), 'NFO:CE': Snap(100, 2, True, 99.95, 100.05, True), 'NFO:PE': Snap(110, 2, True, 109.95, 110.05, True)}
-    mdm = SimpleNamespace(get_symbol_snapshot=lambda s: snaps.get(s), get_ohlc_bars=lambda s, **k: list(range(60)), has_ws_tradable_quote=lambda s: True, _confirmed_subscriptions=set(), _symbol_to_token={'NFO:CE': 1, 'NFO:PE': 2}, _last_tick_ts={'NFO:CE': '2026-05-12T00:00:00Z', 'NFO:PE': '2026-05-12T00:00:00Z'})
+    mdm = SimpleNamespace(get_symbol_snapshot=lambda s: snaps.get(s), get_ohlc_bars=lambda s, **k: list(range(60)), has_ws_tradable_quote=lambda s: True, _confirmed_subscriptions=set(), _symbol_to_token={'NFO:CE': 1, 'NFO:PE': 2}, _last_tick_ts=_fresh_tick_ts())
     ctx = make_ctx(mdm)
     await app._recompute_and_push_runtime_readiness(ctx, reason='test')
     assert ctx.data_hard_ready is True
