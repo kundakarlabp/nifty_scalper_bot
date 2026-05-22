@@ -3720,12 +3720,11 @@ class StrategyManager(_BaseStrategyManager):
             if md0.get("context_fresh") is not None
             else indicators.get("context_fresh")
         ) and context_age_seconds <= self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0)
+        conf_raw = md0.get("underlying_direction_confidence")
+        if conf_raw is None:
+            conf_raw = indicators.get("underlying_direction_confidence")
         try:
-            direction_conf = float(
-                md0.get("underlying_direction_confidence")
-                or indicators.get("underlying_direction_confidence")
-                or 0.0
-            )
+            direction_conf = float(conf_raw) if conf_raw is not None else 0.0
         except (TypeError, ValueError):
             direction_conf = 0.0
         if best_vote.strategy not in allowed_strategies or raw_score < min_score or best_vote.confidence < min_conf or best_vote.side not in {"CE", "PE"} or not selected_ok or vetoed or not direction_aligned or not context_fresh or direction_conf < min_direction_conf:
