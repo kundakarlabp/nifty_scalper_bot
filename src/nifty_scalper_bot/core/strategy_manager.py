@@ -30,6 +30,7 @@ from nifty_scalper_bot.strategies.signal_generator import (
 from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
 )
+from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -2705,12 +2706,16 @@ class StrategyManager(_BaseStrategyManager):
                 empty.append(strategy.name)
                 reason = str(getattr(strategy, "last_no_vote_reason", "none") or "none")
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
-                log_throttled(
+                log_throttled_live(
                     log,
-                    key=f"strategy_no_vote:{symbol}:{strategy.name}:{reason}",
-                    msg=f"STRATEGY_NO_VOTE strategy={strategy.name} symbol={symbol} reason={reason}",
-                    interval_sec=15.0,
-                    level=logging.INFO,
+                    logging.INFO,
+                    "STRATEGY_NO_VOTE",
+                    f"STRATEGY_NO_VOTE:{strategy.name}:{symbol}:{reason}",
+                    float(os.getenv("LOG_THROTTLE_STRATEGY_NO_VOTE_SECONDS", "45") or "45"),
+                    "STRATEGY_NO_VOTE strategy=%s symbol=%s reason=%s",
+                    strategy.name,
+                    symbol,
+                    reason,
                 )
                 continue
             entry = score_map.get(strategy.name)
@@ -3134,7 +3139,12 @@ class StrategyManager(_BaseStrategyManager):
                             "tick_direction": merged_md.get("tick_direction"),
                         }
                     )
-                log.info(
+                log_throttled_live(
+                    log,
+                    logging.INFO,
+                    "TRADE_DECISION_TRACE",
+                    f"TRADE_DECISION_TRACE:{symbol_norm}:no_trigger_vote:{indicator_map.get('direction_bias')}",
+                    float(os.getenv("LOG_THROTTLE_NO_TRADE_TRACE_SECONDS", "30") or "30"),
                     "TRADE_DECISION_TRACE approval_path=%s blocked_at=%s blocked_reason=%s "
                     "symbol=%s context_votes=%s context_sides=%s context_scores=%s "
                     "direction_bias=%s underlying_direction_bias=%s context_age_seconds=%s context_trigger_details=%s",
