@@ -2036,19 +2036,15 @@ class StrategyRunner:
             return False
         if not bool(self._runtime_execution_ready_by_symbol.get(runtime_key, False)):
             return False
-        ttl_seconds = max(
-            1.0,
-            float(os.getenv("RUNNER_EXECUTION_READY_TTL_SECONDS", "60") or 60.0),
-        )
-        last_ready_at = float(self._runtime_symbol_last_ready_at.get(runtime_key, 0.0) or 0.0)
-        if last_ready_at <= 0.0:
-            self._runtime_execution_ready_by_symbol.pop(runtime_key, None)
-            self._runtime_symbol_last_ready_at.pop(runtime_key, None)
-            return False
-        if (time.time() - last_ready_at) > ttl_seconds:
-            self._runtime_execution_ready_by_symbol.pop(runtime_key, None)
-            self._runtime_symbol_last_ready_at.pop(runtime_key, None)
-            return False
+        ttl_seconds = float(os.getenv("RUNNER_EXECUTION_READY_TTL_SECONDS", "60") or "60")
+        if ttl_seconds > 0:
+            last_ready_at = float(
+                self._runtime_symbol_last_ready_at.get(runtime_key, 0.0) or 0.0
+            )
+            if last_ready_at <= 0.0 or (time.time() - last_ready_at) > ttl_seconds:
+                self._runtime_execution_ready_by_symbol.pop(runtime_key, None)
+                self._runtime_symbol_last_ready_at.pop(runtime_key, None)
+                return False
         return True
 
     def _runtime_ready_key(self, symbol: str) -> str:
