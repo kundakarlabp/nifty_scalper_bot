@@ -2091,11 +2091,14 @@ class StrategyRunner:
             snap = None
             for candidate_symbol in candidate_keys:
                 try:
-                    snap = self._market_data.get_symbol_snapshot(candidate_symbol)
-                    snapshot_key_used = candidate_symbol
-                    break
+                    candidate_snap = self._market_data.get_symbol_snapshot(candidate_symbol)
                 except Exception:
                     continue
+                if candidate_snap is None:
+                    continue
+                snap = candidate_snap
+                snapshot_key_used = candidate_symbol
+                break
             if snap is not None:
                 bid = float(snap.bid or 0.0)
                 ask = float(snap.ask or 0.0)
@@ -2145,7 +2148,7 @@ class StrategyRunner:
         elif not lot_size_resolved or lot_size <= 0:
             reason = "lot_size_unresolved"
         elif history_count < min_history and not allow_fresh_without_tick_count:
-            reason = "option_ohlc_insufficient"
+            reason = "option_history_insufficient"
         elif history_count < min_history and allow_fresh_without_tick_count:
             history_fallback = "fresh_quote"
             dynamic_revalidation_passed = True

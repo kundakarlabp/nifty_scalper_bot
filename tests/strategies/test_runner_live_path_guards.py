@@ -1628,3 +1628,48 @@ def test_dynamic_revalidation_resolves_lot_size_once(monkeypatch) -> None:
     runner._order_manager.resolve_lot_size = MagicMock(return_value=65)
     assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='lot-once') is True
     assert runner._order_manager.resolve_lot_size.call_count == 1
+
+
+def test_dynamic_revalidation_snapshot_alias_continues_after_none(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    raw_symbol = 'NFO:NIFTY26MAY23700PE'
+    normalized = 'NIFTY26MAY23700PE'
+
+    def _snap(symbol: str):
+        if symbol == raw_symbol:
+            return None
+        if symbol == normalized:
+            return SimpleNamespace(
+                bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+            )
+        raise RuntimeError('missing')
+
+    runner._market_data.get_symbol_snapshot.side_effect = _snap
+    assert runner._ensure_symbol_execution_ready_for_order(raw_symbol, trace_id='alias-none') is True
+
+
+def test_dynamic_revalidation_rejects_lot_size_zero(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+    )
+    runner._order_manager.resolve_lot_size = MagicMock(return_value=0)
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='lot-zero') is False
+
+
+def test_dynamic_revalidation_rejects_missing_tick_count_when_fallback_disabled(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT', 'false')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=None
+    )
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='hist-off') is False
