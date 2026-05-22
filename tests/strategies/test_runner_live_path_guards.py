@@ -1496,3 +1496,59 @@ def test_directional_dedup_fallback_selected_symbol_snapshot_without_candidates(
     assert result.reason == 'dedup_test_stop'
     assert captured['selected_symbol'] == 'NFO:NIFTY26APR23800PE'
     assert captured['selected_snapshot'] == {}
+
+def test_dynamic_revalidation_marks_symbol_ready_when_fresh_quote(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_live_orders_armed = False
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+    )
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='dyn-1') is True
+    assert runner._runtime_execution_ready_by_symbol.get('NIFTY26MAY23700PE') is True
+
+
+def test_dynamic_revalidation_rejects_missing_lot_size(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
+    )
+    runner._order_manager.resolve_lot_size = MagicMock(side_effect=RuntimeError('no lot'))
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='dyn-2') is False
+
+
+def test_candidate_selection_tries_next_ready_candidate(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._runtime_execution_ready_by_symbol = {'NIFTY26MAY23650PE': True}
+    runner._order_manager.submit_trade_plan = MagicMock(return_value='oid-next')
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=360.0, bid=359.0, ask=360.0, tick_age_s=0.2, real_ticks_last_60s=5, tradable_quote=True, source='ws'
+    )
+    first = SimpleNamespace(symbol='NFO:NIFTY26MAY23700PE', stop_loss=300.0, target=420.0, score=9.0, data_quality_score=8.0, spread_pct=0.1, rr=2.0, side='PE', entry_price=360.0, tick_age_s=0.2)
+    second = SimpleNamespace(symbol='NFO:NIFTY26MAY23650PE', stop_loss=300.0, target=420.0, score=8.0, data_quality_score=8.0, spread_pct=0.1, rr=2.0, side='PE', entry_price=360.0, tick_age_s=0.2)
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[first, second])
+    runner._ensure_symbol_execution_ready_for_order = MagicMock(side_effect=lambda s, trace_id=None: s.endswith('23650PE'))
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26MAY23750PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=300.0, take_profit=420.0, metadata={'candidate_snapshots': [{'symbol': 'NFO:NIFTY26MAY23700PE', 'side': 'PE', 'strike': 23700, 'atm_strike': 23700, 'bid': 359.0, 'ask': 360.0, 'tradable_quote': True}, {'symbol': 'NFO:NIFTY26MAY23650PE', 'side': 'PE', 'strike': 23650, 'atm_strike': 23700, 'bid': 359.0, 'ask': 360.0, 'tradable_quote': True}]})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id='trace-next-ready')
+    assert result.accepted is True
+
+
+def test_runtime_not_ready_cooldown_short_circuits(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    runner._execution_reject_cooldown_ts = {}
+    base_symbol = 'NFO:NIFTY26MAY23700PE'
+    reason_key = 'OrderFlow'
+    now = datetime.now(timezone.utc).timestamp()
+    runner._execution_reject_cooldown_ts[f'NIFTY26MAY23700PE:{reason_key}:runtime_symbol_execution_not_ready'] = now
+    runner._order_manager.submit_trade_plan = MagicMock(return_value='oid-should-not')
+    signal = Signal(action='BUY', symbol=base_symbol, quantity=1, confidence=0.9, reason=reason_key, stop_loss=300.0, take_profit=420.0, metadata={'candidate_snapshots': []})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=base_symbol, trade_symbol=base_symbol, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id='trace-cool')
+    assert result.reason == 'runtime_symbol_execution_not_ready_reject_cooldown'
