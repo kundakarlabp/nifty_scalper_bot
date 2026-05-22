@@ -7854,6 +7854,27 @@ class StrategyRunner:
                                 symbol_role=symbol_role,
                             )
                             return
+                        if not market_open and symbol_role == "tradable_option":
+                            log_throttled(
+                                self._logger,
+                                "market_session_closed_compact",
+                                "MARKET_SESSION_CLOSED orders_disabled=True reason=normal_close",
+                                interval_sec=120.0,
+                                level=logging.INFO,
+                                extra={
+                                    "event": "MARKET_SESSION_CLOSED",
+                                    "orders_disabled": True,
+                                    "reason": "normal_close",
+                                },
+                            )
+                            self._emit_runner_eval_decision(
+                                symbol=symbol,
+                                stage="phase9",
+                                reason="market_closed",
+                                allowed=False,
+                                trace_id=trace_id,
+                            )
+                            return
                         signal = self._strategy_manager.generate_signal(
                             symbol,
                             price,

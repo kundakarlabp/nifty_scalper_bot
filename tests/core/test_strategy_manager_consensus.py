@@ -164,5 +164,213 @@ def test_live_context_promotion_passes_only_with_strict_quality(monkeypatch) -> 
         'is_selected_option': True,
     }
     vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
-    out = manager._try_context_promotion('NFO:NIFTY25000CE', [(signal, vote)], {'context_age_seconds': 10}, manager.get_strategy_mode_profile())
+    out = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {
+            'direction_bias': 'CE',
+            'underlying_direction_bias': 'CE',
+            'underlying_direction_confidence': 0.6,
+            'context_age_seconds': 10,
+            'context_fresh': True,
+            'direction_context_source': 'fallback',
+            'direction_context_reasons': ['close_above_vwap'],
+        },
+        manager.get_strategy_mode_profile(),
+    )
     assert out is not None
+    promoted_signal, _ = out
+    assert promoted_signal.metadata is not None
+    assert promoted_signal.metadata.get('promotion_reason') == 'direction_context_aligned'
+    assert promoted_signal.metadata.get('direction_bias') == 'CE'
+    assert promoted_signal.metadata.get('direction_context_source') == 'fallback'
+
+
+def test_orderflow_context_only_without_direction_stays_context(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': True, 'bid': 100, 'ask': 101, 'spread_pct': 1, 'context_age_seconds': 10}
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    assert manager._try_context_promotion('NFO:NIFTY25000CE', [(signal, vote)], {}, manager.get_strategy_mode_profile()) is None
+
+
+def test_orderflow_context_promotes_with_aligned_fallback_direction(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': True, 'bid': 100, 'ask': 101, 'spread_pct': 1, 'context_age_seconds': 10}
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {
+            'direction_bias': 'CE',
+            'underlying_direction_bias': 'CE',
+            'underlying_direction_confidence': 0.2,
+            'context_age_seconds': 10,
+            'context_fresh': True,
+            'direction_context_source': 'fallback',
+        },
+        manager.get_strategy_mode_profile(),
+    )
+    assert promoted is not None
+
+
+def test_orderflow_context_not_promoted_when_fallback_context_stale(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': True, 'bid': 100, 'ask': 101, 'spread_pct': 1, 'context_age_seconds': 240}
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {'direction_bias': 'CE', 'underlying_direction_confidence': 0.4, 'context_age_seconds': 240, 'context_fresh': False, 'direction_context_source': 'fallback'},
+        manager.get_strategy_mode_profile(),
+    )
+    assert promoted is None
+
+
+def test_orderflow_context_not_promoted_when_direction_conf_below_min(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_MIN_DIRECTION_CONF', '0.25')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': True, 'bid': 100, 'ask': 101, 'spread_pct': 1, 'context_age_seconds': 10}
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {'direction_bias': 'CE', 'underlying_direction_confidence': 0.1, 'context_age_seconds': 10, 'context_fresh': True},
+        manager.get_strategy_mode_profile(),
+    )
+    assert promoted is None
+
+
+def test_orderflow_existing_direction_bias_stale_context_not_promoted(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {
+        'is_selected_option': True,
+        'quote_depth_valid': True,
+        'bid': 100,
+        'ask': 101,
+        'spread_pct': 1,
+        'direction_bias': 'CE',
+        'context_age_seconds': 999,
+        'context_fresh': False,
+    }
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {'direction_bias': 'CE', 'context_age_seconds': 999, 'context_fresh': False, 'underlying_direction_confidence': 0.9},
+        manager.get_strategy_mode_profile(),
+    )
+    assert promoted is None
+
+
+def test_promotion_metadata_not_overwritten_with_none_from_indicators(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {
+        'is_selected_option': True,
+        'quote_depth_valid': True,
+        'bid': 100,
+        'ask': 101,
+        'spread_pct': 1,
+        'direction_bias': 'CE',
+        'underlying_direction_bias': 'CE',
+        'underlying_direction_confidence': 0.7,
+        'context_age_seconds': 5,
+        'context_fresh': True,
+        'direction_context_source': 'primary',
+    }
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {'context_age_seconds': 5, 'context_fresh': True},
+        manager.get_strategy_mode_profile(),
+    )
+    assert promoted is not None
+    promoted_signal, _ = promoted
+    assert promoted_signal.metadata is not None
+    assert promoted_signal.metadata.get('direction_bias') == 'CE'
+    assert promoted_signal.metadata.get('direction_context_source') == 'primary'
+
+
+def test_fresh_primary_context_promotes_only_within_max_age(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    monkeypatch.setenv('STRATEGY_CONTEXT_MAX_AGE_SECONDS', '120')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {
+        'is_selected_option': True,
+        'quote_depth_valid': True,
+        'bid': 100,
+        'ask': 101,
+        'spread_pct': 1,
+        'direction_bias': 'CE',
+        'context_age_seconds': 121,
+        'context_fresh': True,
+    }
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {'direction_bias': 'CE', 'underlying_direction_confidence': 0.6, 'context_age_seconds': 121, 'context_fresh': True},
+        manager.get_strategy_mode_profile(),
+    )
+    assert promoted is None
+
+
+def test_context_promotion_accepts_zero_context_age(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {
+        'is_selected_option': True,
+        'quote_depth_valid': True,
+        'bid': 100,
+        'ask': 101,
+        'spread_pct': 1,
+        'context_age_seconds': 0.0,
+        'context_fresh': True,
+        'direction_bias': 'CE',
+    }
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {
+            'direction_bias': 'CE',
+            'underlying_direction_bias': 'CE',
+            'underlying_direction_confidence': 0.6,
+            'context_age_seconds': 0.0,
+            'context_fresh': True,
+            'direction_context_source': 'primary',
+        },
+        manager.get_strategy_mode_profile(),
+    )
+    assert promoted is not None
+
+def test_derive_direction_fresh_context_and_stale_context_age() -> None:
+    manager = _manager_stub()
+    side, conf, _ = manager._derive_context_direction(
+        {'close': 102, 'vwap': 100, 'ema_fast': 101, 'ema_slow': 99, 'open': 100},
+        role='spot_context',
+    )
+    assert side == 'CE'
+    assert conf > 0.0
