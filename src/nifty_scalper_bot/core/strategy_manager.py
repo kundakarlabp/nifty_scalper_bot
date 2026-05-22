@@ -3708,12 +3708,11 @@ class StrategyManager(_BaseStrategyManager):
             or ""
         ).upper()
         direction_aligned = direction_bias in {"CE", "PE"} and direction_bias == str(best_vote.side).upper()
+        age_raw = md0.get("context_age_seconds")
+        if age_raw is None:
+            age_raw = indicators.get("context_age_seconds")
         try:
-            context_age_seconds = float(
-                md0.get("context_age_seconds")
-                or indicators.get("context_age_seconds")
-                or 999.0
-            )
+            context_age_seconds = float(age_raw) if age_raw is not None else 999.0
         except (TypeError, ValueError):
             context_age_seconds = 999.0
         context_fresh = bool(

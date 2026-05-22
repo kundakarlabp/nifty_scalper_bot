@@ -334,6 +334,38 @@ def test_fresh_primary_context_promotes_only_within_max_age(monkeypatch) -> None
     )
     assert promoted is None
 
+
+def test_context_promotion_accepts_zero_context_age(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {
+        'is_selected_option': True,
+        'quote_depth_valid': True,
+        'bid': 100,
+        'ask': 101,
+        'spread_pct': 1,
+        'context_age_seconds': 0.0,
+        'context_fresh': True,
+        'direction_bias': 'CE',
+    }
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion(
+        'NFO:NIFTY25000CE',
+        [(signal, vote)],
+        {
+            'direction_bias': 'CE',
+            'underlying_direction_bias': 'CE',
+            'underlying_direction_confidence': 0.6,
+            'context_age_seconds': 0.0,
+            'context_fresh': True,
+            'direction_context_source': 'primary',
+        },
+        manager.get_strategy_mode_profile(),
+    )
+    assert promoted is not None
+
 def test_derive_direction_fresh_context_and_stale_context_age() -> None:
     manager = _manager_stub()
     side, conf, _ = manager._derive_context_direction(
