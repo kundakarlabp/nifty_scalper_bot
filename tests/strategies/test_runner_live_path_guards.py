@@ -58,6 +58,7 @@ def _build_runner() -> StrategyRunner:
     runner._order_attempt_window = deque()
     runner._max_order_attempts_per_minute = 100
     runner._signal_direction_dedup_seconds = 45.0
+    runner._signal_direction_dedup_min_improvement = 2.0
     runner._signal_direction_last_emit = {}
     runner._record_trade = lambda *args, **kwargs: None
     runner._reset_execution_state = lambda *_args, **_kwargs: None
@@ -1395,3 +1396,68 @@ def test_directional_dedup_allows_better_candidate_within_window() -> None:
     second = runner._apply_directional_signal_dedup(signal=signal, metadata=stronger, underlying='NIFTY', now_epoch=now_epoch + 5.0, selected_symbol='NFO:NIFTY26APR23850PE', option_side='PE', selected_snapshot={'depth_available': True, 'distance_from_atm': 50})
     assert first is None
     assert second is None
+
+
+def test_directional_dedup_blocks_tiny_score_bump_if_quality_worse() -> None:
+    runner = _build_runner()
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    first = runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.4, 'candidate_tick_age_ms': 10.0},
+        underlying='NIFTY',
+        now_epoch=1000.0,
+        selected_symbol=signal.symbol,
+        option_side='PE',
+        selected_snapshot={'depth_available': True, 'distance_from_atm': 10},
+    )
+    second = runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 8.1, 'tradable_quote': False, 'candidate_spread_pct': 8.0, 'candidate_tick_age_ms': 7000.0},
+        underlying='NIFTY',
+        now_epoch=1003.0,
+        selected_symbol='NFO:NIFTY26APR23850PE',
+        option_side='PE',
+        selected_snapshot={'depth_available': False, 'distance_from_atm': 300},
+    )
+    assert first is None
+    assert second is not None
+    assert second.reason == 'signal_duplicate_direction_cooldown'
+
+
+def test_dedup_prefers_tick_age_ms_over_candidate_tick_age_s() -> None:
+    runner = _build_runner()
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.5, 'candidate_tick_age_ms': 0.0, 'candidate_tick_age_s': 9.0},
+        underlying='NIFTY',
+        now_epoch=1000.0,
+        selected_symbol=signal.symbol,
+        option_side='PE',
+        selected_snapshot={},
+    )
+    state = runner._signal_direction_last_emit['NIFTY:PE:OrderFlow']
+    assert state['ranking_fields']['tick_age_ms'] == 0.0
+
+
+def test_dedup_uses_zero_candidate_tick_age_s_without_fallback_default() -> None:
+    runner = _build_runner()
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800PE', quantity=1, confidence=0.9, reason='OrderFlow', stop_loss=100.0, take_profit=120.0, metadata={})
+    runner._apply_directional_signal_dedup(
+        signal=signal,
+        metadata={'candidate_score': 8.0, 'tradable_quote': True, 'candidate_spread_pct': 0.5, 'candidate_tick_age_s': 0.0},
+        underlying='NIFTY',
+        now_epoch=1000.0,
+        selected_symbol=signal.symbol,
+        option_side='PE',
+        selected_snapshot={},
+    )
+    state = runner._signal_direction_last_emit['NIFTY:PE:OrderFlow']
+    assert state['ranking_fields']['tick_age_ms'] == 0.0
+
+
+def test_mark_directional_dedup_failed_clears_reservation() -> None:
+    runner = _build_runner()
+    runner._signal_direction_last_emit['NIFTY:PE:OrderFlow'] = {'status': 'reserved', 'rank_score': 10.0}
+    runner._mark_directional_dedup_failed(underlying='NIFTY', option_side='PE', reason='OrderFlow')
+    assert 'NIFTY:PE:OrderFlow' not in runner._signal_direction_last_emit
