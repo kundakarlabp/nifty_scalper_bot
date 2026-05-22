@@ -1507,7 +1507,7 @@ def test_dynamic_revalidation_marks_symbol_ready_when_fresh_quote(monkeypatch) -
         bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=5
     )
     assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='dyn-1') is True
-    assert runner._runtime_execution_ready_by_symbol.get('NIFTY26MAY23700PE') is True
+    assert runner._runtime_execution_ready_by_symbol.get('NFO:NIFTY26MAY23700PE') is True
 
 
 def test_dynamic_revalidation_rejects_missing_lot_size(monkeypatch) -> None:
@@ -1525,7 +1525,7 @@ def test_dynamic_revalidation_rejects_missing_lot_size(monkeypatch) -> None:
 def test_candidate_selection_tries_next_ready_candidate(monkeypatch) -> None:
     runner = _build_runner()
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
-    runner._runtime_execution_ready_by_symbol = {'NIFTY26MAY23650PE': True}
+    runner._runtime_execution_ready_by_symbol = {'NFO:NIFTY26MAY23650PE': True}
     runner._order_manager.submit_trade_plan = MagicMock(return_value='oid-next')
     runner._market_data = MagicMock()
     runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
@@ -1569,4 +1569,17 @@ def test_order_readiness_revalidation_log_includes_dynamic_fields(monkeypatch) -
     assert 'ORDER_READINESS_REVALIDATION' in joined
     assert 'dynamic_revalidation_attempted=' in joined
     assert 'dynamic_revalidation_passed=' in joined
+    assert 'runtime_key=' in joined
+    assert 'history_fallback=' in joined
 
+
+def test_dynamic_revalidation_allows_fresh_quote_when_tick_count_missing(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT', 'true')
+    runner._runtime_execution_ready_by_symbol = {}
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        bid=114.7, ask=115.0, tick_age_s=0.2, tradable_quote=True, source='ws', real_ticks_last_60s=None
+    )
+    assert runner._ensure_symbol_execution_ready_for_order('NFO:NIFTY26MAY23700PE', trace_id='dyn-fallback') is True

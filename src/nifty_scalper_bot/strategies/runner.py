@@ -1985,9 +1985,9 @@ class StrategyRunner:
         if execution_ready_by_symbol is not None:
             normalized_execution_ready: dict[str, bool] = {}
             for raw_symbol, ready in execution_ready_by_symbol.items():
-                normalized = normalize_symbol(str(raw_symbol or ""))
-                if normalized:
-                    normalized_execution_ready[normalized] = bool(ready)
+                runtime_key = self._runtime_ready_key(str(raw_symbol or ""))
+                if runtime_key:
+                    normalized_execution_ready[runtime_key] = bool(ready)
             self._runtime_execution_ready_by_symbol = normalized_execution_ready
         self._runtime_readiness_reason = reason
         self._runtime_startup_ready = bool(
@@ -2033,11 +2033,18 @@ class StrategyRunner:
             return True
         if not self._runtime_execution_ready_by_symbol:
             return bool(self._runtime_live_orders_armed)
-        return bool(self._runtime_execution_ready_by_symbol.get(normalize_symbol(symbol), False))
+        return bool(self._runtime_execution_ready_by_symbol.get(self._runtime_ready_key(symbol), False))
+
+    def _runtime_ready_key(self, symbol: str) -> str:
+        normalized = normalize_symbol(symbol)
+        if normalized and ":" not in normalized:
+            return f"NFO:{normalized}"
+        return normalized
 
     def _ensure_symbol_execution_ready_for_order(self, symbol: str, *, trace_id: str | None = None) -> bool:
         normalized = normalize_symbol(symbol)
-        was_ready = self._is_symbol_execution_ready(normalized)
+        runtime_key = self._runtime_ready_key(normalized)
+        was_ready = self._is_symbol_execution_ready(runtime_key)
         if was_ready:
             return True
         reason = "runtime_not_marked_ready"
@@ -2093,9 +2100,10 @@ class StrategyRunner:
         quote_source = None
         history_count = 0
         lot_size = 0
-        startup_marked_ready = bool(self._runtime_execution_ready_by_symbol.get(normalized, False))
+        startup_marked_ready = bool(self._runtime_execution_ready_by_symbol.get(runtime_key, False))
         dynamic_revalidation_attempted = True
         dynamic_revalidation_passed = False
+        history_fallback = "none"
         if snap is not None:
             quote_source = getattr(snap, "source", None)
             try:
@@ -2106,6 +2114,7 @@ class StrategyRunner:
         else:
             spread_ok = False
         min_history = int(os.getenv("RUNNER_MIN_REAL_TICKS_60S", "1") or "1")
+        allow_fresh_without_tick_count = _env_flag("RUNNER_ALLOW_FRESH_QUOTE_WITHOUT_TICK_COUNT", default=True)
         if lot_size_resolved and self._order_manager is not None and lot_size_key_used is not None:
             with suppress(Exception):
                 lot_size = int(self._order_manager.resolve_lot_size(lot_size_key_used) or 0)
@@ -2115,19 +2124,23 @@ class StrategyRunner:
             reason = "quote_stale"
         elif not spread_ok:
             reason = "spread_too_wide"
-        elif not lot_size_resolved:
+        elif not lot_size_resolved or lot_size <= 0:
             reason = "lot_size_unresolved"
-        elif history_count < min_history:
+        elif history_count < min_history and not allow_fresh_without_tick_count:
             reason = "option_ohlc_insufficient"
+        elif history_count < min_history and allow_fresh_without_tick_count:
+            history_fallback = "fresh_quote"
+            dynamic_revalidation_passed = True
+            reason = "fresh_runtime_revalidation"
         else:
             dynamic_revalidation_passed = True
             reason = "fresh_runtime_revalidation"
         final_ready = bool(dynamic_revalidation_passed)
-        if final_ready and normalized:
-            self._runtime_execution_ready_by_symbol[normalized] = True
-            self._runtime_symbol_last_ready_at[normalized] = time.time()
-            self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s", normalized, reason, tick_age_ms, bid, ask, lot_size, history_count, trace_id)
-        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, tradable_quote, lot_size_resolved)
+        if final_ready and runtime_key:
+            self._runtime_execution_ready_by_symbol[runtime_key] = True
+            self._runtime_symbol_last_ready_at[runtime_key] = time.time()
+            self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s runtime_key=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s", normalized, runtime_key, reason, tick_age_ms, bid, ask, lot_size, history_count, trace_id)
+        self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, runtime_key, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, history_fallback, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, tradable_quote, lot_size_resolved)
         return final_ready
 
     def _execution_reject_cooldown_result(
