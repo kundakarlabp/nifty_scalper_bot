@@ -925,6 +925,7 @@ from nifty_scalper_bot.utils.market_hours import (
     allow_offhours_testing_safe,
     get_market_session_state,
     get_market_state,
+    is_market_open_session,
     is_market_open_now,
 )
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
@@ -944,6 +945,21 @@ else:
     TelegramWebhookController = Any
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
+
+
+def _resolve_hydration_market_open_state(logger: logging.Logger = LOGGER) -> bool:
+    """Resolve open-session state for hydration/subscription tracking with safe fallback."""
+    market_open_now = False
+    try:
+        market_open_now = bool(is_market_open_session())
+    except Exception as exc:  # noqa: BLE001
+        market_open_now = False
+        logger.warning(
+            "MARKET_OPEN_CHECK_FAILED defaulting_closed error=%s",
+            exc,
+            exc_info=True,
+        )
+    return market_open_now
 
 
 def _load_telegram_enhanced_notifier() -> type[Any] | None:
@@ -9071,6 +9087,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             live_mode_enabled = bool(ctx.settings.enable_live)
             active_symbols: list[str] = []
             pending_runner_symbols: set[str] = set()
+            market_open_now = _resolve_hydration_market_open_state(LOGGER)
 
             for sym in targets:
                 if mdm:
