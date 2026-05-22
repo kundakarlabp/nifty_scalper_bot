@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import hashlib
 import json
 import math
 import os
@@ -2167,11 +2168,6 @@ class OrderManager:
                 return None  # ❌ STOP HERE. DO NOT CALL BROKER.
 
         # =========================================================
-        from datetime import datetime, time as dtime, timezone
-        import hashlib
-        import time
-        from zoneinfo import ZoneInfo
-
         from nifty_scalper_bot.core.trading_switch import trading_switch
         from nifty_scalper_bot.risk import OrderSignal
 

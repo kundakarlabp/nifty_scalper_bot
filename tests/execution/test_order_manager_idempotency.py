@@ -77,3 +77,41 @@ def test_place_order_fast_fill_bracket_without_trailing_fields_does_not_raise(mo
         get_bracket=lambda order_id: SimpleNamespace(entry_price=100.0, virtual_sl_id="SL1")
     )
     assert om.place_order('NFO:NIFTY26MAY23750CE', 'BUY', 1, order_type=OrderType.MARKET, stop_loss=10) == 'OID1'
+
+def test_place_order_kill_switch_path_does_not_raise_unboundlocalerror(monkeypatch):
+    om = _om('ok')
+    monkeypatch.setattr(om, '_lot_size_for_symbol', lambda s: 1)
+    om._kill_switch_active = True
+
+    result = om.place_order(
+        'NFO:NIFTY26MAY23750CE',
+        'BUY',
+        1,
+        order_type=OrderType.MARKET,
+        stop_loss=10,
+        signal_id='ks1',
+    )
+
+    assert result is None
+
+
+def test_place_order_live_option_signal_calls_broker_once_and_propagates_order_id(monkeypatch):
+    broker = _Broker('ok')
+    om = OrderManager(broker, _Pos(), _Limiter())
+    monkeypatch.setattr(om, '_lot_size_for_symbol', lambda s: 1)
+    monkeypatch.setattr(om, '_validate_live_execution_safety', lambda: True)
+    monkeypatch.setattr(om, '_confirm_fill_fast', lambda order_id, timeout_ms=300: False)
+
+    order_id = om.place_order(
+        'NFO:NIFTY26MAY23750CE',
+        'BUY',
+        1,
+        order_type=OrderType.MARKET,
+        stop_loss=10,
+        take_profit=20,
+        signal_id='ok1',
+        strategy_name='runner',
+    )
+
+    assert broker.calls == 1
+    assert order_id == 'OID1'
