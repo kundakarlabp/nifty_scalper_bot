@@ -166,3 +166,34 @@ def test_live_context_promotion_passes_only_with_strict_quality(monkeypatch) -> 
     vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
     out = manager._try_context_promotion('NFO:NIFTY25000CE', [(signal, vote)], {'context_age_seconds': 10}, manager.get_strategy_mode_profile())
     assert out is not None
+
+
+def test_orderflow_context_only_without_direction_stays_context(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': True, 'bid': 100, 'ask': 101, 'spread_pct': 1, 'context_age_seconds': 10}
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    assert manager._try_context_promotion('NFO:NIFTY25000CE', [(signal, vote)], {}, manager.get_strategy_mode_profile()) is None
+
+
+def test_orderflow_context_promotes_with_aligned_fallback_direction(monkeypatch) -> None:
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'true')
+    manager = _manager_stub()
+    signal = _make_signal()
+    signal.metadata = {'is_selected_option': True, 'quote_depth_valid': True, 'bid': 100, 'ask': 101, 'spread_pct': 1, 'context_age_seconds': 10}
+    vote = StrategyVote(strategy='OrderFlow', side='CE', score=9.0, confidence=0.8, reasons=[], metadata={'role': 'context'})
+    promoted = manager._try_context_promotion('NFO:NIFTY25000CE', [(signal, vote)], {'direction_bias': 'CE', 'context_age_seconds': 10}, manager.get_strategy_mode_profile())
+    assert promoted is not None
+
+
+def test_derive_direction_fresh_context_and_stale_context_age() -> None:
+    manager = _manager_stub()
+    side, conf, _ = manager._derive_context_direction(
+        {'close': 102, 'vwap': 100, 'ema_fast': 101, 'ema_slow': 99, 'open': 100},
+        role='spot_context',
+    )
+    assert side == 'CE'
+    assert conf > 0.0
