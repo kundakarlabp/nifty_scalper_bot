@@ -2593,9 +2593,9 @@ class StrategyManager(_BaseStrategyManager):
                 except (TypeError, ValueError):
                     indicators["underlying_direction_confidence"] = 0.0
                 indicators["context_age_seconds"] = min(now_ts - float(spot_ctx.get("timestamp", now_ts)) if spot_usable else max_context_age + 1, now_ts - float(fut_ctx.get("timestamp", now_ts)) if fut_usable else max_context_age + 1)
-                indicators["context_fresh"] = True
+                indicators["context_fresh"] = bool(float(indicators.get("context_age_seconds") or max_context_age + 1) <= max_context_age)
                 indicators["direction_context_source"] = "primary"
-                context_resolved = True
+                context_resolved = bool(indicators["context_fresh"])
                 direction_context_source = "primary"
                 log_throttled(
                     log,
@@ -3738,14 +3738,19 @@ class StrategyManager(_BaseStrategyManager):
             "promoted_from_context": True,
             "consensus_stage": "context_promoted_controlled",
             "promotion_reason": "direction_context_aligned",
-            "direction_bias": indicators.get("direction_bias"),
-            "underlying_direction_bias": indicators.get("underlying_direction_bias"),
-            "underlying_direction_confidence": indicators.get("underlying_direction_confidence"),
-            "context_age_seconds": indicators.get("context_age_seconds"),
-            "context_fresh": indicators.get("context_fresh"),
-            "direction_context_source": indicators.get("direction_context_source"),
-            "direction_context_reasons": indicators.get("direction_context_reasons"),
         })
+        for key in (
+            "direction_bias",
+            "underlying_direction_bias",
+            "underlying_direction_confidence",
+            "context_age_seconds",
+            "context_fresh",
+            "direction_context_source",
+            "direction_context_reasons",
+        ):
+            value = indicators.get(key)
+            if value is not None:
+                md[key] = value
         promoted = Signal(action="BUY", symbol=best_signal.symbol, quantity=best_signal.quantity, confidence=best_signal.confidence, reason=best_signal.reason, stop_loss=best_signal.stop_loss, take_profit=best_signal.take_profit, metadata=md)
         promoted_vote = StrategyVote(strategy=best_vote.strategy, side=best_vote.side, score=best_vote.score, confidence=best_vote.confidence, reasons=list(best_vote.reasons), metadata=md)
         log.info(
