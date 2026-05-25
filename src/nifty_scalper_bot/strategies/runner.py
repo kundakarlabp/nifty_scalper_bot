@@ -313,6 +313,21 @@ class SignalExecutionResult:
     order_id: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
+@dataclass(slots=True)
+class ExecutionModeSnapshot:
+    execution_mode: str
+    env_live_enabled: bool
+    paper_enabled: bool
+    shadow_mode_enabled: bool
+    order_manager_live: bool | None
+    is_live_mode: bool
+
+@dataclass(slots=True)
+class ExecutionReadinessResult:
+    allowed: bool
+    reason: str = "allowed"
+    details: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass(slots=True)
 class StrategyRunnerConfig:
@@ -592,6 +607,7 @@ class StrategyRunner:
         self._symbol_last_signal_ts: dict[str, float] = {}
         self._underlying_last_signal_ts: dict[str, float] = {}
         self._reason_last_signal_ts: dict[str, float] = {}
+        self._submitted_entry_order_context: dict[str, dict[str, Any]] = {}
         self._premium_squeeze_last_signal_ts: dict[str, float] = {}
         self._signal_reject_cooldown_ts: dict[str, float] = {}
         self._execution_reject_cooldown_ts: dict[str, float] = {}
@@ -2132,11 +2148,14 @@ class StrategyRunner:
         return normalized
 
     def _ensure_symbol_execution_ready_for_order(self, symbol: str, *, trace_id: str | None = None) -> bool:
+        return self._ensure_symbol_execution_ready_result(symbol, trace_id=trace_id).allowed
+
+    def _ensure_symbol_execution_ready_result(self, symbol: str, *, trace_id: str | None = None) -> ExecutionReadinessResult:
         normalized = normalize_symbol(symbol)
         runtime_key = self._runtime_ready_key(normalized)
         was_ready = self._is_symbol_execution_ready(runtime_key)
         if was_ready:
-            return True
+            return ExecutionReadinessResult(True, "already_ready", {"symbol": normalized, "runtime_key": runtime_key})
         reason = "runtime_not_marked_ready"
         tick_age_ms = None
         bid = ask = None
@@ -2233,7 +2252,7 @@ class StrategyRunner:
             self._runtime_symbol_last_ready_at[runtime_key] = time.time()
             self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s runtime_key=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s", normalized, runtime_key, reason, tick_age_ms, bid, ask, lot_size, history_count, trace_id)
         self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, runtime_key, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, history_fallback, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, tradable_quote, lot_size_resolved)
-        return final_ready
+        return ExecutionReadinessResult(final_ready, reason, {"symbol": normalized, "runtime_key": runtime_key, "tick_age_ms": tick_age_ms, "bid": bid, "ask": ask, "tradable_quote": tradable_quote, "lot_size_resolved": lot_size_resolved})
 
     def _execution_reject_cooldown_result(
         self, symbol: str, reason_key: str, now_epoch: float, trace_id: str | None
@@ -2287,11 +2306,8 @@ class StrategyRunner:
     ) -> tuple[Signal | None, str | None]:
         """Prepare signal metadata pre-sync handler. Args: signal, price, trace_id. Returns: prepared signal + block reason. Raises: none."""
         del price
-        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-        is_live_mode = mode == "LIVE" or (
-            str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        mode_snapshot = self._resolve_execution_mode_snapshot()
+        is_live_mode = bool(mode_snapshot.is_live_mode or mode_snapshot.execution_mode == "LIVE")
         if not is_live_mode:
             return signal, None
         runtime_ready = bool(getattr(self, "_runtime_data_hard_ready", False))
@@ -2341,30 +2357,23 @@ class StrategyRunner:
                     metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
                     self._logger.info(
                         "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING symbol=%s",
-                        signal.symbol,
+                        original_symbol,
                         extra={"event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING", "symbol": signal.symbol},
                     )
                     return dataclasses.replace(signal, metadata=metadata), None
             if refresh_pending:
-                if self._market_data is not None:
-                    try:
-                        latest = self._market_data.get_symbol_snapshot(signal.symbol)
-                        metadata["candidate_snapshots"] = [{
-                            "symbol": signal.symbol,
-                            "ltp": float(getattr(latest, "ltp", 0.0) or 0.0),
-                            "bid": float(getattr(latest, "bid", 0.0) or 0.0),
-                            "ask": float(getattr(latest, "ask", 0.0) or 0.0),
-                            "entry": float(getattr(latest, "ltp", 0.0) or 0.0),
-                            "stop_loss": float(signal.stop_loss or 0.0),
-                            "target": float(signal.take_profit or 0.0),
-                            "tradable_quote": bool(getattr(latest, "tradable_quote", False)),
-                            "ltp_only_fallback": True,
-                            "quote_quality": "ltp_only",
-                            "source": str(getattr(latest, "source", "refresh_pending")),
-                        }]
-                        return dataclasses.replace(signal, metadata=metadata), None
-                    except Exception:
-                        pass
+                fallback_candidate = self._build_single_candidate_from_signal(
+                    signal=signal,
+                    metadata=metadata,
+                    option_side=cast(Literal["CE", "PE"], option_side),
+                )
+                if fallback_candidate is not None:
+                    fallback_candidate["source"] = "refresh_pending_fallback"
+                    fallback_candidate["candidate_selected"] = True
+                    fallback_candidate["is_selected_option"] = True
+                    metadata["candidate_snapshots"] = [fallback_candidate]
+                    metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
+                    return dataclasses.replace(signal, metadata=metadata), None
                 return None, "candidate_refresh_pending"
             if not built:
                 return None, "missing_candidate_snapshots"
@@ -2377,6 +2386,23 @@ class StrategyRunner:
         if not metadata.get("candidate_snapshots"):
             return None, "missing_candidate_snapshots"
         return dataclasses.replace(signal, metadata=metadata), None
+
+    def _resolve_execution_mode_snapshot(self) -> ExecutionModeSnapshot:
+        def _env_truthy(name: str) -> bool:
+            return str(os.getenv(name, "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+        mode_source = getattr(self._order_manager, "is_live_mode", None)
+        order_manager_live: bool | None = None
+        if callable(mode_source):
+            try:
+                order_manager_live = bool(mode_source())
+            except Exception:
+                order_manager_live = False
+        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+        env_live_enabled = _env_truthy("ENABLE_LIVE_TRADING") or _env_truthy("ENABLE_LIVE")
+        paper_enabled = _env_truthy("PAPER__ENABLED") or _env_truthy("PAPER_MODE")
+        shadow_mode_enabled = _env_truthy("SHADOW_MODE")
+        is_live_mode = mode == "LIVE" and env_live_enabled and not paper_enabled and not shadow_mode_enabled and (order_manager_live is not False)
+        return ExecutionModeSnapshot(mode, env_live_enabled, paper_enabled, shadow_mode_enabled, order_manager_live, is_live_mode)
 
     def _build_single_candidate_from_signal(
         self,
@@ -9419,8 +9445,12 @@ class StrategyRunner:
         Returns: None. Raises: Exception.
         """
         try:
-            is_live_mode = False
-            execution_mode = "SHADOW"
+            mode_snapshot = self._resolve_execution_mode_snapshot()
+            is_live_mode = mode_snapshot.is_live_mode
+            execution_mode = mode_snapshot.execution_mode
+            candidate = None
+            ranked_candidates = []
+            selected_snapshot = {}
             self._logger.debug(
                 "Entered StrategyRunner._handle_entry_signal_inner (Direct OrderManager Flow)",
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
@@ -9442,51 +9472,16 @@ class StrategyRunner:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "invalid_quantity")
 
-            mode_source = getattr(self._order_manager, "is_live_mode", None)
-            if callable(mode_source):
-                try:
-                    is_live_mode = bool(mode_source())
-                except Exception:
-                    is_live_mode = False
-            def _env_truthy(name: str) -> bool:
-                return str(os.getenv(name, "false")).strip().lower() in {
-                    "1",
-                    "true",
-                    "yes",
-                    "y",
-                    "on",
-                }
-            mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-            env_live_enabled = _env_truthy("ENABLE_LIVE_TRADING") or _env_truthy("ENABLE_LIVE")
-            paper_enabled = _env_truthy("PAPER__ENABLED") or _env_truthy("PAPER_MODE")
-            shadow_mode_enabled = _env_truthy("SHADOW_MODE")
-            if not callable(mode_source):
-                is_live_mode = (
-                    mode == "LIVE"
-                    and env_live_enabled
-                    and not paper_enabled
-                    and not shadow_mode_enabled
-                )
-            else:
-                is_live_mode = (
-                    bool(is_live_mode)
-                    and mode == "LIVE"
-                    and env_live_enabled
-                    and not paper_enabled
-                    and not shadow_mode_enabled
-                )
-            execution_mode = "LIVE" if is_live_mode else mode
-            if execution_mode not in {"LIVE", "PAPER", "SHADOW", "SIMULATION"}:
-                execution_mode = "SHADOW"
             self._logger.info(
-                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s",
+                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s order_manager_live=%s",
                 base_symbol,
                 trace_id,
                 is_live_mode,
                 execution_mode,
-                env_live_enabled,
-                paper_enabled,
-                shadow_mode_enabled,
+                mode_snapshot.env_live_enabled,
+                mode_snapshot.paper_enabled,
+                mode_snapshot.shadow_mode_enabled,
+                mode_snapshot.order_manager_live,
             )
 
             # Cooldown + burst guard
@@ -9780,11 +9775,11 @@ class StrategyRunner:
                 if is_live_mode and is_directional_option and valid_snapshots and len(valid_snapshots) <= 1:
                     basket_source = str(metadata.get("candidate_basket_source") or "existing")
                     self._logger.info(
-                        "EXECUTION_CANDIDATE_BASKET_INADEQUATE symbol=%s total=%s source=%s",
+                        "EXECUTION_SINGLE_CANDIDATE_SCREEN symbol=%s total=%s source=%s",
                         signal.symbol,
                         len(valid_snapshots),
                         basket_source,
-                        extra={"event": "EXECUTION_CANDIDATE_BASKET_INADEQUATE", "symbol": signal.symbol, "total": len(valid_snapshots), "source": basket_source},
+                        extra={"event": "EXECUTION_SINGLE_CANDIDATE_SCREEN", "symbol": signal.symbol, "total": len(valid_snapshots), "source": basket_source},
                     )
                     lone = valid_snapshots[0]
                     lone_symbol = normalize_symbol(str(lone.get("symbol") or ""))
@@ -9804,7 +9799,9 @@ class StrategyRunner:
                     else:
                         strike_distance = float(distance_raw or 999.0)
                     is_selected = bool(lone.get("is_selected_option")) or lone_symbol == selected_symbol
-                    is_fresh = float(lone.get("tick_age_s") or 999.0) <= (float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0)
+                    tick_age_raw = lone.get("tick_age_s")
+                    tick_age_s = float(tick_age_raw) if tick_age_raw is not None else 999.0
+                    is_fresh = tick_age_s <= (float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0)
                     ltp = float(lone.get("ltp") or 0.0)
                     bid = float(lone.get("bid") or 0.0)
                     ask = float(lone.get("ask") or 0.0)
@@ -9828,7 +9825,7 @@ class StrategyRunner:
                             "ltp": ltp,
                             "bid": bid,
                             "ask": ask,
-                            "tick_age_s": float(lone.get("tick_age_s") or 999.0),
+                            "tick_age_s": tick_age_s,
                             "min_option_premium": self._trade_candidate_selector.min_option_premium,
                             "max_option_premium": self._trade_candidate_selector.max_option_premium,
                             "allow_ltp_only_candidate": allow_ltp_only,
@@ -9896,19 +9893,8 @@ class StrategyRunner:
                     )
                 selected_symbol = normalize_symbol(candidate.symbol)
                 original_symbol = normalize_symbol(signal.symbol)
+                original_trade_price = float(trade_price or 0.0)
                 if selected_symbol != original_symbol:
-                    self._logger.info(
-                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original=%s selected=%s trace_id=%s",
-                        signal.symbol,
-                        candidate.symbol,
-                        trace_id,
-                        extra={
-                            "event": "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE",
-                            "original_symbol": signal.symbol,
-                            "selected_symbol": candidate.symbol,
-                            "trace_id": trace_id,
-                        },
-                    )
                     trade_symbol = selected_symbol
                     base_symbol = selected_symbol
                     signal = dataclasses.replace(
@@ -9951,6 +9937,45 @@ class StrategyRunner:
                 )
                 selected_snapshot = dict(selected_snapshot or {})
                 metadata["selected_snapshot_symbol"] = selected_snapshot.get("symbol")
+                selected_trade_price = float(
+                    getattr(candidate, "entry_price", None)
+                    or selected_snapshot.get("ask")
+                    or selected_snapshot.get("ltp")
+                    or metadata.get("candidate_entry_price")
+                    or trade_price
+                    or 0.0
+                )
+                if selected_symbol != original_symbol:
+                    self._logger.info(
+                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original_symbol=%s selected_symbol=%s original_trade_price=%s selected_trade_price=%s candidate_entry_price=%s selected_snapshot_ask=%s selected_snapshot_ltp=%s candidate_stop_loss=%s candidate_target=%s candidate_rr=%s candidate_score=%s trace_id=%s",
+                        original_symbol,
+                        candidate.symbol,
+                        original_trade_price,
+                        selected_trade_price,
+                        getattr(candidate, "entry_price", None),
+                        selected_snapshot.get("ask"),
+                        selected_snapshot.get("ltp"),
+                        getattr(candidate, "stop_loss", None),
+                        getattr(candidate, "target", None),
+                        getattr(candidate, "rr", None),
+                        getattr(candidate, "score", None),
+                        trace_id,
+                        extra={
+                            "event": "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE",
+                            "original_symbol": original_symbol,
+                            "selected_symbol": candidate.symbol,
+                            "original_trade_price": original_trade_price,
+                            "selected_trade_price": selected_trade_price,
+                            "candidate_entry_price": getattr(candidate, "entry_price", None),
+                            "selected_snapshot_ask": selected_snapshot.get("ask"),
+                            "selected_snapshot_ltp": selected_snapshot.get("ltp"),
+                            "candidate_stop_loss": getattr(candidate, "stop_loss", None),
+                            "candidate_target": getattr(candidate, "target", None),
+                            "candidate_rr": getattr(candidate, "rr", None),
+                            "candidate_score": getattr(candidate, "score", None),
+                            "trace_id": trace_id,
+                        },
+                    )
                 snapshot_bid = selected_snapshot.get("bid")
                 snapshot_ask = selected_snapshot.get("ask")
 
@@ -10003,6 +10028,13 @@ class StrategyRunner:
                 allow_ltp_live_plan = _env_flag("ALLOW_LTP_ONLY_LIVE_ORDER_PLAN", default=False)
 
                 metadata["tradable_quote"] = bool(snapshot_tradable_quote or mdm_tradable_quote)
+                trade_price = selected_trade_price
+                metadata["entry_price"] = trade_price
+                metadata["signal_price"] = trade_price
+                metadata["price"] = trade_price
+                metadata["candidate_entry_price"] = trade_price
+                metadata["selected_execution_price"] = trade_price
+
                 metadata["quote_usable_for_order_plan"] = bool(
                     snapshot_tradable_quote
                     or mdm_tradable_quote
@@ -10032,27 +10064,29 @@ class StrategyRunner:
                 if dedup_result is not None:
                     self._reset_execution_state(base_symbol)
                     return dedup_result
-                if is_live_mode and not self._ensure_symbol_execution_ready_for_order(
-                    trade_symbol or base_symbol, trace_id=trace_id
-                ):
-                    selected_candidate = candidate.symbol if candidate is not None else metadata.get("candidate_symbol")
-                    cache_key = normalize_symbol(trade_symbol or base_symbol)
-                    cache_state = self._runtime_execution_ready_by_symbol.get(cache_key)
-                    ready_snapshot = selected_snapshot if isinstance(selected_snapshot, dict) else {}
-                    self._logger.info(
-                        "SYMBOL_EXECUTION_READY_DIAGNOSTICS symbol=%s trace_id=%s selected_candidate=%s ensure_attempted=%s ensure_result=%s",
-                        base_symbol, trace_id, selected_candidate, True, False,
-                        extra={"event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "selected_candidate": selected_candidate, "subscription_ready": ready_snapshot.get("subscription_ready", "unavailable"), "quote_ready": ready_snapshot.get("quote_ready", "unavailable"), "depth_ready": ready_snapshot.get("depth_ready", "unavailable"), "token_ready": ready_snapshot.get("token_ready", "unavailable"), "tick_age_ms": ready_snapshot.get("tick_age_ms", "unavailable"), "ltp": ready_snapshot.get("ltp", metadata.get("entry_price")), "bid": ready_snapshot.get("bid", "unavailable"), "ask": ready_snapshot.get("ask", "unavailable"), "tradable_quote": ready_snapshot.get("tradable_quote", "unavailable"), "execution_ready_cache_state": cache_state if cache_state is not None else "unavailable", "ensure_attempted": True, "ensure_result": False},
+                if is_live_mode:
+                    readiness = self._ensure_symbol_execution_ready_result(
+                        trade_symbol or base_symbol, trace_id=trace_id
                     )
-                    self._mark_directional_dedup_failed(
-                        underlying=underlying, option_side=option_side, reason=reason_key
-                    )
-                    self._execution_reject_cooldown_ts[
-                        f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:runtime_symbol_execution_not_ready"
-                    ] = now_epoch
-                    self._reset_execution_state(base_symbol)
-                    _trace("runtime_symbol_execution_not_ready")
-                    return SignalExecutionResult(False, "runtime_symbol_execution_not_ready")
+                    if not readiness.allowed:
+                        selected_candidate = candidate.symbol if candidate is not None else metadata.get("candidate_symbol")
+                        readiness_details = dict(readiness.details or {})
+                        readiness_details["readiness_reason"] = readiness.reason
+                        readiness_details["trace_id"] = trace_id
+                        self._logger.info(
+                            "SYMBOL_EXECUTION_READY_DIAGNOSTICS symbol=%s trace_id=%s selected_candidate=%s reason=%s details=%s",
+                            base_symbol, trace_id, selected_candidate, readiness.reason, readiness_details,
+                            extra={"event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "selected_candidate": selected_candidate, "readiness_reason": readiness.reason, "readiness_details": readiness_details},
+                        )
+                        self._mark_directional_dedup_failed(
+                            underlying=underlying, option_side=option_side, reason=reason_key
+                        )
+                        self._execution_reject_cooldown_ts[
+                            f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:runtime_symbol_execution_not_ready"
+                        ] = now_epoch
+                        self._reset_execution_state(base_symbol)
+                        _trace("runtime_symbol_execution_not_ready")
+                        return SignalExecutionResult(False, "runtime_symbol_execution_not_ready", details=readiness_details)
             requires_final_score = bool(metadata.get("preliminary_only")) or bool(
                 metadata.get("requires_runner_final_score")
             )
@@ -10536,7 +10570,6 @@ class StrategyRunner:
                 },
             )
 
-            self._order_attempt_window.append(now_epoch)
             max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
             max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
             min_depth_qty = int(float(os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0")) or 0))
@@ -10549,11 +10582,29 @@ class StrategyRunner:
                 trace_id,
                 is_live_mode,
                 execution_mode,
-                env_live_enabled,
-                paper_enabled,
-                shadow_mode_enabled,
+                mode_snapshot.env_live_enabled,
+                mode_snapshot.paper_enabled,
+                mode_snapshot.shadow_mode_enabled,
             )
-            order_id = self._order_manager.submit_trade_plan(plan)
+            submit_result_fn = getattr(self._order_manager, "submit_trade_plan_result", None)
+            order_id = None
+            submit_reason = "order_rejected"
+            submit_details = {"trace_id": trace_id}
+            broker_attempted = True
+            if callable(submit_result_fn):
+                submit_result = submit_result_fn(plan)
+                broker_attempted = bool(getattr(submit_result, "broker_attempted", False))
+                if submit_result.accepted and submit_result.order_id:
+                    order_id = submit_result.order_id
+                else:
+                    submit_reason = f"order_manager_{submit_result.reason}"
+                    submit_details = {**dict(getattr(submit_result, "details", {}) or {}), "trace_id": trace_id}
+            else:
+                order_id = self._order_manager.submit_trade_plan(plan)
+                broker_attempted = True
+
+            if broker_attempted:
+                self._order_attempt_window.append(now_epoch)
 
             if order_id:
                 orchestrator = getattr(self, "_orchestrator", None)
@@ -10574,6 +10625,15 @@ class StrategyRunner:
                 )
                 if reason_key == "premium_momentum_squeeze":
                     self._premium_squeeze_last_signal_ts[underlying] = now_epoch
+                self._submitted_entry_order_context[str(order_id)] = {
+                    "symbol": order_symbol,
+                    "base_symbol": base_symbol,
+                    "underlying": underlying,
+                    "option_side": option_side,
+                    "reason_key": reason_key,
+                    "underlying_reason_key": underlying_reason_key,
+                    "ts": now_epoch,
+                }
                 try:
                     self._record_trade(
                         base_symbol,
@@ -10590,12 +10650,35 @@ class StrategyRunner:
                 )
                 log_throttled(self._logger, f"runner_order_rejected_{base_symbol}", "ORDER_REJECTED by order_manager", interval_sec=300.0, level=logging.WARNING, extra={"event": "ORDER_REJECTED", "symbol": base_symbol})
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(False, "order_rejected", details={"trace_id": trace_id})
+                return SignalExecutionResult(False, submit_reason, details=submit_details)
 
         except Exception as exc:
             self._logger.error("🔴 ENTRY LOGIC CRASH: %s", exc, exc_info=True)
             self._reset_execution_state(base_symbol)
             return SignalExecutionResult(False, "entry_exception", details={"trace_id": trace_id, "error": str(exc)})
+
+    def notify_entry_order_failed(self, *, order_id: str, symbol: str | None = None, reason: str = "unknown") -> None:
+        context = self._submitted_entry_order_context.get(str(order_id), {})
+        underlying = str(context.get("underlying") or self._extract_underlying(symbol or "") or "NIFTY")
+        underlying_reason_key = str(context.get("underlying_reason_key") or "")
+        has_position = False
+        if self._position_manager is not None and symbol:
+            try:
+                has_position = bool(self._position_manager.has_open_position(symbol))
+            except Exception:
+                has_position = False
+        if not has_position:
+            orchestrator = getattr(self, "_orchestrator", None)
+            if orchestrator is not None and hasattr(orchestrator, "clear_direction_lock"):
+                try:
+                    orchestrator.clear_direction_lock(reason="entry_order_failed", symbol=symbol or str(context.get("symbol") or ""))
+                except Exception:
+                    pass
+            self._underlying_last_signal_ts.pop(underlying, None)
+            if underlying_reason_key:
+                self._reason_last_signal_ts.pop(underlying_reason_key, None)
+        self._submitted_entry_order_context.pop(str(order_id), None)
+        self._logger.info("ENTRY_ORDER_FAILED_RECONCILED order_id=%s symbol=%s reason=%s has_position=%s", order_id, symbol or context.get("symbol"), reason, has_position)
 
     def _get_atr_with_fallback(
         self, symbol: str, metadata: dict, current_price: float
@@ -10856,7 +10939,6 @@ class StrategyRunner:
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
                 self._reason_last_signal_ts[f"{underlying}:{reason_key}"] = now_epoch
-                self._order_attempt_window.append(now_epoch)
                 try:
                     self._record_trade(
                         base_symbol,
