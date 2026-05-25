@@ -1374,7 +1374,7 @@ def test_directional_dedup_blocks_second_pe_same_reason_within_window() -> None:
     second = runner._apply_directional_signal_dedup(signal=signal, metadata=metadata, underlying='NIFTY', now_epoch=now_epoch + 10.0, selected_symbol='NFO:NIFTY26APR23850PE', option_side='PE', selected_snapshot={})
     assert first is None
     assert second is not None
-    assert second.reason == 'signal_duplicate_direction_cooldown'
+    assert second.reason == 'signal_attempt_debounce'
 
 
 def test_directional_dedup_separates_pe_and_ce_keys() -> None:
@@ -1434,7 +1434,7 @@ def test_directional_dedup_blocks_tiny_score_bump_if_quality_worse() -> None:
     )
     assert first is None
     assert second is not None
-    assert second.reason == 'signal_duplicate_direction_cooldown'
+    assert second.reason == 'signal_attempt_debounce'
 
 
 def test_dedup_prefers_tick_age_ms_over_candidate_tick_age_s() -> None:

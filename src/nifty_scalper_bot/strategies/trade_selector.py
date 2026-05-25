@@ -40,14 +40,19 @@ class TradeCandidate:
 
 
 class TradeCandidateSelector:
-    def __init__(self, *, quality_mode: str = 'normal', option_strike_window_each_side: int = 2, min_option_premium: float = 80.0, max_option_premium: float = float(os.getenv('MAX_OPTION_PREMIUM', '650')), max_tick_age_s: float | None = None, max_option_spread_pct: float | None = None, require_real_ticks_last_60s: int | None = None) -> None:
+    def __init__(self, *, quality_mode: str = 'normal', option_strike_window_each_side: int = 2, min_option_premium: float | None = None, max_option_premium: float | None = None, max_tick_age_s: float | None = None, max_option_spread_pct: float | None = None, require_real_ticks_last_60s: int | None = None) -> None:
         self.quality_mode = quality_mode
         self.option_strike_window_each_side = option_strike_window_each_side
-        self.min_option_premium = min_option_premium
-        self.max_option_premium = max_option_premium
+        self.min_option_premium = float(min_option_premium if min_option_premium is not None else os.getenv('MIN_OPTION_PREMIUM', '40'))
+        self.max_option_premium = float(max_option_premium if max_option_premium is not None else os.getenv('MAX_OPTION_PREMIUM', '650'))
+        if self.min_option_premium <= 0:
+            raise ValueError('min_option_premium must be > 0')
+        if self.max_option_premium <= self.min_option_premium:
+            raise ValueError('max_option_premium must be > min_option_premium')
         self.max_tick_age_s = max_tick_age_s
         self.max_option_spread_pct = max_option_spread_pct
         self.require_real_ticks_last_60s = require_real_ticks_last_60s
+        self._last_rejects: dict[str, int] = {}
 
     def _limits(self) -> tuple[float, float, int]:
         if self.quality_mode == 'strict':
@@ -87,6 +92,33 @@ class TradeCandidateSelector:
             premium = ltp
             if premium < self.min_option_premium or premium > self.max_option_premium:
                 rejects['premium_out_of_range'] += 1
+                LOGGER.info(
+                    "CANDIDATE_REJECTED symbol=%s reason=premium_out_of_range premium=%s min=%s max=%s ltp=%s bid=%s ask=%s strike=%s atm=%s atm_distance=%s",
+                    symbol,
+                    premium,
+                    self.min_option_premium,
+                    self.max_option_premium,
+                    ltp,
+                    bid,
+                    ask,
+                    strike,
+                    atm_strike,
+                    atm_distance,
+                    extra={
+                        "event": "CANDIDATE_REJECTED",
+                        "symbol": symbol,
+                        "reason": "premium_out_of_range",
+                        "premium": premium,
+                        "min_option_premium": self.min_option_premium,
+                        "max_option_premium": self.max_option_premium,
+                        "ltp": ltp,
+                        "bid": bid,
+                        "ask": ask,
+                        "strike": strike,
+                        "atm": atm_strike,
+                        "atm_distance": atm_distance,
+                    },
+                )
                 continue
             tick_age_s = self._f(s.get('tick_age_s'))
             if tick_age_s is None or tick_age_s > max_age:
@@ -135,6 +167,7 @@ class TradeCandidateSelector:
             final = max(0.0, min(10.0, 0.7 * score + 0.3 * dq.score))
             ranked.append(TradeCandidate(symbol=symbol, side=side, score=final, reasons=reasons, spread_pct=spread_pct, tick_age_s=tick_age_s, premium=premium, atm_distance=atm_distance, data_quality_score=dq.score, entry_price=entry, stop_loss=sl, target=target, rr=rr, liquidity_score=liquidity, microstructure_score=micro, final_score=final))
         sorted_ranked = sorted(ranked, key=lambda c: c.final_score or 0.0, reverse=True)
+        self._last_rejects = dict(rejects)
         key = f'candidate_summary_empty:{direction_bias}:{atm_strike}'
         event_extra = {'event': 'CANDIDATE_SELECTION_SUMMARY', 'direction': direction_bias, 'atm': atm_strike, 'total': len(snapshots), 'ranked': len(sorted_ranked), 'rejects': rejects, 'ltp_only_used': ltp_only_used}
         if sorted_ranked:

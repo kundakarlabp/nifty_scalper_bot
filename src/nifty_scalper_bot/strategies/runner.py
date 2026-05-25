@@ -599,7 +599,7 @@ class StrategyRunner:
         self._exec_reject_invalid_lot_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_INVALID_LOT_SECONDS", "300") or 300))
         self._order_attempt_window: Deque[float] = deque()
         self._signal_direction_dedup_seconds = max(
-            1.0, float(os.getenv("SIGNAL_DIRECTION_DEDUP_SECONDS", "45") or 45)
+            0.5, float(os.getenv("SIGNAL_ATTEMPT_DEBOUNCE_SECONDS", "2") or 2)
         )
         self._signal_direction_dedup_min_improvement = float(
             os.getenv("SIGNAL_DIRECTION_DEDUP_MIN_IMPROVEMENT", "2.0") or 2.0
@@ -9314,19 +9314,19 @@ class StrategyRunner:
                     log_throttled_live(
                         self._logger,
                         logging.INFO,
-                        "SIGNAL_DEDUP_BLOCKED",
-                        f"SIGNAL_DEDUP_BLOCKED:{underlying}:{option_side}:{reason}",
+                        "DUPLICATE_DIRECTION_COOLDOWN_CHECK",
+                        f"DUPLICATE_DIRECTION_COOLDOWN_CHECK:{underlying}:{option_side}:{reason}",
                         float(os.getenv("LOG_THROTTLE_DEDUP_SECONDS", "15") or "15"),
-                        "SIGNAL_DEDUP_BLOCKED symbol=%s direction=%s reason=%s key=%s seconds_remaining=%.2f",
+                        "DUPLICATE_DIRECTION_COOLDOWN_CHECK symbol=%s direction=%s allowed=%s age_s=%.2f required_s=%.2f",
                         selected_symbol,
                         option_side,
-                        reason,
-                        key,
-                        remaining,
-                        extra={"event": "SIGNAL_DEDUP_BLOCKED", "symbol": selected_symbol, "direction": option_side, "reason": reason},
+                        False,
+                        elapsed,
+                        self._signal_direction_dedup_seconds,
+                        extra={"event": "DUPLICATE_DIRECTION_COOLDOWN_CHECK", "symbol": selected_symbol, "direction": option_side, "allowed": False, "age_s": elapsed, "required_s": self._signal_direction_dedup_seconds},
                     )
                     return SignalExecutionResult(
-                        False, "signal_duplicate_direction_cooldown"
+                        False, "signal_attempt_debounce"
                     )
         self._signal_direction_last_emit[key] = {
             "ts": now_epoch,
@@ -9540,6 +9540,27 @@ class StrategyRunner:
                 trade_symbol or base_symbol or signal.symbol
             )
             selected_snapshot: dict[str, Any] = {}
+            if is_live_mode and is_directional_option:
+                existing_snapshots = candidate_snapshots_obj if isinstance(candidate_snapshots_obj, list) else []
+                if len(existing_snapshots) <= 1:
+                    atm_seed = metadata.get("atm_strike") or self._extract_strike_from_symbol(signal.symbol) or self._active_atm_strike
+                    basket_snapshots, basket_pending = asyncio.run(
+                        self.build_candidate_snapshots_async(
+                            underlying=underlying,
+                            direction_bias=cast(Literal["CE", "PE"], option_side),
+                            atm_strike=int(atm_seed) if atm_seed else None,
+                            window_each_side=int(os.getenv("OPTION_STRIKE_WINDOW_EACH_SIDE", "2") or 2),
+                        )
+                    )
+                    if basket_snapshots and not basket_pending:
+                        metadata["candidate_snapshots"] = basket_snapshots
+                        candidate_snapshots_obj = basket_snapshots
+                    else:
+                        self._logger.info(
+                            "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=basket_unavailable symbol=%s",
+                            signal.symbol,
+                            extra={"event": "EXECUTION_CANDIDATE_BASKET_FALLBACK", "reason": "basket_unavailable", "symbol": signal.symbol},
+                        )
             if is_live_mode and is_directional_option and not isinstance(
                 candidate_snapshots_obj, list
             ):
@@ -9635,7 +9656,15 @@ class StrategyRunner:
                 if candidate is None:
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
-                        symbol=base_symbol, trace_id=trace_id, reason="no_execution_ready_candidate"
+                        symbol=base_symbol, trace_id=trace_id, reason="no_execution_ready_candidate", details={
+                            "candidate_total": len(valid_snapshots),
+                            "candidate_ranked": len(ranked_candidates),
+                            "candidate_rejects": getattr(self._trade_candidate_selector, "_last_rejects", {}),
+                            "direction": option_side,
+                            "atm": atm_strike,
+                            "min_option_premium": self._trade_candidate_selector.min_option_premium,
+                            "max_option_premium": self._trade_candidate_selector.max_option_premium,
+                        }
                     )
                 selected_symbol = normalize_symbol(candidate.symbol)
                 original_symbol = normalize_symbol(signal.symbol)
@@ -10293,6 +10322,13 @@ class StrategyRunner:
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
                 self._reason_last_signal_ts[underlying_reason_key] = now_epoch
+                self._logger.info(
+                    "DUPLICATE_DIRECTION_COOLDOWN_MARKED symbol=%s direction=%s reason=order_submitted order_id=%s",
+                    base_symbol,
+                    option_side,
+                    order_id,
+                    extra={"event": "DUPLICATE_DIRECTION_COOLDOWN_MARKED", "symbol": base_symbol, "direction": option_side, "reason": "order_submitted", "order_id": order_id},
+                )
                 if reason_key == "premium_momentum_squeeze":
                     self._premium_squeeze_last_signal_ts[underlying] = now_epoch
                 try:
@@ -10304,6 +10340,11 @@ class StrategyRunner:
                     self._logger.error("record_trade failed: %s", rec_exc)
                 return SignalExecutionResult(True, "order_submitted", order_id=order_id, details={"trace_id": trace_id})
             else:
+                self._logger.info(
+                    "DUPLICATE_DIRECTION_COOLDOWN_NOT_MARKED symbol=%s reason=no_order_submitted",
+                    base_symbol,
+                    extra={"event": "DUPLICATE_DIRECTION_COOLDOWN_NOT_MARKED", "symbol": base_symbol, "reason": "no_order_submitted"},
+                )
                 log_throttled(self._logger, f"runner_order_rejected_{base_symbol}", "ORDER_REJECTED by order_manager", interval_sec=300.0, level=logging.WARNING, extra={"event": "ORDER_REJECTED", "symbol": base_symbol})
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "order_rejected", details={"trace_id": trace_id})
