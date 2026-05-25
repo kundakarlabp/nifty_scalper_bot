@@ -11,6 +11,7 @@ import pytest
 
 from nifty_scalper_bot.strategies.runner import SignalExecutionResult, StrategyRunner
 from nifty_scalper_bot.strategies.signal_generator import Signal
+from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 
 
 class _SilentLogger:
@@ -71,6 +72,7 @@ def _build_runner() -> StrategyRunner:
     runner._runtime_evaluation_ready = True
     runner._runtime_live_orders_armed = True
     runner._runtime_readiness_reason = None
+    runner._build_candidate_snapshots_sync_safe = MagicMock(return_value=([], False, "cached_existing"))
     return runner
 
 
@@ -1363,6 +1365,46 @@ def test_early_runtime_not_ready_cooldown_resets_execution_state() -> None:
     )
     assert result.reason == "runtime_symbol_execution_not_ready_reject_cooldown"
     runner._reset_execution_state.assert_called()
+
+
+def test_live_execution_uses_basket_and_submits_alternate_candidate(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    runner._trade_candidate_selector = TradeCandidateSelector(min_option_premium=100.0, max_option_premium=650.0)
+    runner._is_symbol_execution_ready = MagicMock(return_value=True)
+    runner._order_manager.submit_trade_plan = MagicMock(return_value="oid-alt")
+    signal_symbol = "NFO:NIFTY26MAY24050CE"
+    alt_symbol = "NFO:NIFTY26MAY24100CE"
+    runner._build_candidate_snapshots_sync_safe = MagicMock(
+        return_value=(
+            [
+                {"symbol": signal_symbol, "side": "CE", "option_type": "CE", "strike": 24050, "atm_strike": 24050, "ltp": 80.0, "bid": 79.0, "ask": 81.0, "tick_age_s": 0.5, "real_ticks_last_60s": 3},
+                {"symbol": alt_symbol, "side": "CE", "option_type": "CE", "strike": 24100, "atm_strike": 24050, "ltp": 150.0, "bid": 149.0, "ask": 151.0, "tick_age_s": 0.5, "real_ticks_last_60s": 4},
+            ],
+            False,
+            "async_refresh",
+        )
+    )
+    signal = Signal(action="BUY", symbol=signal_symbol, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=60.0, take_profit=220.0, metadata={"candidate_snapshots": [{"symbol": signal_symbol, "side": "CE", "option_type": "CE", "strike": 24050, "atm_strike": 24050, "ltp": 80.0, "bid": 79.0, "ask": 81.0, "tick_age_s": 0.4, "real_ticks_last_60s": 2}], "atm_strike": 24050})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=signal_symbol, trade_symbol=signal_symbol, trade_price=150.0, timestamp=datetime.now(timezone.utc), trace_id="trace-alt")
+    assert result.accepted is True
+    assert result.reason == "order_submitted"
+    submitted_plan = runner._order_manager.submit_trade_plan.call_args.args[0]
+    assert submitted_plan.symbol == alt_symbol
+
+
+def test_order_rejected_does_not_mark_duplicate_cooldown(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    runner._logger = MagicMock()
+    runner._trade_candidate_selector = TradeCandidateSelector(min_option_premium=40.0, max_option_premium=650.0)
+    runner._is_symbol_execution_ready = MagicMock(return_value=True)
+    runner._order_manager.submit_trade_plan = MagicMock(return_value=None)
+    sym = "NFO:NIFTY26MAY24050CE"
+    signal = Signal(action="BUY", symbol=sym, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=100.0, take_profit=200.0, metadata={"candidate_snapshots": [{"symbol": sym, "side": "CE", "option_type": "CE", "strike": 24050, "atm_strike": 24050, "ltp": 140.0, "bid": 139.0, "ask": 141.0, "tick_age_s": 0.2, "real_ticks_last_60s": 5}]})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=sym, trade_symbol=sym, trade_price=140.0, timestamp=datetime.now(timezone.utc), trace_id="trace-no-order")
+    assert result.reason == "order_rejected"
+    assert not runner._underlying_last_signal_ts
 
 
 def test_directional_dedup_blocks_second_pe_same_reason_within_window() -> None:

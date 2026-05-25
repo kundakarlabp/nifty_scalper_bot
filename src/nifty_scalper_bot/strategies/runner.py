@@ -1830,6 +1830,51 @@ class StrategyRunner:
             )
             return [], True
 
+    def _build_candidate_snapshots_sync_safe(
+        self,
+        *,
+        symbol: str,
+        underlying: str,
+        direction_bias: Literal["CE", "PE"],
+        atm_strike: int | None,
+        existing_snapshots: list[dict[str, Any]] | None,
+        window_each_side: int,
+    ) -> tuple[list[dict[str, Any]], bool, str]:
+        """Sync-safe candidate basket build without unsafe asyncio.run in active loop."""
+        try:
+            asyncio.get_running_loop()
+            self._logger.info(
+                "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=event_loop_active symbol=%s",
+                symbol,
+                extra={
+                    "event": "EXECUTION_CANDIDATE_BASKET_FALLBACK",
+                    "reason": "event_loop_active",
+                    "symbol": symbol,
+                },
+            )
+            return list(existing_snapshots or []), False, "cached_existing"
+        except RuntimeError:
+            snapshots, pending = asyncio.run(
+                self.build_candidate_snapshots_async(
+                    underlying=underlying,
+                    direction_bias=direction_bias,
+                    atm_strike=atm_strike,
+                    window_each_side=window_each_side,
+                )
+            )
+            if snapshots and not pending:
+                self._logger.info(
+                    "EXECUTION_CANDIDATE_BASKET_BUILT source=async_refresh total=%s",
+                    len(snapshots),
+                    extra={
+                        "event": "EXECUTION_CANDIDATE_BASKET_BUILT",
+                        "source": "async_refresh",
+                        "total": len(snapshots),
+                    },
+                )
+                return snapshots, pending, "async_refresh"
+            return snapshots, pending, "async_refresh"
+
     def _schedule_signal_preparation(
         self,
         signal: Signal,
@@ -9314,16 +9359,16 @@ class StrategyRunner:
                     log_throttled_live(
                         self._logger,
                         logging.INFO,
-                        "DUPLICATE_DIRECTION_COOLDOWN_CHECK",
-                        f"DUPLICATE_DIRECTION_COOLDOWN_CHECK:{underlying}:{option_side}:{reason}",
+                        "SIGNAL_ATTEMPT_DEBOUNCE_BLOCKED",
+                        f"SIGNAL_ATTEMPT_DEBOUNCE_BLOCKED:{underlying}:{option_side}:{reason}",
                         float(os.getenv("LOG_THROTTLE_DEDUP_SECONDS", "15") or "15"),
-                        "DUPLICATE_DIRECTION_COOLDOWN_CHECK symbol=%s direction=%s allowed=%s age_s=%.2f required_s=%.2f",
+                        "SIGNAL_ATTEMPT_DEBOUNCE_CHECK symbol=%s direction=%s allowed=%s age_s=%.2f required_s=%.2f",
                         selected_symbol,
                         option_side,
                         False,
                         elapsed,
                         self._signal_direction_dedup_seconds,
-                        extra={"event": "DUPLICATE_DIRECTION_COOLDOWN_CHECK", "symbol": selected_symbol, "direction": option_side, "allowed": False, "age_s": elapsed, "required_s": self._signal_direction_dedup_seconds},
+                        extra={"event": "SIGNAL_ATTEMPT_DEBOUNCE_BLOCKED", "symbol": selected_symbol, "direction": option_side, "allowed": False, "age_s": elapsed, "required_s": self._signal_direction_dedup_seconds},
                     )
                     return SignalExecutionResult(
                         False, "signal_attempt_debounce"
@@ -9544,13 +9589,13 @@ class StrategyRunner:
                 existing_snapshots = candidate_snapshots_obj if isinstance(candidate_snapshots_obj, list) else []
                 if len(existing_snapshots) <= 1:
                     atm_seed = metadata.get("atm_strike") or self._extract_strike_from_symbol(signal.symbol) or self._active_atm_strike
-                    basket_snapshots, basket_pending = asyncio.run(
-                        self.build_candidate_snapshots_async(
-                            underlying=underlying,
-                            direction_bias=cast(Literal["CE", "PE"], option_side),
-                            atm_strike=int(atm_seed) if atm_seed else None,
-                            window_each_side=int(os.getenv("OPTION_STRIKE_WINDOW_EACH_SIDE", "2") or 2),
-                        )
+                    basket_snapshots, basket_pending, _basket_source = self._build_candidate_snapshots_sync_safe(
+                        symbol=signal.symbol,
+                        underlying=underlying,
+                        direction_bias=cast(Literal["CE", "PE"], option_side),
+                        atm_strike=int(atm_seed) if atm_seed else None,
+                        existing_snapshots=existing_snapshots,
+                        window_each_side=int(os.getenv("OPTION_STRIKE_WINDOW_EACH_SIDE", "2") or 2),
                     )
                     if basket_snapshots and not basket_pending:
                         metadata["candidate_snapshots"] = basket_snapshots
