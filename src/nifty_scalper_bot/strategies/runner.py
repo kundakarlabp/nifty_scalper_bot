@@ -9655,10 +9655,20 @@ class StrategyRunner:
                 trade_symbol or base_symbol or signal.symbol
             )
             selected_snapshot: dict[str, Any] = {}
+            existing_snapshots = (
+                candidate_snapshots_obj
+                if isinstance(candidate_snapshots_obj, list)
+                else []
+            )
+            basket_pending = False
+            _basket_source = "existing"
+            atm_seed = (
+                metadata.get("atm_strike")
+                or self._extract_strike_from_symbol(signal.symbol)
+                or self._active_atm_strike
+            )
             if is_live_mode and is_directional_option:
-                existing_snapshots = candidate_snapshots_obj if isinstance(candidate_snapshots_obj, list) else []
                 if len(existing_snapshots) <= 1:
-                    atm_seed = metadata.get("atm_strike") or self._extract_strike_from_symbol(signal.symbol) or self._active_atm_strike
                     basket_snapshots, basket_pending, _basket_source = self._build_candidate_snapshots_sync_safe(
                         symbol=signal.symbol,
                         underlying=underlying,
@@ -9686,6 +9696,12 @@ class StrategyRunner:
                         reason="candidate_refresh_pending",
                     )
                 if basket_pending and len(candidate_snapshots_obj) <= 1:
+                    event_loop_active = _basket_source == "event_loop_active_refresh_pending"
+                    pending_reason = (
+                        "event_loop_active_refresh_pending"
+                        if event_loop_active
+                        else "candidate_snapshot_refresh_pending"
+                    )
                     details = {
                         "symbol": base_symbol,
                         "trace_id": trace_id,
@@ -9693,17 +9709,17 @@ class StrategyRunner:
                         "option_side": option_side,
                         "candidate_total": len(candidate_snapshots_obj),
                         "basket_source": _basket_source,
-                        "event_loop_active": True,
+                        "event_loop_active": event_loop_active,
                         "existing_snapshot_symbols": [normalize_symbol(str(s.get("symbol") or "")) for s in existing_snapshots if isinstance(s, dict)],
                         "atm_seed": atm_seed,
                         "active_atm_strike": self._active_atm_strike,
                         "selected_ce": normalize_symbol(str(metadata.get("selected_ce") or self._selected_ce_symbol or "")),
                         "selected_pe": normalize_symbol(str(metadata.get("selected_pe") or self._selected_pe_symbol or "")),
-                        "reason": "event_loop_active_refresh_pending",
+                        "reason": pending_reason,
                     }
                     self._logger.info(
                         "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS symbol=%s trace_id=%s underlying=%s option_side=%s candidate_total=%s basket_source=%s reason=%s",
-                        base_symbol, trace_id, underlying, option_side, len(candidate_snapshots_obj), _basket_source, "event_loop_active_refresh_pending",
+                        base_symbol, trace_id, underlying, option_side, len(candidate_snapshots_obj), _basket_source, pending_reason,
                         extra={"event": "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS", **details},
                     )
                     self._reset_execution_state(base_symbol)

@@ -1293,6 +1293,44 @@ def test_candidate_refresh_pending_includes_diagnostics(monkeypatch) -> None:
     assert result.details.get("underlying")
     diag = next((e for e in emitted if e.get("event") == "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS"), {})
     assert diag.get("trace_id") == "trace-pending"
+    assert result.details.get("event_loop_active") is True
+    assert result.details.get("reason") == "event_loop_active_refresh_pending"
+
+
+def test_candidate_refresh_pending_non_event_loop_reason(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY26MAY24050PE"
+    runner._build_candidate_snapshots_sync_safe = MagicMock(return_value=([{"symbol": symbol}], True, "async_refresh"))
+    signal = Signal(action="BUY", symbol=symbol, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": symbol}], "atm_strike": 24050})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=symbol, trade_symbol=symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-pending-async")
+    assert result.reason == "candidate_refresh_pending"
+    assert result.details.get("event_loop_active") is False
+    assert result.details.get("reason") == "candidate_snapshot_refresh_pending"
+    assert result.details.get("basket_source") == "async_refresh"
+
+
+def test_multi_snapshot_candidate_skips_refresh_and_no_unboundlocal(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    sym = "NFO:NIFTY26MAY24050PE"
+    alt = "NFO:NIFTY26MAY24000PE"
+    runner._build_candidate_snapshots_sync_safe = MagicMock()
+    runner._is_symbol_execution_ready = MagicMock(return_value=True)
+    runner._transition_execution_state = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    runner._order_manager.submit_trade_plan = MagicMock(return_value="oid-multi")  # type: ignore[attr-defined]
+    runner._materialize_option_trade_plan = MagicMock(side_effect=lambda s, **_: s)
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[SimpleNamespace(symbol=sym, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.1, rr=2.0, side="PE", entry_price=374.95, tick_age_s=0.2)])
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(ltp=374.95, bid=374.5, ask=375.4, tick_age_s=0.2, real_ticks_last_60s=4, tradable_quote=True, source="ws")
+    signal = Signal(action="BUY", symbol=sym, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": sym, "side": "PE", "strike": 24050, "atm_strike": 24050, "ltp": 374.95, "bid": 374.5, "ask": 375.4, "tick_age_s": 0.2, "tradable_quote": True}, {"symbol": alt, "side": "PE", "strike": 24000, "atm_strike": 24050, "ltp": 360.0, "bid": 359.0, "ask": 361.0, "tick_age_s": 0.3, "tradable_quote": True}], "atm_strike": 24050})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=sym, trade_symbol=sym, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-multi")
+    assert result.reason != "candidate_refresh_pending"
+    assert runner._build_candidate_snapshots_sync_safe.call_count == 0
+    assert runner._trade_candidate_selector.select_ranked_candidates.called
 
 
 def test_trade_plan_materialization_failed_emits_diagnostics(monkeypatch) -> None:
