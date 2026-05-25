@@ -7952,6 +7952,46 @@ class StrategyRunner:
                                 trace_id=trace_id,
                             )
                             return
+                        direction_bias = str((indicators_ctx.get("direction_bias") or "")).upper()
+                        underlying_bias = str((indicators_ctx.get("underlying_direction_bias") or "")).upper()
+                        resolved_bias = underlying_bias or direction_bias
+                        resolved_confidence = float(
+                            indicators_ctx.get("direction_confidence")
+                            or indicators_ctx.get("underlying_direction_confidence")
+                            or 0.0
+                        )
+                        spot_fresh = bool(indicators_ctx.get("spot_fresh"))
+                        if spot_fresh and not direction_bias and not underlying_bias:
+                            self._logger.warning(
+                                "TRIGGER_EVAL_SKIPPED symbol=%s reason=direction_context_not_ready spot_fresh=%s",
+                                symbol,
+                                spot_fresh,
+                                extra={"event": "trigger_eval_skipped", "reason": "direction_context_not_ready", "symbol": symbol, "spot_fresh": spot_fresh},
+                            )
+                            self._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="direction_context_not_ready", allowed=False, trace_id=trace_id)
+                            return
+                        if getattr(self, "_orchestrator", None) is not None and hasattr(self._orchestrator, "reconcile_direction_bias"):
+                            self._orchestrator.reconcile_direction_bias(
+                                resolved_bias=resolved_bias or None,
+                                confidence=resolved_confidence,
+                                symbol=symbol,
+                                position_manager=getattr(self, "_position_manager", None),
+                            )
+                        suppress_opposite = str(os.getenv("SUPPRESS_OPPOSITE_SIDE_TRIGGERS", "true")).lower() in {"1", "true", "yes", "on"}
+                        suppress_conf = float(os.getenv("OPPOSITE_SIDE_SUPPRESSION_CONFIDENCE", "0.85"))
+                        if suppress_opposite and resolved_bias in {"CE", "PE"} and resolved_confidence >= suppress_conf:
+                            upper_sym = symbol.upper()
+                            opposite = (resolved_bias == "PE" and upper_sym.endswith("CE")) or (resolved_bias == "CE" and upper_sym.endswith("PE"))
+                            if opposite:
+                                self._logger.warning(
+                                    "TRIGGER_EVAL_SKIPPED symbol=%s reason=opposite_side_trigger_suppressed underlying_bias=%s confidence=%.2f",
+                                    symbol,
+                                    resolved_bias,
+                                    resolved_confidence,
+                                    extra={"event": "trigger_eval_skipped", "reason": "opposite_side_trigger_suppressed", "symbol": symbol, "underlying_bias": resolved_bias, "confidence": resolved_confidence},
+                                )
+                                self._emit_runner_eval_decision(symbol=symbol, stage="phase9", reason="opposite_side_trigger_suppressed", allowed=False, trace_id=trace_id)
+                                return
                         signal = self._strategy_manager.generate_signal(
                             symbol,
                             price,
@@ -10244,6 +10284,9 @@ class StrategyRunner:
             order_id = self._order_manager.submit_trade_plan(plan)
 
             if order_id:
+                orchestrator = getattr(self, "_orchestrator", None)
+                if orchestrator is not None and hasattr(orchestrator, "notify_entry"):
+                    orchestrator.notify_entry(signal.symbol, reason="order_accepted")
                 self._logger.info(
                     "ORDER_SUBMITTED order_id=%s symbol=%s side=%s qty=%s trace_id=%s",
                     order_id, base_symbol, signal.action, qty, trace_id,
