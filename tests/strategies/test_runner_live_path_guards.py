@@ -1247,6 +1247,69 @@ def test_single_candidate_distance_fallback_rejects_far_strike(monkeypatch) -> N
     )
     result = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-one-far")
     assert result.reason == "candidate_basket_inadequate"
+    assert result.details.get("is_selected") is True
+    assert result.details.get("is_fresh") is True
+    assert "tradable" in result.details
+    assert "premium_ok" in result.details
+    assert "strike_distance" in result.details
+    assert "ltp" in result.details
+    assert "bid" in result.details
+    assert "ask" in result.details
+
+
+def test_runtime_symbol_execution_not_ready_emits_diagnostics(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    emitted: list[dict] = []
+    runner._logger.info = lambda *_args, **kwargs: emitted.append(kwargs.get("extra", {}))  # type: ignore[method-assign]
+    runner._ensure_symbol_execution_ready_for_order = MagicMock(return_value=False)
+    runner._is_symbol_execution_ready = MagicMock(return_value=False)
+    symbol = "NFO:NIFTY26MAY24050PE"
+    signal = Signal(action="BUY", symbol=symbol, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": symbol, "side": "PE", "strike": 24050, "atm_strike": 24050, "ltp": 374.95, "bid": 374.5, "ask": 375.4, "tick_age_s": 0.2, "tradable_quote": True}]})
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[SimpleNamespace(symbol=symbol, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.1, rr=2.0, side="PE", entry_price=374.95, tick_age_s=0.2)])
+    result = runner._handle_entry_signal_inner(signal, base_symbol=symbol, trade_symbol=symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-ready")
+    assert result.reason == "runtime_symbol_execution_not_ready"
+    diag = next((e for e in emitted if e.get("event") == "SYMBOL_EXECUTION_READY_DIAGNOSTICS"), {})
+    assert diag.get("symbol") == symbol
+    assert diag.get("trace_id") == "trace-ready"
+    assert diag.get("bid") == 374.5
+    assert diag.get("ask") == 375.4
+    assert diag.get("ltp") == 374.95
+
+
+def test_candidate_refresh_pending_includes_diagnostics(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    emitted: list[dict] = []
+    runner._logger.info = lambda *_args, **kwargs: emitted.append(kwargs.get("extra", {}))  # type: ignore[method-assign]
+    symbol = "NFO:NIFTY26MAY24050PE"
+    runner._build_candidate_snapshots_sync_safe = MagicMock(return_value=([{"symbol": symbol}], True, "event_loop_active_refresh_pending"))
+    signal = Signal(action="BUY", symbol=symbol, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": symbol}], "atm_strike": 24050})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=symbol, trade_symbol=symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-pending")
+    assert result.reason == "candidate_refresh_pending"
+    assert result.details.get("candidate_total") == 1
+    assert result.details.get("basket_source") == "event_loop_active_refresh_pending"
+    assert result.details.get("option_side") == "PE"
+    assert result.details.get("underlying")
+    diag = next((e for e in emitted if e.get("event") == "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS"), {})
+    assert diag.get("trace_id") == "trace-pending"
+
+
+def test_trade_plan_materialization_failed_emits_diagnostics(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    emitted: list[dict] = []
+    runner._logger.error = lambda *_args, **kwargs: emitted.append(kwargs.get("extra", {}))  # type: ignore[method-assign]
+    symbol = "NFO:NIFTY26MAY24050PE"
+    runner._is_symbol_execution_ready = MagicMock(return_value=True)
+    runner._materialize_option_trade_plan = MagicMock(side_effect=ValueError("plan failed"))
+    signal = Signal(action="BUY", symbol=symbol, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": symbol, "side": "PE", "strike": 24050, "atm_strike": 24050, "ltp": 374.95, "bid": 374.5, "ask": 375.4, "tick_age_s": 0.2, "tradable_quote": True}]})
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[SimpleNamespace(symbol=symbol, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.1, rr=2.0, side="PE", entry_price=374.95, tick_age_s=0.2)])
+    result = runner._handle_entry_signal_inner(signal, base_symbol=symbol, trade_symbol=symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-materialize")
+    assert result.reason == "trade_plan_materialization_failed"
+    diag = next((e for e in emitted if e.get("event") == "TRADE_PLAN_MATERIALIZATION_DIAGNOSTICS"), {})
+    assert diag.get("error_type") == "ValueError"
+    assert diag.get("candidate_symbol") == symbol
 
 def test_runner_on_tick_error_log_includes_error_type_phase(caplog):
     from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -1420,6 +1483,44 @@ def test_early_runtime_not_ready_cooldown_resets_execution_state() -> None:
     )
     assert result.reason == "runtime_symbol_execution_not_ready_reject_cooldown"
     runner._reset_execution_state.assert_called()
+
+
+def test_cooldown_block_events_emitted(caplog, monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    sym = "NFO:NIFTY26MAY23650PE"
+    now = datetime.now(timezone.utc).timestamp()
+    runner._underlying_last_signal_ts["NIFTY"] = now
+    s = Signal(action="BUY", symbol=sym, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=420.0, metadata={})
+    with caplog.at_level(logging.INFO):
+        r1 = runner._handle_entry_signal_inner(s, base_symbol=sym, trade_symbol=sym, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id="cd-underlying")
+    assert r1.reason == "underlying_cooldown"
+    assert "UNDERLYING_ORDER_COOLDOWN_BLOCKED" in caplog.text
+
+    caplog.clear()
+    runner._underlying_last_signal_ts.clear()
+    runner._reason_last_signal_ts["NIFTY:OrderFlow"] = now
+    with caplog.at_level(logging.INFO):
+        r2 = runner._handle_entry_signal_inner(s, base_symbol=sym, trade_symbol=sym, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id="cd-reason")
+    assert r2.reason == "reason_cooldown"
+    assert "STRATEGY_REASON_ORDER_COOLDOWN_BLOCKED" in caplog.text
+
+    caplog.clear()
+    runner._reason_last_signal_ts.clear()
+    runner._signal_reject_cooldown_ts[f"{sym}:OrderFlow:score_below_threshold"] = now
+    with caplog.at_level(logging.INFO):
+        r3 = runner._handle_entry_signal_inner(s, base_symbol=sym, trade_symbol=sym, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id="cd-score")
+    assert r3.reason == "score_below_threshold_reject_cooldown"
+    assert "SCORE_REJECT_COOLDOWN_BLOCKED" in caplog.text
+
+    caplog.clear()
+    runner._signal_reject_cooldown_ts.clear()
+    runner._max_order_attempts_per_minute = 1
+    runner._order_attempt_window.append(now)
+    with caplog.at_level(logging.INFO):
+        r4 = runner._handle_entry_signal_inner(s, base_symbol=sym, trade_symbol=sym, trade_price=360.0, timestamp=datetime.now(timezone.utc), trace_id="cd-rate")
+    assert r4.reason == "max_order_attempts_per_minute"
+    assert "ORDER_ATTEMPT_RATE_LIMIT_BLOCKED" in caplog.text
 
 
 def test_live_execution_uses_basket_and_submits_alternate_candidate(monkeypatch) -> None:
