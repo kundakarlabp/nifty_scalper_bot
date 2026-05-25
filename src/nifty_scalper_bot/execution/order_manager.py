@@ -209,6 +209,14 @@ class TradePlan:
     allow_market_entry: bool = False
 
 @dataclass(slots=True)
+class TradePlanSubmitResult:
+    accepted: bool
+    order_id: str | None = None
+    reason: str = "unknown"
+    details: dict[str, Any] = field(default_factory=dict)
+    broker_attempted: bool = False
+
+@dataclass(slots=True)
 class ExitIntent:
     """Bound exit request to the originating entry instrument."""
 
@@ -3143,6 +3151,10 @@ class OrderManager:
         return details
 
     def submit_trade_plan(self, plan: TradePlan) -> str | None:
+        result = self.submit_trade_plan_result(plan)
+        return result.order_id if result.accepted else None
+
+    def submit_trade_plan_result(self, plan: TradePlan) -> TradePlanSubmitResult:
         """Validate TradePlan and delegate to place_managed_order/place_order."""
         symbol = normalize_symbol(plan.symbol)
         validation = self._validate_trade_plan(plan)
@@ -3154,7 +3166,7 @@ class OrderManager:
                 validation.details,
                 plan.trace_id,
             )
-            return None
+            return TradePlanSubmitResult(False, reason=validation.reason, details=validation.details, broker_attempted=False)
         price = self._protected_limit_price(plan)
         if price is None:
             self._logger.warning(
@@ -3163,10 +3175,22 @@ class OrderManager:
                 {"entry_price": plan.entry_price},
                 plan.trace_id,
             )
-            return None
+            return TradePlanSubmitResult(False, reason="protected_limit_unavailable", details={"entry_price": plan.entry_price}, broker_attempted=False)
+        if plan.side == "BUY":
+            if plan.stop_loss is not None and plan.stop_loss >= price:
+                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_above_or_equal_entry"}, broker_attempted=False)
+            if plan.take_profit is not None and plan.take_profit <= price:
+                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_below_or_equal_entry"}, broker_attempted=False)
+        elif plan.side == "SELL":
+            if plan.stop_loss is not None and plan.stop_loss <= price:
+                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_below_or_equal_entry"}, broker_attempted=False)
+            if plan.take_profit is not None and plan.take_profit >= price:
+                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_above_or_equal_entry"}, broker_attempted=False)
         if hasattr(self, "place_managed_order"):
-            return self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
-        return self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+            oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+            return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "order_rejected", details={"protected_price": price}, broker_attempted=True)
+        oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+        return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "order_rejected", details={"protected_price": price}, broker_attempted=True)
 
     def place_managed_order(
         self,

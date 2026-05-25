@@ -313,6 +313,21 @@ class SignalExecutionResult:
     order_id: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
+@dataclass(slots=True)
+class ExecutionModeSnapshot:
+    execution_mode: str
+    env_live_enabled: bool
+    paper_enabled: bool
+    shadow_mode_enabled: bool
+    order_manager_live: bool | None
+    is_live_mode: bool
+
+@dataclass(slots=True)
+class ExecutionReadinessResult:
+    allowed: bool
+    reason: str = "allowed"
+    details: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass(slots=True)
 class StrategyRunnerConfig:
@@ -2132,11 +2147,14 @@ class StrategyRunner:
         return normalized
 
     def _ensure_symbol_execution_ready_for_order(self, symbol: str, *, trace_id: str | None = None) -> bool:
+        return self._ensure_symbol_execution_ready_result(symbol, trace_id=trace_id).allowed
+
+    def _ensure_symbol_execution_ready_result(self, symbol: str, *, trace_id: str | None = None) -> ExecutionReadinessResult:
         normalized = normalize_symbol(symbol)
         runtime_key = self._runtime_ready_key(normalized)
         was_ready = self._is_symbol_execution_ready(runtime_key)
         if was_ready:
-            return True
+            return ExecutionReadinessResult(True, "already_ready", {"symbol": normalized, "runtime_key": runtime_key})
         reason = "runtime_not_marked_ready"
         tick_age_ms = None
         bid = ask = None
@@ -2233,7 +2251,7 @@ class StrategyRunner:
             self._runtime_symbol_last_ready_at[runtime_key] = time.time()
             self._logger.info("EXECUTION_READY_DYNAMIC_MARK symbol=%s runtime_key=%s reason=%s tick_age_ms=%s bid=%s ask=%s lot_size=%s history_count=%s trace_id=%s", normalized, runtime_key, reason, tick_age_ms, bid, ask, lot_size, history_count, trace_id)
         self._logger.info("ORDER_READINESS_REVALIDATION symbol=%s runtime_key=%s trace_id=%s was_ready=%s refreshed=%s final_ready=%s reason=%s startup_marked_ready=%s dynamic_revalidation_attempted=%s dynamic_revalidation_passed=%s quote_source=%s history_count=%s history_fallback=%s lot_size=%s final_reason=%s tick_age_ms=%s max_quote_age_ms=%s snapshot_key_used=%s lot_size_key_used=%s bid=%s ask=%s tradable_quote=%s lot_size_resolved=%s", normalized, runtime_key, trace_id, was_ready, True, final_ready, reason, startup_marked_ready, dynamic_revalidation_attempted, dynamic_revalidation_passed, quote_source, history_count, history_fallback, lot_size, reason, tick_age_ms, max_quote_age_ms, snapshot_key_used, lot_size_key_used, bid, ask, tradable_quote, lot_size_resolved)
-        return final_ready
+        return ExecutionReadinessResult(final_ready, reason, {"symbol": normalized, "runtime_key": runtime_key, "tick_age_ms": tick_age_ms, "bid": bid, "ask": ask, "tradable_quote": tradable_quote, "lot_size_resolved": lot_size_resolved})
 
     def _execution_reject_cooldown_result(
         self, symbol: str, reason_key: str, now_epoch: float, trace_id: str | None
@@ -2287,11 +2305,8 @@ class StrategyRunner:
     ) -> tuple[Signal | None, str | None]:
         """Prepare signal metadata pre-sync handler. Args: signal, price, trace_id. Returns: prepared signal + block reason. Raises: none."""
         del price
-        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-        is_live_mode = mode == "LIVE" or (
-            str(os.getenv("ENABLE_LIVE", "false")).strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
+        mode_snapshot = self._resolve_execution_mode_snapshot()
+        is_live_mode = mode_snapshot.is_live_mode
         if not is_live_mode:
             return signal, None
         runtime_ready = bool(getattr(self, "_runtime_data_hard_ready", False))
@@ -2377,6 +2392,23 @@ class StrategyRunner:
         if not metadata.get("candidate_snapshots"):
             return None, "missing_candidate_snapshots"
         return dataclasses.replace(signal, metadata=metadata), None
+
+    def _resolve_execution_mode_snapshot(self) -> ExecutionModeSnapshot:
+        def _env_truthy(name: str) -> bool:
+            return str(os.getenv(name, "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+        mode_source = getattr(self._order_manager, "is_live_mode", None)
+        order_manager_live: bool | None = None
+        if callable(mode_source):
+            try:
+                order_manager_live = bool(mode_source())
+            except Exception:
+                order_manager_live = False
+        mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+        env_live_enabled = _env_truthy("ENABLE_LIVE_TRADING") or _env_truthy("ENABLE_LIVE")
+        paper_enabled = _env_truthy("PAPER__ENABLED") or _env_truthy("PAPER_MODE")
+        shadow_mode_enabled = _env_truthy("SHADOW_MODE")
+        is_live_mode = mode == "LIVE" and env_live_enabled and not paper_enabled and not shadow_mode_enabled and (order_manager_live is not False)
+        return ExecutionModeSnapshot(mode, env_live_enabled, paper_enabled, shadow_mode_enabled, order_manager_live, is_live_mode)
 
     def _build_single_candidate_from_signal(
         self,
@@ -9419,8 +9451,12 @@ class StrategyRunner:
         Returns: None. Raises: Exception.
         """
         try:
-            is_live_mode = False
-            execution_mode = "SHADOW"
+            mode_snapshot = self._resolve_execution_mode_snapshot()
+            is_live_mode = mode_snapshot.is_live_mode
+            execution_mode = mode_snapshot.execution_mode
+            candidate = None
+            ranked_candidates = []
+            selected_snapshot = {}
             self._logger.debug(
                 "Entered StrategyRunner._handle_entry_signal_inner (Direct OrderManager Flow)",
                 extra={"event": "entry_signal_inner", "symbol": base_symbol},
@@ -9442,51 +9478,16 @@ class StrategyRunner:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "invalid_quantity")
 
-            mode_source = getattr(self._order_manager, "is_live_mode", None)
-            if callable(mode_source):
-                try:
-                    is_live_mode = bool(mode_source())
-                except Exception:
-                    is_live_mode = False
-            def _env_truthy(name: str) -> bool:
-                return str(os.getenv(name, "false")).strip().lower() in {
-                    "1",
-                    "true",
-                    "yes",
-                    "y",
-                    "on",
-                }
-            mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-            env_live_enabled = _env_truthy("ENABLE_LIVE_TRADING") or _env_truthy("ENABLE_LIVE")
-            paper_enabled = _env_truthy("PAPER__ENABLED") or _env_truthy("PAPER_MODE")
-            shadow_mode_enabled = _env_truthy("SHADOW_MODE")
-            if not callable(mode_source):
-                is_live_mode = (
-                    mode == "LIVE"
-                    and env_live_enabled
-                    and not paper_enabled
-                    and not shadow_mode_enabled
-                )
-            else:
-                is_live_mode = (
-                    bool(is_live_mode)
-                    and mode == "LIVE"
-                    and env_live_enabled
-                    and not paper_enabled
-                    and not shadow_mode_enabled
-                )
-            execution_mode = "LIVE" if is_live_mode else mode
-            if execution_mode not in {"LIVE", "PAPER", "SHADOW", "SIMULATION"}:
-                execution_mode = "SHADOW"
             self._logger.info(
-                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s",
+                "ENTRY_EXECUTION_MODE_RESOLVED symbol=%s trace_id=%s is_live_mode=%s execution_mode=%s env_live_enabled=%s paper_enabled=%s shadow_mode_enabled=%s order_manager_live=%s",
                 base_symbol,
                 trace_id,
                 is_live_mode,
                 execution_mode,
-                env_live_enabled,
-                paper_enabled,
-                shadow_mode_enabled,
+                mode_snapshot.env_live_enabled,
+                mode_snapshot.paper_enabled,
+                mode_snapshot.shadow_mode_enabled,
+                mode_snapshot.order_manager_live,
             )
 
             # Cooldown + burst guard
@@ -9780,11 +9781,11 @@ class StrategyRunner:
                 if is_live_mode and is_directional_option and valid_snapshots and len(valid_snapshots) <= 1:
                     basket_source = str(metadata.get("candidate_basket_source") or "existing")
                     self._logger.info(
-                        "EXECUTION_CANDIDATE_BASKET_INADEQUATE symbol=%s total=%s source=%s",
+                        "EXECUTION_SINGLE_CANDIDATE_SCREEN symbol=%s total=%s source=%s",
                         signal.symbol,
                         len(valid_snapshots),
                         basket_source,
-                        extra={"event": "EXECUTION_CANDIDATE_BASKET_INADEQUATE", "symbol": signal.symbol, "total": len(valid_snapshots), "source": basket_source},
+                        extra={"event": "EXECUTION_SINGLE_CANDIDATE_SCREEN", "symbol": signal.symbol, "total": len(valid_snapshots), "source": basket_source},
                     )
                     lone = valid_snapshots[0]
                     lone_symbol = normalize_symbol(str(lone.get("symbol") or ""))
@@ -9804,7 +9805,9 @@ class StrategyRunner:
                     else:
                         strike_distance = float(distance_raw or 999.0)
                     is_selected = bool(lone.get("is_selected_option")) or lone_symbol == selected_symbol
-                    is_fresh = float(lone.get("tick_age_s") or 999.0) <= (float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0)
+                    tick_age_raw = lone.get("tick_age_s")
+                    tick_age_s = float(tick_age_raw) if tick_age_raw is not None else 999.0
+                    is_fresh = tick_age_s <= (float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0)
                     ltp = float(lone.get("ltp") or 0.0)
                     bid = float(lone.get("bid") or 0.0)
                     ask = float(lone.get("ask") or 0.0)
@@ -9828,7 +9831,7 @@ class StrategyRunner:
                             "ltp": ltp,
                             "bid": bid,
                             "ask": ask,
-                            "tick_age_s": float(lone.get("tick_age_s") or 999.0),
+                            "tick_age_s": tick_age_s,
                             "min_option_premium": self._trade_candidate_selector.min_option_premium,
                             "max_option_premium": self._trade_candidate_selector.max_option_premium,
                             "allow_ltp_only_candidate": allow_ltp_only,
@@ -10003,6 +10006,14 @@ class StrategyRunner:
                 allow_ltp_live_plan = _env_flag("ALLOW_LTP_ONLY_LIVE_ORDER_PLAN", default=False)
 
                 metadata["tradable_quote"] = bool(snapshot_tradable_quote or mdm_tradable_quote)
+                candidate_entry = getattr(candidate, "entry_price", None) or selected_snapshot.get("ask") or selected_snapshot.get("ltp") or metadata.get("candidate_entry_price") or trade_price
+                trade_price = float(candidate_entry or trade_price or 0.0)
+                metadata["entry_price"] = trade_price
+                metadata["signal_price"] = trade_price
+                metadata["price"] = trade_price
+                metadata["candidate_entry_price"] = trade_price
+                metadata["selected_execution_price"] = trade_price
+
                 metadata["quote_usable_for_order_plan"] = bool(
                     snapshot_tradable_quote
                     or mdm_tradable_quote
@@ -10536,7 +10547,6 @@ class StrategyRunner:
                 },
             )
 
-            self._order_attempt_window.append(now_epoch)
             max_quote_age_ms = int(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000")
             max_spread_pct = float(os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0")) or "10.0")
             min_depth_qty = int(float(os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0")) or 0))
@@ -10549,11 +10559,29 @@ class StrategyRunner:
                 trace_id,
                 is_live_mode,
                 execution_mode,
-                env_live_enabled,
-                paper_enabled,
-                shadow_mode_enabled,
+                mode_snapshot.env_live_enabled,
+                mode_snapshot.paper_enabled,
+                mode_snapshot.shadow_mode_enabled,
             )
-            order_id = self._order_manager.submit_trade_plan(plan)
+            submit_result_fn = getattr(self._order_manager, "submit_trade_plan_result", None)
+            order_id = None
+            submit_reason = "order_rejected"
+            submit_details = {"trace_id": trace_id}
+            broker_attempted = True
+            if callable(submit_result_fn):
+                submit_result = submit_result_fn(plan)
+                broker_attempted = bool(getattr(submit_result, "broker_attempted", False))
+                if submit_result.accepted and submit_result.order_id:
+                    order_id = submit_result.order_id
+                else:
+                    submit_reason = f"order_manager_{submit_result.reason}"
+                    submit_details = {**dict(getattr(submit_result, "details", {}) or {}), "trace_id": trace_id}
+            else:
+                order_id = self._order_manager.submit_trade_plan(plan)
+                broker_attempted = True
+
+            if broker_attempted:
+                self._order_attempt_window.append(now_epoch)
 
             if order_id:
                 orchestrator = getattr(self, "_orchestrator", None)
@@ -10590,7 +10618,7 @@ class StrategyRunner:
                 )
                 log_throttled(self._logger, f"runner_order_rejected_{base_symbol}", "ORDER_REJECTED by order_manager", interval_sec=300.0, level=logging.WARNING, extra={"event": "ORDER_REJECTED", "symbol": base_symbol})
                 self._reset_execution_state(base_symbol)
-                return SignalExecutionResult(False, "order_rejected", details={"trace_id": trace_id})
+                return SignalExecutionResult(False, submit_reason, details=submit_details)
 
         except Exception as exc:
             self._logger.error("🔴 ENTRY LOGIC CRASH: %s", exc, exc_info=True)
@@ -10856,7 +10884,6 @@ class StrategyRunner:
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
                 self._reason_last_signal_ts[f"{underlying}:{reason_key}"] = now_epoch
-                self._order_attempt_window.append(now_epoch)
                 try:
                     self._record_trade(
                         base_symbol,
