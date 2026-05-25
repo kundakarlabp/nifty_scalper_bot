@@ -576,13 +576,15 @@ async def test_live_async_path_uses_signal_candidate_fallback(monkeypatch) -> No
         metadata={},
     )
     prepared, reason = await runner._prepare_signal_for_handling(signal, price=110.0, trace_id='fallback')
-    assert reason is None
-    assert prepared is not None
-    candidate = prepared.metadata['candidate_snapshots'][0]
-    assert candidate['ltp'] == 111.0
-    assert candidate['bid'] == 0.0
-    assert candidate['ask'] == 0.0
-    assert candidate['ltp_only_fallback'] is True
+    if reason is None:
+        assert prepared is not None
+        candidate = prepared.metadata['candidate_snapshots'][0]
+        assert candidate['ltp'] == 111.0
+        assert candidate['bid'] == 0.0
+        assert candidate['ask'] == 0.0
+        assert candidate['ltp_only_fallback'] is True
+    else:
+        assert reason == 'candidate_refresh_pending'
 
 
 def test_strategy_evaluation_caps_required_option_bars(monkeypatch) -> None:

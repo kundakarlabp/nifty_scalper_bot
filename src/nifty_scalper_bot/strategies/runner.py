@@ -2307,7 +2307,7 @@ class StrategyRunner:
         """Prepare signal metadata pre-sync handler. Args: signal, price, trace_id. Returns: prepared signal + block reason. Raises: none."""
         del price
         mode_snapshot = self._resolve_execution_mode_snapshot()
-        is_live_mode = mode_snapshot.is_live_mode
+        is_live_mode = bool(mode_snapshot.is_live_mode or mode_snapshot.execution_mode == "LIVE")
         if not is_live_mode:
             return signal, None
         runtime_ready = bool(getattr(self, "_runtime_data_hard_ready", False))
@@ -2362,6 +2362,18 @@ class StrategyRunner:
                     )
                     return dataclasses.replace(signal, metadata=metadata), None
             if refresh_pending:
+                fallback_candidate = self._build_single_candidate_from_signal(
+                    signal=signal,
+                    metadata=metadata,
+                    option_side=cast(Literal["CE", "PE"], option_side),
+                )
+                if fallback_candidate is not None:
+                    fallback_candidate["source"] = "refresh_pending_fallback"
+                    fallback_candidate["candidate_selected"] = True
+                    fallback_candidate["is_selected_option"] = True
+                    metadata["candidate_snapshots"] = [fallback_candidate]
+                    metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
+                    return dataclasses.replace(signal, metadata=metadata), None
                 return None, "candidate_refresh_pending"
             if not built:
                 return None, "missing_candidate_snapshots"
