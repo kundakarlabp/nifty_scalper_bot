@@ -58,8 +58,8 @@ def _build_runner() -> StrategyRunner:
     runner._cooldown_log_throttle_seconds = 1.0
     runner._order_attempt_window = deque()
     runner._max_order_attempts_per_minute = 100
-    runner._signal_direction_dedup_seconds = 45.0
-    runner._signal_direction_dedup_min_improvement = 2.0
+    runner._signal_attempt_debounce_seconds = 45.0
+    runner._signal_attempt_debounce_min_improvement = 2.0
     runner._signal_attempt_debounce_state = {}
     runner._record_trade = lambda *args, **kwargs: None
     runner._reset_execution_state = lambda *_args, **_kwargs: None
@@ -1192,6 +1192,61 @@ def test_fallback_candidate_reaches_order_request_path() -> None:
     assert result.accepted is True
     assert 'ORDER_QTY_NORMALIZED' in emitted
     assert 'RUNNER_ORDER_REQUEST' in emitted
+
+
+def test_single_candidate_distance_fallback_from_strike_allows_selected_candidate(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100")
+    runner._transition_execution_state = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    runner._order_manager.submit_trade_plan = MagicMock(return_value="oid-one-good")  # type: ignore[attr-defined]
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=374.95, bid=374.5, ask=375.4, tick_age_s=0.2, real_ticks_last_60s=3, tradable_quote=True, source="ws"
+    )
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY26MAY24050PE",
+        quantity=1,
+        confidence=0.9,
+        reason="x",
+        stop_loss=300.0,
+        take_profit=450.0,
+        metadata={"candidate_snapshots": [{"symbol": "NFO:NIFTY26MAY24050PE", "side": "PE", "strike": 24050, "atm_strike": 24050, "ltp": 374.95, "bid": 374.5, "ask": 375.4, "tick_age_s": 0.2, "real_ticks_last_60s": 3}]},
+    )
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(
+        return_value=[SimpleNamespace(symbol=signal.symbol, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.01, rr=2.0, side="PE", entry_price=374.95, tick_age_s=0.2)]
+    )
+    result = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-one-good")
+    assert result.reason != "candidate_basket_inadequate"
+
+
+def test_single_candidate_distance_fallback_rejects_far_strike(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100")
+    runner._market_data = MagicMock()
+    runner._market_data.get_symbol_snapshot.return_value = SimpleNamespace(
+        ltp=374.95, bid=374.5, ask=375.4, tick_age_s=0.2, real_ticks_last_60s=3, tradable_quote=True, source="ws"
+    )
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY26MAY24050PE",
+        quantity=1,
+        confidence=0.9,
+        reason="x",
+        stop_loss=300.0,
+        take_profit=450.0,
+        metadata={"candidate_snapshots": [{"symbol": "NFO:NIFTY26MAY24050PE", "side": "PE", "strike": 24550, "atm_strike": 24050, "ltp": 374.95, "bid": 374.5, "ask": 375.4, "tick_age_s": 0.2, "real_ticks_last_60s": 3}]},
+    )
+    result = runner._handle_entry_signal_inner(signal, base_symbol=signal.symbol, trade_symbol=signal.symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-one-far")
+    assert result.reason == "candidate_basket_inadequate"
 
 def test_runner_on_tick_error_log_includes_error_type_phase(caplog):
     from nifty_scalper_bot.strategies.runner import StrategyRunner

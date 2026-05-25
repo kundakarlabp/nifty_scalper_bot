@@ -9698,7 +9698,21 @@ class StrategyRunner:
                     )
                     lone = valid_snapshots[0]
                     lone_symbol = normalize_symbol(str(lone.get("symbol") or ""))
-                    strike_distance = float(lone.get("strike_distance_from_atm") or lone.get("distance_from_atm") or 999.0)
+                    distance_raw = lone.get("strike_distance_from_atm")
+                    if distance_raw is None:
+                        distance_raw = lone.get("distance_from_atm")
+                    strike = int(lone.get("strike") or 0)
+                    atm = int(
+                        lone.get("atm_strike")
+                        or metadata.get("atm_strike")
+                        or self._extract_strike_from_symbol(signal.symbol)
+                        or self._active_atm_strike
+                        or 0
+                    )
+                    if distance_raw is None and strike and atm:
+                        strike_distance = abs(strike - atm)
+                    else:
+                        strike_distance = float(distance_raw or 999.0)
                     is_selected = bool(lone.get("is_selected_option")) or lone_symbol == selected_symbol
                     is_fresh = float(lone.get("tick_age_s") or 999.0) <= (float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0)
                     ltp = float(lone.get("ltp") or 0.0)
