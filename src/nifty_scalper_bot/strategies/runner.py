@@ -10064,28 +10064,29 @@ class StrategyRunner:
                 if dedup_result is not None:
                     self._reset_execution_state(base_symbol)
                     return dedup_result
-                readiness = self._ensure_symbol_execution_ready_result(
-                    trade_symbol or base_symbol, trace_id=trace_id
-                )
-                if is_live_mode and not readiness.allowed:
-                    selected_candidate = candidate.symbol if candidate is not None else metadata.get("candidate_symbol")
-                    readiness_details = dict(readiness.details or {})
-                    readiness_details["readiness_reason"] = readiness.reason
-                    readiness_details["trace_id"] = trace_id
-                    self._logger.info(
-                        "SYMBOL_EXECUTION_READY_DIAGNOSTICS symbol=%s trace_id=%s selected_candidate=%s reason=%s details=%s",
-                        base_symbol, trace_id, selected_candidate, readiness.reason, readiness_details,
-                        extra={"event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "selected_candidate": selected_candidate, "readiness_reason": readiness.reason, "readiness_details": readiness_details},
+                if is_live_mode:
+                    readiness = self._ensure_symbol_execution_ready_result(
+                        trade_symbol or base_symbol, trace_id=trace_id
                     )
-                    self._mark_directional_dedup_failed(
-                        underlying=underlying, option_side=option_side, reason=reason_key
-                    )
-                    self._execution_reject_cooldown_ts[
-                        f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:runtime_symbol_execution_not_ready"
-                    ] = now_epoch
-                    self._reset_execution_state(base_symbol)
-                    _trace("runtime_symbol_execution_not_ready")
-                    return SignalExecutionResult(False, "runtime_symbol_execution_not_ready", details=readiness_details)
+                    if not readiness.allowed:
+                        selected_candidate = candidate.symbol if candidate is not None else metadata.get("candidate_symbol")
+                        readiness_details = dict(readiness.details or {})
+                        readiness_details["readiness_reason"] = readiness.reason
+                        readiness_details["trace_id"] = trace_id
+                        self._logger.info(
+                            "SYMBOL_EXECUTION_READY_DIAGNOSTICS symbol=%s trace_id=%s selected_candidate=%s reason=%s details=%s",
+                            base_symbol, trace_id, selected_candidate, readiness.reason, readiness_details,
+                            extra={"event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "selected_candidate": selected_candidate, "readiness_reason": readiness.reason, "readiness_details": readiness_details},
+                        )
+                        self._mark_directional_dedup_failed(
+                            underlying=underlying, option_side=option_side, reason=reason_key
+                        )
+                        self._execution_reject_cooldown_ts[
+                            f"{normalize_symbol(trade_symbol or base_symbol)}:{reason_key}:runtime_symbol_execution_not_ready"
+                        ] = now_epoch
+                        self._reset_execution_state(base_symbol)
+                        _trace("runtime_symbol_execution_not_ready")
+                        return SignalExecutionResult(False, "runtime_symbol_execution_not_ready", details=readiness_details)
             requires_final_score = bool(metadata.get("preliminary_only")) or bool(
                 metadata.get("requires_runner_final_score")
             )

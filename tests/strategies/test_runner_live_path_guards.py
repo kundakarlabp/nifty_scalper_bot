@@ -1990,3 +1990,35 @@ def test_order_attempt_window_counts_only_broker_attempted(monkeypatch) -> None:
     runner._order_manager.submit_trade_plan_result = MagicMock(return_value=SimpleNamespace(accepted=False, order_id=None, reason='place_order_rejected', details={}, broker_attempted=True))
     runner._handle_entry_signal_inner(signal,sym,sym,100.0,datetime.now(timezone.utc),trace_id='b1')
     assert len(runner._order_attempt_window)==1
+
+def test_shadow_mode_does_not_call_execution_readiness_result(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
+    sym = 'NFO:NIFTY26MAY23700PE'
+    runner._ensure_symbol_execution_ready_result = MagicMock(return_value=ExecutionReadinessResult(False, 'quote_stale', {'tick_age_ms': 90000}))
+    runner._order_manager.submit_trade_plan_result = MagicMock(return_value=SimpleNamespace(accepted=True, order_id='oid-s', reason='accepted', details={}, broker_attempted=True))
+    runner._is_symbol_execution_ready = MagicMock(return_value=True)
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[SimpleNamespace(symbol=sym, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.1, rr=2.0, side='PE', entry_price=110.0, tick_age_s=0.1)])
+    signal = Signal(action='BUY', symbol=sym, quantity=1, confidence=0.9, reason='r', stop_loss=300.0, take_profit=450.0, metadata={'candidate_snapshots':[{'symbol':sym,'side':'PE','strike':23700,'atm_strike':23700,'ltp':110.0,'bid':109.5,'ask':110.0,'tick_age_s':0.1,'tradable_quote':True}]})
+    result = runner._handle_entry_signal_inner(signal, sym, sym, 100.0, datetime.now(timezone.utc), trace_id='shadow-ready-skip')
+    assert runner._ensure_symbol_execution_ready_result.call_count == 0
+    assert result.reason != 'runtime_symbol_execution_not_ready'
+
+
+def test_live_mode_calls_execution_readiness_result(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'true')
+    monkeypatch.setenv('PAPER__ENABLED', 'false')
+    monkeypatch.setenv('SHADOW_MODE', 'false')
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    sym = 'NFO:NIFTY26MAY23700PE'
+    runner._ensure_symbol_execution_ready_result = MagicMock(return_value=ExecutionReadinessResult(False, 'quote_stale', {'tick_age_ms': 90000}))
+    runner._is_symbol_execution_ready = MagicMock(return_value=True)
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[SimpleNamespace(symbol=sym, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.1, rr=2.0, side='PE', entry_price=110.0, tick_age_s=0.1)])
+    signal = Signal(action='BUY', symbol=sym, quantity=1, confidence=0.9, reason='r', stop_loss=300.0, take_profit=450.0, metadata={'candidate_snapshots':[{'symbol':sym,'side':'PE','strike':23700,'atm_strike':23700,'ltp':110.0,'bid':109.5,'ask':110.0,'tick_age_s':0.1,'tradable_quote':True}]})
+    result = runner._handle_entry_signal_inner(signal, sym, sym, 100.0, datetime.now(timezone.utc), trace_id='live-ready-call')
+    runner._ensure_symbol_execution_ready_result.assert_called_once()
+    assert result.reason == 'runtime_symbol_execution_not_ready'
+    assert result.details.get('readiness_reason') == 'quote_stale'
+    assert result.details.get('tick_age_ms') == 90000
