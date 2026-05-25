@@ -217,6 +217,14 @@ class TradePlanSubmitResult:
     broker_attempted: bool = False
 
 @dataclass(slots=True)
+class ManagedOrderResult:
+    accepted: bool
+    order_id: str | None = None
+    reason: str = "unknown"
+    details: dict[str, Any] = field(default_factory=dict)
+    broker_attempted: bool = False
+
+@dataclass(slots=True)
 class ExitIntent:
     """Bound exit request to the originating entry instrument."""
 
@@ -860,6 +868,7 @@ class OrderManager:
         self._kill_switch_reason: str | None = None
         self._last_kill_switch_log_ts: float = 0.0
         self._missing_counts: dict[str, int] = {}
+        self._last_order_decision: dict[str, Any] = {}
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
@@ -2077,6 +2086,13 @@ class OrderManager:
                     ).strip().upper()
                 except Exception:  # noqa: BLE001
                     broker_mode = None
+            self._last_order_decision = {
+                "allowed": allowed,
+                "block_reason": block_reason,
+                "details": details or {},
+                "trace_id": trace_id,
+                "broker_attempted": bool(order_id),
+            }
             self._logger.info(
                 "ORDER_MANAGER_DECISION",
                 extra={
@@ -3187,8 +3203,11 @@ class OrderManager:
             if plan.take_profit is not None and plan.take_profit >= price:
                 return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_above_or_equal_entry"}, broker_attempted=False)
         if hasattr(self, "place_managed_order"):
+            if hasattr(self, "place_managed_order_result"):
+                managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+                return TradePlanSubmitResult(managed.accepted, order_id=managed.order_id, reason=managed.reason, details=managed.details or {"protected_price": price}, broker_attempted=managed.broker_attempted)
             oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
-            return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "order_rejected", details={"protected_price": price}, broker_attempted=True)
+            return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "place_order_rejected", details={"protected_price": price}, broker_attempted=bool(oid))
         oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
         return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "order_rejected", details={"protected_price": price}, broker_attempted=True)
 
@@ -3208,6 +3227,39 @@ class OrderManager:
         trace_id: str | None = None,
         allow_market_entry: bool = False,
     ) -> str | None:
+        result = self.place_managed_order_result(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            signal_id=signal_id,
+            strategy_name=strategy_name,
+            tag=tag,
+            product=product,
+            variety=variety,
+            trace_id=trace_id,
+            allow_market_entry=allow_market_entry,
+        )
+        return result.order_id if result.accepted else None
+
+    def place_managed_order_result(
+        self,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        quantity: int,
+        entry_price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        signal_id: str | None = None,
+        strategy_name: str = "runner",
+        tag: str = "strategy",
+        product: str = "MIS",
+        variety: str = "regular",
+        trace_id: str | None = None,
+        allow_market_entry: bool = False,
+    ) -> ManagedOrderResult:
         """Convert a TradePlan-style entry into broker/paper placement plus bracket registration."""
         # BUG 6 FIX: lot size was hardcoded to 65 — NIFTY options lot size fallback for resiliency.
         # Use dynamic resolution with a safe fallback to reject mismatched quantities.
@@ -3217,18 +3269,18 @@ class OrderManager:
         except Exception as exc:
             if exec_mode == "LIVE":
                 self._logger.error("LIVE_ORDER_REJECTED symbol=%s reason=lot_size_unresolved error=%s", symbol, exc)
-                return None
+                return ManagedOrderResult(False, reason="lot_size_unresolved")
             fallback_lot = int(float(os.getenv("PAPER_LOT_FALLBACK", "0") or 0))
             if fallback_lot <= 0:
                 self._logger.error("PAPER_ORDER_REJECTED symbol=%s reason=lot_size_unresolved error=%s", symbol, exc)
-                return None
+                return ManagedOrderResult(False, reason="lot_size_unresolved")
             _lot = fallback_lot
             self._logger.warning("PAPER_LOT_FALLBACK_USED symbol=%s lot=%s", symbol, _lot)
         if _lot > 0 and quantity % _lot != 0:
             self._logger.error(
                 f"🛑 INVALID QTY: {quantity} is not a multiple of {_lot} (lot size for {symbol}). Order aborted."
             )
-            return None
+            return ManagedOrderResult(False, reason="invalid_lot_quantity", details={"quantity": quantity, "lot_size": _lot})
 
         # 2. Execute Entry (Passes Safety Guard because SL is provided)
         entry_order_type = OrderType.LIMIT
@@ -3238,7 +3290,7 @@ class OrderManager:
                     "MANAGED_ORDER_REJECTED symbol=%s reason=protected_limit_unavailable",
                     symbol,
                 )
-                return None
+                return ManagedOrderResult(False, reason="protected_limit_unavailable")
             entry_order_type = OrderType.MARKET
 
         order_id = self.place_order(
@@ -3255,7 +3307,15 @@ class OrderManager:
             product=product,
         )
 
-        # Bracket registration is owned by place_order success path; failures are handled there.
+        if order_id:
+            return ManagedOrderResult(True, order_id=order_id, reason="accepted", broker_attempted=True)
+        decision = dict(getattr(self, "_last_order_decision", {}) or {})
+        return ManagedOrderResult(
+            False,
+            reason=str(decision.get("block_reason") or "place_order_rejected"),
+            details=dict(decision.get("details") or {}),
+            broker_attempted=bool(decision.get("broker_attempted", True)),
+        )
 
         if order_id:
             self._logger.info(

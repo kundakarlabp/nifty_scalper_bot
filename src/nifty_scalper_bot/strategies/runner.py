@@ -607,6 +607,7 @@ class StrategyRunner:
         self._symbol_last_signal_ts: dict[str, float] = {}
         self._underlying_last_signal_ts: dict[str, float] = {}
         self._reason_last_signal_ts: dict[str, float] = {}
+        self._submitted_entry_order_context: dict[str, dict[str, Any]] = {}
         self._premium_squeeze_last_signal_ts: dict[str, float] = {}
         self._signal_reject_cooldown_ts: dict[str, float] = {}
         self._execution_reject_cooldown_ts: dict[str, float] = {}
@@ -2361,25 +2362,6 @@ class StrategyRunner:
                     )
                     return dataclasses.replace(signal, metadata=metadata), None
             if refresh_pending:
-                if self._market_data is not None:
-                    try:
-                        latest = self._market_data.get_symbol_snapshot(signal.symbol)
-                        metadata["candidate_snapshots"] = [{
-                            "symbol": signal.symbol,
-                            "ltp": float(getattr(latest, "ltp", 0.0) or 0.0),
-                            "bid": float(getattr(latest, "bid", 0.0) or 0.0),
-                            "ask": float(getattr(latest, "ask", 0.0) or 0.0),
-                            "entry": float(getattr(latest, "ltp", 0.0) or 0.0),
-                            "stop_loss": float(signal.stop_loss or 0.0),
-                            "target": float(signal.take_profit or 0.0),
-                            "tradable_quote": bool(getattr(latest, "tradable_quote", False)),
-                            "ltp_only_fallback": True,
-                            "quote_quality": "ltp_only",
-                            "source": str(getattr(latest, "source", "refresh_pending")),
-                        }]
-                        return dataclasses.replace(signal, metadata=metadata), None
-                    except Exception:
-                        pass
                 return None, "candidate_refresh_pending"
             if not built:
                 return None, "missing_candidate_snapshots"
@@ -9899,16 +9881,37 @@ class StrategyRunner:
                     )
                 selected_symbol = normalize_symbol(candidate.symbol)
                 original_symbol = normalize_symbol(signal.symbol)
+                original_trade_price = float(trade_price or 0.0)
+                selected_trade_price = float(
+                    getattr(candidate, "entry_price", None)
+                    or metadata.get("candidate_entry_price")
+                    or trade_price
+                    or 0.0
+                )
                 if selected_symbol != original_symbol:
                     self._logger.info(
-                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original=%s selected=%s trace_id=%s",
+                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original_symbol=%s selected_symbol=%s original_trade_price=%s selected_trade_price=%s candidate_entry_price=%s candidate_stop_loss=%s candidate_target=%s candidate_rr=%s candidate_score=%s trace_id=%s",
                         signal.symbol,
                         candidate.symbol,
+                        original_trade_price,
+                        selected_trade_price,
+                        getattr(candidate, "entry_price", None),
+                        getattr(candidate, "stop_loss", None),
+                        getattr(candidate, "target", None),
+                        getattr(candidate, "rr", None),
+                        getattr(candidate, "score", None),
                         trace_id,
                         extra={
                             "event": "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE",
                             "original_symbol": signal.symbol,
                             "selected_symbol": candidate.symbol,
+                            "original_trade_price": original_trade_price,
+                            "selected_trade_price": selected_trade_price,
+                            "candidate_entry_price": getattr(candidate, "entry_price", None),
+                            "candidate_stop_loss": getattr(candidate, "stop_loss", None),
+                            "candidate_target": getattr(candidate, "target", None),
+                            "candidate_rr": getattr(candidate, "rr", None),
+                            "candidate_score": getattr(candidate, "score", None),
                             "trace_id": trace_id,
                         },
                     )
@@ -10006,8 +10009,7 @@ class StrategyRunner:
                 allow_ltp_live_plan = _env_flag("ALLOW_LTP_ONLY_LIVE_ORDER_PLAN", default=False)
 
                 metadata["tradable_quote"] = bool(snapshot_tradable_quote or mdm_tradable_quote)
-                candidate_entry = getattr(candidate, "entry_price", None) or selected_snapshot.get("ask") or selected_snapshot.get("ltp") or metadata.get("candidate_entry_price") or trade_price
-                trade_price = float(candidate_entry or trade_price or 0.0)
+                trade_price = selected_trade_price
                 metadata["entry_price"] = trade_price
                 metadata["signal_price"] = trade_price
                 metadata["price"] = trade_price
@@ -10043,17 +10045,18 @@ class StrategyRunner:
                 if dedup_result is not None:
                     self._reset_execution_state(base_symbol)
                     return dedup_result
-                if is_live_mode and not self._ensure_symbol_execution_ready_for_order(
+                readiness = self._ensure_symbol_execution_ready_result(
                     trade_symbol or base_symbol, trace_id=trace_id
-                ):
+                )
+                if is_live_mode and not readiness.allowed:
                     selected_candidate = candidate.symbol if candidate is not None else metadata.get("candidate_symbol")
-                    cache_key = normalize_symbol(trade_symbol or base_symbol)
-                    cache_state = self._runtime_execution_ready_by_symbol.get(cache_key)
-                    ready_snapshot = selected_snapshot if isinstance(selected_snapshot, dict) else {}
+                    readiness_details = dict(readiness.details or {})
+                    readiness_details["readiness_reason"] = readiness.reason
+                    readiness_details["trace_id"] = trace_id
                     self._logger.info(
-                        "SYMBOL_EXECUTION_READY_DIAGNOSTICS symbol=%s trace_id=%s selected_candidate=%s ensure_attempted=%s ensure_result=%s",
-                        base_symbol, trace_id, selected_candidate, True, False,
-                        extra={"event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "selected_candidate": selected_candidate, "subscription_ready": ready_snapshot.get("subscription_ready", "unavailable"), "quote_ready": ready_snapshot.get("quote_ready", "unavailable"), "depth_ready": ready_snapshot.get("depth_ready", "unavailable"), "token_ready": ready_snapshot.get("token_ready", "unavailable"), "tick_age_ms": ready_snapshot.get("tick_age_ms", "unavailable"), "ltp": ready_snapshot.get("ltp", metadata.get("entry_price")), "bid": ready_snapshot.get("bid", "unavailable"), "ask": ready_snapshot.get("ask", "unavailable"), "tradable_quote": ready_snapshot.get("tradable_quote", "unavailable"), "execution_ready_cache_state": cache_state if cache_state is not None else "unavailable", "ensure_attempted": True, "ensure_result": False},
+                        "SYMBOL_EXECUTION_READY_DIAGNOSTICS symbol=%s trace_id=%s selected_candidate=%s reason=%s details=%s",
+                        base_symbol, trace_id, selected_candidate, readiness.reason, readiness_details,
+                        extra={"event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "selected_candidate": selected_candidate, "readiness_reason": readiness.reason, "readiness_details": readiness_details},
                     )
                     self._mark_directional_dedup_failed(
                         underlying=underlying, option_side=option_side, reason=reason_key
@@ -10063,7 +10066,7 @@ class StrategyRunner:
                     ] = now_epoch
                     self._reset_execution_state(base_symbol)
                     _trace("runtime_symbol_execution_not_ready")
-                    return SignalExecutionResult(False, "runtime_symbol_execution_not_ready")
+                    return SignalExecutionResult(False, "runtime_symbol_execution_not_ready", details=readiness_details)
             requires_final_score = bool(metadata.get("preliminary_only")) or bool(
                 metadata.get("requires_runner_final_score")
             )
@@ -10602,6 +10605,15 @@ class StrategyRunner:
                 )
                 if reason_key == "premium_momentum_squeeze":
                     self._premium_squeeze_last_signal_ts[underlying] = now_epoch
+                self._submitted_entry_order_context[str(order_id)] = {
+                    "symbol": order_symbol,
+                    "base_symbol": base_symbol,
+                    "underlying": underlying,
+                    "option_side": option_side,
+                    "reason_key": reason_key,
+                    "underlying_reason_key": underlying_reason_key,
+                    "ts": now_epoch,
+                }
                 try:
                     self._record_trade(
                         base_symbol,
@@ -10624,6 +10636,29 @@ class StrategyRunner:
             self._logger.error("🔴 ENTRY LOGIC CRASH: %s", exc, exc_info=True)
             self._reset_execution_state(base_symbol)
             return SignalExecutionResult(False, "entry_exception", details={"trace_id": trace_id, "error": str(exc)})
+
+    def notify_entry_order_failed(self, *, order_id: str, symbol: str | None = None, reason: str = "unknown") -> None:
+        context = self._submitted_entry_order_context.get(str(order_id), {})
+        underlying = str(context.get("underlying") or self._extract_underlying(symbol or "") or "NIFTY")
+        underlying_reason_key = str(context.get("underlying_reason_key") or "")
+        has_position = False
+        if self._position_manager is not None and symbol:
+            try:
+                has_position = bool(self._position_manager.has_open_position(symbol))
+            except Exception:
+                has_position = False
+        if not has_position:
+            orchestrator = getattr(self, "_orchestrator", None)
+            if orchestrator is not None and hasattr(orchestrator, "clear_direction_lock"):
+                try:
+                    orchestrator.clear_direction_lock(reason="entry_order_failed", symbol=symbol or str(context.get("symbol") or ""))
+                except Exception:
+                    pass
+            self._underlying_last_signal_ts.pop(underlying, None)
+            if underlying_reason_key:
+                self._reason_last_signal_ts.pop(underlying_reason_key, None)
+        self._submitted_entry_order_context.pop(str(order_id), None)
+        self._logger.info("ENTRY_ORDER_FAILED_RECONCILED order_id=%s symbol=%s reason=%s has_position=%s", order_id, symbol or context.get("symbol"), reason, has_position)
 
     def _get_atr_with_fallback(
         self, symbol: str, metadata: dict, current_price: float

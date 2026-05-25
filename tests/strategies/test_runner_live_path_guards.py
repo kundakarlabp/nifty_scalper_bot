@@ -179,6 +179,10 @@ def test_premium_squeeze_does_not_self_suppress_on_first_execution() -> None:
 def test_live_entry_uses_runtime_readiness_not_mdm_hard_ready(monkeypatch) -> None:
     runner = _build_runner()
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'true')
+    monkeypatch.setenv('SHADOW_MODE', 'false')
+    monkeypatch.setenv('PAPER__ENABLED', 'false')
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
     runner._runtime_data_hard_ready = True
     runner._runtime_live_orders_armed = True
     class _BadMarketData:
@@ -433,6 +437,8 @@ def test_preliminary_signal_requires_final_score_gate(monkeypatch) -> None:
 async def test_live_async_path_builds_candidates_before_sync_handler(monkeypatch) -> None:
     runner = _build_runner()
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'true')
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
     runner.build_candidate_snapshots_async = AsyncMock(
         return_value=(
             [
