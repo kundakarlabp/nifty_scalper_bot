@@ -598,13 +598,13 @@ class StrategyRunner:
         self._exec_reject_runtime_not_ready_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_RUNTIME_NOT_READY_SECONDS", "10") or 10))
         self._exec_reject_invalid_lot_seconds = max(1.0, float(os.getenv("EXEC_REJECT_COOLDOWN_INVALID_LOT_SECONDS", "300") or 300))
         self._order_attempt_window: Deque[float] = deque()
-        self._signal_direction_dedup_seconds = max(
+        self._signal_attempt_debounce_seconds = max(
             0.5, float(os.getenv("SIGNAL_ATTEMPT_DEBOUNCE_SECONDS", "2") or 2)
         )
-        self._signal_direction_dedup_min_improvement = float(
+        self._signal_attempt_debounce_min_improvement = float(
             os.getenv("SIGNAL_DIRECTION_DEDUP_MIN_IMPROVEMENT", "2.0") or 2.0
         )
-        self._signal_direction_last_emit: dict[str, dict[str, Any]] = {}
+        self._signal_attempt_debounce_state: dict[str, dict[str, Any]] = {}
         self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "60") or 60))
         self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "120") or 120))
         self._max_order_attempts_per_minute = max(1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "3") or 3))
@@ -1843,16 +1843,32 @@ class StrategyRunner:
         """Sync-safe candidate basket build without unsafe asyncio.run in active loop."""
         try:
             asyncio.get_running_loop()
+            existing = list(existing_snapshots or [])
+            if len(existing) > 1:
+                self._logger.info(
+                    "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=event_loop_active_using_cached_existing symbol=%s total=%s",
+                    symbol,
+                    len(existing),
+                    extra={
+                        "event": "EXECUTION_CANDIDATE_BASKET_FALLBACK",
+                        "reason": "event_loop_active_using_cached_existing",
+                        "symbol": symbol,
+                        "total": len(existing),
+                    },
+                )
+                return existing, False, "cached_existing_event_loop_active"
             self._logger.info(
-                "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=event_loop_active symbol=%s",
+                "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=event_loop_active_refresh_pending symbol=%s total=%s",
                 symbol,
+                len(existing),
                 extra={
                     "event": "EXECUTION_CANDIDATE_BASKET_FALLBACK",
-                    "reason": "event_loop_active",
+                    "reason": "event_loop_active_refresh_pending",
                     "symbol": symbol,
+                    "total": len(existing),
                 },
             )
-            return list(existing_snapshots or []), False, "cached_existing"
+            return existing, True, "event_loop_active_refresh_pending"
         except RuntimeError:
             snapshots, pending = asyncio.run(
                 self.build_candidate_snapshots_async(
@@ -2511,10 +2527,10 @@ class StrategyRunner:
         key = self._directional_dedup_key(
             underlying=underlying, option_side=option_side, reason=reason
         )
-        state = self._signal_direction_last_emit.get(key)
+        state = self._signal_attempt_debounce_state.get(key)
         if isinstance(state, dict):
             state["status"] = "failed"
-            self._signal_direction_last_emit.pop(key, None)
+            self._signal_attempt_debounce_state.pop(key, None)
 
     def _resolve_candidate_contracts(
         self, *, side: str, target_strikes: set[int]
@@ -9282,7 +9298,7 @@ class StrategyRunner:
         key = self._directional_dedup_key(
             underlying=underlying, option_side=option_side, reason=reason
         )
-        prev = self._signal_direction_last_emit.get(key)
+        prev = self._signal_attempt_debounce_state.get(key)
         score_raw = metadata.get("candidate_score")
         if score_raw is None:
             score_raw = metadata.get("strategy_score")
@@ -9352,10 +9368,10 @@ class StrategyRunner:
         )
         if prev is not None:
             elapsed = now_epoch - float(prev.get("ts", 0.0))
-            if elapsed < self._signal_direction_dedup_seconds:
+            if elapsed < self._signal_attempt_debounce_seconds:
                 prev_rank_score = float(prev.get("rank_score", 0.0) or 0.0)
-                if (rank_score - prev_rank_score) < self._signal_direction_dedup_min_improvement:
-                    remaining = max(0.0, self._signal_direction_dedup_seconds - elapsed)
+                if (rank_score - prev_rank_score) < self._signal_attempt_debounce_min_improvement:
+                    remaining = max(0.0, self._signal_attempt_debounce_seconds - elapsed)
                     log_throttled_live(
                         self._logger,
                         logging.INFO,
@@ -9367,13 +9383,13 @@ class StrategyRunner:
                         option_side,
                         False,
                         elapsed,
-                        self._signal_direction_dedup_seconds,
-                        extra={"event": "SIGNAL_ATTEMPT_DEBOUNCE_BLOCKED", "symbol": selected_symbol, "direction": option_side, "allowed": False, "age_s": elapsed, "required_s": self._signal_direction_dedup_seconds},
+                        self._signal_attempt_debounce_seconds,
+                        extra={"event": "SIGNAL_ATTEMPT_DEBOUNCE_BLOCKED", "symbol": selected_symbol, "direction": option_side, "allowed": False, "age_s": elapsed, "required_s": self._signal_attempt_debounce_seconds},
                     )
                     return SignalExecutionResult(
                         False, "signal_attempt_debounce"
                     )
-        self._signal_direction_last_emit[key] = {
+        self._signal_attempt_debounce_state[key] = {
             "ts": now_epoch,
             "symbol": selected_symbol,
             "status": "reserved",
@@ -9522,8 +9538,8 @@ class StrategyRunner:
             reason_last_ts = self._reason_last_signal_ts.get(underlying_reason_key)
             underlying_age = None if underlying_last_ts is None else now_epoch - float(underlying_last_ts)
             reason_age = None if reason_last_ts is None else now_epoch - float(reason_last_ts)
-            self._logger.info("COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying_reason_key, f"{reason_age:.2f}" if reason_age is not None else None, self._reason_signal_cooldown_seconds, True if reason_age is None else reason_age >= self._reason_signal_cooldown_seconds, "first_trade_for_key" if reason_age is None else "cooldown_elapsed", trace_id)
-            self._logger.info("COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying, f"{underlying_age:.2f}" if underlying_age is not None else None, self._underlying_signal_cooldown_seconds, True if underlying_age is None else underlying_age >= self._underlying_signal_cooldown_seconds, "first_trade_for_key" if underlying_age is None else "cooldown_elapsed", trace_id)
+            self._logger.info("STRATEGY_REASON_ORDER_COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying_reason_key, f"{reason_age:.2f}" if reason_age is not None else None, self._reason_signal_cooldown_seconds, True if reason_age is None else reason_age >= self._reason_signal_cooldown_seconds, "first_trade_for_key" if reason_age is None else "cooldown_elapsed", trace_id)
+            self._logger.info("UNDERLYING_ORDER_COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying, f"{underlying_age:.2f}" if underlying_age is not None else None, self._underlying_signal_cooldown_seconds, True if underlying_age is None else underlying_age >= self._underlying_signal_cooldown_seconds, "first_trade_for_key" if underlying_age is None else "cooldown_elapsed", trace_id)
             if underlying_age is not None and underlying_age < self._underlying_signal_cooldown_seconds:
                 self._logger.info("COOLDOWN_REJECTED reason=underlying_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying, underlying_last_ts, now_epoch, underlying_age, self._underlying_signal_cooldown_seconds)
                 log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
@@ -9600,21 +9616,29 @@ class StrategyRunner:
                     if basket_snapshots and not basket_pending:
                         metadata["candidate_snapshots"] = basket_snapshots
                         candidate_snapshots_obj = basket_snapshots
+                        metadata["candidate_basket_source"] = _basket_source
                     else:
                         self._logger.info(
                             "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=basket_unavailable symbol=%s",
                             signal.symbol,
                             extra={"event": "EXECUTION_CANDIDATE_BASKET_FALLBACK", "reason": "basket_unavailable", "symbol": signal.symbol},
                         )
-            if is_live_mode and is_directional_option and not isinstance(
-                candidate_snapshots_obj, list
-            ):
-                self._reset_execution_state(base_symbol)
-                return self._reject_signal_execution(
-                    symbol=base_symbol,
-                    trace_id=trace_id,
-                    reason="candidate_refresh_pending",
-                )
+            if is_live_mode and is_directional_option:
+                if not isinstance(candidate_snapshots_obj, list):
+                    self._reset_execution_state(base_symbol)
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="candidate_refresh_pending",
+                    )
+                if basket_pending and len(candidate_snapshots_obj) <= 1:
+                    self._reset_execution_state(base_symbol)
+                    return self._reject_signal_execution(
+                        symbol=base_symbol,
+                        trace_id=trace_id,
+                        reason="candidate_refresh_pending",
+                        details={"candidate_total": len(candidate_snapshots_obj), "basket_source": _basket_source, "reason": "event_loop_active_refresh_pending"},
+                    )
             if is_live_mode and is_directional_option and not candidate_snapshots_obj:
                 signal_symbol = normalize_symbol(signal.symbol)
                 selected_ce = normalize_symbol(str(metadata.get("selected_ce") or self._selected_ce_symbol or ""))
@@ -9663,6 +9687,35 @@ class StrategyRunner:
                     for snap in candidate_snapshots_obj
                     if isinstance(snap, dict)
                 ]
+                if is_live_mode and is_directional_option and valid_snapshots and len(valid_snapshots) <= 1:
+                    basket_source = str(metadata.get("candidate_basket_source") or "existing")
+                    self._logger.info(
+                        "EXECUTION_CANDIDATE_BASKET_INADEQUATE symbol=%s total=%s source=%s",
+                        signal.symbol,
+                        len(valid_snapshots),
+                        basket_source,
+                        extra={"event": "EXECUTION_CANDIDATE_BASKET_INADEQUATE", "symbol": signal.symbol, "total": len(valid_snapshots), "source": basket_source},
+                    )
+                    lone = valid_snapshots[0]
+                    lone_symbol = normalize_symbol(str(lone.get("symbol") or ""))
+                    strike_distance = float(lone.get("strike_distance_from_atm") or lone.get("distance_from_atm") or 999.0)
+                    is_selected = bool(lone.get("is_selected_option")) or lone_symbol == selected_symbol
+                    is_fresh = float(lone.get("tick_age_s") or 999.0) <= (float(os.getenv("ORDER_MAX_QUOTE_AGE_MS", "60000") or "60000") / 1000.0)
+                    ltp = float(lone.get("ltp") or 0.0)
+                    bid = float(lone.get("bid") or 0.0)
+                    ask = float(lone.get("ask") or 0.0)
+                    bid_ask_ok = bid > 0 and ask > bid
+                    allow_ltp_only = _env_flag("ALLOW_LTP_ONLY_CANDIDATE", default=False)
+                    tradable = bool(lone.get("tradable_quote")) or bid_ask_ok or (allow_ltp_only and bool(lone.get("ltp_only_fallback")) and ltp > 0)
+                    premium_ok = self._trade_candidate_selector.min_option_premium <= ltp <= self._trade_candidate_selector.max_option_premium
+                    if not (is_selected and is_fresh and tradable and premium_ok and strike_distance <= float(os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100)):
+                        self._reset_execution_state(base_symbol)
+                        return self._reject_signal_execution(
+                            symbol=base_symbol,
+                            trace_id=trace_id,
+                            reason="candidate_basket_inadequate",
+                            details={"candidate_total": len(valid_snapshots), "basket_source": basket_source, "symbol": signal.symbol},
+                        )
                 try:
                     ranked_candidates = self._trade_candidate_selector.select_ranked_candidates(
                         direction_bias=option_side,

@@ -56,9 +56,43 @@ class SMCStrategy(EliteStrategy):
                 )
                 return None
             min_bars_required = int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")
-            history_count = int(indicators.get("indicator_history_count") or indicators.get("history_count") or 0)
-            if history_count and history_count < min_bars_required:
+            execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
+            is_live = execution_mode == 'LIVE'
+            raw_history_count = indicators.get("indicator_history_count")
+            if raw_history_count is None:
+                raw_history_count = indicators.get("history_count")
+            if is_live and raw_history_count is None:
+                self._no_vote("smc_history_count_missing")
+                LOGGER.warning(
+                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_history_count_missing min_bars=%s",
+                    symbol,
+                    min_bars_required,
+                    extra={
+                        "event": "STRATEGY_NO_VOTE",
+                        "strategy": "SMC",
+                        "symbol": symbol,
+                        "reason": "smc_history_count_missing",
+                        "min_bars_required": min_bars_required,
+                    },
+                )
+                return None
+            history_count = int(raw_history_count or 0)
+            if is_live and history_count < min_bars_required:
                 self._no_vote("smc_insufficient_history")
+                LOGGER.warning(
+                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_insufficient_history history_count=%s min_bars=%s",
+                    symbol,
+                    history_count,
+                    min_bars_required,
+                    extra={
+                        "event": "STRATEGY_NO_VOTE",
+                        "strategy": "SMC",
+                        "symbol": symbol,
+                        "reason": "smc_insufficient_history",
+                        "history_count": history_count,
+                        "min_bars_required": min_bars_required,
+                    },
+                )
                 return None
 
             if stale_data or current_price <= 0:
@@ -162,8 +196,6 @@ class SMCStrategy(EliteStrategy):
                 reasons.append('clean_invalidation_rr')
 
             strategy_score = max(0.0, min(10.0, score))
-            execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
-            is_live = execution_mode == 'LIVE'
             min_score = float(os.getenv('SMC_MIN_SCORE_LIVE', '6.5') if is_live else os.getenv('SMC_MIN_SCORE_SHADOW', '4.5'))
             require_structure_live = str(os.getenv('SMC_REQUIRE_STRUCTURE_CONFIRMATION_LIVE', 'true')).lower() in {'1', 'true', 'yes', 'on'}
             allow_momentum_without_structure = str(os.getenv("SMC_ALLOW_MOMENTUM_WITHOUT_STRUCTURE_LIVE", "true")).lower() in {"1", "true", "yes", "on"}
@@ -210,6 +242,11 @@ class SMCStrategy(EliteStrategy):
                         "underlying_direction": underlying_direction,
                         "context_age_seconds": context_age_seconds,
                         "momentum_confirmed": momentum_confirmed,
+                        "effective_direction": effective_direction,
+                        "min_score": min_score,
+                        "strategy_score": strategy_score,
+                        "SMC_MOMENTUM_DISPLACEMENT_MIN": float(os.getenv("SMC_MOMENTUM_DISPLACEMENT_MIN", "0.80") or "0.80"),
+                        "SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST": str(os.getenv("SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST", "true")).lower() in {"1", "true", "yes", "on"},
                     },
                 )
                 LOGGER.info(
@@ -245,6 +282,12 @@ class SMCStrategy(EliteStrategy):
                         "direction": direction,
                         "underlying_direction": underlying_direction,
                         "reason": "smc_structure_required_live",
+                        "effective_direction": effective_direction,
+                        "momentum_confirmed": momentum_confirmed,
+                        "min_score": min_score,
+                        "strategy_score": strategy_score,
+                        "SMC_MOMENTUM_DISPLACEMENT_MIN": float(os.getenv("SMC_MOMENTUM_DISPLACEMENT_MIN", "0.80") or "0.80"),
+                        "SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST": str(os.getenv("SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST", "true")).lower() in {"1", "true", "yes", "on"},
                     },
                 )
                 return None

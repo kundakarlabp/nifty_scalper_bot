@@ -60,7 +60,7 @@ def _build_runner() -> StrategyRunner:
     runner._max_order_attempts_per_minute = 100
     runner._signal_direction_dedup_seconds = 45.0
     runner._signal_direction_dedup_min_improvement = 2.0
-    runner._signal_direction_last_emit = {}
+    runner._signal_attempt_debounce_state = {}
     runner._record_trade = lambda *args, **kwargs: None
     runner._reset_execution_state = lambda *_args, **_kwargs: None
     runner._entry_lock = threading.Lock()
@@ -1491,7 +1491,7 @@ def test_dedup_prefers_tick_age_ms_over_candidate_tick_age_s() -> None:
         option_side='PE',
         selected_snapshot={},
     )
-    state = runner._signal_direction_last_emit['NIFTY:PE:OrderFlow']
+    state = runner._signal_attempt_debounce_state['NIFTY:PE:OrderFlow']
     assert state['ranking_fields']['tick_age_ms'] == 0.0
 
 
@@ -1507,15 +1507,15 @@ def test_dedup_uses_zero_candidate_tick_age_s_without_fallback_default() -> None
         option_side='PE',
         selected_snapshot={},
     )
-    state = runner._signal_direction_last_emit['NIFTY:PE:OrderFlow']
+    state = runner._signal_attempt_debounce_state['NIFTY:PE:OrderFlow']
     assert state['ranking_fields']['tick_age_ms'] == 0.0
 
 
 def test_mark_directional_dedup_failed_clears_reservation() -> None:
     runner = _build_runner()
-    runner._signal_direction_last_emit['NIFTY:PE:OrderFlow'] = {'status': 'reserved', 'rank_score': 10.0}
+    runner._signal_attempt_debounce_state['NIFTY:PE:OrderFlow'] = {'status': 'reserved', 'rank_score': 10.0}
     runner._mark_directional_dedup_failed(underlying='NIFTY', option_side='PE', reason='OrderFlow')
-    assert 'NIFTY:PE:OrderFlow' not in runner._signal_direction_last_emit
+    assert 'NIFTY:PE:OrderFlow' not in runner._signal_attempt_debounce_state
 
 
 def test_directional_dedup_fallback_selected_symbol_snapshot_without_candidates(monkeypatch) -> None:

@@ -53,6 +53,23 @@ class TradeCandidateSelector:
         self.max_option_spread_pct = max_option_spread_pct
         self.require_real_ticks_last_60s = require_real_ticks_last_60s
         self._last_rejects: dict[str, int] = {}
+        self._candidate_reject_log_throttle_seconds = max(
+            1.0, float(os.getenv("CANDIDATE_REJECT_LOG_THROTTLE_SECONDS", "15") or 15)
+        )
+
+    def _log_reject(self, reason: str, symbol: str, *, throttle_key_parts: tuple[Any, ...], **fields: Any) -> None:
+        key = "CANDIDATE_REJECTED:" + ":".join(str(part) for part in throttle_key_parts)
+        log_once_or_throttled(
+            LOGGER,
+            key,
+            "CANDIDATE_REJECTED symbol=%s reason=%s fields=%s",
+            symbol,
+            reason,
+            fields,
+            interval_sec=self._candidate_reject_log_throttle_seconds,
+            level=logging.INFO,
+            extra={"event": "CANDIDATE_REJECTED", "symbol": symbol, "reason": reason, **fields},
+        )
 
     def _limits(self) -> tuple[float, float, int]:
         if self.quality_mode == 'strict':
@@ -78,16 +95,19 @@ class TradeCandidateSelector:
             symbol = str(s.get('symbol') or '')
             if side != direction_bias:
                 rejects['side_mismatch'] += 1
+                self._log_reject("side_mismatch", symbol, throttle_key_parts=("side_mismatch", symbol, side, direction_bias), side=side, expected_direction=direction_bias)
                 continue
             strike = int(s.get('strike') or 0)
             atm_distance = abs((strike - atm_strike) // 50) if strike and atm_strike else 999
             if atm_distance > self.option_strike_window_each_side:
                 rejects['atm_distance'] += 1
+                self._log_reject("atm_distance", symbol, throttle_key_parts=("atm_distance", symbol, strike, atm_strike), strike=strike, atm_strike=atm_strike, atm_distance=atm_distance, allowed_window=self.option_strike_window_each_side)
                 continue
             bid, ask, ltp = self._f(s.get('bid')), self._f(s.get('ask')), self._f(s.get('ltp'))
             has_bid_ask = bool((bid or 0) > 0 and (ask or 0) > 0)
             if ltp is None or ltp <= 0:
                 rejects['missing_bid_ask'] += 1
+                self._log_reject("missing_bid_ask", symbol, throttle_key_parts=("missing_bid_ask", symbol, "invalid_ltp"), ltp=ltp, bid=bid, ask=ask, quote_quality=s.get("quote_quality"), ltp_only_fallback=bool(s.get("ltp_only_fallback")), allow_ltp_only=allow_ltp_only)
                 continue
             premium = ltp
             if premium < self.min_option_premium or premium > self.max_option_premium:
@@ -123,10 +143,12 @@ class TradeCandidateSelector:
             tick_age_s = self._f(s.get('tick_age_s'))
             if tick_age_s is None or tick_age_s > max_age:
                 rejects['tick_stale'] += 1
+                self._log_reject("tick_stale", symbol, throttle_key_parts=("tick_stale", symbol, int(max_age)), tick_age_s=tick_age_s, max_age_s=max_age)
                 continue
             real_ticks = int(s.get('real_ticks_last_60s') or 0)
             if real_ticks < min_ticks:
                 rejects['insufficient_ticks'] += 1
+                self._log_reject("insufficient_ticks", symbol, throttle_key_parts=("insufficient_ticks", symbol, min_ticks), real_ticks_last_60s=real_ticks, min_ticks=min_ticks)
                 continue
             reasons = ['candidate_valid']
             spread_pct: float | None = None
@@ -135,6 +157,7 @@ class TradeCandidateSelector:
                 spread_pct = (((ask or 0.0) - (bid or 0.0)) / mid * 100.0) if mid > 0 else 100.0
                 if spread_pct > max_spread:
                     rejects['spread_too_wide'] += 1
+                    self._log_reject("spread_too_wide", symbol, throttle_key_parts=("spread_too_wide", symbol, int(max_spread * 100)), bid=bid, ask=ask, spread_pct=spread_pct, max_spread_pct=max_spread)
                     continue
                 entry = ask if (ask or 0.0) > 0 else ltp
                 score_penalty = 0.0
@@ -144,6 +167,7 @@ class TradeCandidateSelector:
                 )
                 if not (allow_ltp_only and ltp_only_flag):
                     rejects['missing_bid_ask'] += 1
+                    self._log_reject("missing_bid_ask", symbol, throttle_key_parts=("missing_bid_ask", symbol, "no_bidask"), ltp=ltp, bid=bid, ask=ask, quote_quality=s.get("quote_quality"), ltp_only_fallback=ltp_only_flag, allow_ltp_only=allow_ltp_only)
                     continue
                 entry = ltp * 1.003
                 score_penalty = 1.5
@@ -159,6 +183,7 @@ class TradeCandidateSelector:
             rr = (target - entry) / (entry - sl)
             if rr < 1.5:
                 rejects['invalid_rr'] += 1
+                self._log_reject("invalid_rr", symbol, throttle_key_parts=("invalid_rr", symbol), entry=entry, stop_loss=sl, target=target, rr=rr, min_rr=1.5)
                 continue
             liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct * 100.0)
             micro = min(10.0, real_ticks * 3.0)
