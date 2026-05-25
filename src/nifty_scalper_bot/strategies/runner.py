@@ -9948,7 +9948,7 @@ class StrategyRunner:
                 if selected_symbol != original_symbol:
                     self._logger.info(
                         "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original_symbol=%s selected_symbol=%s original_trade_price=%s selected_trade_price=%s candidate_entry_price=%s selected_snapshot_ask=%s selected_snapshot_ltp=%s candidate_stop_loss=%s candidate_target=%s candidate_rr=%s candidate_score=%s trace_id=%s",
-                        signal.symbol,
+                        original_symbol,
                         candidate.symbol,
                         original_trade_price,
                         selected_trade_price,
