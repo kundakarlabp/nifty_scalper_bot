@@ -175,6 +175,11 @@ class SMCStrategy(EliteStrategy):
             )
             if is_live and require_structure_live and not (structure_confirmed or momentum_confirmed):
                 self._no_vote('smc_structure_required_live')
+                premium_reclaim_source = indicators.get("premium_reclaim_source")
+                premium_current = indicators.get("premium_current")
+                premium_prev_close = indicators.get("premium_prev_close")
+                premium_vwap = indicators.get("premium_vwap")
+                retest_reason = indicators.get("retest_reason")
                 LOGGER.info(
                     "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_structure_required_live "
                     "choch_confirmed=%s bos_confirmed=%s retest_confirmed=%s displacement_score=%.3f "
@@ -205,6 +210,41 @@ class SMCStrategy(EliteStrategy):
                         "underlying_direction": underlying_direction,
                         "context_age_seconds": context_age_seconds,
                         "momentum_confirmed": momentum_confirmed,
+                    },
+                )
+                LOGGER.info(
+                    "SMC_RECLAIM_DIAGNOSTICS symbol=%s premium_reclaim=%s premium_reclaim_source=%s premium_current=%s premium_prev_close=%s premium_vwap=%s retest_confirmed=%s retest_reason=%s choch_confirmed=%s bos_confirmed=%s displacement_score=%.3f direction_aligned=%s direction=%s underlying_direction=%s reason=smc_structure_required_live",
+                    symbol,
+                    premium_reclaim,
+                    premium_reclaim_source if premium_reclaim_source is not None else "unavailable",
+                    premium_current if premium_current is not None else "unavailable",
+                    premium_prev_close if premium_prev_close is not None else "unavailable",
+                    premium_vwap if premium_vwap is not None else "unavailable",
+                    retest_confirmed,
+                    retest_reason if retest_reason is not None else "unavailable",
+                    choch_confirmed,
+                    bos_confirmed,
+                    displacement_score,
+                    direction_aligned,
+                    direction or "unavailable",
+                    underlying_direction or "unavailable",
+                    extra={
+                        "event": "SMC_RECLAIM_DIAGNOSTICS",
+                        "symbol": symbol,
+                        "premium_reclaim": premium_reclaim,
+                        "premium_reclaim_source": premium_reclaim_source,
+                        "premium_current": premium_current,
+                        "premium_prev_close": premium_prev_close,
+                        "premium_vwap": premium_vwap,
+                        "retest_confirmed": retest_confirmed,
+                        "retest_reason": retest_reason,
+                        "choch_confirmed": choch_confirmed,
+                        "bos_confirmed": bos_confirmed,
+                        "displacement_score": displacement_score,
+                        "direction_aligned": direction_aligned,
+                        "direction": direction,
+                        "underlying_direction": underlying_direction,
+                        "reason": "smc_structure_required_live",
                     },
                 )
                 return None
