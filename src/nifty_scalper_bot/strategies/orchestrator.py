@@ -69,6 +69,69 @@ class StrategyOrchestrator:
         self._active_direction_symbol: str = ""
         self._direction_lock_time: float = 0.0
 
+    def _infer_option_direction(self, symbol: str) -> str | None:
+        value = str(symbol or "").upper()
+        if value.endswith("CE"):
+            return "CE"
+        if value.endswith("PE"):
+            return "PE"
+        return None
+
+    def clear_direction_lock(self, *, reason: str, symbol: str | None = None) -> None:
+        old_direction = self._active_direction
+        old_symbol = self._active_direction_symbol
+        self._active_direction = None
+        self._active_direction_symbol = ""
+        self._direction_lock_time = 0.0
+        self._logger.warning(
+            "DIRECTION_LOCK_CLEARED reason=%s old_direction=%s old_symbol=%s symbol=%s",
+            reason,
+            old_direction,
+            old_symbol,
+            symbol,
+            extra={"event": "orchestrator_direction_lock_cleared", "reason": reason, "old_direction": old_direction, "old_symbol": old_symbol, "symbol": symbol},
+        )
+
+    def notify_entry(self, symbol: str, *, reason: str = "order_accepted") -> None:
+        direction = self._infer_option_direction(symbol)
+        if not direction:
+            return
+        import time as _t
+        self._active_direction = direction
+        self._active_direction_symbol = symbol
+        self._direction_lock_time = _t.time()
+        self._logger.info(
+            "DIRECTION_LOCK_SET reason=%s direction=%s symbol=%s",
+            reason,
+            direction,
+            symbol,
+            extra={"event": "orchestrator_direction_lock_set", "reason": reason, "direction": direction, "symbol": symbol},
+        )
+
+    def _has_open_position_for_locked_symbol(self, position_manager: Any) -> bool:
+        symbol = str(self._active_direction_symbol or "")
+        if not symbol or position_manager is None:
+            return False
+        try:
+            pos = position_manager.get_position(symbol)
+            if pos and float(getattr(pos, "quantity", 0) or 0) > 0:
+                return True
+        except Exception:
+            return False
+        return False
+
+    def reconcile_direction_bias(self, *, resolved_bias: str | None, confidence: float | None, symbol: str | None = None, position_manager: Any | None = None) -> None:
+        bias = str(resolved_bias or "").upper()
+        conf = float(confidence or 0.0)
+        threshold = float(os.getenv("DIRECTION_LOCK_FLIP_CONFIDENCE", "0.90"))
+        if bias not in {"CE", "PE"} or conf < threshold or not self._active_direction:
+            return
+        if bias == self._active_direction:
+            return
+        if self._has_open_position_for_locked_symbol(position_manager):
+            return
+        self.clear_direction_lock(reason="resolved_bias_flip", symbol=symbol)
+
     def register_strategy(
         self, name: str, *, capital_fraction: float, correlation_tags: Iterable[str]
     ) -> None:
@@ -210,13 +273,11 @@ class StrategyOrchestrator:
         if action == "BUY":
             import time as _t
 
-            _sym_upper = symbol.upper()
-            _direction = (
-                "CE"
-                if _sym_upper.endswith("CE")
-                else ("PE" if _sym_upper.endswith("PE") else None)
-            )
-            _dir_cooldown = float(os.getenv("DIRECTION_LOCK_SECONDS", "20"))
+            _direction = self._infer_option_direction(symbol)
+            _dir_cooldown = float(os.getenv("DIRECTION_LOCK_SECONDS", "10"))
+
+            if self._active_direction and not self._has_open_position_for_locked_symbol(position_manager):
+                self.clear_direction_lock(reason="stale_lock_no_open_position", symbol=symbol)
 
             if _direction and self._active_direction:
                 _time_since_lock = _t.time() - self._direction_lock_time
@@ -224,14 +285,20 @@ class StrategyOrchestrator:
                     self._active_direction != _direction
                     and _time_since_lock < _dir_cooldown
                 ):
-                    self._logger.info(
-                        f"🛡️ DIRECTION CONFLICT: {symbol} is {_direction} but "
-                        f"active direction is {self._active_direction} "
-                        f"({self._active_direction_symbol}) | "
-                        f"Wait {_dir_cooldown - _time_since_lock:.0f}s",
+                    self._logger.warning(
+                        "DIRECTION_CONFLICT symbol=%s requested_direction=%s active_direction=%s active_symbol=%s wait_s=%.1f",
+                        symbol,
+                        _direction,
+                        self._active_direction,
+                        self._active_direction_symbol,
+                        _dir_cooldown - _time_since_lock,
                         extra={
                             "event": "orchestrator_direction_conflict",
                             "symbol": symbol,
+                            "requested_direction": _direction,
+                            "active_direction": self._active_direction,
+                            "active_direction_symbol": self._active_direction_symbol,
+                            "wait_s": _dir_cooldown - _time_since_lock,
                         },
                     )
                     self._set_skip_reason("direction_conflict")
@@ -372,19 +439,7 @@ class StrategyOrchestrator:
         if action in {"BUY"}:
             self._last_signal_time = now
 
-            # Lock direction ONLY after ALL checks pass
-            _sym_upper = symbol.upper()
-            _final_direction = (
-                "CE"
-                if _sym_upper.endswith("CE")
-                else ("PE" if _sym_upper.endswith("PE") else None)
-            )
-            if _final_direction:
-                import time as _t
-
-                self._active_direction = _final_direction
-                self._active_direction_symbol = symbol
-                self._direction_lock_time = _t.time()
+            # Direction lock is set only from notify_entry after order acceptance.
 
         self._logger.info(
             "ORCHESTRATOR_PREFILTER_PASSED symbol=%s action=%s conf=%.2f strategy=%s",
@@ -438,11 +493,7 @@ class StrategyOrchestrator:
         with self._lock:
             self._active.pop(normalized, None)
             self._pending_underlyings.pop(normalized, None)
-            # ✅ FIX (6 Feb 2026): Clear direction lock on exit
-            self._active_direction = None
-            self._active_direction_symbol = ""
-            self._direction_lock_time = 0.0
-            self._logger.info(f"🔓 Direction lock cleared on exit: {normalized}")
+            self.clear_direction_lock(reason="notify_exit", symbol=normalized)
         self._logger.info(
             "Condition met: orchestrator_release",
             extra={"event": "orchestrator_release", "underlying": normalized},

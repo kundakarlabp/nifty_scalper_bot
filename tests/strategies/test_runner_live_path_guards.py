@@ -209,6 +209,19 @@ def test_trade_plan_uses_env_preflight_values(monkeypatch) -> None:
     assert plan.allow_market_entry is True
 
 
+def test_order_acceptance_notifies_orchestrator_entry() -> None:
+    runner = _build_runner()
+    notified = {}
+    runner._orchestrator = SimpleNamespace(
+        notify_entry=lambda symbol, reason="order_accepted": notified.update({"symbol": symbol, "reason": reason})
+    )
+    runner._order_manager.submit_trade_plan = MagicMock(return_value='order-2')
+    signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800CE', quantity=1, confidence=0.9, reason='test', stop_loss=100.0, take_profit=120.0, metadata={'strategy_score': 7, 'option_score': 7, 'data_score': 7, 'rr_score': 7})
+    runner._handle_entry_signal_inner(signal, 'NFO:NIFTY26APR23800CE', 'NFO:NIFTY26APR23800CE', 110.0, datetime.now(timezone.utc), trace_id='notify')
+    assert notified["symbol"] == 'NFO:NIFTY26APR23800CE'
+    assert notified["reason"] == "order_accepted"
+
+
 def test_atr_fallback_used_for_insufficient_bars() -> None:
     runner = _build_runner()
     runner._required_candles = 20

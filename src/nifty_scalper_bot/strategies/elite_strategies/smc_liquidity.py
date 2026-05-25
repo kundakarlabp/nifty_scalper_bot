@@ -14,7 +14,7 @@ LOGGER = get_logger(__name__)
 class SMCStrategy(EliteStrategy):
     """SMC liquidity sweep strategy producing structured votes only."""
 
-    MIN_BARS_REQUIRED = 15
+    MIN_BARS_REQUIRED = 30
     ROLE = 'trigger'
     TRIGGER_KEY = 'smc_lite'
 
@@ -37,21 +37,29 @@ class SMCStrategy(EliteStrategy):
             close = float(indicators.get('close') or current_price)
             open_price = float(indicators.get('open') or current_price)
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
-            direction = str(
-                indicators.get("direction_bias")
-                or indicators.get("underlying_direction_bias")
-                or ""
-            ).upper()
+            direction = str(indicators.get("direction_bias") or "").upper()
             stale_data = bool(indicators.get('stale_data_used')) or float(indicators.get('data_age_seconds') or 0.0) > 120.0
             try:
                 context_age_seconds = float(indicators.get("context_age_seconds") or 999.0)
             except (TypeError, ValueError):
                 context_age_seconds = 999.0
-            underlying_direction = str(
-                indicators.get("underlying_direction_bias")
-                or indicators.get("direction_bias")
-                or ""
-            ).upper()
+            underlying_direction = str(indicators.get("underlying_direction_bias") or "").upper()
+            effective_direction = underlying_direction or direction
+            if str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper() == 'LIVE' and not effective_direction:
+                self._no_vote("direction_context_not_ready")
+                LOGGER.warning(
+                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=direction_context_not_ready direction_bias=%s underlying_direction_bias=%s",
+                    symbol,
+                    direction,
+                    underlying_direction,
+                    extra={"event": "STRATEGY_NO_VOTE", "strategy": "SMC", "symbol": symbol, "reason": "direction_context_not_ready"},
+                )
+                return None
+            min_bars_required = int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")
+            history_count = int(indicators.get("indicator_history_count") or indicators.get("history_count") or 0)
+            if history_count and history_count < min_bars_required:
+                self._no_vote("smc_insufficient_history")
+                return None
 
             if stale_data or current_price <= 0:
                 self._no_vote("stale_or_invalid_data")
@@ -142,7 +150,7 @@ class SMCStrategy(EliteStrategy):
             if retest_confirmed:
                 score += 1.0
                 reasons.append('retest_mitigation')
-            direction_aligned = direction in {'CE', 'PE'} and direction == side
+            direction_aligned = effective_direction in {'CE', 'PE'} and effective_direction == side
             if direction_aligned:
                 score += 2.0
                 reasons.append('direction_alignment')
@@ -158,7 +166,14 @@ class SMCStrategy(EliteStrategy):
             is_live = execution_mode == 'LIVE'
             min_score = float(os.getenv('SMC_MIN_SCORE_LIVE', '6.5') if is_live else os.getenv('SMC_MIN_SCORE_SHADOW', '4.5'))
             require_structure_live = str(os.getenv('SMC_REQUIRE_STRUCTURE_CONFIRMATION_LIVE', 'true')).lower() in {'1', 'true', 'yes', 'on'}
-            if is_live and require_structure_live and not structure_confirmed:
+            allow_momentum_without_structure = str(os.getenv("SMC_ALLOW_MOMENTUM_WITHOUT_STRUCTURE_LIVE", "true")).lower() in {"1", "true", "yes", "on"}
+            momentum_confirmed = (
+                allow_momentum_without_structure
+                and displacement_score >= float(os.getenv("SMC_MOMENTUM_DISPLACEMENT_MIN", "0.80") or "0.80")
+                and direction_aligned
+                and (premium_reclaim or retest_confirmed or str(os.getenv("SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST", "true")).lower() not in {"1", "true", "yes", "on"})
+            )
+            if is_live and require_structure_live and not (structure_confirmed or momentum_confirmed):
                 self._no_vote('smc_structure_required_live')
                 LOGGER.info(
                     "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_structure_required_live "
@@ -189,6 +204,7 @@ class SMCStrategy(EliteStrategy):
                         "direction": direction,
                         "underlying_direction": underlying_direction,
                         "context_age_seconds": context_age_seconds,
+                        "momentum_confirmed": momentum_confirmed,
                     },
                 )
                 return None
@@ -271,6 +287,8 @@ class SMCStrategy(EliteStrategy):
                 'sweep_level': sweep_level,
                 'displacement_score': round(displacement_score, 3),
                 'structure_confirmed': structure_confirmed,
+                'momentum_confirmed': momentum_confirmed,
+                'structure_or_momentum_confirmed': bool(structure_confirmed or momentum_confirmed),
                 'smc_sweep_type': 'bullish' if bullish_sweep else 'bearish',
                 'structure_confirmation_used': structure_confirmed,
                 'premium_reclaim_used': premium_reclaim,

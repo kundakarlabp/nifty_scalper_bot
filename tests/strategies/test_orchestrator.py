@@ -12,6 +12,7 @@ from nifty_scalper_bot.strategies.signal_generator import Signal
 @dataclass
 class _DummyPosition:
     symbol: str
+    quantity: int = 0
 
 
 class _OrderManagerStub:
@@ -35,6 +36,8 @@ class _PositionManagerStub:
 
     def get_all_positions(self) -> list[_DummyPosition]:
         return [_DummyPosition(symbol=s) for s in self._symbols]
+    def get_position(self, symbol: str):
+        return _DummyPosition(symbol=symbol, quantity=1) if symbol in self._symbols else None
 
 
 class _RiskStub:
@@ -62,6 +65,38 @@ def _make_signal(strategy: str, action: str = "BUY") -> Signal:
         take_profit=20.0,
         metadata={"strategy": strategy},
     )
+
+
+def test_filter_signal_does_not_set_direction_lock() -> None:
+    orchestrator = StrategyOrchestrator(risk_manager=_RiskStub(balance=10_000))
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26MAY24000CE", quantity=1, confidence=0.8, reason="t", stop_loss=1, take_profit=2, metadata={})
+    result = orchestrator.filter_signal(signal, {}, _PositionManagerStub())
+    assert result is signal
+    assert orchestrator._active_direction is None
+
+
+def test_notify_entry_sets_direction_lock_and_notify_exit_clears() -> None:
+    orchestrator = StrategyOrchestrator(risk_manager=_RiskStub(balance=10_000))
+    orchestrator.notify_entry("NFO:NIFTY26MAY24000CE")
+    assert orchestrator._active_direction == "CE"
+    assert orchestrator._active_direction_symbol == "NFO:NIFTY26MAY24000CE"
+    orchestrator.notify_exit("NIFTY")
+    assert orchestrator._active_direction is None
+
+
+def test_stale_lock_clears_without_open_position_and_reconcile_respects_open_position() -> None:
+    orchestrator = StrategyOrchestrator(risk_manager=_RiskStub(balance=10_000))
+    orchestrator.notify_entry("NFO:NIFTY26MAY24000CE")
+    sig = Signal(action="BUY", symbol="NFO:NIFTY26MAY24000PE", quantity=1, confidence=0.9, reason="t", stop_loss=1, take_profit=2, metadata={})
+    allowed = orchestrator.filter_signal(sig, {}, _PositionManagerStub(symbols=()))
+    assert allowed is sig
+    assert orchestrator.get_skip_reason() != "direction_conflict"
+    assert orchestrator._active_direction is None
+
+    orchestrator.notify_entry("NFO:NIFTY26MAY24000CE")
+    blocked = orchestrator.filter_signal(sig, {}, _PositionManagerStub(symbols=("NFO:NIFTY26MAY24000CE",)))
+    assert blocked is None
+    assert orchestrator.get_skip_reason() == "direction_conflict"
 
 
 def test_orchestrator_blocks_when_capital_exceeded() -> None:
