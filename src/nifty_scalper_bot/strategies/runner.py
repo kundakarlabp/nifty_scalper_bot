@@ -605,6 +605,11 @@ class StrategyRunner:
             os.getenv("SIGNAL_DIRECTION_DEDUP_MIN_IMPROVEMENT", "2.0") or 2.0
         )
         self._signal_attempt_debounce_state: dict[str, dict[str, Any]] = {}
+        # Live scalping tuning note (documentation only; defaults remain unchanged):
+        # RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS=20
+        # RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS=30
+        # SIGNAL_REJECT_COOLDOWN_SECONDS=15
+        # RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE=5
         self._underlying_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS", "60") or 60))
         self._reason_signal_cooldown_seconds = max(1.0, float(os.getenv("RUNNER_REASON_SIGNAL_COOLDOWN_SECONDS", "120") or 120))
         self._max_order_attempts_per_minute = max(1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "3") or 3))
@@ -9506,7 +9511,24 @@ class StrategyRunner:
             reject_cooldown_key = f"{base_symbol}:{reason_key}:score_below_threshold"
             reject_last_ts = self._signal_reject_cooldown_ts.get(reject_cooldown_key)
             if reject_last_ts is not None and (now_epoch - float(reject_last_ts)) < float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "60") or "60"):
+                reject_age = now_epoch - float(reject_last_ts)
+                required_seconds = float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "60") or "60")
                 self._logger.info("SIGNAL_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s trace_id=%s", base_symbol, "score_below_threshold", trace_id)
+                self._logger.info(
+                    "SCORE_REJECT_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
+                    base_symbol,
+                    trace_id,
+                    reject_cooldown_key,
+                    reject_age,
+                    required_seconds,
+                    max(0.0, required_seconds - reject_age),
+                    reason_key,
+                    underlying,
+                    reason_key,
+                    float(reject_last_ts),
+                    now_epoch,
+                    extra={"event": "SCORE_REJECT_COOLDOWN_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": reject_cooldown_key, "age_seconds": reject_age, "required_seconds": required_seconds, "remaining_seconds": max(0.0, required_seconds - reject_age), "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": float(reject_last_ts), "now_epoch": now_epoch},
+                )
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "score_below_threshold_reject_cooldown")
             if reason_key == "premium_momentum_squeeze":
@@ -9524,6 +9546,7 @@ class StrategyRunner:
                     return SignalExecutionResult(False, "non_option_instrument")
                 last_premium_ts = float(self._premium_squeeze_last_signal_ts.get(underlying, 0.0))
                 if now_epoch - last_premium_ts < self._underlying_signal_cooldown_seconds:
+                    premium_age = now_epoch - last_premium_ts
                     log_throttled(
                         self._logger,
                         f"premium_squeeze_suppressed_{underlying}",
@@ -9531,6 +9554,21 @@ class StrategyRunner:
                         interval_sec=self._cooldown_log_throttle_seconds,
                         level=logging.INFO,
                         extra={"event": "PREMIUM_SQUEEZE_SUPPRESSED", "underlying": underlying, "reason": "cooldown"},
+                    )
+                    self._logger.info(
+                        "PREMIUM_SQUEEZE_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
+                        base_symbol,
+                        trace_id,
+                        underlying,
+                        premium_age,
+                        self._underlying_signal_cooldown_seconds,
+                        max(0.0, self._underlying_signal_cooldown_seconds - premium_age),
+                        reason_key,
+                        underlying,
+                        reason_key,
+                        last_premium_ts,
+                        now_epoch,
+                        extra={"event": "PREMIUM_SQUEEZE_COOLDOWN_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": underlying, "age_seconds": premium_age, "required_seconds": self._underlying_signal_cooldown_seconds, "remaining_seconds": max(0.0, self._underlying_signal_cooldown_seconds - premium_age), "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": last_premium_ts, "now_epoch": now_epoch},
                     )
                     self._reset_execution_state(base_symbol)
                     return SignalExecutionResult(False, "premium_squeeze_cooldown")
@@ -9542,17 +9580,33 @@ class StrategyRunner:
             self._logger.info("UNDERLYING_ORDER_COOLDOWN_CHECK symbol=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f allowed=%s reason=%s trace_id=%s", base_symbol, underlying, f"{underlying_age:.2f}" if underlying_age is not None else None, self._underlying_signal_cooldown_seconds, True if underlying_age is None else underlying_age >= self._underlying_signal_cooldown_seconds, "first_trade_for_key" if underlying_age is None else "cooldown_elapsed", trace_id)
             if underlying_age is not None and underlying_age < self._underlying_signal_cooldown_seconds:
                 self._logger.info("COOLDOWN_REJECTED reason=underlying_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying, underlying_last_ts, now_epoch, underlying_age, self._underlying_signal_cooldown_seconds)
+                self._logger.info(
+                    "UNDERLYING_ORDER_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
+                    base_symbol, trace_id, underlying, underlying_age, self._underlying_signal_cooldown_seconds, max(0.0, self._underlying_signal_cooldown_seconds - underlying_age), reason_key, underlying, reason_key, float(underlying_last_ts), now_epoch,
+                    extra={"event": "UNDERLYING_ORDER_COOLDOWN_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": underlying, "age_seconds": underlying_age, "required_seconds": self._underlying_signal_cooldown_seconds, "remaining_seconds": max(0.0, self._underlying_signal_cooldown_seconds - underlying_age), "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": float(underlying_last_ts), "now_epoch": now_epoch},
+                )
                 log_throttled(self._logger, f"runner_underlying_cd_{underlying}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "underlying_cooldown"})
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "underlying_cooldown")
             if reason_age is not None and reason_age < self._reason_signal_cooldown_seconds:
                 self._logger.info("COOLDOWN_REJECTED reason=reason_cooldown symbol=%s underlying=%s reason_key=%s cooldown_key=%s last_ts=%.3f now_epoch=%.3f age_seconds=%.2f required_seconds=%.2f", base_symbol, underlying, reason_key, underlying_reason_key, reason_last_ts, now_epoch, reason_age, self._reason_signal_cooldown_seconds)
+                self._logger.info(
+                    "STRATEGY_REASON_ORDER_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
+                    base_symbol, trace_id, underlying_reason_key, reason_age, self._reason_signal_cooldown_seconds, max(0.0, self._reason_signal_cooldown_seconds - reason_age), reason_key, underlying, reason_key, float(reason_last_ts), now_epoch,
+                    extra={"event": "STRATEGY_REASON_ORDER_COOLDOWN_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": underlying_reason_key, "age_seconds": reason_age, "required_seconds": self._reason_signal_cooldown_seconds, "remaining_seconds": max(0.0, self._reason_signal_cooldown_seconds - reason_age), "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": float(reason_last_ts), "now_epoch": now_epoch},
+                )
                 log_throttled(self._logger, f"runner_reason_cd_{reason_key}", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=self._cooldown_log_throttle_seconds, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "reason_cooldown"})
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "reason_cooldown")
             while self._order_attempt_window and (now_epoch - self._order_attempt_window[0]) > 60.0:
                 self._order_attempt_window.popleft()
             if len(self._order_attempt_window) >= self._max_order_attempts_per_minute:
+                oldest_attempt_age_s = None if not self._order_attempt_window else now_epoch - self._order_attempt_window[0]
+                self._logger.info(
+                    "ORDER_ATTEMPT_RATE_LIMIT_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%s required_seconds=%.2f remaining_seconds=%s reason_key=%s underlying=%s strategy=%s last_ts=%s now_epoch=%.3f attempts_last_60s=%s max_order_attempts_per_minute=%s oldest_attempt_age_s=%s",
+                    base_symbol, trace_id, "order_attempt_window", oldest_attempt_age_s, 60.0, None, reason_key, underlying, reason_key, None, now_epoch, len(self._order_attempt_window), self._max_order_attempts_per_minute, oldest_attempt_age_s,
+                    extra={"event": "ORDER_ATTEMPT_RATE_LIMIT_BLOCKED", "symbol": base_symbol, "trace_id": trace_id, "cooldown_key": "order_attempt_window", "age_seconds": oldest_attempt_age_s, "required_seconds": 60.0, "remaining_seconds": None, "reason_key": reason_key, "underlying": underlying, "strategy": reason_key, "last_ts": None, "now_epoch": now_epoch, "attempts_last_60s": len(self._order_attempt_window), "max_order_attempts_per_minute": self._max_order_attempts_per_minute, "oldest_attempt_age_s": oldest_attempt_age_s},
+                )
                 log_throttled(self._logger, "runner_order_attempt_rate", "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", interval_sec=300.0, level=logging.INFO, extra={"event": "RUNNER_SIGNAL_SUPPRESSED_EXECUTION_HALTED", "symbol": base_symbol, "reason": "max_order_attempts_per_minute"})
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "max_order_attempts_per_minute")
@@ -9601,10 +9655,20 @@ class StrategyRunner:
                 trade_symbol or base_symbol or signal.symbol
             )
             selected_snapshot: dict[str, Any] = {}
+            existing_snapshots = (
+                candidate_snapshots_obj
+                if isinstance(candidate_snapshots_obj, list)
+                else []
+            )
+            basket_pending = False
+            _basket_source = "existing"
+            atm_seed = (
+                metadata.get("atm_strike")
+                or self._extract_strike_from_symbol(signal.symbol)
+                or self._active_atm_strike
+            )
             if is_live_mode and is_directional_option:
-                existing_snapshots = candidate_snapshots_obj if isinstance(candidate_snapshots_obj, list) else []
                 if len(existing_snapshots) <= 1:
-                    atm_seed = metadata.get("atm_strike") or self._extract_strike_from_symbol(signal.symbol) or self._active_atm_strike
                     basket_snapshots, basket_pending, _basket_source = self._build_candidate_snapshots_sync_safe(
                         symbol=signal.symbol,
                         underlying=underlying,
@@ -9632,12 +9696,38 @@ class StrategyRunner:
                         reason="candidate_refresh_pending",
                     )
                 if basket_pending and len(candidate_snapshots_obj) <= 1:
+                    event_loop_active = _basket_source == "event_loop_active_refresh_pending"
+                    pending_reason = (
+                        "event_loop_active_refresh_pending"
+                        if event_loop_active
+                        else "candidate_snapshot_refresh_pending"
+                    )
+                    details = {
+                        "symbol": base_symbol,
+                        "trace_id": trace_id,
+                        "underlying": underlying,
+                        "option_side": option_side,
+                        "candidate_total": len(candidate_snapshots_obj),
+                        "basket_source": _basket_source,
+                        "event_loop_active": event_loop_active,
+                        "existing_snapshot_symbols": [normalize_symbol(str(s.get("symbol") or "")) for s in existing_snapshots if isinstance(s, dict)],
+                        "atm_seed": atm_seed,
+                        "active_atm_strike": self._active_atm_strike,
+                        "selected_ce": normalize_symbol(str(metadata.get("selected_ce") or self._selected_ce_symbol or "")),
+                        "selected_pe": normalize_symbol(str(metadata.get("selected_pe") or self._selected_pe_symbol or "")),
+                        "reason": pending_reason,
+                    }
+                    self._logger.info(
+                        "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS symbol=%s trace_id=%s underlying=%s option_side=%s candidate_total=%s basket_source=%s reason=%s",
+                        base_symbol, trace_id, underlying, option_side, len(candidate_snapshots_obj), _basket_source, pending_reason,
+                        extra={"event": "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS", **details},
+                    )
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
                         symbol=base_symbol,
                         trace_id=trace_id,
                         reason="candidate_refresh_pending",
-                        details={"candidate_total": len(candidate_snapshots_obj), "basket_source": _basket_source, "reason": "event_loop_active_refresh_pending"},
+                        details=details,
                     )
             if is_live_mode and is_directional_option and not candidate_snapshots_obj:
                 signal_symbol = normalize_symbol(signal.symbol)
@@ -9723,12 +9813,38 @@ class StrategyRunner:
                     tradable = bool(lone.get("tradable_quote")) or bid_ask_ok or (allow_ltp_only and bool(lone.get("ltp_only_fallback")) and ltp > 0)
                     premium_ok = self._trade_candidate_selector.min_option_premium <= ltp <= self._trade_candidate_selector.max_option_premium
                     if not (is_selected and is_fresh and tradable and premium_ok and strike_distance <= float(os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100)):
+                        basket_details = {
+                            "symbol": signal.symbol,
+                            "trace_id": trace_id,
+                            "candidate_total": len(valid_snapshots),
+                            "basket_source": basket_source,
+                            "lone_symbol": lone_symbol,
+                            "is_selected": is_selected,
+                            "is_fresh": is_fresh,
+                            "tradable": tradable,
+                            "premium_ok": premium_ok,
+                            "strike_distance": strike_distance,
+                            "max_distance": float(os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or 100),
+                            "ltp": ltp,
+                            "bid": bid,
+                            "ask": ask,
+                            "tick_age_s": float(lone.get("tick_age_s") or 999.0),
+                            "min_option_premium": self._trade_candidate_selector.min_option_premium,
+                            "max_option_premium": self._trade_candidate_selector.max_option_premium,
+                            "allow_ltp_only_candidate": allow_ltp_only,
+                            "reason": "candidate_screen_failed",
+                        }
+                        self._logger.info(
+                            "EXECUTION_CANDIDATE_BASKET_INADEQUATE symbol=%s trace_id=%s lone_symbol=%s reason=%s",
+                            signal.symbol, trace_id, lone_symbol, "candidate_screen_failed",
+                            extra={"event": "EXECUTION_CANDIDATE_BASKET_INADEQUATE", **basket_details},
+                        )
                         self._reset_execution_state(base_symbol)
                         return self._reject_signal_execution(
                             symbol=base_symbol,
                             trace_id=trace_id,
                             reason="candidate_basket_inadequate",
-                            details={"candidate_total": len(valid_snapshots), "basket_source": basket_source, "symbol": signal.symbol},
+                            details=basket_details,
                         )
                 try:
                     ranked_candidates = self._trade_candidate_selector.select_ranked_candidates(
@@ -9919,6 +10035,15 @@ class StrategyRunner:
                 if is_live_mode and not self._ensure_symbol_execution_ready_for_order(
                     trade_symbol or base_symbol, trace_id=trace_id
                 ):
+                    selected_candidate = candidate.symbol if candidate is not None else metadata.get("candidate_symbol")
+                    cache_key = normalize_symbol(trade_symbol or base_symbol)
+                    cache_state = self._runtime_execution_ready_by_symbol.get(cache_key)
+                    ready_snapshot = selected_snapshot if isinstance(selected_snapshot, dict) else {}
+                    self._logger.info(
+                        "SYMBOL_EXECUTION_READY_DIAGNOSTICS symbol=%s trace_id=%s selected_candidate=%s ensure_attempted=%s ensure_result=%s",
+                        base_symbol, trace_id, selected_candidate, True, False,
+                        extra={"event": "SYMBOL_EXECUTION_READY_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "selected_candidate": selected_candidate, "subscription_ready": ready_snapshot.get("subscription_ready", "unavailable"), "quote_ready": ready_snapshot.get("quote_ready", "unavailable"), "depth_ready": ready_snapshot.get("depth_ready", "unavailable"), "token_ready": ready_snapshot.get("token_ready", "unavailable"), "tick_age_ms": ready_snapshot.get("tick_age_ms", "unavailable"), "ltp": ready_snapshot.get("ltp", metadata.get("entry_price")), "bid": ready_snapshot.get("bid", "unavailable"), "ask": ready_snapshot.get("ask", "unavailable"), "tradable_quote": ready_snapshot.get("tradable_quote", "unavailable"), "execution_ready_cache_state": cache_state if cache_state is not None else "unavailable", "ensure_attempted": True, "ensure_result": False},
+                    )
                     self._mark_directional_dedup_failed(
                         underlying=underlying, option_side=option_side, reason=reason_key
                     )
@@ -9987,6 +10112,7 @@ class StrategyRunner:
                 metadata["stop_loss"] = signal.stop_loss
                 metadata["take_profit"] = signal.take_profit
             except Exception as materialize_exc:
+                candidate_symbol = None if candidate is None else candidate.symbol
                 self._logger.exception(
                     "TRADE_PLAN_MATERIALIZATION_FAILED symbol=%s trace_id=%s error=%s",
                     base_symbol,
@@ -9998,6 +10124,11 @@ class StrategyRunner:
                         "trace_id": trace_id,
                         "error_type": type(materialize_exc).__name__,
                     },
+                )
+                self._logger.error(
+                    "TRADE_PLAN_MATERIALIZATION_DIAGNOSTICS symbol=%s trace_id=%s action=%s quantity=%s trade_price=%s error_type=%s error=%s",
+                    base_symbol, trace_id, signal.action, signal.quantity, trade_price, type(materialize_exc).__name__, materialize_exc,
+                    extra={"event": "TRADE_PLAN_MATERIALIZATION_DIAGNOSTICS", "symbol": base_symbol, "trace_id": trace_id, "action": signal.action, "quantity": signal.quantity, "trade_price": trade_price, "entry_price": metadata.get("entry_price"), "stop_loss": signal.stop_loss, "take_profit": signal.take_profit, "candidate_symbol": candidate_symbol, "candidate_entry_price": metadata.get("candidate_entry_price"), "candidate_stop_loss": metadata.get("candidate_stop_loss"), "candidate_target": metadata.get("candidate_target"), "candidate_rr": metadata.get("candidate_rr"), "lot_size": metadata.get("lot_size"), "tick_size": metadata.get("tick_size"), "metadata_keys": sorted(list(metadata.keys())), "error_type": type(materialize_exc).__name__, "error": str(materialize_exc)},
                 )
                 self._reset_execution_state(base_symbol)
                 _trace("trade_plan_materialization_failed")
