@@ -2076,6 +2076,7 @@ class OrderManager:
             block_reason: str | None = None,
             order_id: str | None = None,
             broker_mode: str | None = None,
+            broker_attempted: bool = False,
             details: dict[str, Any] | None = None,
         ) -> None:
             """Emit unified decision logs for order placement. Args: fields. Returns: None. Raises: None."""
@@ -2091,7 +2092,7 @@ class OrderManager:
                 "block_reason": block_reason,
                 "details": details or {},
                 "trace_id": trace_id,
-                "broker_attempted": bool(order_id),
+                "broker_attempted": broker_attempted,
             }
             self._logger.info(
                 "ORDER_MANAGER_DECISION",
@@ -2110,6 +2111,7 @@ class OrderManager:
                     "trace_id": trace_id,
                     "broker_mode": broker_mode,
                     "details": details or {},
+                    "broker_attempted": broker_attempted,
                 },
             )
         # ✅ FIX: Round Price/Trigger to 0.05 tick size BEFORE processing
@@ -2715,6 +2717,7 @@ class OrderManager:
                             _log_order_decision(
                                 allowed=False,
                                 block_reason="uncertain_order_reconciliation_pending",
+                                broker_attempted=True,
                             )
                             if pending_signal_marked:
                                 self._clear_pending_signal(signal_id)
@@ -2877,6 +2880,7 @@ class OrderManager:
                     _log_order_decision(
                         allowed=True,
                         order_id=order_id,
+                        broker_attempted=True,
                     )
                     self._consecutive_failures = 0
                     if signal_id:
@@ -2955,7 +2959,7 @@ class OrderManager:
                         price=float(price or 0.0),
                         meta={"trade_id": trade_id, "error": str(e)},
                     )
-                    _log_order_decision(allowed=False, block_reason="fatal_order_error")
+                    _log_order_decision(allowed=False, block_reason="fatal_order_error", broker_attempted=True)
                     if pending_signal_marked:
                         self._clear_pending_signal(signal_id)
                     return None
@@ -2965,7 +2969,7 @@ class OrderManager:
 
         self._logger.error("❌ Order placement failed after retries.")
         self._clear_uncertain_order(unique_client_id)
-        _log_order_decision(allowed=False, block_reason="order_placement_failed_after_retries")
+        _log_order_decision(allowed=False, block_reason="order_placement_failed_after_retries", broker_attempted=True)
         if pending_signal_marked:
             self._clear_pending_signal(signal_id)
         return None
@@ -3194,14 +3198,22 @@ class OrderManager:
             return TradePlanSubmitResult(False, reason="protected_limit_unavailable", details={"entry_price": plan.entry_price}, broker_attempted=False)
         if plan.side == "BUY":
             if plan.stop_loss is not None and plan.stop_loss >= price:
-                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_above_or_equal_entry"}, broker_attempted=False)
+                details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_above_or_equal_entry"}
+                self._logger.warning("ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s", symbol, details, plan.trace_id)
+                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
             if plan.take_profit is not None and plan.take_profit <= price:
-                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_below_or_equal_entry"}, broker_attempted=False)
+                details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_below_or_equal_entry"}
+                self._logger.warning("ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s", symbol, details, plan.trace_id)
+                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
         elif plan.side == "SELL":
             if plan.stop_loss is not None and plan.stop_loss <= price:
-                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_below_or_equal_entry"}, broker_attempted=False)
+                details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "stop_loss_below_or_equal_entry"}
+                self._logger.warning("ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s", symbol, details, plan.trace_id)
+                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
             if plan.take_profit is not None and plan.take_profit >= price:
-                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details={"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_above_or_equal_entry"}, broker_attempted=False)
+                details = {"protected_price": price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit, "side": plan.side, "violation": "take_profit_above_or_equal_entry"}
+                self._logger.warning("ORDER_REJECTED symbol=%s reason=protected_price_invalidates_bracket details=%s trace_id=%s", symbol, details, plan.trace_id)
+                return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
         if hasattr(self, "place_managed_order"):
             if hasattr(self, "place_managed_order_result"):
                 managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
@@ -3293,6 +3305,7 @@ class OrderManager:
                 return ManagedOrderResult(False, reason="protected_limit_unavailable")
             entry_order_type = OrderType.MARKET
 
+        self._last_order_decision = {}
         order_id = self.place_order(
             symbol=symbol,
             side=side,
@@ -3310,20 +3323,19 @@ class OrderManager:
         if order_id:
             return ManagedOrderResult(True, order_id=order_id, reason="accepted", broker_attempted=True)
         decision = dict(getattr(self, "_last_order_decision", {}) or {})
+        if not decision:
+            return ManagedOrderResult(
+                False,
+                reason="place_order_rejected_without_decision",
+                details={"symbol": symbol, "side": side, "quantity": quantity, "entry_price": entry_price, "trace_id": trace_id},
+                broker_attempted=False,
+            )
         return ManagedOrderResult(
             False,
             reason=str(decision.get("block_reason") or "place_order_rejected"),
             details=dict(decision.get("details") or {}),
             broker_attempted=bool(decision.get("broker_attempted", True)),
         )
-
-        if order_id:
-            self._logger.info(
-                f"✅ Managed Order {order_id} placed successfully with Virtual Bracket."
-            )
-            return order_id
-
-        return None
 
     def guard_existing_position(
         self,

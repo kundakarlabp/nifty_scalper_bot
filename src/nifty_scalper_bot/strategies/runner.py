@@ -2357,7 +2357,7 @@ class StrategyRunner:
                     metadata.setdefault("atm_strike", int(fallback_candidate.get("atm_strike") or 0))
                     self._logger.info(
                         "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING symbol=%s",
-                        signal.symbol,
+                        original_symbol,
                         extra={"event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED_AFTER_REFRESH_PENDING", "symbol": signal.symbol},
                     )
                     return dataclasses.replace(signal, metadata=metadata), None
@@ -9882,39 +9882,7 @@ class StrategyRunner:
                 selected_symbol = normalize_symbol(candidate.symbol)
                 original_symbol = normalize_symbol(signal.symbol)
                 original_trade_price = float(trade_price or 0.0)
-                selected_trade_price = float(
-                    getattr(candidate, "entry_price", None)
-                    or metadata.get("candidate_entry_price")
-                    or trade_price
-                    or 0.0
-                )
                 if selected_symbol != original_symbol:
-                    self._logger.info(
-                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original_symbol=%s selected_symbol=%s original_trade_price=%s selected_trade_price=%s candidate_entry_price=%s candidate_stop_loss=%s candidate_target=%s candidate_rr=%s candidate_score=%s trace_id=%s",
-                        signal.symbol,
-                        candidate.symbol,
-                        original_trade_price,
-                        selected_trade_price,
-                        getattr(candidate, "entry_price", None),
-                        getattr(candidate, "stop_loss", None),
-                        getattr(candidate, "target", None),
-                        getattr(candidate, "rr", None),
-                        getattr(candidate, "score", None),
-                        trace_id,
-                        extra={
-                            "event": "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE",
-                            "original_symbol": signal.symbol,
-                            "selected_symbol": candidate.symbol,
-                            "original_trade_price": original_trade_price,
-                            "selected_trade_price": selected_trade_price,
-                            "candidate_entry_price": getattr(candidate, "entry_price", None),
-                            "candidate_stop_loss": getattr(candidate, "stop_loss", None),
-                            "candidate_target": getattr(candidate, "target", None),
-                            "candidate_rr": getattr(candidate, "rr", None),
-                            "candidate_score": getattr(candidate, "score", None),
-                            "trace_id": trace_id,
-                        },
-                    )
                     trade_symbol = selected_symbol
                     base_symbol = selected_symbol
                     signal = dataclasses.replace(
@@ -9957,6 +9925,45 @@ class StrategyRunner:
                 )
                 selected_snapshot = dict(selected_snapshot or {})
                 metadata["selected_snapshot_symbol"] = selected_snapshot.get("symbol")
+                selected_trade_price = float(
+                    getattr(candidate, "entry_price", None)
+                    or selected_snapshot.get("ask")
+                    or selected_snapshot.get("ltp")
+                    or metadata.get("candidate_entry_price")
+                    or trade_price
+                    or 0.0
+                )
+                if selected_symbol != original_symbol:
+                    self._logger.info(
+                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original_symbol=%s selected_symbol=%s original_trade_price=%s selected_trade_price=%s candidate_entry_price=%s selected_snapshot_ask=%s selected_snapshot_ltp=%s candidate_stop_loss=%s candidate_target=%s candidate_rr=%s candidate_score=%s trace_id=%s",
+                        signal.symbol,
+                        candidate.symbol,
+                        original_trade_price,
+                        selected_trade_price,
+                        getattr(candidate, "entry_price", None),
+                        selected_snapshot.get("ask"),
+                        selected_snapshot.get("ltp"),
+                        getattr(candidate, "stop_loss", None),
+                        getattr(candidate, "target", None),
+                        getattr(candidate, "rr", None),
+                        getattr(candidate, "score", None),
+                        trace_id,
+                        extra={
+                            "event": "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE",
+                            "original_symbol": original_symbol,
+                            "selected_symbol": candidate.symbol,
+                            "original_trade_price": original_trade_price,
+                            "selected_trade_price": selected_trade_price,
+                            "candidate_entry_price": getattr(candidate, "entry_price", None),
+                            "selected_snapshot_ask": selected_snapshot.get("ask"),
+                            "selected_snapshot_ltp": selected_snapshot.get("ltp"),
+                            "candidate_stop_loss": getattr(candidate, "stop_loss", None),
+                            "candidate_target": getattr(candidate, "target", None),
+                            "candidate_rr": getattr(candidate, "rr", None),
+                            "candidate_score": getattr(candidate, "score", None),
+                            "trace_id": trace_id,
+                        },
+                    )
                 snapshot_bid = selected_snapshot.get("bid")
                 snapshot_ask = selected_snapshot.get("ask")
 
