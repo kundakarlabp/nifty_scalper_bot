@@ -867,6 +867,8 @@ class OrderManager:
         self._kill_switch_engaged_at: datetime | None = None
         self._kill_switch_reason: str | None = None
         self._last_kill_switch_log_ts: float = 0.0
+        self._kill_switch_failure_history: deque[dict[str, Any]] = deque(maxlen=20)
+        self._kill_switch_last_reset: dict[str, Any] | None = None
         self._missing_counts: dict[str, int] = {}
         self._last_order_decision: dict[str, Any] = {}
 
@@ -1938,6 +1940,26 @@ class OrderManager:
             self._logger.error("Failure in _validate_live_execution_safety: %s", e)
             return False
 
+
+    def _record_kill_switch_failure(self, record: dict[str, Any]) -> None:
+        with self._lock:
+            self._kill_switch_failure_history.append(dict(record))
+
+    def get_kill_switch_failure_history(self, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 20), 20))
+        with self._lock:
+            return [dict(item) for item in list(self._kill_switch_failure_history)[-safe_limit:]]
+
+    def get_last_kill_switch_failure(self) -> dict[str, Any] | None:
+        with self._lock:
+            if not self._kill_switch_failure_history:
+                return None
+            return dict(self._kill_switch_failure_history[-1])
+
+    def clear_kill_switch_failure_history(self) -> None:
+        with self._lock:
+            self._kill_switch_failure_history.clear()
+
     def is_kill_switch_active(self) -> bool:
         """Return whether kill switch is currently blocking new entries. Args: none. Returns: bool. Raises: none."""
         if self._kill_switch_engaged_at is None:
@@ -1956,10 +1978,11 @@ class OrderManager:
         self._kill_switch_engaged_at = None
         self._kill_switch_reason = None
         self._last_kill_switch_log_ts = 0.0
+        self._kill_switch_last_reset = {"reset_reason": reason, "reset_ts": datetime.now(timezone.utc).isoformat()}
         self._logger.info(
             "ORDER_KILL_SWITCH_RESET reason=%s",
             reason,
-            extra={"event": "ORDER_KILL_SWITCH_RESET", "reason": reason},
+            extra={"event": "ORDER_KILL_SWITCH_RESET", "reason": reason, **self._kill_switch_last_reset},
         )
         self._log_kill_switch_status()
 
@@ -1982,6 +2005,7 @@ class OrderManager:
         if engaged_at is not None and self._kill_switch_allow_auto_reset:
             elapsed = (datetime.now(timezone.utc) - engaged_at).total_seconds()
             remaining = max(float(self._kill_switch_auto_reset_seconds) - elapsed, 0.0)
+        recent_failures = self.get_kill_switch_failure_history(limit=5)
         return {
             "active": self.is_kill_switch_active(),
             "kill_reason": self._kill_switch_reason,
@@ -1990,7 +2014,24 @@ class OrderManager:
             "auto_reset_allowed": bool(self._kill_switch_allow_auto_reset),
             "auto_reset_seconds": int(self._kill_switch_auto_reset_seconds),
             "remaining_auto_reset_seconds": int(remaining),
+            "last_failure": self.get_last_kill_switch_failure(),
+            "recent_failures_count": len(recent_failures),
+            "recent_failures": recent_failures,
+            "last_reset": dict(self._kill_switch_last_reset) if self._kill_switch_last_reset else None,
         }
+
+    def execution_health_snapshot(self) -> dict[str, Any]:
+        """Return compact execution health diagnostics."""
+        with self._lock:
+            self._prune_pending_signals()
+            self._prune_uncertain_orders()
+            return {
+                "kill_switch": self.get_kill_switch_status(),
+                "last_order_decision": dict(self._last_order_decision),
+                "pending_orders_count": len(self._pending_signal_ids),
+                "uncertain_orders_count": len(self._uncertain_client_order_ids),
+                "consecutive_failures": self._consecutive_failures,
+            }
 
     def resolve_lot_size(self, symbol: str) -> int:
         """Resolve lot size for symbol. Args: symbol. Returns: lot size. Raises: OrderPlacementError."""
@@ -2133,6 +2174,7 @@ class OrderManager:
 
         if not is_system_exit and self.is_kill_switch_active():
             kill_state = self.get_kill_switch_status()
+            last_failure = kill_state.get("last_failure") or {}
             now_ts = time.time()
             if now_ts - self._last_kill_switch_log_ts >= 300.0:
                 self._last_kill_switch_log_ts = now_ts
@@ -2144,12 +2186,17 @@ class OrderManager:
                         extra={"event": "ORDER_KILL_SWITCH_BLOCK", "symbol": symbol, "consecutive_failures": self._consecutive_failures, "reason": self._kill_switch_reason},
                 )
             self._logger.warning(
-                "ORDER_BLOCKED reason=kill_switch_active kill_reason=%s failures=%s engaged_at=%s trace_id=%s",
+                "ORDER_BLOCKED reason=kill_switch_active kill_reason=%s failures=%s engaged_at=%s trace_id=%s symbol=%s side=%s qty=%s last_failure_exception_type=%s last_failure_exception_message=%s",
                 kill_state.get("kill_reason"),
                 kill_state.get("consecutive_failures"),
                 kill_state.get("engaged_at"),
                 trace_id,
-                extra={"event": "ORDER_BLOCKED", "block_reason": "kill_switch_active", "trace_id": trace_id},
+                normalized_symbol,
+                normalized_side,
+                quantity,
+                last_failure.get("exception_type"),
+                last_failure.get("exception_message"),
+                extra={"event": "ORDER_BLOCKED", "block_reason": "kill_switch_active", "trace_id": trace_id, "kill_state": kill_state, "last_failure": last_failure, "symbol": normalized_symbol, "side": normalized_side, "quantity": quantity},
             )
             _log_order_decision(
                 allowed=False,
@@ -2919,6 +2966,39 @@ class OrderManager:
                 }
                 if failure_class in countable_failures:
                     self._consecutive_failures += 1
+                    self._record_kill_switch_failure(
+                        {
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "trace_id": trace_id,
+                            "symbol": normalized_symbol,
+                            "side": normalized_side or side,
+                            "quantity": quantity,
+                            "attempt": attempt,
+                            "failure_class": failure_class,
+                            "exception_type": type(e).__name__,
+                            "exception_message": str(e),
+                            "consecutive_failures_after": self._consecutive_failures,
+                            "max_failures": self._max_failures,
+                            "broker_attempted": True,
+                            "order_type": str(final_order_type),
+                            "product": product,
+                            "variety": variety,
+                            "signal_id": signal_id,
+                            "strategy_name": strategy_name,
+                            "client_order_id": unique_client_id,
+                            "payload_summary": {
+                                "symbol": normalized_symbol,
+                                "side": normalized_side,
+                                "quantity": quantity,
+                                "product": product,
+                                "order_type": str(final_order_type),
+                                "price": price,
+                                "trigger_price": trigger_price,
+                                "tag": broker_tag,
+                                "variety": variety,
+                            },
+                        }
+                    )
                 if self._consecutive_failures >= self._max_failures and self._kill_switch_engaged_at is None:
                     self._kill_switch_engaged_at = datetime.now(timezone.utc)
                     self._kill_switch_reason = failure_class

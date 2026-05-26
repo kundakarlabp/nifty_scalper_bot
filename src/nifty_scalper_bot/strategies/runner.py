@@ -2774,10 +2774,31 @@ class StrategyRunner:
     ) -> str:
         return f"{underlying}:{option_side}:{reason}"
 
+    def _directional_dedup_key_from_parts(
+        self, *, underlying: str, option_side: str, reason: str
+    ) -> str:
+        return self._directional_dedup_key(
+            underlying=underlying, option_side=option_side, reason=reason
+        )
+
+    def _mark_directional_dedup_submitted(
+        self, *, underlying: str, option_side: str, reason: str, order_id: str
+    ) -> None:
+        key = self._directional_dedup_key_from_parts(
+            underlying=underlying, option_side=option_side, reason=reason
+        )
+        prev = self._signal_attempt_debounce_state.get(key) or {}
+        self._signal_attempt_debounce_state[key] = {
+            **prev,
+            "status": "submitted",
+            "order_id": order_id,
+            "submitted_ts": time.time(),
+        }
+
     def _mark_directional_dedup_failed(
         self, *, underlying: str, option_side: str, reason: str
     ) -> None:
-        key = self._directional_dedup_key(
+        key = self._directional_dedup_key_from_parts(
             underlying=underlying, option_side=option_side, reason=reason
         )
         state = self._signal_attempt_debounce_state.get(key)
@@ -9374,7 +9395,7 @@ class StrategyRunner:
                 "RUNNER_SIGNAL_DECISION",
                 extra={
                     "event": "RUNNER_SIGNAL_DECISION",
-                    "symbol": order_symbol,
+                    "symbol": base_symbol,
                 "underlying_symbol": base_symbol,
                     "action": action,
                     "proceed_to_order": False,
@@ -10135,7 +10156,14 @@ class StrategyRunner:
                     )
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
-                        symbol=base_symbol, trace_id=trace_id, reason="no_execution_ready_candidate"
+                        symbol=base_symbol, trace_id=trace_id, reason="candidate_selection_exception", details={
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "candidate_total": len(valid_snapshots),
+                            "direction": option_side,
+                            "atm": atm_strike,
+                            "trace_id": trace_id,
+                        }
                     )
                 if candidate is None:
                     self._reset_execution_state(base_symbol)
@@ -10805,11 +10833,27 @@ class StrategyRunner:
             if not self._transition_execution_state(
                 base_symbol, ExecutionState.ORDER_PENDING
             ):
+                state_details = self._get_execution_state_machine(base_symbol).current_state_details()
+                self._logger.warning(
+                    "EXECUTION_STATE_TRANSITION_REJECTED symbol=%s base_symbol=%s trade_symbol=%s signal_symbol=%s trace_id=%s target_state=%s state_details=%s",
+                    base_symbol,
+                    base_symbol,
+                    trade_symbol,
+                    signal.symbol,
+                    trace_id,
+                    ExecutionState.ORDER_PENDING.value,
+                    state_details,
+                    extra={"event": "EXECUTION_STATE_TRANSITION_REJECTED", "symbol": base_symbol, "trace_id": trace_id, "state_details": state_details, "target_state": ExecutionState.ORDER_PENDING.value, "reason_key": reason_key},
+                )
+                self._mark_directional_dedup_failed(
+                    underlying=underlying, option_side=option_side, reason=reason_key
+                )
                 self._reset_execution_state(base_symbol)
                 return self._reject_signal_execution(
                     symbol=base_symbol,
                     trace_id=trace_id,
                     reason="order_state_rejected",
+                    details={"state_details": state_details, "target_state": ExecutionState.ORDER_PENDING.value},
                 )
 
             self._logger.info(
@@ -10858,6 +10902,13 @@ class StrategyRunner:
                 else:
                     submit_reason = f"order_manager_{submit_result.reason}"
                     submit_details = {**dict(getattr(submit_result, "details", {}) or {}), "trace_id": trace_id}
+                    if submit_result.reason == "kill_switch_active" and hasattr(self._order_manager, "get_kill_switch_status"):
+                        submit_details["kill_switch_status"] = self._order_manager.get_kill_switch_status()
+                    self._logger.warning(
+                        "RUNNER_ORDER_MANAGER_REJECTED symbol=%s order_symbol=%s reason=%s runner_reason=%s broker_attempted=%s trace_id=%s",
+                        base_symbol, order_symbol, submit_result.reason, submit_reason, submit_result.broker_attempted, trace_id,
+                        extra={"event": "RUNNER_ORDER_MANAGER_REJECTED", "symbol": base_symbol, "order_symbol": order_symbol, "reason": submit_result.reason, "runner_reason": submit_reason, "broker_attempted": submit_result.broker_attempted, "details": submit_details, "trace_id": trace_id},
+                    )
             else:
                 order_id = self._order_manager.submit_trade_plan(plan)
                 broker_attempted = True
@@ -10874,6 +10925,9 @@ class StrategyRunner:
                     order_id, base_symbol, signal.action, qty, trace_id,
                 )
                 self._underlying_last_signal_ts[underlying] = now_epoch
+                self._mark_directional_dedup_submitted(
+                    underlying=underlying, option_side=option_side, reason=reason_key, order_id=order_id
+                )
                 self._reason_last_signal_ts[underlying_reason_key] = now_epoch
                 self._logger.info(
                     "DUPLICATE_DIRECTION_COOLDOWN_MARKED symbol=%s direction=%s reason=order_submitted order_id=%s",
@@ -10885,7 +10939,7 @@ class StrategyRunner:
                 if reason_key == "premium_momentum_squeeze":
                     self._premium_squeeze_last_signal_ts[underlying] = now_epoch
                 self._submitted_entry_order_context[str(order_id)] = {
-                    "symbol": order_symbol,
+                    "symbol": base_symbol,
                     "base_symbol": base_symbol,
                     "underlying": underlying,
                     "option_side": option_side,
@@ -10902,6 +10956,10 @@ class StrategyRunner:
                     self._logger.error("record_trade failed: %s", rec_exc)
                 return SignalExecutionResult(True, "order_submitted", order_id=order_id, details={"trace_id": trace_id})
             else:
+                if not broker_attempted:
+                    self._mark_directional_dedup_failed(
+                        underlying=underlying, option_side=option_side, reason=reason_key
+                    )
                 self._logger.info(
                     "DUPLICATE_DIRECTION_COOLDOWN_NOT_MARKED symbol=%s reason=no_order_submitted",
                     base_symbol,

@@ -1238,6 +1238,31 @@ class StrategyManager:
         indicators = self._indicator_engine.get_indicators(
             symbol, list(required_indicators)
         )
+        bars = []
+        get_bars = getattr(self._indicator_engine, "get_ohlc_bars", None)
+        if callable(get_bars):
+            try:
+                bars = list(get_bars(symbol) or [])
+            except Exception:
+                bars = []
+        history_count = len(bars)
+        indicators["indicator_history_count"] = history_count
+        indicators["history_count"] = history_count
+        indicators["history_symbol_key"] = symbol
+        indicators["history_source"] = "indicator_engine"
+        if bars:
+            first = bars[0] if isinstance(bars[0], dict) else {}
+            last = bars[-1] if isinstance(bars[-1], dict) else {}
+            indicators["oldest_bar_ts"] = first.get("timestamp") or first.get("ts")
+            indicators["latest_bar_ts"] = last.get("timestamp") or last.get("ts")
+        else:
+            logger.info(
+                "STRATEGY_CONTEXT_HISTORY_MISSING symbol=%s strategy=elite live_mode=%s source=%s",
+                symbol,
+                True,
+                "indicator_engine",
+                extra={"event": "STRATEGY_CONTEXT_HISTORY_MISSING", "symbol": symbol, "underlying": symbol, "strategy": "elite", "source": "indicator_engine", "live_mode": True},
+            )
 
         # Basic Data Integrity Check
         if not indicators:
