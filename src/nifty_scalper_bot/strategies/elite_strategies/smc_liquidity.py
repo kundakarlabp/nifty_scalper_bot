@@ -58,25 +58,41 @@ class SMCStrategy(EliteStrategy):
             min_bars_required = int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")
             execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
             is_live = execution_mode == 'LIVE'
-            raw_history_count = indicators.get("indicator_history_count")
-            if raw_history_count is None:
-                raw_history_count = indicators.get("history_count")
-            if is_live and raw_history_count is None:
+            history_domain_used = str(indicators.get("history_domain_used") or "unknown")
+            option_history_count = indicators.get("option_history_count")
+            underlying_history_count = indicators.get("underlying_history_count")
+            spot_history_count = indicators.get("spot_history_count")
+            indicator_history_count = indicators.get("indicator_history_count")
+            raw_history_count = indicators.get("history_count")
+            resolved_history_count = (
+                option_history_count if history_domain_used == "options"
+                else underlying_history_count if history_domain_used == "underlying"
+                else raw_history_count if raw_history_count is not None else indicator_history_count
+            )
+            if is_live and resolved_history_count is None:
                 self._no_vote("smc_history_count_missing")
                 LOGGER.warning(
-                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_history_count_missing min_bars=%s",
+                    "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_history_count_missing min_bars=%s history_domain_used=%s",
                     symbol,
                     min_bars_required,
+                    history_domain_used,
                     extra={
                         "event": "STRATEGY_NO_VOTE",
                         "strategy": "SMC",
                         "symbol": symbol,
                         "reason": "smc_history_count_missing",
                         "min_bars_required": min_bars_required,
+                        "resolved_history_count": resolved_history_count,
+                        "history_domain_used": history_domain_used,
+                        "option_history_count": option_history_count,
+                        "underlying_history_count": underlying_history_count,
+                        "spot_history_count": spot_history_count,
+                        "indicator_history_count": indicator_history_count,
+                        "history_source": indicators.get("history_source"),
                     },
                 )
                 return None
-            history_count = int(raw_history_count or 0)
+            history_count = int(resolved_history_count or 0)
             if is_live and history_count < min_bars_required:
                 self._no_vote("smc_insufficient_history")
                 LOGGER.warning(
@@ -91,6 +107,13 @@ class SMCStrategy(EliteStrategy):
                         "reason": "smc_insufficient_history",
                         "history_count": history_count,
                         "min_bars_required": min_bars_required,
+                        "resolved_history_count": resolved_history_count,
+                        "history_domain_used": history_domain_used,
+                        "option_history_count": option_history_count,
+                        "underlying_history_count": underlying_history_count,
+                        "spot_history_count": spot_history_count,
+                        "indicator_history_count": indicator_history_count,
+                        "history_source": indicators.get("history_source"),
                     },
                 )
                 return None

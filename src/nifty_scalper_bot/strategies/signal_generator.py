@@ -4,18 +4,68 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
+from contextlib import suppress
 import dataclasses
 import datetime as dt
 from dataclasses import dataclass, field
 from datetime import datetime, time
 import hashlib
 import math
+import os
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
+
+
+def build_strategy_history_context(
+    *,
+    symbol: str,
+    indicator_engine: Any,
+    data_hub: Any | None,
+    runner_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build domain-aware strategy history metadata."""
+    del data_hub
+    bars: list[Any] = []
+    get_bars = getattr(indicator_engine, "get_ohlc_bars", None)
+    if callable(get_bars):
+        with suppress(Exception):
+            bars = list(get_bars(symbol) or [])
+    indicator_count = len(bars)
+    symbol_upper = str(symbol or "").upper()
+    is_option = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
+    option_count = indicator_count if is_option else 0
+    spot_count = indicator_count if symbol_upper.startswith("NSE:NIFTY") else 0
+    underlying_count = 0
+    if runner_context:
+        option_count = int(runner_context.get("option_history_count", option_count) or 0)
+        spot_count = int(runner_context.get("spot_history_count", spot_count) or 0)
+        underlying_count = int(runner_context.get("underlying_history_count", 0) or 0)
+    min_required = int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")
+    context: dict[str, Any] = {
+        "history_count": indicator_count,
+        "indicator_history_count": indicator_count,
+        "option_history_count": option_count,
+        "spot_history_count": spot_count,
+        "underlying_history_count": underlying_count,
+        "history_symbol_key": symbol,
+        "history_source": "indicator_engine",
+        "history_domain_used": "options" if is_option else "underlying",
+        "oldest_bar_ts": None,
+        "latest_bar_ts": None,
+        "history_quality": "warm" if indicator_count >= min_required else "cold",
+        "history_required_min": min_required,
+        "history_ready_for_smc": indicator_count >= min_required,
+    }
+    if bars:
+        first = bars[0] if isinstance(bars[0], dict) else {}
+        last = bars[-1] if isinstance(bars[-1], dict) else {}
+        context["oldest_bar_ts"] = first.get("timestamp") or first.get("ts")
+        context["latest_bar_ts"] = last.get("timestamp") or last.get("ts")
+    return context
 
 
 class Position(Protocol):
@@ -1243,18 +1293,17 @@ class StrategyManager:
             logger.debug(f"SKIP {symbol}: No indicators returned from engine")
             return None
 
+        history_ctx = build_strategy_history_context(
+            symbol=symbol,
+            indicator_engine=self._indicator_engine,
+            data_hub=self._data_hub,
+        )
+        indicators.update(history_ctx)
         bars = []
         get_bars = getattr(self._indicator_engine, "get_ohlc_bars", None)
         if callable(get_bars):
-            try:
+            with suppress(Exception):
                 bars = list(get_bars(symbol) or [])
-            except Exception:
-                bars = []
-        history_count = len(bars)
-        indicators["indicator_history_count"] = history_count
-        indicators["history_count"] = history_count
-        indicators["history_symbol_key"] = symbol
-        indicators["history_source"] = "indicator_engine"
         if bars:
             first = bars[0] if isinstance(bars[0], dict) else {}
             last = bars[-1] if isinstance(bars[-1], dict) else {}

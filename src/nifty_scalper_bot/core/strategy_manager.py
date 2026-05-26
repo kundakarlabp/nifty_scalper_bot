@@ -1555,6 +1555,9 @@ class StrategyManager(_BaseStrategyManager):
             extra={"event": "elite_stats_collect"},
         )
         stats: list[dict[str, t.Any]] = []
+        eval_id = f"{symbol}:{int(time.time())}"
+        indicators.setdefault("eval_id", eval_id)
+        strategy_reasons: dict[str, str] = {}
         for strategy in self._strategies:
             if not isinstance(strategy, EliteStrategy):
                 continue
@@ -2776,17 +2779,7 @@ class StrategyManager(_BaseStrategyManager):
                 empty.append(strategy.name)
                 reason = str(getattr(strategy, "last_no_vote_reason", "none") or "none")
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
-                log_throttled_live(
-                    log,
-                    logging.INFO,
-                    "STRATEGY_NO_VOTE",
-                    f"STRATEGY_NO_VOTE:{strategy.name}:{symbol}:{reason}",
-                    float(os.getenv("LOG_THROTTLE_STRATEGY_NO_VOTE_SECONDS", "45") or "45"),
-                    "STRATEGY_NO_VOTE strategy=%s symbol=%s reason=%s",
-                    strategy.name,
-                    symbol,
-                    reason,
-                )
+                strategy_reasons[strategy.name] = reason
                 continue
             entry = score_map.get(strategy.name)
             adjusted = self._apply_weighted_confidence(base_signal, strategy.name, entry)
@@ -2808,6 +2801,18 @@ class StrategyManager(_BaseStrategyManager):
                 },
             )
 
+        if no_vote_reason_counts:
+            log.info(
+                "STRATEGY_NO_VOTE_SUMMARY symbol=%s eval_id=%s no_vote_reason_counts=%s strategy_reasons=%s trigger_vote_count=%s context_vote_count=%s final_block_reason=%s",
+                symbol,
+                eval_id,
+                no_vote_reason_counts,
+                strategy_reasons,
+                len(signals),
+                0,
+                "no_strategy_signal" if not signals else "partial",
+                extra={"event": "STRATEGY_NO_VOTE_SUMMARY", "symbol": symbol, "eval_id": eval_id, "no_vote_reason_counts": no_vote_reason_counts, "strategy_reasons": strategy_reasons, "trigger_vote_count": len(signals), "context_vote_count": 0, "final_block_reason": "no_strategy_signal" if not signals else "partial"},
+            )
         if not signals:
             missing = sorted(
                 name

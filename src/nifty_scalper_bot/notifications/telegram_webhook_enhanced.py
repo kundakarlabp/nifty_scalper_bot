@@ -118,6 +118,20 @@ async def safe_reply_text(
 
 
 @dataclass(slots=True)
+class NotificationDispatchResult:
+    alert_id: str
+    event_type: str
+    provider: str
+    status: str
+    attempts: int
+    latency_ms: float | None = None
+    error_type: str | None = None
+    error: str | None = None
+    degraded: bool = False
+    backoff_until: float | None = None
+
+
+@dataclass(slots=True)
 class TelegramEnhancedNotifier:
     """Asynchronous notifier with token-bucket rate limiting and retries."""
 
@@ -136,6 +150,9 @@ class TelegramEnhancedNotifier:
     _telegram_degraded_logged: bool = field(init=False, repr=False, default=False)
     _telegram_backoff_active: bool = field(init=False, repr=False, default=False)
     _telegram_backoff_until: float = field(init=False, repr=False, default=0.0)
+    _consecutive_failures: int = field(init=False, repr=False, default=0)
+    _last_success_ts: float = field(init=False, repr=False, default=0.0)
+    _last_error_type: str | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
