@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
@@ -45,6 +46,11 @@ class _CaptureSMC:
         return None
 
 
+class _IndicatorEngineNone(_IndicatorEngine):
+    def get_indicators(self, symbol: str, names: Any) -> None:
+        return None
+
+
 def test_strategy_manager_injects_smc_history_context_option_domain() -> None:
     smc = _CaptureSMC()
     symbol = "NFO:NIFTY26MAY23850PE"
@@ -67,3 +73,25 @@ def test_strategy_manager_option_history_not_overwritten_by_underlying() -> None
     assert smc.last.get("option_history_count") == 5
     assert smc.last.get("history_ready_for_smc") is False
     assert smc.last.get("history_quality") == "cold"
+
+
+def test_strategy_manager_handles_none_indicators_and_injects_history_context() -> None:
+    smc = _CaptureSMC()
+    symbol = "NFO:NIFTY26MAY23850PE"
+    manager = StrategyManager([smc], _IndicatorEngineNone(35), _PositionManager(), data_hub=_DataHub({symbol: 35}))
+    assert manager.generate_signal(symbol, 100.0) is None
+    assert smc.last is not None
+    assert smc.last.get("history_domain_used") == "options"
+    assert smc.last.get("option_history_count") == 35
+    assert smc.last.get("history_ready_for_smc") is True
+
+
+def test_smc_history_input_diagnostics_throttled_when_not_ready(caplog: Any) -> None:
+    smc = _CaptureSMC()
+    symbol = "NFO:NIFTY26MAY23850PE"
+    manager = StrategyManager([smc], _IndicatorEngine(5), _PositionManager(), data_hub=_DataHub({symbol: 5}))
+    caplog.set_level(logging.INFO)
+    manager.generate_signal(symbol, 100.0)
+    manager.generate_signal(symbol, 100.0)
+    diag_records = [r for r in caplog.records if getattr(r, "event", "") == "SMC_HISTORY_INPUT_DIAGNOSTICS" and getattr(r, "symbol", "") == symbol]
+    assert len(diag_records) == 1

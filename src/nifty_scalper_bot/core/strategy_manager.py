@@ -2085,7 +2085,26 @@ class StrategyManager(_BaseStrategyManager):
             hub_ready = bool(getattr(self._data_hub, "indicators_ready", False))
         required_for_eval = self._strategy_required_indicator_union()
         indicators_raw = self._indicator_engine.get_indicators(symbol, required_for_eval)
-        indicators: dict[str, t.Any] = dict(indicators_raw)
+        if isinstance(indicators_raw, dict):
+            indicators: dict[str, t.Any] = dict(indicators_raw)
+        elif hasattr(indicators_raw, "items"):
+            indicators = dict(indicators_raw)
+        else:
+            indicators = {}
+            log_throttled(
+                log,
+                f"strategy_empty_indicators:{symbol}",
+                "STRATEGY_EMPTY_INDICATORS symbol=%s",
+                symbol,
+                interval_sec=30.0,
+                level=logging.INFO,
+                extra={
+                    "event": "STRATEGY_EMPTY_INDICATORS",
+                    "symbol": symbol,
+                    "required_indicator_count": len(required_for_eval),
+                    "indicators_raw_type": type(indicators_raw).__name__,
+                },
+            )
         symbol_role = classify_symbol_role(symbol)
         indicators["symbol_role"] = symbol_role
         history_ctx = build_strategy_history_context(
@@ -2778,9 +2797,8 @@ class StrategyManager(_BaseStrategyManager):
                     if not isinstance(last_diag_map, dict):
                         last_diag_map = {}
                     ready_for_smc = bool(indicators.get("history_ready_for_smc"))
-                    should_emit_diag = (not ready_for_smc) or (
-                        now - float(last_diag_map.get(symbol, 0.0) or 0.0) >= 60.0
-                    )
+                    interval_sec = 30.0 if not ready_for_smc else 60.0
+                    should_emit_diag = now - float(last_diag_map.get(symbol, 0.0) or 0.0) >= interval_sec
                     if should_emit_diag:
                         last_diag_map[symbol] = now
                         self._smc_history_diag_last_emitted = last_diag_map
