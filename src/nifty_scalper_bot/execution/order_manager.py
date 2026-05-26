@@ -871,6 +871,19 @@ class OrderManager:
         self._kill_switch_last_reset: dict[str, Any] | None = None
         self._missing_counts: dict[str, int] = {}
         self._last_order_decision: dict[str, Any] = {}
+        self._margin_cache_max_age_seconds: int = max(1, int(os.getenv("MARGIN_CACHE_MAX_AGE_SECONDS", "120") or 120))
+        self._allow_entry_with_stale_margin: bool = os.getenv("ALLOW_ENTRY_WITH_STALE_MARGIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self._last_margin_refresh_ts: float | None = None
+        self._last_margin_success_ts: float | None = None
+        self._last_margin_error_type: str | None = None
+        self._last_margin_error: str | None = None
+        self._margin_circuit_open: bool = False
+        self._margin_circuit_until_ts: float | None = None
+        self._last_order_api_error_type: str | None = None
+        self._last_order_api_error: str | None = None
+        self._last_broker_health_emit_ts: float = 0.0
+        self._last_broker_health_effect: str = "none"
+        self._last_broker_health_circuit_state: bool = False
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
@@ -2006,6 +2019,7 @@ class OrderManager:
             elapsed = (datetime.now(timezone.utc) - engaged_at).total_seconds()
             remaining = max(float(self._kill_switch_auto_reset_seconds) - elapsed, 0.0)
         recent_failures = self.get_kill_switch_failure_history(limit=5)
+        last_failure = self.get_last_kill_switch_failure() or {}
         return {
             "active": self.is_kill_switch_active(),
             "kill_reason": self._kill_switch_reason,
@@ -2014,9 +2028,14 @@ class OrderManager:
             "auto_reset_allowed": bool(self._kill_switch_allow_auto_reset),
             "auto_reset_seconds": int(self._kill_switch_auto_reset_seconds),
             "remaining_auto_reset_seconds": int(remaining),
-            "last_failure": self.get_last_kill_switch_failure(),
+            "last_failure": last_failure or None,
             "recent_failures_count": len(recent_failures),
             "recent_failures": recent_failures,
+            "broker_attempted": bool(last_failure.get("broker_attempted", False)),
+            "last_exception_type": last_failure.get("exception_type"),
+            "last_exception_message": last_failure.get("exception_message"),
+            "symbol": last_failure.get("symbol"),
+            "trace_id": last_failure.get("trace_id"),
             "last_reset": dict(self._kill_switch_last_reset) if self._kill_switch_last_reset else None,
         }
 
@@ -7063,6 +7082,48 @@ class OrderManager:
                 if order.status not in self.FINAL_STATUSES
             ]
 
+    def get_broker_health_snapshot(self) -> dict[str, Any]:
+        now = time.time()
+        last_margin_success_age_s = max(now - self._last_margin_success_ts, 0.0) if self._last_margin_success_ts is not None else None
+        balance_stale = last_margin_success_age_s is None or last_margin_success_age_s > float(self._margin_cache_max_age_seconds)
+        trading_allowed_effect = "none"
+        if self._margin_circuit_open or self._last_margin_error_type:
+            trading_allowed_effect = "position_sizing_degraded"
+        if balance_stale and not self._allow_entry_with_stale_margin:
+            trading_allowed_effect = "live_orders_blocked"
+        available_balance, balance_source = self._resolve_available_margin_raw()
+        return {
+            "broker_connected": bool(getattr(self._broker, "is_connected", True)),
+            "margin_api_available": self._last_margin_error_type is None,
+            "last_margin_refresh_ts": self._last_margin_refresh_ts,
+            "last_margin_success_age_s": last_margin_success_age_s,
+            "last_margin_error_type": self._last_margin_error_type,
+            "last_margin_error": self._last_margin_error,
+            "margin_circuit_open": self._margin_circuit_open,
+            "margin_circuit_remaining_s": max((self._margin_circuit_until_ts or 0.0) - now, 0.0),
+            "balance_stale": balance_stale,
+            "available_balance": available_balance,
+            "balance_source": balance_source,
+            "trading_allowed_effect": trading_allowed_effect,
+            "order_api_available": self._last_order_api_error_type is None,
+            "last_order_api_error_type": self._last_order_api_error_type,
+            "last_order_api_error": self._last_order_api_error,
+        }
+
+    def _emit_broker_health_status(self, *, force: bool = False) -> None:
+        now = time.time()
+        market_open, _, _ = get_time_status()
+        snapshot = self.get_broker_health_snapshot()
+        changed_effect = snapshot["trading_allowed_effect"] != self._last_broker_health_effect
+        changed_circuit = bool(snapshot["margin_circuit_open"]) != self._last_broker_health_circuit_state
+        interval_elapsed = now - self._last_broker_health_emit_ts >= 30.0
+        if not (force or changed_effect or changed_circuit or (market_open and interval_elapsed)):
+            return
+        self._last_broker_health_emit_ts = now
+        self._last_broker_health_effect = str(snapshot["trading_allowed_effect"])
+        self._last_broker_health_circuit_state = bool(snapshot["margin_circuit_open"])
+        self._logger.info("BROKER_HEALTH_STATUS", extra={"event": "BROKER_HEALTH_STATUS", **snapshot})
+
     def _resolve_margin_client(self) -> Any:
         client = getattr(self._broker, "_client", None)
         return client if client is not None else self._broker
@@ -7097,12 +7158,17 @@ class OrderManager:
             return None
         return float(number)
 
-    def _resolve_available_margin(self) -> tuple[float | None, str]:
+    def _resolve_available_margin_raw(self) -> tuple[float | None, str]:
         mdm = self._data_hub or self._market_data
         if mdm is not None:
+            self._last_margin_refresh_ts = time.time()
             try:
                 mdm.refresh_margin_snapshot()
             except Exception as exc:  # noqa: BLE001
+                self._last_margin_error_type = type(exc).__name__
+                self._last_margin_error = str(exc)
+                self._margin_circuit_open = True
+                self._margin_circuit_until_ts = time.time() + 30.0
                 self._logger.error(
                     "Failure in _resolve_available_margin mdm refresh: %s",
                     exc,
@@ -7120,6 +7186,10 @@ class OrderManager:
                 )
             else:
                 if available is not None and available > 0:
+                    self._last_margin_success_ts = time.time()
+                    self._last_margin_error_type = None
+                    self._last_margin_error = None
+                    self._margin_circuit_open = False
                     return float(available), "mdm"
         risk_manager = self._risk_manager
         if risk_manager is not None:
@@ -7128,6 +7198,31 @@ class OrderManager:
                 if math.isfinite(balance) and balance > 0:
                     return balance, "risk"
         return None, "unknown"
+
+    def _resolve_available_margin(self) -> tuple[float | None, str]:
+        available, source = self._resolve_available_margin_raw()
+        now = time.time()
+        if (
+            self._margin_circuit_open
+            and self._margin_circuit_until_ts is not None
+            and now >= self._margin_circuit_until_ts
+        ):
+            self._margin_circuit_open = False
+        if source == "mdm":
+            self._emit_broker_health_status()
+            return available, source
+        if self._last_margin_success_ts is not None:
+            age = now - self._last_margin_success_ts
+            if age <= float(self._margin_cache_max_age_seconds):
+                self._emit_broker_health_status(force=True)
+                return available, "margin_cache_used"
+            if self._allow_entry_with_stale_margin:
+                self._emit_broker_health_status(force=True)
+                return available, "margin_cache_stale_allowed"
+            self._emit_broker_health_status(force=True)
+            return None, "margin_unavailable_stale"
+        self._emit_broker_health_status(force=True)
+        return available, source
 
     def _reference_price(self, symbol: str) -> float:
         """Return a best-effort reference price for margin planning.

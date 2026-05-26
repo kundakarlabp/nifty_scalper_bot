@@ -77,6 +77,7 @@ def test_stale_last_order_decision_does_not_leak() -> None:
 
 from datetime import datetime, timezone
 from collections import deque
+import time
 
 
 def test_kill_switch_history_helpers_capture_last_failure() -> None:
@@ -101,3 +102,66 @@ def test_kill_switch_history_helpers_capture_last_failure() -> None:
     assert status['last_failure']['exception_type'] == 'RuntimeError'
     assert 'boom' in status['last_failure']['exception_message']
     assert status['last_failure']['trace_id'] == 't-1'
+
+
+def test_margin_api_502_uses_fresh_cache() -> None:
+    om = OrderManager.__new__(OrderManager)
+    om._data_hub = SimpleNamespace(
+        refresh_margin_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("HTTP 502")),
+        get_available_balance=lambda: 5000.0,
+    )
+    om._market_data = None
+    om._risk_manager = None
+    om._logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
+    om._margin_cache_max_age_seconds = 120
+    om._allow_entry_with_stale_margin = False
+    om._last_margin_success_ts = time.time()
+    om._margin_circuit_open = False
+    om._margin_circuit_until_ts = None
+    om._emit_broker_health_status = lambda **kwargs: None
+    available, source = OrderManager._resolve_available_margin(om)
+    assert available == 5000.0
+    assert source == "mdm"
+
+
+def test_margin_api_502_blocks_entry_when_cache_stale() -> None:
+    om = OrderManager.__new__(OrderManager)
+    om._data_hub = SimpleNamespace(
+        refresh_margin_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("HTTP 502")),
+        get_available_balance=lambda: None,
+    )
+    om._market_data = None
+    om._risk_manager = None
+    om._logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
+    om._margin_cache_max_age_seconds = 120
+    om._allow_entry_with_stale_margin = False
+    om._last_margin_success_ts = time.time() - 1000
+    om._margin_circuit_open = False
+    om._margin_circuit_until_ts = None
+    om._emit_broker_health_status = lambda **kwargs: None
+    available, source = OrderManager._resolve_available_margin(om)
+    assert available is None
+    assert source == "margin_unavailable_stale"
+
+
+def test_broker_health_status_emitted_on_margin_circuit_open() -> None:
+    records: list[dict] = []
+    om = OrderManager.__new__(OrderManager)
+    om._logger = SimpleNamespace(info=lambda *_a, **k: records.append(k.get("extra", {})))
+    om._broker = SimpleNamespace(is_connected=True)
+    om._last_margin_success_ts = time.time() - 10
+    om._last_margin_refresh_ts = time.time()
+    om._last_margin_error_type = "RuntimeError"
+    om._last_margin_error = "HTTP 502"
+    om._margin_circuit_open = True
+    om._margin_circuit_until_ts = time.time() + 10
+    om._margin_cache_max_age_seconds = 120
+    om._allow_entry_with_stale_margin = False
+    om._last_order_api_error_type = None
+    om._last_order_api_error = None
+    om._last_broker_health_emit_ts = 0.0
+    om._last_broker_health_effect = "none"
+    om._last_broker_health_circuit_state = False
+    om._resolve_available_margin_raw = lambda: (5000.0, "mdm")
+    OrderManager._emit_broker_health_status(om, force=True)
+    assert any(r.get("event") == "BROKER_HEALTH_STATUS" for r in records)

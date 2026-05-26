@@ -2297,9 +2297,11 @@ def test_submit_result_deterministic_rejection_rolls_back_dedup(monkeypatch) -> 
     runner._ensure_symbol_execution_ready_result = MagicMock(return_value=ExecutionReadinessResult(True,'ok',{}))
     runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[SimpleNamespace(symbol=sym, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.1, rr=2.0, side='PE', entry_price=110.0, tick_age_s=0.1)])
     runner._order_manager.submit_trade_plan_result = MagicMock(return_value=SimpleNamespace(accepted=False, order_id=None, reason='kill_switch_active', details={'last_failure':{'exception_type':'RuntimeError'}}, broker_attempted=True))
+    runner._order_manager.get_kill_switch_status = MagicMock(return_value={"active": True, "kill_reason": "unexpected_exception", "trace_id": "det-rej"})
     signal=Signal(action='BUY',symbol=sym,quantity=1,confidence=0.9,reason='OrderFlow',stop_loss=300.0,take_profit=450.0,metadata={'candidate_snapshots':[{'symbol':sym,'side':'PE','strike':23700,'atm_strike':23700,'ltp':110.0,'bid':109.5,'ask':110.0,'tick_age_s':0.1,'tradable_quote':True}]})
     result = runner._handle_entry_signal_inner(signal, sym, sym, 100.0, datetime.now(timezone.utc), trace_id='det-rej')
     assert result.reason == 'order_manager_kill_switch_active'
+    assert result.details.get("kill_switch_status", {}).get("active") is True
     assert 'NIFTY:PE:OrderFlow' not in runner._signal_attempt_debounce_state
 
 
