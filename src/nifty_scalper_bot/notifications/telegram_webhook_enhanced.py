@@ -451,7 +451,7 @@ class TelegramEnhancedNotifier:
                             "telegram_notifier_degraded",
                             extra={
                                 "event": "telegram_notifier_degraded",
-                                "chat_id": chat_id,
+                                "chat_id_hash": _hash_chat_id(chat_id),
                                 "cooldown_s": retry_window_s,
                             },
                         )
@@ -467,7 +467,7 @@ class TelegramEnhancedNotifier:
                     "telegram_network_retry",
                     extra={
                         "event": "network_retry",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "attempt": attempt,
                         "delay": delay,
                         "err": str(exc),
@@ -482,7 +482,7 @@ class TelegramEnhancedNotifier:
                     "telegram_forbidden",
                     extra={
                         "event": "forbidden",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "attempt": attempt,
                         "err": str(exc),
                     },
@@ -514,7 +514,7 @@ class TelegramEnhancedNotifier:
                             "telegram_notifier_degraded",
                             extra={
                                 "event": "telegram_notifier_degraded",
-                                "chat_id": chat_id,
+                                "chat_id_hash": _hash_chat_id(chat_id),
                                 "cooldown_s": retry_window_s,
                             },
                         )
@@ -885,7 +885,7 @@ class TelegramWebhookController:
             "telegram_message",
             extra={
                 "event": "message",
-                "chat_id": chat_id,
+                "chat_id_hash": _hash_chat_id(chat_id),
                 "text": _truncate(text, 120),
             },
         )
@@ -906,7 +906,7 @@ class TelegramWebhookController:
             "telegram_callback",
             extra={
                 "event": "callback",
-                "chat_id": chat_id,
+                "chat_id_hash": _hash_chat_id(chat_id) if chat_id is not None else None,
                 "data": _truncate(str(data), 200) if data else None,
             },
         )
@@ -935,7 +935,11 @@ class TelegramWebhookController:
                 )
                 self.logger.debug(
                     "telegram_reply_sent",
-                    extra={"event": "reply", "chat_id": chat_id, "attempt": attempt},
+                    extra={
+                        "event": "reply",
+                        "chat_id_hash": _hash_chat_id(chat_id),
+                        "attempt": attempt,
+                    },
                 )
                 return
             except RetryAfter as exc:

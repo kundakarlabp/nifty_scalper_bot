@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram.error import Forbidden, TimedOut
+from telegram.error import Forbidden, TelegramError, TimedOut
 
 from nifty_scalper_bot.notifications.telegram_webhook_enhanced import (
     NotificationDispatchResult,
@@ -243,6 +243,46 @@ async def test_telegram_logs_do_not_emit_raw_chat_id(
     notifier = TelegramEnhancedNotifier(bot=bot, settings=settings)
     await notifier._send_single(chat_id=chat_id, text='x', alert_id='a7', event_type='alert')
     assert str(chat_id) not in caplog.text
+    assert any(hasattr(record, 'chat_id_hash') for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_timeout_final_failure_logs_only_chat_id_hash(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level('INFO')
+    async def _noop_sleep(_seconds: float) -> None:
+        return None
+    monkeypatch.setattr(
+        'nifty_scalper_bot.notifications.telegram_webhook_enhanced.asyncio.sleep',
+        _noop_sleep,
+    )
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=TimedOut('timeout'))
+    settings = SimpleNamespace(rate_per_second=20.0, burst_capacity=20.0, whitelist_chat_ids=[123456789], whitelist_user_ids=None)
+    notifier = TelegramEnhancedNotifier(bot=bot, settings=settings)
+    await notifier._send_single(chat_id=123456789, text='x', alert_id='a8', event_type='alert')
+    assert all(not hasattr(record, 'chat_id') for record in caplog.records)
+    assert any(hasattr(record, 'chat_id_hash') for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_telegram_error_final_failure_logs_only_chat_id_hash(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level('INFO')
+    async def _noop_sleep(_seconds: float) -> None:
+        return None
+    monkeypatch.setattr(
+        'nifty_scalper_bot.notifications.telegram_webhook_enhanced.asyncio.sleep',
+        _noop_sleep,
+    )
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=TelegramError('tg failed'))
+    settings = SimpleNamespace(rate_per_second=20.0, burst_capacity=20.0, whitelist_chat_ids=[123456789], whitelist_user_ids=None)
+    notifier = TelegramEnhancedNotifier(bot=bot, settings=settings)
+    await notifier._send_single(chat_id=123456789, text='x', alert_id='a9', event_type='alert')
+    assert all(not hasattr(record, 'chat_id') for record in caplog.records)
     assert any(hasattr(record, 'chat_id_hash') for record in caplog.records)
 
 
