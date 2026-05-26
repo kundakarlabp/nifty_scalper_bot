@@ -629,14 +629,15 @@ def resolve_reference_price(
 
 class OrderManager:
     _SECRET_PATTERNS = (
+        re.compile(r"(?i)\b(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._\-]+"),
+        re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._\-]+"),
         re.compile(
             r"(?i)\b("
             r"api[_-]?key|api[_-]?secret|access[_-]?token|request[_-]?token|"
             r"refresh[_-]?token|auth[_-]?token|session[_-]?token|enctoken|"
-            r"authorization|password|passwd|secret|token"
+            r"password|passwd|secret|token"
             r")\s*[:=]\s*([^\s,&]+)"
         ),
-        re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._\-]+"),
     )
     """Manage complete order lifecycle."""
 

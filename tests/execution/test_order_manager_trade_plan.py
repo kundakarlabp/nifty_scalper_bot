@@ -303,13 +303,24 @@ def test_broker_error_sanitizer_redacts_common_secret_shapes() -> None:
         "Authorization: Bearer eyJabc.secret"
     )
     sanitized = OrderManager._sanitize_broker_error(raw)
-    assert "token=secret" not in sanitized
-    assert "access_token=abc123" not in sanitized
-    assert "request_token=req456" not in sanitized
-    assert "enctoken=enc789" not in sanitized
-    assert "password=pw" not in sanitized
-    assert "Bearer eyJabc.secret" not in sanitized
+    leaked_values = [
+        "token=secret",
+        "abc123",
+        "req456",
+        "enc789",
+        "password=pw",
+        "Bearer eyJabc.secret",
+        "eyJabc.secret",
+    ]
+    for leaked in leaked_values:
+        assert leaked not in sanitized
     assert "REDACTED" in sanitized
+
+
+def test_broker_error_sanitizer_redacts_bare_bearer_token() -> None:
+    sanitized = OrderManager._sanitize_broker_error("broker error Bearer abc.def-ghi")
+    assert "abc.def-ghi" not in sanitized
+    assert "Bearer [REDACTED]" in sanitized or "Bearer[REDACTED]" in sanitized
 
 
 def test_broker_health_status_uses_two_tuple_time_status(monkeypatch) -> None:
