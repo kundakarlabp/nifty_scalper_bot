@@ -6,9 +6,18 @@ from typing import Any
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
 from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
+
+
+def _safe_history_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class SMCStrategy(EliteStrategy):
@@ -58,33 +67,32 @@ class SMCStrategy(EliteStrategy):
             min_bars_required = int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")
             execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
             is_live = execution_mode == 'LIVE'
-            history_domain_used = str(indicators.get("history_domain_used") or "unknown")
-            option_history_count = indicators.get("option_history_count")
-            underlying_history_count = indicators.get("underlying_history_count")
-            spot_history_count = indicators.get("spot_history_count")
-            indicator_history_count = indicators.get("indicator_history_count")
-            raw_history_count = indicators.get("history_count")
-            resolved_history_count = (
-                option_history_count if history_domain_used == "options"
-                else (
-                    spot_history_count
-                    if spot_history_count is not None
-                    else underlying_history_count
-                    if underlying_history_count is not None
-                    else raw_history_count
-                    if raw_history_count is not None
-                    else indicator_history_count
-                ) if history_domain_used == "spot"
-                else underlying_history_count if history_domain_used == "underlying"
-                else raw_history_count if raw_history_count is not None else indicator_history_count
-            )
+            history_domain_used = str(indicators.get("history_domain_used") or "unknown").lower()
+            option_history_count = _safe_history_int(indicators.get("option_history_count"))
+            underlying_history_count = _safe_history_int(indicators.get("underlying_history_count"))
+            spot_history_count = _safe_history_int(indicators.get("spot_history_count"))
+            indicator_history_count = _safe_history_int(indicators.get("indicator_history_count"))
+            raw_history_count = _safe_history_int(indicators.get("history_count"))
+            resolved_count = _safe_history_int(indicators.get("history_resolved_count"))
+            if history_domain_used == "options":
+                resolved_history_count = option_history_count or resolved_count or raw_history_count or indicator_history_count
+            elif history_domain_used == "spot":
+                resolved_history_count = spot_history_count or underlying_history_count or resolved_count or raw_history_count or indicator_history_count
+            elif history_domain_used == "underlying":
+                resolved_history_count = underlying_history_count or spot_history_count or resolved_count or raw_history_count or indicator_history_count
+            else:
+                resolved_history_count = resolved_count or raw_history_count or indicator_history_count or option_history_count or underlying_history_count or spot_history_count
             if is_live and resolved_history_count is None:
                 self._no_vote("smc_history_count_missing")
-                LOGGER.warning(
+                log_throttled(
+                    LOGGER,
+                    f"smc_history_no_vote:{symbol}:smc_history_count_missing:{history_domain_used}",
                     "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_history_count_missing min_bars=%s history_domain_used=%s",
                     symbol,
                     min_bars_required,
                     history_domain_used,
+                    interval_sec=float(os.getenv("SMC_HISTORY_NO_VOTE_LOG_THROTTLE_SECONDS", "60") or "60"),
+                    level=30,
                     extra={
                         "event": "STRATEGY_NO_VOTE",
                         "strategy": "SMC",
@@ -98,17 +106,26 @@ class SMCStrategy(EliteStrategy):
                         "spot_history_count": spot_history_count,
                         "indicator_history_count": indicator_history_count,
                         "history_source": indicators.get("history_source"),
+                        "history_symbol_key": indicators.get("history_symbol_key"),
+                        "oldest_bar_ts": indicators.get("oldest_bar_ts"),
+                        "latest_bar_ts": indicators.get("latest_bar_ts"),
+                        "data_phase": indicators.get("data_phase"),
+                        "eval_id": indicators.get("eval_id"),
                     },
                 )
                 return None
             history_count = int(resolved_history_count or 0)
             if is_live and history_count < min_bars_required:
                 self._no_vote("smc_insufficient_history")
-                LOGGER.warning(
+                log_throttled(
+                    LOGGER,
+                    f"smc_history_no_vote:{symbol}:smc_insufficient_history:{history_domain_used}",
                     "STRATEGY_NO_VOTE strategy=SMC symbol=%s reason=smc_insufficient_history history_count=%s min_bars=%s",
                     symbol,
                     history_count,
                     min_bars_required,
+                    interval_sec=float(os.getenv("SMC_HISTORY_NO_VOTE_LOG_THROTTLE_SECONDS", "60") or "60"),
+                    level=30,
                     extra={
                         "event": "STRATEGY_NO_VOTE",
                         "strategy": "SMC",
@@ -123,6 +140,11 @@ class SMCStrategy(EliteStrategy):
                         "spot_history_count": spot_history_count,
                         "indicator_history_count": indicator_history_count,
                         "history_source": indicators.get("history_source"),
+                        "history_symbol_key": indicators.get("history_symbol_key"),
+                        "oldest_bar_ts": indicators.get("oldest_bar_ts"),
+                        "latest_bar_ts": indicators.get("latest_bar_ts"),
+                        "data_phase": indicators.get("data_phase"),
+                        "eval_id": indicators.get("eval_id"),
                     },
                 )
                 return None
