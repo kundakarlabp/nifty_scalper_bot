@@ -28,47 +28,77 @@ def build_strategy_history_context(
     runner_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build domain-aware strategy history metadata."""
-    bars: list[Any] = []
-    get_bars = getattr(data_hub, "get_ohlc_bars", None) if data_hub is not None else None
-    history_source = "data_hub"
-    if not callable(get_bars):
-        get_bars = getattr(indicator_engine, "get_ohlc_bars", None)
-        history_source = "indicator_engine"
-    if callable(get_bars):
-        with suppress(Exception):
-            bars = list(get_bars(symbol) or [])
-    indicator_count = len(bars)
+    def _safe_get_bars(source: Any, sym: str) -> list[Any]:
+        if source is None:
+            return []
+        for method_name in ("get_ohlc_bars", "get_history", "get_bars"):
+            method = getattr(source, method_name, None)
+            if callable(method):
+                with suppress(Exception):
+                    bars = list(method(sym) or [])
+                    if bars:
+                        return bars
+        return []
+
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _bar_ts(bar: Any) -> Any:
+        if isinstance(bar, Mapping):
+            return bar.get("timestamp") or bar.get("ts") or bar.get("datetime") or bar.get("time")
+        return (
+            getattr(bar, "timestamp", None)
+            or getattr(bar, "ts", None)
+            or getattr(bar, "datetime", None)
+            or getattr(bar, "time", None)
+        )
+
+    data_hub_bars = _safe_get_bars(data_hub, symbol)
+    indicator_bars = _safe_get_bars(indicator_engine, symbol)
+    bars: list[Any] = data_hub_bars or indicator_bars
+    history_source = "data_hub" if data_hub_bars else "indicator_engine" if indicator_bars else "unavailable"
+
     symbol_upper = str(symbol or "").upper()
-    is_option = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
+    is_option = symbol_upper.endswith(("CE", "PE"))
     is_spot = symbol_upper in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}
-    option_count = indicator_count if is_option else 0
-    spot_count = indicator_count if is_spot else 0
-    underlying_count = 0 if (is_option or is_spot) else indicator_count
+    is_underlying_or_future = not is_option and not is_spot
+    raw_count = len(bars)
+    option_count = raw_count if is_option else 0
+    spot_count = raw_count if is_spot else 0
+    underlying_count = raw_count if is_underlying_or_future else 0
     if runner_context:
-        option_count = int(runner_context.get("option_history_count", option_count) or 0)
-        spot_count = int(runner_context.get("spot_history_count", spot_count) or 0)
-        underlying_count = int(runner_context.get("underlying_history_count", 0) or 0)
+        option_count = max(option_count, _safe_int(runner_context.get("option_history_count"), 0))
+        spot_count = max(spot_count, _safe_int(runner_context.get("spot_history_count"), 0))
+        underlying_count = max(underlying_count, _safe_int(runner_context.get("underlying_history_count"), 0))
+    history_domain_used = "options" if is_option else "spot" if is_spot else "underlying"
+    resolved_history_count = (
+        option_count if history_domain_used == "options"
+        else spot_count if history_domain_used == "spot"
+        else underlying_count
+    )
     min_required = int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")
     context: dict[str, Any] = {
-        "history_count": indicator_count,
-        "indicator_history_count": indicator_count,
+        "history_count": resolved_history_count,
+        "indicator_history_count": raw_count,
         "option_history_count": option_count,
         "spot_history_count": spot_count,
         "underlying_history_count": underlying_count,
         "history_symbol_key": symbol,
         "history_source": history_source,
-        "history_domain_used": "options" if is_option else "spot" if is_spot else "underlying",
+        "history_domain_used": history_domain_used,
+        "history_resolved_count": resolved_history_count,
         "oldest_bar_ts": None,
         "latest_bar_ts": None,
-        "history_quality": "warm" if indicator_count >= min_required else "cold",
+        "history_quality": "warm" if resolved_history_count >= min_required else "cold",
         "history_required_min": min_required,
-        "history_ready_for_smc": indicator_count >= min_required,
+        "history_ready_for_smc": resolved_history_count >= min_required,
     }
     if bars:
-        first = bars[0] if isinstance(bars[0], dict) else {}
-        last = bars[-1] if isinstance(bars[-1], dict) else {}
-        context["oldest_bar_ts"] = first.get("timestamp") or first.get("ts")
-        context["latest_bar_ts"] = last.get("timestamp") or last.get("ts")
+        context["oldest_bar_ts"] = _bar_ts(bars[0])
+        context["latest_bar_ts"] = _bar_ts(bars[-1])
     return context
 
 

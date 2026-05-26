@@ -26,6 +26,7 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrate
 from nifty_scalper_bot.strategies.signal_quality import infer_option_side
 from nifty_scalper_bot.strategies.signal_generator import (
     Signal,
+    build_strategy_history_context,
 )
 from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
@@ -2084,9 +2085,35 @@ class StrategyManager(_BaseStrategyManager):
             hub_ready = bool(getattr(self._data_hub, "indicators_ready", False))
         required_for_eval = self._strategy_required_indicator_union()
         indicators_raw = self._indicator_engine.get_indicators(symbol, required_for_eval)
-        indicators: dict[str, t.Any] = dict(indicators_raw)
+        if isinstance(indicators_raw, dict):
+            indicators: dict[str, t.Any] = dict(indicators_raw)
+        elif hasattr(indicators_raw, "items"):
+            indicators = dict(indicators_raw)
+        else:
+            indicators = {}
+            log_throttled(
+                log,
+                f"strategy_empty_indicators:{symbol}",
+                "STRATEGY_EMPTY_INDICATORS symbol=%s",
+                symbol,
+                interval_sec=30.0,
+                level=logging.INFO,
+                extra={
+                    "event": "STRATEGY_EMPTY_INDICATORS",
+                    "symbol": symbol,
+                    "required_indicator_count": len(required_for_eval),
+                    "indicators_raw_type": type(indicators_raw).__name__,
+                },
+            )
         symbol_role = classify_symbol_role(symbol)
         indicators["symbol_role"] = symbol_role
+        history_ctx = build_strategy_history_context(
+            symbol=symbol,
+            indicator_engine=self._indicator_engine,
+            data_hub=self._data_hub,
+            runner_context=indicators,
+        )
+        indicators.update(history_ctx)
         vwap = indicators.get("vwap")
         avg_volume = indicators.get("avg_volume")
         required_missing = sorted(
@@ -2764,6 +2791,55 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             try:
+                if strategy_name == "SMC":
+                    now = time.monotonic()
+                    last_diag_map = getattr(self, "_smc_history_diag_last_emitted", {})
+                    if not isinstance(last_diag_map, dict):
+                        last_diag_map = {}
+                    ready_for_smc = bool(indicators.get("history_ready_for_smc"))
+                    interval_sec = 30.0 if not ready_for_smc else 60.0
+                    should_emit_diag = now - float(last_diag_map.get(symbol, 0.0) or 0.0) >= interval_sec
+                    if should_emit_diag:
+                        last_diag_map[symbol] = now
+                        self._smc_history_diag_last_emitted = last_diag_map
+                        log.info(
+                            "SMC_HISTORY_INPUT_DIAGNOSTICS symbol=%s eval_id=%s history_domain_used=%s history_count=%s history_resolved_count=%s option_history_count=%s",
+                            symbol,
+                            eval_id,
+                            indicators.get("history_domain_used"),
+                            indicators.get("history_count"),
+                            indicators.get("history_resolved_count"),
+                            indicators.get("option_history_count"),
+                            extra={
+                                "event": "SMC_HISTORY_INPUT_DIAGNOSTICS",
+                                "symbol": symbol,
+                                "eval_id": eval_id,
+                                "history_domain_used": indicators.get("history_domain_used"),
+                                "history_count": indicators.get("history_count"),
+                                "history_resolved_count": indicators.get("history_resolved_count"),
+                                "indicator_history_count": indicators.get("indicator_history_count"),
+                                "option_history_count": indicators.get("option_history_count"),
+                                "spot_history_count": indicators.get("spot_history_count"),
+                                "underlying_history_count": indicators.get("underlying_history_count"),
+                                "history_source": indicators.get("history_source"),
+                                "history_symbol_key": indicators.get("history_symbol_key"),
+                                "history_ready_for_smc": indicators.get("history_ready_for_smc"),
+                                "history_quality": indicators.get("history_quality"),
+                                "history_required_min": indicators.get("history_required_min"),
+                                "oldest_bar_ts": indicators.get("oldest_bar_ts"),
+                                "latest_bar_ts": indicators.get("latest_bar_ts"),
+                                "available_indicator_keys_count": len(indicators),
+                                "has_open": indicators.get("open") is not None,
+                                "has_high": indicators.get("high") is not None,
+                                "has_low": indicators.get("low") is not None,
+                                "has_close": indicators.get("close") is not None,
+                                "has_vwap": indicators.get("vwap") is not None,
+                                "has_volume": indicators.get("volume") is not None,
+                                "data_phase": indicators.get("data_phase"),
+                                "quote_update_version": indicators.get("quote_update_version"),
+                                "live_candle_version": indicators.get("live_candle_version"),
+                            },
+                        )
                 base_signal = strategy.generate_signal(
                     symbol, indicators, current_price, position
                 )
@@ -2815,6 +2891,45 @@ class StrategyManager(_BaseStrategyManager):
                 "no_strategy_signal" if not signals else "partial",
                 extra={"event": "STRATEGY_NO_VOTE_SUMMARY", "symbol": symbol, "eval_id": eval_id, "no_vote_reason_counts": no_vote_reason_counts, "strategy_reasons": strategy_reasons, "trigger_vote_count": len(signals), "context_vote_count": 0, "final_block_reason": "no_strategy_signal" if not signals else "partial"},
             )
+            smc_reasons = {"smc_history_count_missing", "smc_insufficient_history"}
+            smc_reason_counts = {k: v for k, v in no_vote_reason_counts.items() if k in smc_reasons}
+            if smc_reason_counts:
+                now = time.monotonic()
+                win = 30.0
+                summary = getattr(self, "_smc_history_no_vote_summary", None)
+                if not isinstance(summary, dict) or now - float(summary.get("window_start", 0.0) or 0.0) >= win:
+                    summary = {"window_start": now, "symbols": set(), "total_no_votes": 0, "reason_counts": {}, "domain_counts": {}, "symbol_counts": {}}
+                    self._smc_history_no_vote_summary = summary
+                summary["symbols"].add(symbol)
+                domain = str(indicators.get("history_domain_used") or "unknown")
+                summary["domain_counts"][domain] = int(summary["domain_counts"].get(domain, 0)) + sum(smc_reason_counts.values())
+                for reason, count in smc_reason_counts.items():
+                    summary["reason_counts"][reason] = int(summary["reason_counts"].get(reason, 0)) + int(count)
+                    summary["total_no_votes"] = int(summary["total_no_votes"]) + int(count)
+                    summary["symbol_counts"][symbol] = int(summary["symbol_counts"].get(symbol, 0)) + int(count)
+                last_emit = float(summary.get("last_emit", 0.0) or 0.0)
+                if now - last_emit >= win:
+                    top_symbols = sorted(summary["symbol_counts"].items(), key=lambda item: item[1], reverse=True)[:5]
+                    log.info(
+                        "SMC_HISTORY_NO_VOTE_SUMMARY window_seconds=%s symbol_count=%s total_no_votes=%s reason_counts=%s",
+                        int(win),
+                        len(summary["symbols"]),
+                        summary["total_no_votes"],
+                        summary["reason_counts"],
+                        extra={
+                            "event": "SMC_HISTORY_NO_VOTE_SUMMARY",
+                            "window_seconds": int(win),
+                            "symbol_count": len(summary["symbols"]),
+                            "total_no_votes": summary["total_no_votes"],
+                            "reason_counts": dict(summary["reason_counts"]),
+                            "history_domain_used_counts": dict(summary["domain_counts"]),
+                            "top_symbols": top_symbols,
+                            "min_bars": int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30"),
+                            "live_mode": str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE",
+                            "data_phase": indicators.get("data_phase"),
+                        },
+                    )
+                    summary["last_emit"] = now
         if not signals:
             missing = sorted(
                 name

@@ -84,3 +84,18 @@ def test_build_strategy_history_context_sets_spot_domain_for_nifty_spot() -> Non
     assert ctx["history_domain_used"] == "spot"
     assert ctx["spot_history_count"] == 35
     assert ctx["underlying_history_count"] == 0
+
+
+def test_build_strategy_history_context_falls_back_to_indicator_engine_when_data_hub_empty() -> None:
+    class _DataHubEmpty:
+        def get_ohlc_bars(self, symbol: str) -> list[dict[str, Any]]:
+            return []
+
+    ctx = build_strategy_history_context(
+        symbol="NFO:NIFTY26MAY24350PE",
+        indicator_engine=_IndicatorEngineBars(),
+        data_hub=_DataHubEmpty(),
+    )
+    assert ctx["history_source"] == "indicator_engine"
+    assert ctx["history_domain_used"] == "options"
+    assert ctx["history_resolved_count"] == 35
