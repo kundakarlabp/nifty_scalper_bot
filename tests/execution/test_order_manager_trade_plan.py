@@ -78,6 +78,7 @@ def test_stale_last_order_decision_does_not_leak() -> None:
 from datetime import datetime, timezone
 from collections import deque
 import time
+import nifty_scalper_bot.execution.order_manager as order_manager_module
 
 
 def test_kill_switch_history_helpers_capture_last_failure() -> None:
@@ -115,7 +116,8 @@ def test_margin_api_502_uses_fresh_cache() -> None:
     om._logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
     om._margin_cache_max_age_seconds = 120
     om._allow_entry_with_stale_margin = False
-    om._last_margin_success_ts = time.time()
+    old_success_ts = time.time() - 5
+    om._last_margin_success_ts = old_success_ts
     om._last_margin_available_balance = 4900.0
     om._margin_circuit_open = False
     om._margin_circuit_until_ts = None
@@ -123,6 +125,30 @@ def test_margin_api_502_uses_fresh_cache() -> None:
     om._emit_broker_health_status = lambda **kwargs: None
     available, source = OrderManager._resolve_available_margin(om)
     assert available == 4900.0
+    assert source == "margin_cache_used"
+    assert om._margin_circuit_open is True
+    assert om._last_margin_error_type == "RuntimeError"
+    assert om._last_margin_success_ts == old_success_ts
+    assert om._last_margin_available_balance == 4900.0
+
+
+def test_margin_api_502_does_not_clear_circuit_when_mdm_cache_read_returns_value() -> None:
+    om = OrderManager.__new__(OrderManager)
+    om._data_hub = SimpleNamespace(
+        refresh_margin_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("HTTP 502")),
+        get_available_balance=lambda: 5000.0,
+    )
+    om._market_data = None
+    om._risk_manager = None
+    om._logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
+    om._margin_cache_max_age_seconds = 120
+    om._allow_entry_with_stale_margin = False
+    om._last_margin_success_ts = time.time() - 10
+    om._last_margin_available_balance = 4900.0
+    om._margin_circuit_open = False
+    om._margin_circuit_until_ts = None
+    om._emit_broker_health_status = lambda **kwargs: None
+    _, source = OrderManager._resolve_available_margin(om)
     assert source == "margin_cache_used"
     assert om._margin_circuit_open is True
     assert om._last_margin_error_type == "RuntimeError"
@@ -135,7 +161,7 @@ def test_margin_api_502_blocks_entry_when_cache_stale() -> None:
         get_available_balance=lambda: None,
     )
     om._market_data = None
-    om._risk_manager = None
+    om._risk_manager = SimpleNamespace(current_balance=99999.0)
     om._logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
     om._margin_cache_max_age_seconds = 120
     om._allow_entry_with_stale_margin = False
@@ -147,6 +173,27 @@ def test_margin_api_502_blocks_entry_when_cache_stale() -> None:
     available, source = OrderManager._resolve_available_margin(om)
     assert available is None
     assert source == "margin_unavailable_stale"
+
+
+def test_margin_api_502_allows_stale_only_when_configured() -> None:
+    om = OrderManager.__new__(OrderManager)
+    om._data_hub = SimpleNamespace(
+        refresh_margin_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("HTTP 502")),
+        get_available_balance=lambda: None,
+    )
+    om._market_data = None
+    om._risk_manager = SimpleNamespace(current_balance=99999.0)
+    om._logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
+    om._margin_cache_max_age_seconds = 120
+    om._allow_entry_with_stale_margin = True
+    om._last_margin_success_ts = time.time() - 1000
+    om._last_margin_available_balance = 5000.0
+    om._margin_circuit_open = False
+    om._margin_circuit_until_ts = None
+    om._emit_broker_health_status = lambda **kwargs: None
+    available, source = OrderManager._resolve_available_margin(om)
+    assert available == 5000.0
+    assert source == "margin_cache_stale_allowed"
 
 
 def test_broker_health_status_emitted_on_margin_circuit_open() -> None:
@@ -209,15 +256,20 @@ def test_exit_path_not_blocked_by_margin_cache_if_existing_policy_allows_exits()
     om._margin_circuit_open = False
     om._margin_circuit_until_ts = None
     om._emit_broker_health_status = lambda **kwargs: None
+    old_success_ts = om._last_margin_success_ts
     available, source = OrderManager._resolve_available_margin(om, for_entry=False)
     assert source == "margin_unavailable_stale_exit_allowed"
+    assert om._last_margin_success_ts == old_success_ts
+    assert om._margin_circuit_open is True
 
 
-def test_order_api_failure_updates_broker_health_snapshot() -> None:
+def test_order_api_failure_returns_structured_rejection() -> None:
     m = _manager_stub()
     m._validate_trade_plan = lambda p: OrderPreflightResult(True)
     m._protected_limit_price = lambda p: 100.0
-    m.place_order = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("broker down"))
+    m.place_order = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("broker down token=secret"))
+    m._sanitize_broker_error = lambda exc: OrderManager._sanitize_broker_error(m, exc)
+    m._emit_broker_health_status = lambda **kwargs: None
     m._last_order_api_error_type = None
     m._last_order_api_error = None
     m._last_margin_success_ts = time.time()
@@ -231,10 +283,51 @@ def test_order_api_failure_updates_broker_health_snapshot() -> None:
     m._last_margin_available_balance = 5000.0
     m._last_margin_balance_source = "mdm"
     m._broker = SimpleNamespace(is_connected=True)
-    try:
-        OrderManager.submit_trade_plan_result(m, TradePlan(symbol='NFO:NIFTY', side='BUY', quantity=75, entry_price=100.0, stop_loss=90.0, take_profit=110.0))
-    except RuntimeError:
-        pass
+    result = OrderManager.submit_trade_plan_result(m, TradePlan(symbol='NFO:NIFTY', side='BUY', quantity=75, entry_price=100.0, stop_loss=90.0, take_profit=110.0))
+    assert result.accepted is False
+    assert result.broker_attempted is True
+    assert result.reason == "broker_placement_exception"
+    assert "secret" not in str(result.details)
     snap = OrderManager.get_broker_health_snapshot(m)
     assert snap["order_api_available"] is False
     assert snap["last_order_api_error_type"] == "RuntimeError"
+    assert "secret" not in str(snap["last_order_api_error"])
+
+
+def test_broker_health_status_uses_two_tuple_time_status(monkeypatch) -> None:
+    records: list[dict] = []
+    om = OrderManager.__new__(OrderManager)
+    om._logger = SimpleNamespace(info=lambda *_a, **k: records.append(k.get("extra", {})), debug=lambda *a, **k: None)
+    om._last_broker_health_emit_ts = 0.0
+    om._last_broker_health_effect = "none"
+    om._last_broker_health_circuit_state = False
+    om.get_broker_health_snapshot = lambda: {"trading_allowed_effect": "none", "margin_circuit_open": False}
+    monkeypatch.setattr(order_manager_module, "get_time_status", lambda: (True, "Within safe entry window"))
+    OrderManager._emit_broker_health_status(om, force=True)
+    assert any(r.get("event") == "BROKER_HEALTH_STATUS" for r in records)
+
+
+def test_broker_health_emit_never_raises(monkeypatch) -> None:
+    om = OrderManager.__new__(OrderManager)
+    om._logger = SimpleNamespace(info=lambda *a, **k: None, debug=lambda *a, **k: None)
+    om._last_broker_health_emit_ts = 0.0
+    om._last_broker_health_effect = "none"
+    om._last_broker_health_circuit_state = False
+    om._sanitize_broker_error = lambda e: str(e)
+    om.get_broker_health_snapshot = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    monkeypatch.setattr(order_manager_module, "get_time_status", lambda: (True, "x"))
+    OrderManager._emit_broker_health_status(om, force=True)
+
+
+def test_live_kill_switch_does_not_auto_reset(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    om = OrderManager.__new__(OrderManager)
+    om._kill_switch_engaged_at = datetime.now(timezone.utc)
+    om._kill_switch_allow_auto_reset = True
+    om._kill_switch_auto_reset_seconds = 1
+    om.reset_kill_switch = lambda reason="manual": (_ for _ in ()).throw(AssertionError("must not auto reset in live"))
+    assert OrderManager.is_kill_switch_active(om) is True
+    assert om._kill_switch_engaged_at is not None
