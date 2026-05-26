@@ -2035,11 +2035,16 @@ class StrategyRunner:
             atm_strike=atm_strike,
             window_each_side=int(os.getenv("OPTION_STRIKE_WINDOW_EACH_SIDE", "2") or 2),
         )
+        def _snapshot_side(snap: dict[str, Any]) -> str:
+            explicit = str(snap.get("option_type") or snap.get("side") or "").upper()
+            if explicit in {"CE", "PE"}:
+                return explicit
+            return str(infer_option_side(str(snap.get("symbol") or ""), snap)).upper()
+
         same_side = [
             snap
             for snap in snapshots
-            if isinstance(snap, dict)
-            and str(snap.get("option_type") or snap.get("side") or "").upper() == option_side
+            if isinstance(snap, dict) and _snapshot_side(snap) == option_side
         ]
         if len(same_side) >= 2:
             metadata["candidate_snapshots"] = same_side
@@ -2502,7 +2507,7 @@ class StrategyRunner:
         """Prepare signal metadata pre-sync handler. Args: signal, price, trace_id. Returns: prepared signal + block reason. Raises: none."""
         del price
         mode_snapshot = self._resolve_execution_mode_snapshot()
-        is_live_mode = bool(mode_snapshot.is_live_mode or mode_snapshot.execution_mode == "LIVE")
+        is_live_mode = bool(mode_snapshot.is_live_mode)
         if not is_live_mode:
             return signal, None
         runtime_ready = bool(getattr(self, "_runtime_data_hard_ready", False))
@@ -2522,7 +2527,15 @@ class StrategyRunner:
         atm_seed = metadata.get("atm_strike") or self._extract_strike_from_symbol(signal.symbol) or self._active_atm_strike
         atm_strike = int(atm_seed) if atm_seed else None
         candidate_snapshots_obj = metadata.get("candidate_snapshots")
-        if is_live_mode and isinstance(candidate_snapshots_obj, list) and len(candidate_snapshots_obj) <= 1:
+        needs_prebuild = (
+            is_live_mode
+            and is_directional_option
+            and (
+                not isinstance(candidate_snapshots_obj, list)
+                or len(candidate_snapshots_obj) <= 1
+            )
+        )
+        if needs_prebuild:
             prepared = await self._prepare_execution_candidate_basket_async(
                 signal=signal,
                 metadata=metadata,
@@ -9906,20 +9919,34 @@ class StrategyRunner:
                         if event_loop_active
                         else "candidate_snapshot_refresh_pending"
                     )
-                    cache_key = self._execution_candidate_cache_key(
+                    cache_key_versioned = self._execution_candidate_cache_key(
                         underlying=underlying,
                         option_side=cast(Literal["CE", "PE"], option_side),
                         atm_strike=int(atm_seed) if atm_seed else None,
                         version=int(metadata.get("quote_update_version") or metadata.get("live_candle_version") or 0),
                     )
-                    cache_entry = self._execution_candidate_basket_cache.get(cache_key)
+                    cache_key_fallback_zero = self._execution_candidate_cache_key(
+                        underlying=underlying,
+                        option_side=cast(Literal["CE", "PE"], option_side),
+                        atm_strike=int(atm_seed) if atm_seed else None,
+                        version=0,
+                    )
+                    cache_entry_versioned = self._execution_candidate_basket_cache.get(cache_key_versioned)
+                    cache_entry_fallback = self._execution_candidate_basket_cache.get(cache_key_fallback_zero)
                     cache_age_s = None
                     cache_total = 0
-                    if cache_entry:
-                        cache_age_s = max(0.0, time.time() - float(cache_entry.get("created_at") or 0.0))
+                    cache_hit = False
+                    for cache_entry in (cache_entry_versioned, cache_entry_fallback):
+                        if not cache_entry:
+                            continue
+                        age_s = max(0.0, time.time() - float(cache_entry.get("created_at") or 0.0))
+                        if age_s > max(0.0, self._execution_candidate_basket_cache_ttl_seconds):
+                            continue
                         cache_snaps = cache_entry.get("snapshots")
-                        if isinstance(cache_snaps, list):
-                            cache_total = len(cache_snaps)
+                        cache_total = len(cache_snaps) if isinstance(cache_snaps, list) else 0
+                        cache_age_s = age_s
+                        cache_hit = True
+                        break
                     details = {
                         "symbol": base_symbol,
                         "trace_id": trace_id,
@@ -9929,8 +9956,9 @@ class StrategyRunner:
                         "basket_source": _basket_source,
                         "event_loop_active": event_loop_active,
                         "existing_snapshot_symbols": [normalize_symbol(str(s.get("symbol") or "")) for s in existing_snapshots if isinstance(s, dict)],
-                        "cache_key": str(cache_key),
-                        "cache_hit": bool(cache_entry),
+                        "cache_key_versioned": str(cache_key_versioned),
+                        "cache_key_fallback_zero": str(cache_key_fallback_zero),
+                        "cache_hit": cache_hit,
                         "cache_age_s": cache_age_s,
                         "cache_total": cache_total,
                         "atm_seed": atm_seed,
