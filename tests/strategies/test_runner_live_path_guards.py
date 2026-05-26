@@ -1320,8 +1320,33 @@ def test_candidate_refresh_pending_includes_diagnostics(monkeypatch) -> None:
     assert result.details.get("selected_pe") == ""
     fallback_events = [e for e in emitted if e.get("event") == "EXECUTION_CANDIDATE_BASKET_FALLBACK"]
     assert not any(e.get("reason") == "basket_unavailable" for e in fallback_events)
+    
+
+def test_build_candidate_snapshots_sync_safe_logs_refresh_pending_in_active_loop() -> None:
+    runner = _build_runner()
+    emitted: list[dict] = []
+    runner._logger.info = lambda *_args, **kwargs: emitted.append(kwargs.get("extra", {}))  # type: ignore[method-assign]
+    symbol = "NFO:NIFTY26MAY24050PE"
+
+    async def _invoke() -> tuple[list[dict], bool, str]:
+        return runner._build_candidate_snapshots_sync_safe(
+            symbol=symbol,
+            underlying="NIFTY",
+            direction_bias="PE",
+            atm_strike=24050,
+            existing_snapshots=[{"symbol": symbol}],
+            window_each_side=2,
+        )
+
+    snapshots, pending, source = asyncio.run(_invoke())
+    assert snapshots == [{"symbol": symbol}]
+    assert pending is True
+    assert source == "event_loop_active_refresh_pending"
     refresh_pending = [e for e in emitted if e.get("event") == "EXECUTION_CANDIDATE_BASKET_REFRESH_PENDING"]
     assert refresh_pending
+    assert refresh_pending[0].get("reason") == "event_loop_active_refresh_pending"
+    assert refresh_pending[0].get("source") == "event_loop_active_refresh_pending"
+    assert refresh_pending[0].get("total") == 1
 
 
 def test_candidate_refresh_pending_non_event_loop_reason(monkeypatch) -> None:
