@@ -9720,6 +9720,8 @@ class StrategyRunner:
         Args: signal, base_symbol, trade_symbol, trade_price, timestamp.
         Returns: None. Raises: Exception.
         """
+        dedup_reserved = False
+        dedup_key_context: dict[str, str] | None = None
         try:
             mode_snapshot = self._resolve_execution_mode_snapshot()
             is_live_mode = mode_snapshot.is_live_mode
