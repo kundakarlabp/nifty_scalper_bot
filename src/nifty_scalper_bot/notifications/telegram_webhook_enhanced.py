@@ -5,10 +5,11 @@ and robust command replies (/ping, /status, /start).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from logging import Logger
 from time import monotonic
 from typing import Any, Callable, Iterable, Mapping, Sequence, cast
@@ -49,6 +50,11 @@ def _truncate(text: str, limit: int = 3500) -> str:
     if len(text) <= limit:
         return text
     return f"{text[: limit - 1]}…"
+
+
+def _hash_chat_id(chat_id: int) -> str:
+    digest = hashlib.sha256(str(chat_id).encode("utf-8")).hexdigest()
+    return digest[:12]
 
 
 _TELEGRAM_MAX_CHARS = 3500
@@ -190,21 +196,39 @@ class TelegramEnhancedNotifier:
 
     async def send_event(
         self, event: str, payload: Mapping[str, object] | None = None
-    ) -> None:
+    ) -> list[NotificationDispatchResult]:
         """Send ``event`` with optional ``payload`` to authorised chats."""
 
+        alert_id = f"evt-{int(_current_loop_time() * 1000)}-{random.randint(1000, 9999)}"
         if not self._chat_whitelist:
-            self._logger.debug(
-                "telegram_notifier_skip",
-                extra={"event": event, "reason": "no_whitelisted_chats"},
+            result = NotificationDispatchResult(
+                alert_id=alert_id,
+                event_type=event,
+                provider="telegram",
+                status="no_whitelisted_chats",
+                attempts=0,
             )
-            return
+            self._logger.info(
+                "NOTIFICATION_DISPATCH_RESULT",
+                extra=asdict(result),
+            )
+            self._log_provider_health()
+            return [result]
 
         message = self._format_message(event, payload)
+        results: list[NotificationDispatchResult] = []
 
         for chat_id in self._chat_whitelist:
             await self._acquire_token()
-            await self._send_single(chat_id, message)
+            results.append(
+                await self._send_single(
+                    chat_id,
+                    message,
+                    alert_id=alert_id,
+                    event_type=event,
+                )
+            )
+        return results
 
     def send_alert(self, message: str) -> None:
         """Send alert synchronously with proper event loop handling.
@@ -224,33 +248,50 @@ class TelegramEnhancedNotifier:
             extra={"event": "notifier.send_alert.enter"},
         )
 
+        alert_id = f"alert-{int(_current_loop_time() * 1000)}-{random.randint(1000, 9999)}"
         if not self._chat_whitelist:
+            result = NotificationDispatchResult(
+                alert_id=alert_id,
+                event_type="alert",
+                provider="telegram",
+                status="no_whitelisted_chats",
+                attempts=0,
+            )
+            self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+            self._log_provider_health()
             return
 
-        async def _dispatch() -> None:
+        async def _dispatch() -> list[NotificationDispatchResult]:
             """Deliver alert to all whitelisted chats."""
-
+            results: list[NotificationDispatchResult] = []
             for chat_id in self._chat_whitelist:
                 await self._acquire_token()
-                await self._send_single(chat_id, _clamp(str(message)))
+                results.append(
+                    await self._send_single(
+                        chat_id,
+                        _clamp(str(message)),
+                        alert_id=alert_id,
+                        event_type="alert",
+                    )
+                )
+            return results
 
         try:
             # Check if we're already in an event loop
             try:
                 loop = asyncio.get_running_loop()
                 # We're in a running loop - schedule as task
-                safe_task(_dispatch())
-                self._logger.info(
-                    "Alert scheduled on running loop",
-                    extra={"event": "notifier.send_alert.scheduled"},
-                )
+                task = safe_task(_dispatch())
+                self._logger.info("NOTIFICATION_DISPATCH_QUEUED", extra={"status": "queued", "alert_id": alert_id, "provider": "telegram", "event_type": "alert"})
+                def _on_done(done_task: asyncio.Task[list[NotificationDispatchResult]]) -> None:
+                    with suppress(asyncio.CancelledError):
+                        exc = done_task.exception()
+                        if exc is not None:
+                            self._logger.error("NOTIFICATION_DISPATCH_FAILED", extra={"alert_id": alert_id, "provider": "telegram", "event_type": "alert", "error_type": type(exc).__name__, "error": str(exc)})
+                task.add_done_callback(_on_done)
             except RuntimeError:
                 # No running loop - create one
                 asyncio.run(_dispatch())
-                self._logger.info(
-                    "Alert sent via new loop",
-                    extra={"event": "notifier.send_alert.completed"},
-                )
         except Exception as exc:
             self._logger.error(
                 f"Alert send failed: {exc}",
@@ -278,7 +319,14 @@ class TelegramEnhancedNotifier:
         self._tokens = min(self._capacity, self._tokens + refill)
         self._last_refill = now
 
-    async def _send_single(self, chat_id: int, text: str) -> None:
+    def _log_provider_health(self) -> None:
+        now = _current_loop_time()
+        last_success_age_s = (now - self._last_success_ts) if self._last_success_ts > 0 else None
+        self._logger.info("TELEGRAM_PROVIDER_HEALTH", extra={"provider": "telegram", "degraded": self._telegram_degraded, "degraded_until": self._telegram_degraded_until, "backoff_active": self._telegram_backoff_active and now < self._telegram_backoff_until, "backoff_until": self._telegram_backoff_until, "consecutive_failures": self._consecutive_failures, "last_success_age_s": last_success_age_s, "last_error_type": self._last_error_type})
+
+    async def _send_single(
+        self, chat_id: int, text: str, *, alert_id: str, event_type: str
+    ) -> NotificationDispatchResult:
         attempt = 1
         max_attempts = 5
         retry_window_s = 300.0
@@ -287,12 +335,18 @@ class TelegramEnhancedNotifier:
         # Circuit-breaker latch prevents unbounded retry storms during outages.
         now = _current_loop_time()
         if self._telegram_backoff_active and now < self._telegram_backoff_until:
-            return
+            result = NotificationDispatchResult(alert_id=alert_id, event_type=event_type, provider="telegram", status="dropped_degraded", attempts=0, degraded=True, backoff_until=self._telegram_backoff_until)
+            self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+            self._log_provider_health()
+            return result
         if self._telegram_backoff_active and now >= self._telegram_backoff_until:
             self._telegram_backoff_active = False
             self._telegram_backoff_until = 0.0
         if self._telegram_degraded and now < self._telegram_degraded_until:
-            return
+            result = NotificationDispatchResult(alert_id=alert_id, event_type=event_type, provider="telegram", status="dropped_degraded", attempts=0, degraded=True, backoff_until=self._telegram_degraded_until)
+            self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+            self._log_provider_health()
+            return result
         if self._telegram_degraded and now >= self._telegram_degraded_until:
             self._telegram_degraded = False
             self._telegram_degraded_logged = False
@@ -309,12 +363,29 @@ class TelegramEnhancedNotifier:
                         "telegram_notifier_degraded",
                         extra={
                             "event": "telegram_notifier_degraded",
-                            "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                             "cooldown_s": retry_window_s,
                         },
                     )
-                return
+                self._consecutive_failures += 1
+                self._last_error_type = "RetryWindowExceeded"
+                result = NotificationDispatchResult(
+                    alert_id=alert_id,
+                    event_type=event_type,
+                    provider="telegram",
+                    status="dropped_degraded",
+                    attempts=max(0, attempt - 1),
+                    error_type="RetryWindowExceeded",
+                    error=f"retry_window_exceeded_after_{retry_window_s}s",
+                    degraded=True,
+                    backoff_until=self._telegram_degraded_until,
+                )
+                self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+                self._log_provider_health()
+                return result
             try:
+                self._logger.info("NOTIFICATION_DISPATCH_ATTEMPT", extra={"alert_id": alert_id, "event_type": event_type, "provider": "telegram", "chat_id_hash": _hash_chat_id(chat_id), "attempt": attempt})
+                started = _current_loop_time()
                 await self.bot.send_message(
                     chat_id=chat_id,
                     text=text,
@@ -322,14 +393,20 @@ class TelegramEnhancedNotifier:
                 )
                 self._logger.debug(
                     "telegram_send_success",
-                    extra={"event": "send", "chat_id": chat_id, "attempt": attempt},
+                    extra={"event": "send", "chat_id_hash": _hash_chat_id(chat_id), "attempt": attempt},
                 )
                 self._telegram_degraded = False
                 self._telegram_degraded_logged = False
                 self._telegram_degraded_until = 0.0
                 self._telegram_backoff_active = False
                 self._telegram_backoff_until = 0.0
-                return
+                self._last_success_ts = _current_loop_time()
+                self._consecutive_failures = 0
+                self._last_error_type = None
+                result = NotificationDispatchResult(alert_id=alert_id, event_type=event_type, provider="telegram", status="sent", attempts=attempt, latency_ms=(_current_loop_time() - started) * 1000.0, degraded=False)
+                self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+                self._log_provider_health()
+                return result
             except RetryAfter as exc:  # pragma: no cover - depends on API
                 delay = float(getattr(exc, "retry_after", 1.0) or 1.0)
                 delay = max(delay, 1.0)
@@ -337,7 +414,7 @@ class TelegramEnhancedNotifier:
                     "telegram_retry_after",
                     extra={
                         "event": "retry_after",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "attempt": attempt,
                         "delay": delay,
                     },
@@ -346,13 +423,20 @@ class TelegramEnhancedNotifier:
                 self._telegram_backoff_until = _current_loop_time() + delay
                 await asyncio.sleep(delay)
                 attempt += 1
+                if attempt > max_attempts:
+                    self._consecutive_failures += 1
+                    self._last_error_type = "RetryAfter"
+                    result = NotificationDispatchResult(alert_id=alert_id, event_type=event_type, provider="telegram", status="queued_retry", attempts=max_attempts, error_type="RetryAfter", error=str(exc), degraded=self._telegram_degraded, backoff_until=self._telegram_backoff_until)
+                    self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+                    self._log_provider_health()
+                    return result
             except (TimedOut, NetworkError) as exc:  # pragma: no cover - network
                 if attempt >= max_attempts:
                     self._logger.error(
                         "telegram_network_error",
                         extra={
                             "event": "network_error",
-                            "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                             "attempt": attempt,
                             "err": str(exc),
                         },
@@ -367,17 +451,23 @@ class TelegramEnhancedNotifier:
                             "telegram_notifier_degraded",
                             extra={
                                 "event": "telegram_notifier_degraded",
-                                "chat_id": chat_id,
+                                "chat_id_hash": _hash_chat_id(chat_id),
                                 "cooldown_s": retry_window_s,
                             },
                         )
-                    return
+                    self._consecutive_failures += 1
+                    err_type = type(exc).__name__
+                    self._last_error_type = err_type
+                    result = NotificationDispatchResult(alert_id=alert_id, event_type=event_type, provider="telegram", status="failed_timeout" if isinstance(exc, TimedOut) else "failed_network", attempts=attempt, error_type=err_type, error=str(exc), degraded=True, backoff_until=self._telegram_degraded_until)
+                    self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+                    self._log_provider_health()
+                    return result
                 delay = min(2.0**attempt, 30.0)
                 self._logger.warning(
                     "telegram_network_retry",
                     extra={
                         "event": "network_retry",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "attempt": attempt,
                         "delay": delay,
                         "err": str(exc),
@@ -392,19 +482,24 @@ class TelegramEnhancedNotifier:
                     "telegram_forbidden",
                     extra={
                         "event": "forbidden",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "attempt": attempt,
                         "err": str(exc),
                     },
                 )
-                return
+                self._consecutive_failures += 1
+                self._last_error_type = "Forbidden"
+                result = NotificationDispatchResult(alert_id=alert_id, event_type=event_type, provider="telegram", status="failed_forbidden", attempts=attempt, error_type="Forbidden", error=str(exc), degraded=self._telegram_degraded, backoff_until=self._telegram_backoff_until)
+                self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+                self._log_provider_health()
+                return result
             except TelegramError as exc:  # pragma: no cover - network
                 if attempt >= max_attempts:
                     self._logger.error(
                         "telegram_send_failed",
                         extra={
                             "event": "send_failed",
-                            "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                             "attempt": attempt,
                             "err": str(exc),
                         },
@@ -419,17 +514,22 @@ class TelegramEnhancedNotifier:
                             "telegram_notifier_degraded",
                             extra={
                                 "event": "telegram_notifier_degraded",
-                                "chat_id": chat_id,
+                                "chat_id_hash": _hash_chat_id(chat_id),
                                 "cooldown_s": retry_window_s,
                             },
                         )
-                    return
+                    self._consecutive_failures += 1
+                    self._last_error_type = "TelegramError"
+                    result = NotificationDispatchResult(alert_id=alert_id, event_type=event_type, provider="telegram", status="failed_telegram", attempts=attempt, error_type="TelegramError", error=str(exc), degraded=True, backoff_until=self._telegram_degraded_until)
+                    self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+                    self._log_provider_health()
+                    return result
                 delay = min(2.0**attempt, 30.0)
                 self._logger.warning(
                     "telegram_send_retry",
                     extra={
                         "event": "send_retry",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "attempt": attempt,
                         "delay": delay,
                         "err": str(exc),
@@ -712,7 +812,7 @@ class TelegramWebhookController:
                     "telegram_update_rejected",
                     extra={
                         "event": "update_rejected",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "user_id": user_id,
                         "reason": "chat_not_whitelisted",
                     },
@@ -725,7 +825,7 @@ class TelegramWebhookController:
                     "telegram_update_rejected",
                     extra={
                         "event": "update_rejected",
-                        "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                         "user_id": user_id,
                         "reason": "user_not_whitelisted",
                     },
@@ -753,7 +853,7 @@ class TelegramWebhookController:
             "telegram_command",
             extra={
                 "event": "command",
-                "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                 "command": command,
                 # ``args`` is a reserved LogRecord attribute; avoid KeyError
                 "cmd_args": list(args),
@@ -785,7 +885,7 @@ class TelegramWebhookController:
             "telegram_message",
             extra={
                 "event": "message",
-                "chat_id": chat_id,
+                "chat_id_hash": _hash_chat_id(chat_id),
                 "text": _truncate(text, 120),
             },
         )
@@ -806,7 +906,7 @@ class TelegramWebhookController:
             "telegram_callback",
             extra={
                 "event": "callback",
-                "chat_id": chat_id,
+                "chat_id_hash": _hash_chat_id(chat_id) if chat_id is not None else None,
                 "data": _truncate(str(data), 200) if data else None,
             },
         )
@@ -835,7 +935,11 @@ class TelegramWebhookController:
                 )
                 self.logger.debug(
                     "telegram_reply_sent",
-                    extra={"event": "reply", "chat_id": chat_id, "attempt": attempt},
+                    extra={
+                        "event": "reply",
+                        "chat_id_hash": _hash_chat_id(chat_id),
+                        "attempt": attempt,
+                    },
                 )
                 return
             except RetryAfter as exc:
@@ -848,7 +952,7 @@ class TelegramWebhookController:
                     "telegram_reply_failed",
                     extra={
                         "event": "reply_failed",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "err": str(exc),
                     },
                 )
