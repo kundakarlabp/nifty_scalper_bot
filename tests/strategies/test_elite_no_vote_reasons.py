@@ -153,3 +153,35 @@ def test_smc_quality_gate_logs_specific_reason(caplog) -> None:
     signal = strategy.generate_signal('NFO:NIFTY26MAY24350CE', {'high':10,'low':9,'close':9.5,'open':9.0,'atr':1,'liquidity_sweep_confirmed':True,'premium_reclaim':False,'bos_confirmed':False,'choch_confirmed':False,'data_age_seconds':1}, 9.5, None)
     assert signal is None
     assert any('smc_quality_gate_failed' in r.message for r in caplog.records)
+
+
+def test_smc_resolves_spot_history_domain_in_live(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = SMCStrategy(SMCStrategyConfig())
+    signal = strategy.generate_signal(
+        symbol="NSE:NIFTY",
+        indicators={
+            "high": 102,
+            "low": 98,
+            "open": 99,
+            "close": 101,
+            "atr": 2,
+            "history_domain_used": "spot",
+            "spot_history_count": 35,
+            "underlying_history_count": 0,
+            "history_count": 35,
+            "indicator_history_count": 35,
+            "liquidity_sweep_confirmed": True,
+            "premium_reclaim": True,
+            "choch_confirmed": True,
+            "bos_confirmed": True,
+            "direction_bias": "CE",
+            "underlying_direction_bias": "CE",
+            "data_age_seconds": 1,
+        },
+        current_price=100,
+        position=None,
+    )
+    assert strategy.last_no_vote_reason != "smc_history_count_missing"
+    assert strategy.last_no_vote_reason != "smc_insufficient_history"
+    assert signal is not None

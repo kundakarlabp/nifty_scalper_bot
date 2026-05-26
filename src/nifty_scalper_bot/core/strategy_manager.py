@@ -2703,6 +2703,9 @@ class StrategyManager(_BaseStrategyManager):
         symbol_is_option = bool(re.search(r"(CE|PE)$", symbol_upper))
         symbol_is_future = symbol_upper.endswith("FUT")
         direction_bias = str(indicators.get("direction_bias") or "").upper()
+        eval_id = f"{symbol}:{int(time.time())}"
+        indicators.setdefault("eval_id", eval_id)
+        strategy_reasons: dict[str, str] = {}
         for strategy in self._strategies:
             if strategy.name in self._disabled_strategies:
                 disabled.append(strategy.name)
@@ -2717,6 +2720,7 @@ class StrategyManager(_BaseStrategyManager):
                 continue
             strategy_name = str(getattr(strategy, "name", "") or "")
             if strategy_name in {"VWAPPro", "OrderFlow"} and not symbol_is_option:
+                strategy_reasons[strategy_name] = "context_symbol_skipped_for_option_strategy"
                 no_vote_reason_counts["context_symbol_skipped_for_option_strategy"] = (
                     no_vote_reason_counts.get(
                         "context_symbol_skipped_for_option_strategy", 0
@@ -2738,6 +2742,7 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             if strategy_name == "BBSqueeze" and symbol_is_option:
+                strategy_reasons[strategy_name] = "context_symbol_skipped_for_underlying_strategy"
                 no_vote_reason_counts["context_symbol_skipped_for_underlying_strategy"] = (
                     no_vote_reason_counts.get(
                         "context_symbol_skipped_for_underlying_strategy", 0
@@ -2776,17 +2781,7 @@ class StrategyManager(_BaseStrategyManager):
                 empty.append(strategy.name)
                 reason = str(getattr(strategy, "last_no_vote_reason", "none") or "none")
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
-                log_throttled_live(
-                    log,
-                    logging.INFO,
-                    "STRATEGY_NO_VOTE",
-                    f"STRATEGY_NO_VOTE:{strategy.name}:{symbol}:{reason}",
-                    float(os.getenv("LOG_THROTTLE_STRATEGY_NO_VOTE_SECONDS", "45") or "45"),
-                    "STRATEGY_NO_VOTE strategy=%s symbol=%s reason=%s",
-                    strategy.name,
-                    symbol,
-                    reason,
-                )
+                strategy_reasons[strategy.name] = reason
                 continue
             entry = score_map.get(strategy.name)
             adjusted = self._apply_weighted_confidence(base_signal, strategy.name, entry)
@@ -2808,6 +2803,18 @@ class StrategyManager(_BaseStrategyManager):
                 },
             )
 
+        if no_vote_reason_counts:
+            log.info(
+                "STRATEGY_NO_VOTE_SUMMARY symbol=%s eval_id=%s no_vote_reason_counts=%s strategy_reasons=%s trigger_vote_count=%s context_vote_count=%s final_block_reason=%s",
+                symbol,
+                eval_id,
+                no_vote_reason_counts,
+                strategy_reasons,
+                len(signals),
+                0,
+                "no_strategy_signal" if not signals else "partial",
+                extra={"event": "STRATEGY_NO_VOTE_SUMMARY", "symbol": symbol, "eval_id": eval_id, "no_vote_reason_counts": no_vote_reason_counts, "strategy_reasons": strategy_reasons, "trigger_vote_count": len(signals), "context_vote_count": 0, "final_block_reason": "no_strategy_signal" if not signals else "partial"},
+            )
         if not signals:
             missing = sorted(
                 name
