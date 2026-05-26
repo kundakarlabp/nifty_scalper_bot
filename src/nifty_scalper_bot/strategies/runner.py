@@ -2767,6 +2767,19 @@ class StrategyRunner:
                 **payload,
             },
         )
+        if reason == "candidate_refresh_pending" and not bool(payload.get("event_loop_active", False)):
+            self._logger.info(
+                "SIGNAL_DROPPED_CANDIDATE_REFRESH_PENDING symbol=%s trace_id=%s reason=%s",
+                symbol,
+                trace_id,
+                str(payload.get("reason") or "candidate_snapshot_refresh_pending"),
+                extra={
+                    "event": "SIGNAL_DROPPED_CANDIDATE_REFRESH_PENDING",
+                    "symbol": symbol,
+                    "signal_id": trace_id,
+                    "reason": str(payload.get("reason") or "candidate_snapshot_refresh_pending"),
+                },
+            )
         return SignalExecutionResult(False, reason, details=payload)
 
     def _directional_dedup_key(
@@ -6164,6 +6177,9 @@ class StrategyRunner:
                 "symbol": symbol,
                 "trace_id": trace_id,
                 "allowed": allowed,
+                "diagnostic_eval_allowed": bool(context.pop("diagnostic_eval_allowed", True)),
+                "trading_allowed": bool(context.pop("trading_allowed", allowed)),
+                "order_forwarding_allowed": bool(context.pop("order_forwarding_allowed", allowed)),
                 "stage": stage,
                 "reason": reason,
                 "active_symbol": symbol in self._active_symbols,
@@ -6187,9 +6203,16 @@ class StrategyRunner:
                 "mdm_bars": mdm_bars,
                 "hydration_attempted": symbol in self._hydration_attempted_symbols,
                 "last_hydration_reason": self._last_hydration_reason_by_symbol.get(symbol),
+                "market_session_state": "open" if is_market_hours_cached() else "closed",
+                "selected_symbol": symbol,
+                "option_history_count": candle_count,
+                "history_domain_used": context.get("history_domain_used") if isinstance(context, dict) else None,
             }
             if context:
                 payload.update(context)
+            payload["diagnostic_eval_allowed"] = bool(payload.get("diagnostic_eval_allowed", True))
+            payload["trading_allowed"] = bool(payload.get("trading_allowed", allowed))
+            payload["order_forwarding_allowed"] = bool(payload.get("order_forwarding_allowed", payload["trading_allowed"]))
             verbose_eval = str(os.getenv("LOG_VERBOSE_RUNNER_EVAL", "false")).strip().lower() in {"1", "true", "yes", "on"}
             log_level = logging.DEBUG if ((not allowed) and reason_str == "strategy_eval_skipped_same_bar" and not verbose_eval) else logging.INFO
             log_throttled_live(
@@ -6214,6 +6237,7 @@ class StrategyRunner:
                 payload.get("data_phase"),
                 extra=payload,
             )
+            self._emit_live_trading_readiness_snapshot(symbol=symbol, strategy_signal_present=allowed, order_path_entered=False)
         except Exception as exc:  # noqa: BLE001
             # Observability must never raise; log and continue.
             try:
@@ -6223,6 +6247,54 @@ class StrategyRunner:
                 )
             except Exception:  # pragma: no cover - defensive
                 pass
+
+    def _emit_live_trading_readiness_snapshot(self, *, symbol: str, strategy_signal_present: bool, order_path_entered: bool, order_manager_block_reason: str | None = None) -> None:
+        try:
+            ce_symbol = self._selected_option_symbol_for_side("CE", {}) or getattr(self, "_active_selected_ce", None)
+            pe_symbol = self._selected_option_symbol_for_side("PE", {}) or getattr(self, "_active_selected_pe", None)
+            ce_history = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
+            pe_history = len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
+            _last_tick_map = getattr(self._market_data, "_last_tick_time", {}) or {}
+            ce_tick_age = int(max(0.0, (time.time() - float(_last_tick_map.get(ce_symbol, 0.0) or 0.0)) * 1000.0)) if ce_symbol and _last_tick_map.get(ce_symbol) else None
+            pe_tick_age = int(max(0.0, (time.time() - float(_last_tick_map.get(pe_symbol, 0.0) or 0.0)) * 1000.0)) if pe_symbol and _last_tick_map.get(pe_symbol) else None
+            payload = {
+                "event": "LIVE_TRADING_READINESS_SNAPSHOT",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "underlying": "NIFTY",
+                "data_phase": self._data_phase.get(symbol),
+                "market_session_state": "open" if is_market_hours_cached() else "closed",
+                "trading_allowed": bool(self._runtime_evaluation_ready),
+                "diagnostic_allowed": True,
+                "live_orders_armed": bool(self._runtime_live_orders_armed),
+                "live_block_reason": self._runtime_readiness_reason,
+                "selected_ce_symbol": ce_symbol,
+                "selected_pe_symbol": pe_symbol,
+                "ce_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(ce_symbol, False)) if ce_symbol else False,
+                "pe_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(pe_symbol, False)) if pe_symbol else False,
+                "ce_quote_ready": bool(self._is_option_symbol_tick_fresh(ce_symbol, max_age_s=60.0)) if ce_symbol else False,
+                "pe_quote_ready": bool(self._is_option_symbol_tick_fresh(pe_symbol, max_age_s=60.0)) if pe_symbol else False,
+                "ce_history_ready": ce_history > 0,
+                "pe_history_ready": pe_history > 0,
+                "ce_depth_tradable": bool(self._is_symbol_execution_ready(ce_symbol)) if ce_symbol else False,
+                "pe_depth_tradable": bool(self._is_symbol_execution_ready(pe_symbol)) if pe_symbol else False,
+                "ce_spread_ok": bool(self._is_symbol_execution_ready(ce_symbol)) if ce_symbol else False,
+                "pe_spread_ok": bool(self._is_symbol_execution_ready(pe_symbol)) if pe_symbol else False,
+                "ce_tick_age_ms": ce_tick_age,
+                "pe_tick_age_ms": pe_tick_age,
+                "ce_last_quote_ts": _last_tick_map.get(ce_symbol) if ce_symbol else None,
+                "pe_last_quote_ts": _last_tick_map.get(pe_symbol) if pe_symbol else None,
+                "ce_history_count": ce_history,
+                "pe_history_count": pe_history,
+                "selected_candidate_count": 0,
+                "candidate_refresh_pending": False,
+                "strategy_signal_present": bool(strategy_signal_present),
+                "order_path_entered": bool(order_path_entered),
+                "order_manager_block_reason": order_manager_block_reason,
+            }
+            self._logger.info("LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s", symbol, bool(self._runtime_live_orders_armed), self._runtime_readiness_reason, extra=payload)
+        except Exception:
+            return
 
     def _same_bar_eval_reason(
         self,
@@ -10031,6 +10103,26 @@ class StrategyRunner:
                         "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS symbol=%s trace_id=%s underlying=%s option_side=%s candidate_total=%s basket_source=%s reason=%s",
                         base_symbol, trace_id, underlying, option_side, len(candidate_snapshots_obj), _basket_source, pending_reason,
                         extra={"event": "CANDIDATE_REFRESH_PENDING_DIAGNOSTICS", **details},
+                    )
+                    self._logger.info(
+                        "SIGNAL_DEFERRED_CANDIDATE_REFRESH_PENDING symbol=%s trace_id=%s strategy=%s direction=%s age_ms=%s retry_allowed=%s",
+                        base_symbol,
+                        trace_id,
+                        reason_key,
+                        option_side,
+                        int(max(0.0, (cache_age_s or 0.0) * 1000.0)),
+                        bool(event_loop_active),
+                        extra={
+                            "event": "SIGNAL_DEFERRED_CANDIDATE_REFRESH_PENDING",
+                            "symbol": base_symbol,
+                            "signal_id": trace_id,
+                            "strategy": reason_key,
+                            "direction": option_side,
+                            "candidate_refresh_started_at": None,
+                            "candidate_refresh_age_ms": int(max(0.0, (cache_age_s or 0.0) * 1000.0)),
+                            "retry_allowed": bool(event_loop_active),
+                            "retry_deadline_ms": int(max(1000.0, self._execution_candidate_basket_cache_ttl_seconds * 1000.0)),
+                        },
                     )
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
