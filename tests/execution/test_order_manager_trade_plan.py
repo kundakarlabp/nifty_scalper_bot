@@ -74,3 +74,30 @@ def test_stale_last_order_decision_does_not_leak() -> None:
     out = OrderManager.place_managed_order_result(m, symbol='NFO:NIFTY', side='BUY', quantity=75, entry_price=100.0, stop_loss=90.0, take_profit=110.0, trace_id='t1')
     assert out.reason == 'place_order_rejected_without_decision'
     assert out.broker_attempted is False
+
+from datetime import datetime, timezone
+from collections import deque
+
+
+def test_kill_switch_history_helpers_capture_last_failure() -> None:
+    om = OrderManager.__new__(OrderManager)
+    om._lock = __import__('threading').RLock()
+    om._kill_switch_failure_history = deque(maxlen=20)
+    om._kill_switch_engaged_at = datetime.now(timezone.utc)
+    om._kill_switch_allow_auto_reset = False
+    om._kill_switch_auto_reset_seconds = 900
+    om._kill_switch_reason = 'unexpected_exception'
+    om._consecutive_failures = 3
+    om._kill_switch_last_reset = None
+    om._record_kill_switch_failure({
+        'trace_id': 't-1',
+        'symbol': 'NFO:NIFTY26MAY23700PE',
+        'failure_class': 'unexpected_exception',
+        'exception_type': 'RuntimeError',
+        'exception_message': 'boom',
+    })
+    status = om.get_kill_switch_status()
+    assert status['active'] is True
+    assert status['last_failure']['exception_type'] == 'RuntimeError'
+    assert 'boom' in status['last_failure']['exception_message']
+    assert status['last_failure']['trace_id'] == 't-1'

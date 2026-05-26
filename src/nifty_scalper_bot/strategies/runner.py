@@ -2795,6 +2795,32 @@ class StrategyRunner:
             "submitted_ts": time.time(),
         }
 
+    def _mark_directional_dedup_uncertain(
+        self,
+        *,
+        underlying: str,
+        option_side: str,
+        reason: str,
+        trace_id: str | None,
+        ttl_s: float | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        key = self._directional_dedup_key_from_parts(
+            underlying=underlying, option_side=option_side, reason=reason
+        )
+        now_ts = time.time()
+        ttl_value = float(ttl_s if ttl_s is not None else 30.0)
+        prev = self._signal_attempt_debounce_state.get(key) or {}
+        self._signal_attempt_debounce_state[key] = {
+            **prev,
+            "status": "uncertain",
+            "ts": now_ts,
+            "expires_at": now_ts + max(1.0, ttl_value),
+            "trace_id": trace_id,
+            "reason": reason,
+            "details": dict(details or {}),
+        }
+
     def _mark_directional_dedup_failed(
         self, *, underlying: str, option_side: str, reason: str
     ) -> None:
@@ -3019,6 +3045,8 @@ class StrategyRunner:
             }
 
         # ── Pipeline health (non-blocking, best-effort) ──────────────────────
+        dedup_reserved = False
+        dedup_key_context: dict[str, str] | None = None
         try:
             from nifty_scalper_bot.data.pipeline import (  # noqa: PLC0415
                 get_pipeline,
@@ -9573,6 +9601,11 @@ class StrategyRunner:
             underlying=underlying, option_side=option_side, reason=reason
         )
         prev = self._signal_attempt_debounce_state.get(key)
+        if isinstance(prev, dict) and str(prev.get("status") or "") == "uncertain":
+            expires_at = float(prev.get("expires_at") or 0.0)
+            if expires_at > 0.0 and now_epoch >= expires_at:
+                self._signal_attempt_debounce_state.pop(key, None)
+                prev = None
         score_raw = metadata.get("candidate_score")
         if score_raw is None:
             score_raw = metadata.get("strategy_score")
@@ -10352,6 +10385,11 @@ class StrategyRunner:
                     self._reset_execution_state(base_symbol)
                     return dedup_result
                 dedup_reserved = True
+                dedup_key_context = {
+                    "underlying": underlying,
+                    "option_side": option_side,
+                    "reason": reason_key,
+                }
                 def _reject_after_dedup(
                     *,
                     reason: str,
@@ -10942,9 +10980,50 @@ class StrategyRunner:
                     self._logger.error("record_trade failed: %s", rec_exc)
                 return SignalExecutionResult(True, "order_submitted", order_id=order_id, details={"trace_id": trace_id})
             else:
-                if not broker_attempted:
+                deterministic_rejections = {
+                    "order_manager_place_order_rejected",
+                    "order_manager_order_rejected",
+                    "order_manager_fatal_order_error",
+                    "order_manager_invalid_quantity",
+                    "order_manager_invalid_symbol",
+                    "order_manager_insufficient_margin",
+                    "order_manager_broker_rejected",
+                    "order_manager_protected_price_invalidates_bracket",
+                    "order_manager_protected_limit_unavailable",
+                    "order_manager_quote_unavailable",
+                    "order_manager_quote_stale",
+                    "order_manager_spread_too_wide",
+                    "order_manager_depth_insufficient",
+                    "order_manager_kill_switch_active",
+                }
+                uncertain_markers = {
+                    "timeout",
+                    "network_timeout",
+                    "reconciliation_pending",
+                    "order_status_unknown",
+                    "broker_response_unknown",
+                    "placement_uncertain",
+                }
+                submit_reason_lc = str(submit_reason or "").lower()
+                if not broker_attempted or submit_reason in deterministic_rejections:
                     self._mark_directional_dedup_failed(
                         underlying=underlying, option_side=option_side, reason=reason_key
+                    )
+                elif any(marker in submit_reason_lc for marker in uncertain_markers):
+                    self._mark_directional_dedup_uncertain(
+                        underlying=underlying,
+                        option_side=option_side,
+                        reason=reason_key,
+                        trace_id=trace_id,
+                        details={"submit_reason": submit_reason, **dict(submit_details or {})},
+                    )
+                else:
+                    self._mark_directional_dedup_uncertain(
+                        underlying=underlying,
+                        option_side=option_side,
+                        reason=reason_key,
+                        trace_id=trace_id,
+                        details={"submit_reason": submit_reason, **dict(submit_details or {})},
                     )
                 self._logger.info(
                     "DUPLICATE_DIRECTION_COOLDOWN_NOT_MARKED symbol=%s reason=no_order_submitted",
@@ -10956,6 +11035,16 @@ class StrategyRunner:
                 return SignalExecutionResult(False, submit_reason, details=submit_details)
 
         except Exception as exc:
+            if dedup_reserved and dedup_key_context:
+                self._mark_directional_dedup_failed(**dedup_key_context)
+                self._logger.warning(
+                    "DIRECTIONAL_DEDUP_ROLLED_BACK reason=entry_exception trace_id=%s underlying=%s option_side=%s reason_key=%s",
+                    trace_id,
+                    dedup_key_context.get("underlying"),
+                    dedup_key_context.get("option_side"),
+                    dedup_key_context.get("reason"),
+                    extra={"event": "DIRECTIONAL_DEDUP_ROLLED_BACK", "rollback_reason": "entry_exception", "trace_id": trace_id, **dedup_key_context},
+                )
             self._logger.error("🔴 ENTRY LOGIC CRASH: %s", exc, exc_info=True)
             self._reset_execution_state(base_symbol)
             return SignalExecutionResult(False, "entry_exception", details={"trace_id": trace_id, "error": str(exc)})
