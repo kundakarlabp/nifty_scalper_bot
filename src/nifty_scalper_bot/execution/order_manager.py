@@ -629,7 +629,13 @@ def resolve_reference_price(
 
 class OrderManager:
     _SECRET_PATTERNS = (
-        re.compile(r"(?i)(api[_-]?key|access[_-]?token|request[_-]?token|enctoken|authorization|password|secret)=([^\s,&]+)"),
+        re.compile(
+            r"(?i)\b("
+            r"api[_-]?key|api[_-]?secret|access[_-]?token|request[_-]?token|"
+            r"refresh[_-]?token|auth[_-]?token|session[_-]?token|enctoken|"
+            r"authorization|password|passwd|secret|token"
+            r")\s*[:=]\s*([^\s,&]+)"
+        ),
         re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._\-]+"),
     )
     """Manage complete order lifecycle."""
@@ -705,9 +711,10 @@ class OrderManager:
         """Return True only when this manager is allowed to place live orders."""
         return self.execution_mode == "LIVE" and self._order_live_execution_enabled()
 
-    def _sanitize_broker_error(self, exc_or_text: Any) -> str:
+    @classmethod
+    def _sanitize_broker_error(cls, exc_or_text: Any) -> str:
         text = str(exc_or_text or "")
-        for pattern in self._SECRET_PATTERNS:
+        for pattern in cls._SECRET_PATTERNS:
             text = pattern.sub(lambda m: f"{m.group(1)}[REDACTED]", text)
         return text[:500]
 

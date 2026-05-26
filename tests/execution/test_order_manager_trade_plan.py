@@ -268,7 +268,7 @@ def test_order_api_failure_returns_structured_rejection() -> None:
     m._validate_trade_plan = lambda p: OrderPreflightResult(True)
     m._protected_limit_price = lambda p: 100.0
     m.place_order = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("broker down token=secret"))
-    m._sanitize_broker_error = lambda exc: OrderManager._sanitize_broker_error(m, exc)
+    m._sanitize_broker_error = lambda exc: OrderManager._sanitize_broker_error(exc)
     m._emit_broker_health_status = lambda **kwargs: None
     m._last_order_api_error_type = None
     m._last_order_api_error = None
@@ -288,10 +288,28 @@ def test_order_api_failure_returns_structured_rejection() -> None:
     assert result.broker_attempted is True
     assert result.reason == "broker_placement_exception"
     assert "secret" not in str(result.details)
+    assert "token=secret" not in str(result.details)
     snap = OrderManager.get_broker_health_snapshot(m)
     assert snap["order_api_available"] is False
     assert snap["last_order_api_error_type"] == "RuntimeError"
     assert "secret" not in str(snap["last_order_api_error"])
+    assert "token=secret" not in str(snap["last_order_api_error"])
+
+
+def test_broker_error_sanitizer_redacts_common_secret_shapes() -> None:
+    raw = (
+        "broker failed token=secret access_token=abc123 "
+        "request_token=req456 enctoken=enc789 password=pw "
+        "Authorization: Bearer eyJabc.secret"
+    )
+    sanitized = OrderManager._sanitize_broker_error(raw)
+    assert "token=secret" not in sanitized
+    assert "access_token=abc123" not in sanitized
+    assert "request_token=req456" not in sanitized
+    assert "enctoken=enc789" not in sanitized
+    assert "password=pw" not in sanitized
+    assert "Bearer eyJabc.secret" not in sanitized
+    assert "REDACTED" in sanitized
 
 
 def test_broker_health_status_uses_two_tuple_time_status(monkeypatch) -> None:
