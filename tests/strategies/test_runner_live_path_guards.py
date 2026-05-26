@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from datetime import datetime, timezone
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 import threading
 from unittest.mock import AsyncMock, MagicMock
@@ -1315,6 +1316,12 @@ def test_candidate_refresh_pending_includes_diagnostics(monkeypatch) -> None:
     assert diag.get("trace_id") == "trace-pending"
     assert result.details.get("event_loop_active") is True
     assert result.details.get("reason") == "event_loop_active_refresh_pending"
+    assert result.details.get("selected_ce") == ""
+    assert result.details.get("selected_pe") == ""
+    fallback_events = [e for e in emitted if e.get("event") == "EXECUTION_CANDIDATE_BASKET_FALLBACK"]
+    assert not any(e.get("reason") == "basket_unavailable" for e in fallback_events)
+    refresh_pending = [e for e in emitted if e.get("event") == "EXECUTION_CANDIDATE_BASKET_REFRESH_PENDING"]
+    assert refresh_pending
 
 
 def test_candidate_refresh_pending_non_event_loop_reason(monkeypatch) -> None:
@@ -1328,6 +1335,60 @@ def test_candidate_refresh_pending_non_event_loop_reason(monkeypatch) -> None:
     assert result.details.get("event_loop_active") is False
     assert result.details.get("reason") == "candidate_snapshot_refresh_pending"
     assert result.details.get("basket_source") == "async_refresh"
+
+
+def test_missing_candidate_snapshots_without_selected_attrs_returns_clean_rejection(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY26MAY24100PE"
+    if hasattr(runner, "_selected_ce_symbol"):
+        delattr(runner, "_selected_ce_symbol")
+    if hasattr(runner, "_selected_pe_symbol"):
+        delattr(runner, "_selected_pe_symbol")
+    runner._is_option_symbol_tick_fresh = MagicMock(return_value=False)
+    signal = Signal(
+        action="BUY",
+        symbol=symbol,
+        quantity=1,
+        confidence=0.9,
+        reason="OrderFlow",
+        stop_loss=300.0,
+        take_profit=450.0,
+        metadata={},
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        base_symbol=symbol,
+        trade_symbol=symbol,
+        trade_price=374.95,
+        timestamp=datetime.now(timezone.utc),
+        trace_id="trace-missing-candidates",
+    )
+    assert result.reason == "missing_candidate_snapshots"
+    assert result.reason != "entry_exception"
+
+
+def test_selected_option_symbol_for_side_prefers_metadata() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    metadata = {
+        "selected_ce": "NFO:NIFTY26MAY24150CE",
+        "selected_pe": "NFO:NIFTY26MAY24100PE",
+    }
+    assert runner._selected_option_symbol_for_side("CE", metadata) == "NFO:NIFTY26MAY24150CE"
+    assert runner._selected_option_symbol_for_side("PE", metadata) == "NFO:NIFTY26MAY24100PE"
+
+
+def test_init_sets_selected_symbol_attrs() -> None:
+    runner = _build_runner()
+    assert hasattr(runner, "_selected_ce_symbol")
+    assert hasattr(runner, "_selected_pe_symbol")
+
+
+def test_runner_source_has_no_unsafe_selected_symbol_fallbacks() -> None:
+    source_path = Path("src/nifty_scalper_bot/strategies/runner.py")
+    source = source_path.read_text(encoding="utf-8")
+    assert "or self._selected_ce_symbol" not in source
+    assert "or self._selected_pe_symbol" not in source
 
 
 def test_multi_snapshot_candidate_skips_refresh_and_no_unboundlocal(monkeypatch) -> None:

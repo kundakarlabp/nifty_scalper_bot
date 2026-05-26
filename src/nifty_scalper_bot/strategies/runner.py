@@ -640,6 +640,8 @@ class StrategyRunner:
         self._startup_gate_last_log_ts = 0.0
         self._active_selected_ce: str | None = None
         self._active_selected_pe: str | None = None
+        self._selected_ce_symbol: str | None = None
+        self._selected_pe_symbol: str | None = None
         self._active_atm_strike: int | None = None
         self._active_option_symbols: set[str] = set()
 
@@ -1879,14 +1881,16 @@ class StrategyRunner:
                 )
                 return existing, False, "cached_existing_event_loop_active"
             self._logger.info(
-                "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=event_loop_active_refresh_pending symbol=%s total=%s",
+                "EXECUTION_CANDIDATE_BASKET_REFRESH_PENDING reason=event_loop_active_refresh_pending symbol=%s total=%s source=%s",
                 symbol,
                 len(existing),
+                "event_loop_active_refresh_pending",
                 extra={
-                    "event": "EXECUTION_CANDIDATE_BASKET_FALLBACK",
+                    "event": "EXECUTION_CANDIDATE_BASKET_REFRESH_PENDING",
                     "reason": "event_loop_active_refresh_pending",
                     "symbol": symbol,
                     "total": len(existing),
+                    "source": "event_loop_active_refresh_pending",
                 },
             )
             return existing, True, "event_loop_active_refresh_pending"
@@ -1911,6 +1915,36 @@ class StrategyRunner:
                 )
                 return snapshots, pending, "async_refresh"
             return snapshots, pending, "async_refresh"
+
+    def _selected_option_symbol_for_side(
+        self,
+        side: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> str:
+        metadata = metadata or {}
+        side_u = str(side or "").upper()
+        if side_u == "CE":
+            raw = (
+                metadata.get("selected_ce")
+                or metadata.get("selected_ce_symbol")
+                or metadata.get("ce_symbol")
+                or getattr(self, "_selected_ce_symbol", None)
+                or ""
+            )
+        elif side_u == "PE":
+            raw = (
+                metadata.get("selected_pe")
+                or metadata.get("selected_pe_symbol")
+                or metadata.get("pe_symbol")
+                or getattr(self, "_selected_pe_symbol", None)
+                or ""
+            )
+        else:
+            raw = ""
+        try:
+            return normalize_symbol(str(raw or ""))
+        except Exception:
+            return ""
 
     def _schedule_signal_preparation(
         self,
@@ -9676,7 +9710,7 @@ class StrategyRunner:
                         metadata["candidate_snapshots"] = basket_snapshots
                         candidate_snapshots_obj = basket_snapshots
                         metadata["candidate_basket_source"] = _basket_source
-                    else:
+                    elif not basket_pending:
                         self._logger.info(
                             "EXECUTION_CANDIDATE_BASKET_FALLBACK reason=basket_unavailable symbol=%s",
                             signal.symbol,
@@ -9708,8 +9742,8 @@ class StrategyRunner:
                         "existing_snapshot_symbols": [normalize_symbol(str(s.get("symbol") or "")) for s in existing_snapshots if isinstance(s, dict)],
                         "atm_seed": atm_seed,
                         "active_atm_strike": self._active_atm_strike,
-                        "selected_ce": normalize_symbol(str(metadata.get("selected_ce") or self._selected_ce_symbol or "")),
-                        "selected_pe": normalize_symbol(str(metadata.get("selected_pe") or self._selected_pe_symbol or "")),
+                        "selected_ce": self._selected_option_symbol_for_side("CE", metadata),
+                        "selected_pe": self._selected_option_symbol_for_side("PE", metadata),
                         "reason": pending_reason,
                     }
                     self._logger.info(
@@ -9726,8 +9760,8 @@ class StrategyRunner:
                     )
             if is_live_mode and is_directional_option and not candidate_snapshots_obj:
                 signal_symbol = normalize_symbol(signal.symbol)
-                selected_ce = normalize_symbol(str(metadata.get("selected_ce") or self._selected_ce_symbol or ""))
-                selected_pe = normalize_symbol(str(metadata.get("selected_pe") or self._selected_pe_symbol or ""))
+                selected_ce = self._selected_option_symbol_for_side("CE", metadata)
+                selected_pe = self._selected_option_symbol_for_side("PE", metadata)
                 strike_distance = float(metadata.get("strike_distance_from_atm") or 999.0)
                 selected_or_near = (
                     signal_symbol in {selected_ce, selected_pe}
