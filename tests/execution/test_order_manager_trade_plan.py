@@ -116,12 +116,16 @@ def test_margin_api_502_uses_fresh_cache() -> None:
     om._margin_cache_max_age_seconds = 120
     om._allow_entry_with_stale_margin = False
     om._last_margin_success_ts = time.time()
+    om._last_margin_available_balance = 4900.0
     om._margin_circuit_open = False
     om._margin_circuit_until_ts = None
+    om._last_margin_balance_source = "mdm"
     om._emit_broker_health_status = lambda **kwargs: None
     available, source = OrderManager._resolve_available_margin(om)
-    assert available == 5000.0
-    assert source == "mdm"
+    assert available == 4900.0
+    assert source == "margin_cache_used"
+    assert om._margin_circuit_open is True
+    assert om._last_margin_error_type == "RuntimeError"
 
 
 def test_margin_api_502_blocks_entry_when_cache_stale() -> None:
@@ -136,6 +140,7 @@ def test_margin_api_502_blocks_entry_when_cache_stale() -> None:
     om._margin_cache_max_age_seconds = 120
     om._allow_entry_with_stale_margin = False
     om._last_margin_success_ts = time.time() - 1000
+    om._last_margin_available_balance = 5000.0
     om._margin_circuit_open = False
     om._margin_circuit_until_ts = None
     om._emit_broker_health_status = lambda **kwargs: None
@@ -162,6 +167,74 @@ def test_broker_health_status_emitted_on_margin_circuit_open() -> None:
     om._last_broker_health_emit_ts = 0.0
     om._last_broker_health_effect = "none"
     om._last_broker_health_circuit_state = False
-    om._resolve_available_margin_raw = lambda: (5000.0, "mdm")
-    OrderManager._emit_broker_health_status(om, force=True)
+    om._last_margin_available_balance = 5000.0
+    om._last_margin_balance_source = "margin_cache_used"
+    OrderManager._emit_broker_health_status(om, force=False)
     assert any(r.get("event") == "BROKER_HEALTH_STATUS" for r in records)
+
+
+def test_broker_health_snapshot_is_read_only() -> None:
+    om = OrderManager.__new__(OrderManager)
+    om._broker = SimpleNamespace(is_connected=True)
+    om._last_margin_success_ts = time.time()
+    om._margin_cache_max_age_seconds = 120
+    om._margin_circuit_open = False
+    om._last_margin_error_type = None
+    om._allow_entry_with_stale_margin = False
+    om._last_margin_refresh_ts = time.time()
+    om._last_margin_error = None
+    om._margin_circuit_until_ts = None
+    om._last_margin_available_balance = 4200.0
+    om._last_margin_balance_source = "mdm"
+    om._last_order_api_error_type = None
+    om._last_order_api_error = None
+    snap = OrderManager.get_broker_health_snapshot(om)
+    assert snap["available_balance"] == 4200.0
+    assert snap["balance_source"] == "mdm"
+
+
+def test_exit_path_not_blocked_by_margin_cache_if_existing_policy_allows_exits() -> None:
+    om = OrderManager.__new__(OrderManager)
+    om._data_hub = SimpleNamespace(
+        refresh_margin_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("HTTP 502")),
+        get_available_balance=lambda: None,
+    )
+    om._market_data = None
+    om._risk_manager = None
+    om._logger = SimpleNamespace(error=lambda *a, **k: None, info=lambda *a, **k: None)
+    om._margin_cache_max_age_seconds = 120
+    om._allow_entry_with_stale_margin = False
+    om._last_margin_success_ts = time.time() - 1000
+    om._last_margin_available_balance = 5000.0
+    om._margin_circuit_open = False
+    om._margin_circuit_until_ts = None
+    om._emit_broker_health_status = lambda **kwargs: None
+    available, source = OrderManager._resolve_available_margin(om, for_entry=False)
+    assert source == "margin_unavailable_stale_exit_allowed"
+
+
+def test_order_api_failure_updates_broker_health_snapshot() -> None:
+    m = _manager_stub()
+    m._validate_trade_plan = lambda p: OrderPreflightResult(True)
+    m._protected_limit_price = lambda p: 100.0
+    m.place_order = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("broker down"))
+    m._last_order_api_error_type = None
+    m._last_order_api_error = None
+    m._last_margin_success_ts = time.time()
+    m._margin_cache_max_age_seconds = 120
+    m._margin_circuit_open = False
+    m._last_margin_error_type = None
+    m._allow_entry_with_stale_margin = False
+    m._last_margin_refresh_ts = time.time()
+    m._last_margin_error = None
+    m._margin_circuit_until_ts = None
+    m._last_margin_available_balance = 5000.0
+    m._last_margin_balance_source = "mdm"
+    m._broker = SimpleNamespace(is_connected=True)
+    try:
+        OrderManager.submit_trade_plan_result(m, TradePlan(symbol='NFO:NIFTY', side='BUY', quantity=75, entry_price=100.0, stop_loss=90.0, take_profit=110.0))
+    except RuntimeError:
+        pass
+    snap = OrderManager.get_broker_health_snapshot(m)
+    assert snap["order_api_available"] is False
+    assert snap["last_order_api_error_type"] == "RuntimeError"

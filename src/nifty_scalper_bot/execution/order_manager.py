@@ -884,6 +884,8 @@ class OrderManager:
         self._last_broker_health_emit_ts: float = 0.0
         self._last_broker_health_effect: str = "none"
         self._last_broker_health_circuit_state: bool = False
+        self._last_margin_available_balance: float | None = None
+        self._last_margin_balance_source: str | None = None
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
@@ -1977,6 +1979,8 @@ class OrderManager:
         """Return whether kill switch is currently blocking new entries. Args: none. Returns: bool. Raises: none."""
         if self._kill_switch_engaged_at is None:
             return False
+        if self._order_live_execution_enabled():
+            return True
         if not self._kill_switch_allow_auto_reset:
             return True
         elapsed = (datetime.now(timezone.utc) - self._kill_switch_engaged_at).total_seconds()
@@ -3315,11 +3319,32 @@ class OrderManager:
                 return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
         if hasattr(self, "place_managed_order"):
             if hasattr(self, "place_managed_order_result"):
-                managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+                try:
+                    managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+                except Exception as exc:  # noqa: BLE001
+                    self._last_order_api_error_type = type(exc).__name__
+                    self._last_order_api_error = str(exc)
+                    raise
                 return TradePlanSubmitResult(managed.accepted, order_id=managed.order_id, reason=managed.reason, details=managed.details or {"protected_price": price}, broker_attempted=managed.broker_attempted)
-            oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+            try:
+                oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+            except Exception as exc:  # noqa: BLE001
+                self._last_order_api_error_type = type(exc).__name__
+                self._last_order_api_error = str(exc)
+                raise
+            if oid:
+                self._last_order_api_error_type = None
+                self._last_order_api_error = None
             return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "place_order_rejected", details={"protected_price": price}, broker_attempted=bool(oid))
-        oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+        try:
+            oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+        except Exception as exc:  # noqa: BLE001
+            self._last_order_api_error_type = type(exc).__name__
+            self._last_order_api_error = str(exc)
+            raise
+        if oid:
+            self._last_order_api_error_type = None
+            self._last_order_api_error = None
         return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "order_rejected", details={"protected_price": price}, broker_attempted=True)
 
     def place_managed_order(
@@ -7091,9 +7116,13 @@ class OrderManager:
             trading_allowed_effect = "position_sizing_degraded"
         if balance_stale and not self._allow_entry_with_stale_margin:
             trading_allowed_effect = "live_orders_blocked"
-        available_balance, balance_source = self._resolve_available_margin_raw()
+        connected_attr = getattr(self._broker, "is_connected", True)
+        try:
+            broker_connected = bool(connected_attr() if callable(connected_attr) else connected_attr)
+        except Exception:
+            broker_connected = False
         return {
-            "broker_connected": bool(getattr(self._broker, "is_connected", True)),
+            "broker_connected": broker_connected,
             "margin_api_available": self._last_margin_error_type is None,
             "last_margin_refresh_ts": self._last_margin_refresh_ts,
             "last_margin_success_age_s": last_margin_success_age_s,
@@ -7102,8 +7131,8 @@ class OrderManager:
             "margin_circuit_open": self._margin_circuit_open,
             "margin_circuit_remaining_s": max((self._margin_circuit_until_ts or 0.0) - now, 0.0),
             "balance_stale": balance_stale,
-            "available_balance": available_balance,
-            "balance_source": balance_source,
+            "available_balance": self._last_margin_available_balance,
+            "balance_source": self._last_margin_balance_source or "unknown",
             "trading_allowed_effect": trading_allowed_effect,
             "order_api_available": self._last_order_api_error_type is None,
             "last_order_api_error_type": self._last_order_api_error_type,
@@ -7190,6 +7219,8 @@ class OrderManager:
                     self._last_margin_error_type = None
                     self._last_margin_error = None
                     self._margin_circuit_open = False
+                    self._last_margin_available_balance = float(available)
+                    self._last_margin_balance_source = "mdm"
                     return float(available), "mdm"
         risk_manager = self._risk_manager
         if risk_manager is not None:
@@ -7199,7 +7230,7 @@ class OrderManager:
                     return balance, "risk"
         return None, "unknown"
 
-    def _resolve_available_margin(self) -> tuple[float | None, str]:
+    def _resolve_available_margin(self, *, for_entry: bool = True) -> tuple[float | None, str]:
         available, source = self._resolve_available_margin_raw()
         now = time.time()
         if (
@@ -7213,12 +7244,21 @@ class OrderManager:
             return available, source
         if self._last_margin_success_ts is not None:
             age = now - self._last_margin_success_ts
-            if age <= float(self._margin_cache_max_age_seconds):
+            cached = self._last_margin_available_balance
+            if age <= float(self._margin_cache_max_age_seconds) and cached is not None and cached > 0:
                 self._emit_broker_health_status(force=True)
-                return available, "margin_cache_used"
-            if self._allow_entry_with_stale_margin:
+                self._last_margin_balance_source = "margin_cache_used"
+                return cached, "margin_cache_used"
+            if not for_entry:
                 self._emit_broker_health_status(force=True)
-                return available, "margin_cache_stale_allowed"
+                return available, "margin_unavailable_stale_exit_allowed"
+            if self._allow_entry_with_stale_margin and cached is not None and cached > 0:
+                self._emit_broker_health_status(force=True)
+                self._last_margin_balance_source = "margin_cache_stale_allowed"
+                return cached, "margin_cache_stale_allowed"
+            self._emit_broker_health_status(force=True)
+            return None, "margin_unavailable_stale"
+        if for_entry and source == "risk" and not self._allow_entry_with_stale_margin:
             self._emit_broker_health_status(force=True)
             return None, "margin_unavailable_stale"
         self._emit_broker_health_status(force=True)
