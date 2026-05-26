@@ -5369,6 +5369,26 @@ class MarketDataManager:
                     sym: int(max(0.0, (now_epoch - float(self._last_tick_time.get(sym, 0.0) or 0.0)) * 1000.0))
                     for sym in stale_symbols_list
                 }
+                selected_ce_symbol = str(
+                    getattr(self, "_selected_ce_symbol", None)
+                    or getattr(self, "selected_ce_symbol", None)
+                    or ""
+                ) or None
+                selected_pe_symbol = str(
+                    getattr(self, "_selected_pe_symbol", None)
+                    or getattr(self, "selected_pe_symbol", None)
+                    or ""
+                ) or None
+                selected_ce_stale = bool(selected_ce_symbol and selected_ce_symbol in stale_symbols_list)
+                selected_pe_stale = bool(selected_pe_symbol and selected_pe_symbol in stale_symbols_list)
+                selected_ce_age_ms = stale_age_map.get(selected_ce_symbol) if selected_ce_symbol else None
+                selected_pe_age_ms = stale_age_map.get(selected_pe_symbol) if selected_pe_symbol else None
+                live_orders_armed = bool(getattr(self, "_live_orders_armed", getattr(self, "live_orders_armed", True)))
+                impact_on_trading = "diagnostic_only"
+                if (selected_ce_stale or selected_pe_stale) and not live_orders_armed:
+                    impact_on_trading = "live_orders_disarmed"
+                elif selected_ce_stale or selected_pe_stale:
+                    impact_on_trading = "none"
                 self._last_stale_detail_emit_epoch = now_epoch
                 self._logger.info(
                     "MARKET_DATA_STALE_SYMBOLS_DETAIL stale_count=%d fresh_count=%d ws_connected=%s",
@@ -5383,15 +5403,15 @@ class MarketDataManager:
                         "stale_symbols": sorted(stale_symbols_list),
                         "stale_age_ms_by_symbol": stale_age_map,
                         "fresh_symbols": fresh_symbols,
-                        "selected_ce_symbol": None,
-                        "selected_pe_symbol": None,
-                        "selected_ce_stale": None,
-                        "selected_pe_stale": None,
-                        "selected_ce_age_ms": None,
-                        "selected_pe_age_ms": None,
+                        "selected_ce_symbol": selected_ce_symbol,
+                        "selected_pe_symbol": selected_pe_symbol,
+                        "selected_ce_stale": selected_ce_stale,
+                        "selected_pe_stale": selected_pe_stale,
+                        "selected_ce_age_ms": selected_ce_age_ms,
+                        "selected_pe_age_ms": selected_pe_age_ms,
                         "ws_connected": self._is_ws_connected(),
                         "subscribed_count": subscribed,
-                        "impact_on_trading": "diagnostic_only",
+                        "impact_on_trading": impact_on_trading,
                     },
                 )
         try:
