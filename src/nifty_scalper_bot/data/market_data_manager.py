@@ -5342,11 +5342,15 @@ class MarketDataManager:
             with self._lock:
                 live_symbols = len(self._symbols_with_tick)
                 subscribed = len(self._active_subscribed_symbols)
-                stale_symbols = sum(
-                    1
+                stale_symbols_list = [
+                    sym
                     for sym in self._active_subscribed_symbols
                     if (time.time() - float(self._last_tick_time.get(sym, 0.0) or 0.0))
                     >= self._option_stale_seconds
+                ]
+                stale_symbols = sum(
+                    1
+                    for sym in stale_symbols_list
                 )
             self._logger.info(
                 "MARKET_DATA_HEALTH_SUMMARY ws_connected=%s subscribed=%d live_symbols=%d stale_symbols=%d poll_fallbacks=%d bus_running=%s",
@@ -5357,6 +5361,39 @@ class MarketDataManager:
                 int(getattr(self, "_poll_fallback_count", 0)),
                 bool(getattr(getattr(self, "bus", None), "running", False)),
             )
+            now_epoch = time.time()
+            last_detail_emit = float(getattr(self, "_last_stale_detail_emit_epoch", 0.0) or 0.0)
+            if (now_epoch - last_detail_emit) >= 30.0:
+                fresh_symbols = sorted([sym for sym in self._active_subscribed_symbols if sym not in stale_symbols_list])
+                stale_age_map = {
+                    sym: int(max(0.0, (now_epoch - float(self._last_tick_time.get(sym, 0.0) or 0.0)) * 1000.0))
+                    for sym in stale_symbols_list
+                }
+                self._last_stale_detail_emit_epoch = now_epoch
+                self._logger.info(
+                    "MARKET_DATA_STALE_SYMBOLS_DETAIL stale_count=%d fresh_count=%d ws_connected=%s",
+                    len(stale_symbols_list),
+                    len(fresh_symbols),
+                    self._is_ws_connected(),
+                    extra={
+                        "event": "MARKET_DATA_STALE_SYMBOLS_DETAIL",
+                        "total_symbols": subscribed,
+                        "stale_count": len(stale_symbols_list),
+                        "fresh_count": len(fresh_symbols),
+                        "stale_symbols": sorted(stale_symbols_list),
+                        "stale_age_ms_by_symbol": stale_age_map,
+                        "fresh_symbols": fresh_symbols,
+                        "selected_ce_symbol": None,
+                        "selected_pe_symbol": None,
+                        "selected_ce_stale": None,
+                        "selected_pe_stale": None,
+                        "selected_ce_age_ms": None,
+                        "selected_pe_age_ms": None,
+                        "ws_connected": self._is_ws_connected(),
+                        "subscribed_count": subscribed,
+                        "impact_on_trading": "diagnostic_only",
+                    },
+                )
         try:
             self._m_ticks.inc()
         except Exception:  # pragma: no cover - optional metrics
