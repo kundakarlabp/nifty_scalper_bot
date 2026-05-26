@@ -248,10 +248,18 @@ class TelegramEnhancedNotifier:
             extra={"event": "notifier.send_alert.enter"},
         )
 
-        if not self._chat_whitelist:
-            return
-
         alert_id = f"alert-{int(_current_loop_time() * 1000)}-{random.randint(1000, 9999)}"
+        if not self._chat_whitelist:
+            result = NotificationDispatchResult(
+                alert_id=alert_id,
+                event_type="alert",
+                provider="telegram",
+                status="no_whitelisted_chats",
+                attempts=0,
+            )
+            self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+            self._log_provider_health()
+            return
 
         async def _dispatch() -> list[NotificationDispatchResult]:
             """Deliver alert to all whitelisted chats."""
@@ -355,11 +363,26 @@ class TelegramEnhancedNotifier:
                         "telegram_notifier_degraded",
                         extra={
                             "event": "telegram_notifier_degraded",
-                            "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                             "cooldown_s": retry_window_s,
                         },
                     )
-                return
+                self._consecutive_failures += 1
+                self._last_error_type = "RetryWindowExceeded"
+                result = NotificationDispatchResult(
+                    alert_id=alert_id,
+                    event_type=event_type,
+                    provider="telegram",
+                    status="dropped_degraded",
+                    attempts=max(0, attempt - 1),
+                    error_type="RetryWindowExceeded",
+                    error=f"retry_window_exceeded_after_{retry_window_s}s",
+                    degraded=True,
+                    backoff_until=self._telegram_degraded_until,
+                )
+                self._logger.info("NOTIFICATION_DISPATCH_RESULT", extra=asdict(result))
+                self._log_provider_health()
+                return result
             try:
                 self._logger.info("NOTIFICATION_DISPATCH_ATTEMPT", extra={"alert_id": alert_id, "event_type": event_type, "provider": "telegram", "chat_id_hash": _hash_chat_id(chat_id), "attempt": attempt})
                 started = _current_loop_time()
@@ -370,7 +393,7 @@ class TelegramEnhancedNotifier:
                 )
                 self._logger.debug(
                     "telegram_send_success",
-                    extra={"event": "send", "chat_id": chat_id, "attempt": attempt},
+                    extra={"event": "send", "chat_id_hash": _hash_chat_id(chat_id), "attempt": attempt},
                 )
                 self._telegram_degraded = False
                 self._telegram_degraded_logged = False
@@ -391,7 +414,7 @@ class TelegramEnhancedNotifier:
                     "telegram_retry_after",
                     extra={
                         "event": "retry_after",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "attempt": attempt,
                         "delay": delay,
                     },
@@ -413,7 +436,7 @@ class TelegramEnhancedNotifier:
                         "telegram_network_error",
                         extra={
                             "event": "network_error",
-                            "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                             "attempt": attempt,
                             "err": str(exc),
                         },
@@ -476,7 +499,7 @@ class TelegramEnhancedNotifier:
                         "telegram_send_failed",
                         extra={
                             "event": "send_failed",
-                            "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                             "attempt": attempt,
                             "err": str(exc),
                         },
@@ -506,7 +529,7 @@ class TelegramEnhancedNotifier:
                     "telegram_send_retry",
                     extra={
                         "event": "send_retry",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "attempt": attempt,
                         "delay": delay,
                         "err": str(exc),
@@ -789,7 +812,7 @@ class TelegramWebhookController:
                     "telegram_update_rejected",
                     extra={
                         "event": "update_rejected",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "user_id": user_id,
                         "reason": "chat_not_whitelisted",
                     },
@@ -802,7 +825,7 @@ class TelegramWebhookController:
                     "telegram_update_rejected",
                     extra={
                         "event": "update_rejected",
-                        "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                         "user_id": user_id,
                         "reason": "user_not_whitelisted",
                     },
@@ -830,7 +853,7 @@ class TelegramWebhookController:
             "telegram_command",
             extra={
                 "event": "command",
-                "chat_id": chat_id,
+                            "chat_id_hash": _hash_chat_id(chat_id),
                 "command": command,
                 # ``args`` is a reserved LogRecord attribute; avoid KeyError
                 "cmd_args": list(args),
@@ -925,7 +948,7 @@ class TelegramWebhookController:
                     "telegram_reply_failed",
                     extra={
                         "event": "reply_failed",
-                        "chat_id": chat_id,
+                        "chat_id_hash": _hash_chat_id(chat_id),
                         "err": str(exc),
                     },
                 )
