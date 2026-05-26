@@ -20,6 +20,10 @@ def _safe_history_int(value: Any) -> int | None:
         return None
 
 
+def _first_not_none(*values: int | None) -> int | None:
+    return next((value for value in values if value is not None), None)
+
+
 class SMCStrategy(EliteStrategy):
     """SMC liquidity sweep strategy producing structured votes only."""
 
@@ -75,13 +79,37 @@ class SMCStrategy(EliteStrategy):
             raw_history_count = _safe_history_int(indicators.get("history_count"))
             resolved_count = _safe_history_int(indicators.get("history_resolved_count"))
             if history_domain_used == "options":
-                resolved_history_count = option_history_count or resolved_count or raw_history_count or indicator_history_count
+                resolved_history_count = _first_not_none(
+                    option_history_count,
+                    resolved_count,
+                    raw_history_count,
+                    indicator_history_count,
+                )
             elif history_domain_used == "spot":
-                resolved_history_count = spot_history_count or underlying_history_count or resolved_count or raw_history_count or indicator_history_count
+                resolved_history_count = _first_not_none(
+                    spot_history_count,
+                    underlying_history_count,
+                    resolved_count,
+                    raw_history_count,
+                    indicator_history_count,
+                )
             elif history_domain_used == "underlying":
-                resolved_history_count = underlying_history_count or spot_history_count or resolved_count or raw_history_count or indicator_history_count
+                resolved_history_count = _first_not_none(
+                    underlying_history_count,
+                    spot_history_count,
+                    resolved_count,
+                    raw_history_count,
+                    indicator_history_count,
+                )
             else:
-                resolved_history_count = resolved_count or raw_history_count or indicator_history_count or option_history_count or underlying_history_count or spot_history_count
+                resolved_history_count = _first_not_none(
+                    resolved_count,
+                    raw_history_count,
+                    indicator_history_count,
+                    option_history_count,
+                    underlying_history_count,
+                    spot_history_count,
+                )
             if is_live and resolved_history_count is None:
                 self._no_vote("smc_history_count_missing")
                 log_throttled(

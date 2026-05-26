@@ -46,6 +46,12 @@ class _CaptureSMC:
         return None
 
 
+class _CaptureSMCNoVote(_CaptureSMC):
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self.last_no_vote_reason = reason
+
+
 class _IndicatorEngineNone(_IndicatorEngine):
     def get_indicators(self, symbol: str, names: Any) -> None:
         return None
@@ -95,3 +101,47 @@ def test_smc_history_input_diagnostics_throttled_when_not_ready(caplog: Any) -> 
     manager.generate_signal(symbol, 100.0)
     diag_records = [r for r in caplog.records if getattr(r, "event", "") == "SMC_HISTORY_INPUT_DIAGNOSTICS" and getattr(r, "symbol", "") == symbol]
     assert len(diag_records) == 1
+
+
+def test_smc_summary_window_flushes_before_reset(caplog: Any, monkeypatch: Any) -> None:
+    symbol = "NFO:NIFTY26MAY23850PE"
+    smc = _CaptureSMCNoVote("smc_insufficient_history")
+    manager = StrategyManager([smc], _IndicatorEngine(5), _PositionManager(), data_hub=_DataHub({symbol: 5}))
+    manager._smc_history_no_vote_summary = {
+        "window_start": 1.0,
+        "symbols": {"NFO:NIFTY26MAY23800PE"},
+        "total_no_votes": 3,
+        "reason_counts": {"smc_insufficient_history": 2, "smc_history_count_missing": 1},
+        "domain_counts": {"options": 3},
+        "symbol_counts": {"NFO:NIFTY26MAY23800PE": 3},
+    }
+    monotonic_values = iter([40.0])
+    monkeypatch.setattr("nifty_scalper_bot.core.strategy_manager.time.monotonic", lambda: next(monotonic_values))
+    caplog.set_level(logging.INFO)
+
+    manager.generate_signal(symbol, 100.0)
+
+    summary_logs = [r for r in caplog.records if getattr(r, "event", "") == "SMC_HISTORY_NO_VOTE_SUMMARY"]
+    assert len(summary_logs) == 1
+    assert getattr(summary_logs[0], "total_no_votes", None) == 3
+    summary = manager._smc_history_no_vote_summary
+    assert isinstance(summary, dict)
+    assert summary["total_no_votes"] == 1
+    assert summary["symbol_counts"][symbol] == 1
+    assert "NFO:NIFTY26MAY23800PE" not in summary["symbol_counts"]
+
+
+def test_smc_summary_first_event_does_not_prematurely_emit(caplog: Any) -> None:
+    symbol = "NFO:NIFTY26MAY23850PE"
+    smc = _CaptureSMCNoVote("smc_history_count_missing")
+    manager = StrategyManager([smc], _IndicatorEngine(5), _PositionManager(), data_hub=_DataHub({symbol: 5}))
+    caplog.set_level(logging.INFO)
+
+    manager.generate_signal(symbol, 100.0)
+
+    summary_logs = [r for r in caplog.records if getattr(r, "event", "") == "SMC_HISTORY_NO_VOTE_SUMMARY"]
+    assert summary_logs == []
+    summary = manager._smc_history_no_vote_summary
+    assert isinstance(summary, dict)
+    assert summary["total_no_votes"] == 1
+    assert summary["symbol_counts"][symbol] == 1

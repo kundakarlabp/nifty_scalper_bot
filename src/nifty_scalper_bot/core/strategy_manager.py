@@ -1799,6 +1799,40 @@ class StrategyManager(_BaseStrategyManager):
                 extra={"event": "strategy_no_signal_summary_error", "symbol": symbol},
             )
 
+    def _emit_smc_history_no_vote_summary(
+        self,
+        *,
+        summary: dict[str, t.Any],
+        indicators: t.Mapping[str, t.Any],
+        window_seconds: float,
+    ) -> None:
+        total_no_votes = int(summary.get("total_no_votes", 0) or 0)
+        if total_no_votes <= 0:
+            return
+        symbols = summary.get("symbols")
+        symbol_count = len(symbols) if isinstance(symbols, set) else 0
+        symbol_counts = summary.get("symbol_counts", {})
+        top_symbols = sorted(symbol_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+        log.info(
+            "SMC_HISTORY_NO_VOTE_SUMMARY window_seconds=%s symbol_count=%s total_no_votes=%s reason_counts=%s",
+            int(window_seconds),
+            symbol_count,
+            total_no_votes,
+            summary.get("reason_counts", {}),
+            extra={
+                "event": "SMC_HISTORY_NO_VOTE_SUMMARY",
+                "window_seconds": int(window_seconds),
+                "symbol_count": symbol_count,
+                "total_no_votes": total_no_votes,
+                "reason_counts": dict(summary.get("reason_counts", {})),
+                "history_domain_used_counts": dict(summary.get("domain_counts", {})),
+                "top_symbols": top_symbols,
+                "min_bars": int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30"),
+                "live_mode": str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE",
+                "data_phase": indicators.get("data_phase"),
+            },
+        )
+
 
     def _update_context_snapshot(
         self,
@@ -2897,7 +2931,16 @@ class StrategyManager(_BaseStrategyManager):
                 now = time.monotonic()
                 win = 30.0
                 summary = getattr(self, "_smc_history_no_vote_summary", None)
-                if not isinstance(summary, dict) or now - float(summary.get("window_start", 0.0) or 0.0) >= win:
+                if isinstance(summary, dict):
+                    window_start = float(summary.get("window_start", now) or now)
+                    if now - window_start >= win:
+                        self._emit_smc_history_no_vote_summary(
+                            summary=summary,
+                            indicators=indicators,
+                            window_seconds=win,
+                        )
+                        summary = None
+                if not isinstance(summary, dict):
                     summary = {"window_start": now, "symbols": set(), "total_no_votes": 0, "reason_counts": {}, "domain_counts": {}, "symbol_counts": {}}
                     self._smc_history_no_vote_summary = summary
                 summary["symbols"].add(symbol)
@@ -2907,29 +2950,6 @@ class StrategyManager(_BaseStrategyManager):
                     summary["reason_counts"][reason] = int(summary["reason_counts"].get(reason, 0)) + int(count)
                     summary["total_no_votes"] = int(summary["total_no_votes"]) + int(count)
                     summary["symbol_counts"][symbol] = int(summary["symbol_counts"].get(symbol, 0)) + int(count)
-                last_emit = float(summary.get("last_emit", 0.0) or 0.0)
-                if now - last_emit >= win:
-                    top_symbols = sorted(summary["symbol_counts"].items(), key=lambda item: item[1], reverse=True)[:5]
-                    log.info(
-                        "SMC_HISTORY_NO_VOTE_SUMMARY window_seconds=%s symbol_count=%s total_no_votes=%s reason_counts=%s",
-                        int(win),
-                        len(summary["symbols"]),
-                        summary["total_no_votes"],
-                        summary["reason_counts"],
-                        extra={
-                            "event": "SMC_HISTORY_NO_VOTE_SUMMARY",
-                            "window_seconds": int(win),
-                            "symbol_count": len(summary["symbols"]),
-                            "total_no_votes": summary["total_no_votes"],
-                            "reason_counts": dict(summary["reason_counts"]),
-                            "history_domain_used_counts": dict(summary["domain_counts"]),
-                            "top_symbols": top_symbols,
-                            "min_bars": int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30"),
-                            "live_mode": str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE",
-                            "data_phase": indicators.get("data_phase"),
-                        },
-                    )
-                    summary["last_emit"] = now
         if not signals:
             missing = sorted(
                 name

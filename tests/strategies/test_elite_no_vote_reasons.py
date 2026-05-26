@@ -185,3 +185,50 @@ def test_smc_resolves_spot_history_domain_in_live(monkeypatch) -> None:
     assert strategy.last_no_vote_reason != "smc_history_count_missing"
     assert strategy.last_no_vote_reason != "smc_insufficient_history"
     assert signal is not None
+
+
+def test_smc_option_history_zero_does_not_fallback_to_nonzero(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = SMCStrategy(SMCStrategyConfig())
+    signal = strategy.generate_signal(
+        symbol="NFO:NIFTY26MAY23850PE",
+        indicators={
+            "history_domain_used": "options",
+            "option_history_count": 0,
+            "history_resolved_count": 35,
+            "history_count": 35,
+            "indicator_history_count": 35,
+            "high": 102,
+            "low": 98,
+            "open": 99,
+            "close": 101,
+            "atr": 2,
+            "data_age_seconds": 1,
+        },
+        current_price=100,
+        position=None,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "smc_insufficient_history"
+    assert strategy.last_no_vote_reason != "smc_history_count_missing"
+
+
+def test_smc_missing_history_only_when_all_counts_none(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = SMCStrategy(SMCStrategyConfig())
+    signal = strategy.generate_signal(
+        symbol="NFO:NIFTY26MAY23850PE",
+        indicators={
+            "history_domain_used": "options",
+            "high": 102,
+            "low": 98,
+            "open": 99,
+            "close": 101,
+            "atr": 2,
+            "data_age_seconds": 1,
+        },
+        current_price=100,
+        position=None,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "smc_history_count_missing"
