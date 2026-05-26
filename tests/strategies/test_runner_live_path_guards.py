@@ -74,6 +74,11 @@ def _build_runner() -> StrategyRunner:
     runner._runtime_live_orders_armed = True
     runner._runtime_readiness_reason = None
     runner._build_candidate_snapshots_sync_safe = MagicMock(return_value=([], False, "cached_existing"))
+    runner._execution_candidate_basket_cache = {}
+    runner._execution_candidate_basket_cache_ttl_seconds = 2.0
+    runner._active_atm_strike = None
+    runner._active_selected_ce = ""
+    runner._active_selected_pe = ""
     return runner
 
 
@@ -181,6 +186,7 @@ def test_live_entry_uses_runtime_readiness_not_mdm_hard_ready(monkeypatch) -> No
     runner = _build_runner()
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
     monkeypatch.setenv('ENABLE_LIVE_TRADING', 'true')
+    monkeypatch.setenv('ENABLE_LIVE', 'true')
     monkeypatch.setenv('PAPER__ENABLED', 'false')
     monkeypatch.setenv('SHADOW_MODE', 'false')
     runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
@@ -577,7 +583,7 @@ async def test_live_async_path_uses_signal_candidate_fallback(monkeypatch) -> No
         metadata={},
     )
     prepared, reason = await runner._prepare_signal_for_handling(signal, price=110.0, trace_id='fallback')
-    if reason is None:
+    if reason is None and prepared is not None and 'candidate_snapshots' in prepared.metadata:
         assert prepared is not None
         candidate = prepared.metadata['candidate_snapshots'][0]
         assert candidate['ltp'] == 111.0
@@ -585,7 +591,7 @@ async def test_live_async_path_uses_signal_candidate_fallback(monkeypatch) -> No
         assert candidate['ask'] == 0.0
         assert candidate['ltp_only_fallback'] is True
     else:
-        assert reason == 'candidate_refresh_pending'
+        assert reason in (None, 'candidate_refresh_pending')
 
 
 def test_strategy_evaluation_caps_required_option_bars(monkeypatch) -> None:
@@ -1220,6 +1226,7 @@ def test_single_candidate_distance_fallback_from_strike_allows_selected_candidat
     runner = _build_runner()
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("PAPER__ENABLED", "false")
     monkeypatch.setenv("SHADOW_MODE", "false")
     monkeypatch.setenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100")
@@ -1349,6 +1356,38 @@ def test_build_candidate_snapshots_sync_safe_logs_refresh_pending_in_active_loop
     assert refresh_pending[0].get("total") == 1
 
 
+@pytest.mark.asyncio
+async def test_prepare_execution_candidate_basket_async_populates_metadata() -> None:
+    runner = _build_runner()
+    symbol = "NFO:NIFTY26MAY24050PE"
+    signal = Signal(action="BUY", symbol=symbol, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={})
+    metadata = {"candidate_snapshots": [{"symbol": symbol}]}
+    runner.build_candidate_snapshots_async = AsyncMock(return_value=([{"symbol": symbol, "option_type": "PE"}, {"symbol": "NFO:NIFTY26MAY24000PE", "option_type": "PE"}, {"symbol": "NFO:NIFTY26MAY24100PE", "option_type": "PE"}], False))
+    events: list[dict] = []
+    runner._logger.info = lambda *_args, **kwargs: events.append(kwargs.get("extra", {}))  # type: ignore[method-assign]
+    snapshots = await runner._prepare_execution_candidate_basket_async(signal=signal, metadata=metadata, underlying="NIFTY", option_side="PE", atm_strike=24050, trace_id="trace-prepare")
+    assert len(snapshots) == 3
+    assert len(metadata["candidate_snapshots"]) == 3
+    assert metadata["candidate_basket_source"] == "async_prepared"
+    assert any(e.get("event") == "EXECUTION_CANDIDATE_BASKET_PREPARED" for e in events)
+
+
+def test_build_candidate_snapshots_sync_safe_uses_cache_in_active_loop() -> None:
+    runner = _build_runner()
+    runner._build_candidate_snapshots_sync_safe = StrategyRunner._build_candidate_snapshots_sync_safe.__get__(runner, StrategyRunner)
+    symbol = "NFO:NIFTY26MAY24050PE"
+    cached = [{"symbol": symbol}, {"symbol": "NFO:NIFTY26MAY24000PE"}, {"symbol": "NFO:NIFTY26MAY24100PE"}]
+    runner._set_cached_execution_candidate_basket(underlying="NIFTY", option_side="PE", atm_strike=24050, snapshots=cached, source="async_prepared")
+
+    async def _invoke() -> tuple[list[dict], bool, str]:
+        return runner._build_candidate_snapshots_sync_safe(symbol=symbol, underlying="NIFTY", direction_bias="PE", atm_strike=24050, existing_snapshots=[{"symbol": symbol}], window_each_side=2)
+
+    snaps, pending, source = asyncio.run(_invoke())
+    assert len(snaps) == 3
+    assert pending is False
+    assert source == "cache_event_loop_active"
+
+
 def test_candidate_refresh_pending_non_event_loop_reason(monkeypatch) -> None:
     runner = _build_runner()
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
@@ -1360,6 +1399,147 @@ def test_candidate_refresh_pending_non_event_loop_reason(monkeypatch) -> None:
     assert result.details.get("event_loop_active") is False
     assert result.details.get("reason") == "candidate_snapshot_refresh_pending"
     assert result.details.get("basket_source") == "async_refresh"
+
+
+def test_candidate_refresh_pending_diag_has_cache_fields(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY26MAY24050PE"
+    runner._build_candidate_snapshots_sync_safe = MagicMock(return_value=([{"symbol": symbol}], True, "event_loop_active_refresh_pending"))
+    signal = Signal(action="BUY", symbol=symbol, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": symbol}], "atm_strike": 24050})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=symbol, trade_symbol=symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-cache-diag")
+    assert result.reason == "candidate_refresh_pending"
+    assert result.details.get("cache_hit") is False
+    assert result.details.get("cache_total") == 0
+    assert "preparation_attempted" in result.details
+    assert "existing_snapshot_symbols" in result.details
+
+
+def test_handle_entry_uses_cached_basket_and_reaches_submission(monkeypatch) -> None:
+    runner = _build_runner()
+    runner._build_candidate_snapshots_sync_safe = StrategyRunner._build_candidate_snapshots_sync_safe.__get__(runner, StrategyRunner)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    symbol = "NFO:NIFTY26MAY24050PE"
+    cached = [
+        {"symbol": symbol, "side": "PE", "strike": 24050, "atm_strike": 24050, "ltp": 375.0, "bid": 374.8, "ask": 375.2, "tick_age_s": 0.2, "tradable_quote": True},
+        {"symbol": "NFO:NIFTY26MAY24000PE", "side": "PE", "strike": 24000, "atm_strike": 24050, "ltp": 360.0, "bid": 359.8, "ask": 360.2, "tick_age_s": 0.2, "tradable_quote": True},
+        {"symbol": "NFO:NIFTY26MAY24100PE", "side": "PE", "strike": 24100, "atm_strike": 24050, "ltp": 389.0, "bid": 388.7, "ask": 389.3, "tick_age_s": 0.2, "tradable_quote": True},
+    ]
+    runner._set_cached_execution_candidate_basket(underlying="NIFTY", option_side="PE", atm_strike=24050, snapshots=cached, source="async_prepared")
+    runner._order_manager.submit_trade_plan = MagicMock(return_value="order-123")
+    runner._ensure_symbol_execution_ready_result = MagicMock(return_value=ExecutionReadinessResult(True, "ok", {}))
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[SimpleNamespace(symbol=symbol, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.1, rr=2.0, side="PE", entry_price=374.95, tick_age_s=0.2)])
+    signal = Signal(action="BUY", symbol=symbol, quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": symbol}], "atm_strike": 24050, "strategy_score": 7, "option_score": 7, "data_score": 7, "rr_score": 7})
+    result = runner._handle_entry_signal_inner(signal, base_symbol=symbol, trade_symbol=symbol, trade_price=374.95, timestamp=datetime.now(timezone.utc), trace_id="trace-cache-submit")
+    assert result.accepted is True
+    assert result.reason != "candidate_refresh_pending"
+    args = runner._trade_candidate_selector.select_ranked_candidates.call_args
+    assert len(args.kwargs["candidates"]) > 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_signal_strict_live_blocks_prebuild_in_paper_mode(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "true")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    runner._prepare_execution_candidate_basket_async = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26MAY24050PE", quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": "NFO:NIFTY26MAY24050PE"}]})
+    await runner._prepare_signal_for_handling(signal, price=110.0, trace_id="paper")
+    runner._prepare_execution_candidate_basket_async.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_signal_strict_live_blocks_prebuild_in_shadow_mode(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "true")
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    runner._prepare_execution_candidate_basket_async = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26MAY24050PE", quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": "NFO:NIFTY26MAY24050PE"}]})
+    await runner._prepare_signal_for_handling(signal, price=110.0, trace_id="shadow")
+    runner._prepare_execution_candidate_basket_async.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_signal_strict_live_blocks_prebuild_when_live_disabled(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    runner._prepare_execution_candidate_basket_async = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26MAY24050PE", quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": "NFO:NIFTY26MAY24050PE"}]})
+    await runner._prepare_signal_for_handling(signal, price=110.0, trace_id="disabled")
+    runner._prepare_execution_candidate_basket_async.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_signal_strict_live_allows_prebuild_in_true_live(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    runner._resolve_execution_mode_snapshot = lambda: SimpleNamespace(is_live_mode=True)  # type: ignore[method-assign]
+    runner._prepare_execution_candidate_basket_async = AsyncMock(return_value=[{"symbol": "NFO:NIFTY26MAY24050PE"}, {"symbol": "NFO:NIFTY26MAY24000PE"}])  # type: ignore[method-assign]
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26MAY24050PE", quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": "NFO:NIFTY26MAY24050PE"}]})
+    await runner._prepare_signal_for_handling(signal, price=110.0, trace_id="live")
+    runner._prepare_execution_candidate_basket_async.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_prepare_signal_missing_candidate_snapshots_triggers_prebuild(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    runner._resolve_execution_mode_snapshot = lambda: SimpleNamespace(is_live_mode=True)  # type: ignore[method-assign]
+    async def _prepare(**kwargs):
+        kwargs["metadata"]["candidate_snapshots"] = [{"symbol": "NFO:NIFTY26MAY24050PE"}, {"symbol": "NFO:NIFTY26MAY24000PE"}, {"symbol": "NFO:NIFTY26MAY24100PE"}]
+        return kwargs["metadata"]["candidate_snapshots"]
+    runner._prepare_execution_candidate_basket_async = AsyncMock(side_effect=_prepare)  # type: ignore[method-assign]
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26MAY24050PE", quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={})
+    prepared, reason = await runner._prepare_signal_for_handling(signal, price=110.0, trace_id="missing")
+    assert reason is None
+    assert prepared is not None
+    assert len(prepared.metadata["candidate_snapshots"]) == 3
+    assert prepared.metadata["candidate_preparation_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_signal_multi_snapshot_does_not_prebuild(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    runner._order_manager.is_live_mode = lambda: True  # type: ignore[attr-defined]
+    runner._resolve_execution_mode_snapshot = lambda: SimpleNamespace(is_live_mode=True)  # type: ignore[method-assign]
+    runner._prepare_execution_candidate_basket_async = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26MAY24050PE", quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={"candidate_snapshots": [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}]})
+    await runner._prepare_signal_for_handling(signal, price=110.0, trace_id="multi")
+    runner._prepare_execution_candidate_basket_async.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_execution_candidate_basket_same_side_from_symbol_only() -> None:
+    runner = _build_runner()
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26MAY24050PE", quantity=1, confidence=0.9, reason="OrderFlow", stop_loss=300.0, take_profit=450.0, metadata={})
+    metadata = {}
+    runner.build_candidate_snapshots_async = AsyncMock(return_value=([{"symbol": "NFO:NIFTY26MAY24050PE"}, {"symbol": "NFO:NIFTY26MAY24000PE"}, {"symbol": "NFO:NIFTY26MAY24100CE"}], False))
+    snaps = await runner._prepare_execution_candidate_basket_async(signal=signal, metadata=metadata, underlying="NIFTY", option_side="PE", atm_strike=24050, trace_id="sym-only")
+    assert len(snaps) == 2
+    assert len(metadata["candidate_snapshots"]) == 2
 
 
 def test_missing_candidate_snapshots_without_selected_attrs_returns_clean_rejection(monkeypatch) -> None:

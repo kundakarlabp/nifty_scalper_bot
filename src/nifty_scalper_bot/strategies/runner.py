@@ -847,6 +847,10 @@ class StrategyRunner:
         self._candle_versions: dict[str, int] = defaultdict(int)
         self._last_strategy_versions: dict[str, int] = defaultdict(int)
         self._quote_update_versions: dict[str, int] = defaultdict(int)
+        self._execution_candidate_basket_cache: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+        self._execution_candidate_basket_cache_ttl_seconds: float = float(
+            os.getenv("EXECUTION_CANDIDATE_BASKET_CACHE_TTL_SECONDS", "2.0") or "2.0"
+        )
         self._symbol_has_completed_strategy_eval: set[str] = set()
         self._gap_repair_inflight: set[str] = set()
         self._history_refresh_interval_seconds: float = 60.0
@@ -1864,6 +1868,7 @@ class StrategyRunner:
         window_each_side: int,
     ) -> tuple[list[dict[str, Any]], bool, str]:
         """Sync-safe candidate basket build without unsafe asyncio.run in active loop."""
+        atm_value = int(atm_strike) if atm_strike else 0
         try:
             asyncio.get_running_loop()
             existing = list(existing_snapshots or [])
@@ -1880,6 +1885,22 @@ class StrategyRunner:
                     },
                 )
                 return existing, False, "cached_existing_event_loop_active"
+            cached = self._get_cached_execution_candidate_basket(
+                underlying=underlying,
+                option_side=direction_bias,
+                atm_strike=atm_value,
+            )
+            if cached and len(cached) > 1:
+                self._logger.info(
+                    "EXECUTION_CANDIDATE_BASKET_BUILT source=cache_event_loop_active total=%s",
+                    len(cached),
+                    extra={
+                        "event": "EXECUTION_CANDIDATE_BASKET_BUILT",
+                        "source": "cache_event_loop_active",
+                        "total": len(cached),
+                    },
+                )
+                return cached, False, "cache_event_loop_active"
             self._logger.info(
                 "EXECUTION_CANDIDATE_BASKET_REFRESH_PENDING reason=event_loop_active_refresh_pending symbol=%s total=%s source=%s",
                 symbol,
@@ -1899,7 +1920,7 @@ class StrategyRunner:
                 self.build_candidate_snapshots_async(
                     underlying=underlying,
                     direction_bias=direction_bias,
-                    atm_strike=atm_strike,
+                    atm_strike=atm_value,
                     window_each_side=window_each_side,
                 )
             )
@@ -1915,6 +1936,151 @@ class StrategyRunner:
                 )
                 return snapshots, pending, "async_refresh"
             return snapshots, pending, "async_refresh"
+
+    def _execution_candidate_cache_key(
+        self,
+        *,
+        underlying: str,
+        option_side: Literal["CE", "PE"],
+        atm_strike: int | None,
+        version: int = 0,
+    ) -> tuple[str, str, int, int]:
+        return (
+            str(underlying or "NIFTY").upper(),
+            str(option_side or "").upper(),
+            int(atm_strike or 0),
+            int(version or 0),
+        )
+
+    def _set_cached_execution_candidate_basket(
+        self,
+        *,
+        underlying: str,
+        option_side: Literal["CE", "PE"],
+        atm_strike: int | None,
+        snapshots: list[dict[str, Any]],
+        source: str,
+        version: int = 0,
+    ) -> None:
+        key = self._execution_candidate_cache_key(
+            underlying=underlying,
+            option_side=option_side,
+            atm_strike=atm_strike,
+            version=version,
+        )
+        self._execution_candidate_basket_cache[key] = {
+            "snapshots": list(snapshots),
+            "created_at": time.time(),
+            "source": source,
+            "underlying": str(underlying or "NIFTY").upper(),
+            "option_side": str(option_side).upper(),
+            "atm_strike": int(atm_strike or 0),
+            "symbols": [
+                normalize_symbol(str(snap.get("symbol") or ""))
+                for snap in snapshots
+                if isinstance(snap, dict)
+            ],
+            "version": int(version or 0),
+        }
+        if int(version or 0) != 0:
+            zero_key = self._execution_candidate_cache_key(
+                underlying=underlying,
+                option_side=option_side,
+                atm_strike=atm_strike,
+                version=0,
+            )
+            self._execution_candidate_basket_cache[zero_key] = dict(
+                self._execution_candidate_basket_cache[key]
+            )
+
+    def _get_cached_execution_candidate_basket(
+        self,
+        *,
+        underlying: str,
+        option_side: Literal["CE", "PE"],
+        atm_strike: int | None,
+        version: int = 0,
+    ) -> list[dict[str, Any]] | None:
+        key = self._execution_candidate_cache_key(
+            underlying=underlying,
+            option_side=option_side,
+            atm_strike=atm_strike,
+            version=version,
+        )
+        entry = self._execution_candidate_basket_cache.get(key)
+        if not entry:
+            return None
+        age_s = time.time() - float(entry.get("created_at") or 0.0)
+        if age_s > max(0.0, self._execution_candidate_basket_cache_ttl_seconds):
+            self._execution_candidate_basket_cache.pop(key, None)
+            return None
+        snapshots = entry.get("snapshots")
+        if isinstance(snapshots, list):
+            return [snap for snap in snapshots if isinstance(snap, dict)]
+        return None
+
+    async def _prepare_execution_candidate_basket_async(
+        self,
+        *,
+        signal: Signal,
+        metadata: dict[str, Any],
+        underlying: str,
+        option_side: Literal["CE", "PE"],
+        atm_strike: int | None,
+        trace_id: str | None,
+    ) -> list[dict[str, Any]]:
+        snapshots, _ = await self.build_candidate_snapshots_async(
+            underlying=underlying,
+            direction_bias=option_side,
+            atm_strike=atm_strike,
+            window_each_side=int(os.getenv("OPTION_STRIKE_WINDOW_EACH_SIDE", "2") or 2),
+        )
+        def _snapshot_side(snap: dict[str, Any]) -> str:
+            explicit = str(snap.get("option_type") or snap.get("side") or "").upper()
+            if explicit in {"CE", "PE"}:
+                return explicit
+            return str(infer_option_side(str(snap.get("symbol") or ""), snap)).upper()
+
+        same_side = [
+            snap
+            for snap in snapshots
+            if isinstance(snap, dict) and _snapshot_side(snap) == option_side
+        ]
+        if len(same_side) >= 2:
+            metadata["candidate_snapshots"] = same_side
+            metadata["candidate_basket_source"] = "async_prepared"
+            self._set_cached_execution_candidate_basket(
+                underlying=underlying,
+                option_side=option_side,
+                atm_strike=atm_strike,
+                snapshots=same_side,
+                source="async_prepared",
+                version=int(metadata.get("quote_update_version") or metadata.get("live_candle_version") or 0),
+            )
+            self._logger.info(
+                "EXECUTION_CANDIDATE_BASKET_PREPARED symbol=%s underlying=%s option_side=%s atm_strike=%s total=%s source=%s trace_id=%s",
+                signal.symbol,
+                underlying,
+                option_side,
+                atm_strike,
+                len(same_side),
+                "async_prepared",
+                trace_id,
+                extra={"event": "EXECUTION_CANDIDATE_BASKET_PREPARED", "symbol": signal.symbol, "underlying": underlying, "option_side": option_side, "atm_strike": atm_strike, "total": len(same_side), "source": "async_prepared", "trace_id": trace_id},
+            )
+            return same_side
+        self._logger.info(
+            "EXECUTION_CANDIDATE_BASKET_PREPARE_INCOMPLETE symbol=%s underlying=%s option_side=%s atm_strike=%s total=%s reason=%s trace_id=%s",
+            signal.symbol,
+            underlying,
+            option_side,
+            atm_strike,
+            len(same_side),
+            "insufficient_snapshots",
+            trace_id,
+            extra={"event": "EXECUTION_CANDIDATE_BASKET_PREPARE_INCOMPLETE", "symbol": signal.symbol, "underlying": underlying, "option_side": option_side, "atm_strike": atm_strike, "total": len(same_side), "reason": "insufficient_snapshots", "trace_id": trace_id},
+        )
+        return same_side
 
     def _selected_option_symbol_for_side(
         self,
@@ -2341,7 +2507,7 @@ class StrategyRunner:
         """Prepare signal metadata pre-sync handler. Args: signal, price, trace_id. Returns: prepared signal + block reason. Raises: none."""
         del price
         mode_snapshot = self._resolve_execution_mode_snapshot()
-        is_live_mode = bool(mode_snapshot.is_live_mode or mode_snapshot.execution_mode == "LIVE")
+        is_live_mode = bool(mode_snapshot.is_live_mode)
         if not is_live_mode:
             return signal, None
         runtime_ready = bool(getattr(self, "_runtime_data_hard_ready", False))
@@ -2355,7 +2521,33 @@ class StrategyRunner:
         is_directional_option = option_side in {"CE", "PE"}
         if not is_directional_option:
             return dataclasses.replace(signal, metadata=metadata), None
+        underlying = self._extract_underlying(signal.symbol) or "NIFTY"
+        if underlying in {"NFO", "NSE", ""}:
+            underlying = "NIFTY"
+        atm_seed = metadata.get("atm_strike") or self._extract_strike_from_symbol(signal.symbol) or self._active_atm_strike
+        atm_strike = int(atm_seed) if atm_seed else None
         candidate_snapshots_obj = metadata.get("candidate_snapshots")
+        needs_prebuild = (
+            is_live_mode
+            and is_directional_option
+            and (
+                not isinstance(candidate_snapshots_obj, list)
+                or len(candidate_snapshots_obj) <= 1
+            )
+        )
+        if needs_prebuild:
+            prepared = await self._prepare_execution_candidate_basket_async(
+                signal=signal,
+                metadata=metadata,
+                underlying=underlying,
+                option_side=cast(Literal["CE", "PE"], option_side),
+                atm_strike=atm_strike,
+                trace_id=trace_id,
+            )
+            metadata["candidate_preparation_attempted"] = True
+            metadata["candidate_preparation_source"] = "async_prepared"
+            metadata["candidate_preparation_total"] = len(prepared)
+            candidate_snapshots_obj = metadata.get("candidate_snapshots")
         if not isinstance(candidate_snapshots_obj, list):
             fallback_candidate = self._build_single_candidate_from_signal(
                 signal=signal,
@@ -2371,13 +2563,9 @@ class StrategyRunner:
                     extra={"event": "CANDIDATE_FALLBACK_FROM_SIGNAL_USED", "symbol": signal.symbol},
                 )
                 return dataclasses.replace(signal, metadata=metadata), None
-            underlying = self._extract_underlying(signal.symbol) or "NIFTY"
-            if underlying in {"NFO", "NSE", ""}:
-                underlying = "NIFTY"
-            atm_strike = int(metadata.get("atm_strike") or 0)
             built, refresh_pending = await self.build_candidate_snapshots_async(
                 direction_bias=cast(Literal["CE", "PE"], option_side),
-                atm_strike=atm_strike,
+                atm_strike=atm_strike or 0,
                 underlying=underlying,
             )
             if refresh_pending or not built:
@@ -9731,6 +9919,34 @@ class StrategyRunner:
                         if event_loop_active
                         else "candidate_snapshot_refresh_pending"
                     )
+                    cache_key_versioned = self._execution_candidate_cache_key(
+                        underlying=underlying,
+                        option_side=cast(Literal["CE", "PE"], option_side),
+                        atm_strike=int(atm_seed) if atm_seed else None,
+                        version=int(metadata.get("quote_update_version") or metadata.get("live_candle_version") or 0),
+                    )
+                    cache_key_fallback_zero = self._execution_candidate_cache_key(
+                        underlying=underlying,
+                        option_side=cast(Literal["CE", "PE"], option_side),
+                        atm_strike=int(atm_seed) if atm_seed else None,
+                        version=0,
+                    )
+                    cache_entry_versioned = self._execution_candidate_basket_cache.get(cache_key_versioned)
+                    cache_entry_fallback = self._execution_candidate_basket_cache.get(cache_key_fallback_zero)
+                    cache_age_s = None
+                    cache_total = 0
+                    cache_hit = False
+                    for cache_entry in (cache_entry_versioned, cache_entry_fallback):
+                        if not cache_entry:
+                            continue
+                        age_s = max(0.0, time.time() - float(cache_entry.get("created_at") or 0.0))
+                        if age_s > max(0.0, self._execution_candidate_basket_cache_ttl_seconds):
+                            continue
+                        cache_snaps = cache_entry.get("snapshots")
+                        cache_total = len(cache_snaps) if isinstance(cache_snaps, list) else 0
+                        cache_age_s = age_s
+                        cache_hit = True
+                        break
                     details = {
                         "symbol": base_symbol,
                         "trace_id": trace_id,
@@ -9740,10 +9956,19 @@ class StrategyRunner:
                         "basket_source": _basket_source,
                         "event_loop_active": event_loop_active,
                         "existing_snapshot_symbols": [normalize_symbol(str(s.get("symbol") or "")) for s in existing_snapshots if isinstance(s, dict)],
+                        "cache_key_versioned": str(cache_key_versioned),
+                        "cache_key_fallback_zero": str(cache_key_fallback_zero),
+                        "cache_hit": cache_hit,
+                        "cache_age_s": cache_age_s,
+                        "cache_total": cache_total,
                         "atm_seed": atm_seed,
                         "active_atm_strike": self._active_atm_strike,
+                        "live_orders_armed": bool(self._runtime_live_orders_armed),
                         "selected_ce": self._selected_option_symbol_for_side("CE", metadata),
                         "selected_pe": self._selected_option_symbol_for_side("PE", metadata),
+                        "preparation_attempted": bool(metadata.get("candidate_preparation_attempted")),
+                        "preparation_source": metadata.get("candidate_preparation_source"),
+                        "preparation_total": int(metadata.get("candidate_preparation_total") or 0),
                         "reason": pending_reason,
                     }
                     self._logger.info(
