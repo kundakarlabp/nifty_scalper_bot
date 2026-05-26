@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 from threading import Event, RLock, Thread
 import time
@@ -627,6 +628,17 @@ def resolve_reference_price(
 
 
 class OrderManager:
+    _SECRET_PATTERNS = (
+        re.compile(r"(?i)\b(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._\-]+"),
+        re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._\-]+"),
+        re.compile(
+            r"(?i)\b("
+            r"api[_-]?key|api[_-]?secret|access[_-]?token|request[_-]?token|"
+            r"refresh[_-]?token|auth[_-]?token|session[_-]?token|enctoken|"
+            r"password|passwd|secret|token"
+            r")\s*[:=]\s*([^\s,&]+)"
+        ),
+    )
     """Manage complete order lifecycle."""
 
     POLL_INTERVAL_SEC: float = 2.0
@@ -699,6 +711,13 @@ class OrderManager:
     def is_live_mode(self) -> bool:
         """Return True only when this manager is allowed to place live orders."""
         return self.execution_mode == "LIVE" and self._order_live_execution_enabled()
+
+    @classmethod
+    def _sanitize_broker_error(cls, exc_or_text: Any) -> str:
+        text = str(exc_or_text or "")
+        for pattern in cls._SECRET_PATTERNS:
+            text = pattern.sub(lambda m: f"{m.group(1)}[REDACTED]", text)
+        return text[:500]
 
     def __init__(
         self,
@@ -871,6 +890,21 @@ class OrderManager:
         self._kill_switch_last_reset: dict[str, Any] | None = None
         self._missing_counts: dict[str, int] = {}
         self._last_order_decision: dict[str, Any] = {}
+        self._margin_cache_max_age_seconds: int = max(1, int(os.getenv("MARGIN_CACHE_MAX_AGE_SECONDS", "120") or 120))
+        self._allow_entry_with_stale_margin: bool = os.getenv("ALLOW_ENTRY_WITH_STALE_MARGIN", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self._last_margin_refresh_ts: float | None = None
+        self._last_margin_success_ts: float | None = None
+        self._last_margin_error_type: str | None = None
+        self._last_margin_error: str | None = None
+        self._margin_circuit_open: bool = False
+        self._margin_circuit_until_ts: float | None = None
+        self._last_order_api_error_type: str | None = None
+        self._last_order_api_error: str | None = None
+        self._last_broker_health_emit_ts: float = 0.0
+        self._last_broker_health_effect: str = "none"
+        self._last_broker_health_circuit_state: bool = False
+        self._last_margin_available_balance: float | None = None
+        self._last_margin_balance_source: str | None = None
 
     def set_market_data_manager(self, market_data_manager: MarketDataManager) -> None:
         """Inject the shared market data manager instance."""
@@ -1964,6 +1998,8 @@ class OrderManager:
         """Return whether kill switch is currently blocking new entries. Args: none. Returns: bool. Raises: none."""
         if self._kill_switch_engaged_at is None:
             return False
+        if self._order_live_execution_enabled():
+            return True
         if not self._kill_switch_allow_auto_reset:
             return True
         elapsed = (datetime.now(timezone.utc) - self._kill_switch_engaged_at).total_seconds()
@@ -2006,6 +2042,7 @@ class OrderManager:
             elapsed = (datetime.now(timezone.utc) - engaged_at).total_seconds()
             remaining = max(float(self._kill_switch_auto_reset_seconds) - elapsed, 0.0)
         recent_failures = self.get_kill_switch_failure_history(limit=5)
+        last_failure = self.get_last_kill_switch_failure() or {}
         return {
             "active": self.is_kill_switch_active(),
             "kill_reason": self._kill_switch_reason,
@@ -2014,9 +2051,14 @@ class OrderManager:
             "auto_reset_allowed": bool(self._kill_switch_allow_auto_reset),
             "auto_reset_seconds": int(self._kill_switch_auto_reset_seconds),
             "remaining_auto_reset_seconds": int(remaining),
-            "last_failure": self.get_last_kill_switch_failure(),
+            "last_failure": last_failure or None,
             "recent_failures_count": len(recent_failures),
             "recent_failures": recent_failures,
+            "broker_attempted": bool(last_failure.get("broker_attempted", False)),
+            "last_exception_type": last_failure.get("exception_type"),
+            "last_exception_message": last_failure.get("exception_message"),
+            "symbol": last_failure.get("symbol"),
+            "trace_id": last_failure.get("trace_id"),
             "last_reset": dict(self._kill_switch_last_reset) if self._kill_switch_last_reset else None,
         }
 
@@ -3296,11 +3338,38 @@ class OrderManager:
                 return TradePlanSubmitResult(False, reason="protected_price_invalidates_bracket", details=details, broker_attempted=False)
         if hasattr(self, "place_managed_order"):
             if hasattr(self, "place_managed_order_result"):
-                managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+                try:
+                    managed = self.place_managed_order_result(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+                except Exception as exc:  # noqa: BLE001
+                    err = self._sanitize_broker_error(exc)
+                    self._last_order_api_error_type = type(exc).__name__
+                    self._last_order_api_error = err
+                    self._emit_broker_health_status(force=True)
+                    return TradePlanSubmitResult(False, reason="broker_placement_exception", details={"error_type": type(exc).__name__, "error": err, "symbol": symbol, "trace_id": plan.trace_id, "protected_price": price}, broker_attempted=True)
                 return TradePlanSubmitResult(managed.accepted, order_id=managed.order_id, reason=managed.reason, details=managed.details or {"protected_price": price}, broker_attempted=managed.broker_attempted)
-            oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+            try:
+                oid = self.place_managed_order(symbol=symbol, side=plan.side, quantity=plan.quantity, entry_price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, signal_id=plan.signal_id, strategy_name=plan.strategy_name, tag=plan.tag, product=plan.product, variety=plan.variety, trace_id=plan.trace_id, allow_market_entry=plan.allow_market_entry)
+            except Exception as exc:  # noqa: BLE001
+                err = self._sanitize_broker_error(exc)
+                self._last_order_api_error_type = type(exc).__name__
+                self._last_order_api_error = err
+                self._emit_broker_health_status(force=True)
+                return TradePlanSubmitResult(False, reason="broker_placement_exception", details={"error_type": type(exc).__name__, "error": err, "symbol": symbol, "trace_id": plan.trace_id, "protected_price": price}, broker_attempted=True)
+            if oid:
+                self._last_order_api_error_type = None
+                self._last_order_api_error = None
             return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "place_order_rejected", details={"protected_price": price}, broker_attempted=bool(oid))
-        oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+        try:
+            oid = self.place_order(symbol=symbol, side=plan.side, quantity=plan.quantity, order_type=OrderType.LIMIT, price=price, stop_loss=plan.stop_loss, take_profit=plan.take_profit, tag=plan.tag, check_risk=True, product=plan.product)
+        except Exception as exc:  # noqa: BLE001
+            err = self._sanitize_broker_error(exc)
+            self._last_order_api_error_type = type(exc).__name__
+            self._last_order_api_error = err
+            self._emit_broker_health_status(force=True)
+            return TradePlanSubmitResult(False, reason="broker_placement_exception", details={"error_type": type(exc).__name__, "error": err, "symbol": symbol, "trace_id": plan.trace_id, "protected_price": price}, broker_attempted=True)
+        if oid:
+            self._last_order_api_error_type = None
+            self._last_order_api_error = None
         return TradePlanSubmitResult(bool(oid), order_id=oid, reason="accepted" if oid else "order_rejected", details={"protected_price": price}, broker_attempted=True)
 
     def place_managed_order(
@@ -7063,6 +7132,82 @@ class OrderManager:
                 if order.status not in self.FINAL_STATUSES
             ]
 
+    def get_broker_health_snapshot(self) -> dict[str, Any]:
+        now = time.time()
+        last_margin_success_age_s = max(now - self._last_margin_success_ts, 0.0) if self._last_margin_success_ts is not None else None
+        balance_stale = last_margin_success_age_s is None or last_margin_success_age_s > float(self._margin_cache_max_age_seconds)
+        trading_allowed_effect = "none"
+        if self._margin_circuit_open or self._last_margin_error_type:
+            trading_allowed_effect = "position_sizing_degraded"
+        if balance_stale and not self._allow_entry_with_stale_margin:
+            trading_allowed_effect = "live_orders_blocked"
+        connected_attr = getattr(self._broker, "is_connected", True)
+        try:
+            broker_connected = bool(connected_attr() if callable(connected_attr) else connected_attr)
+        except Exception:
+            broker_connected = False
+        return {
+            "broker_connected": broker_connected,
+            "margin_api_available": self._last_margin_error_type is None,
+            "last_margin_refresh_ts": self._last_margin_refresh_ts,
+            "last_margin_success_age_s": last_margin_success_age_s,
+            "last_margin_error_type": self._last_margin_error_type,
+            "last_margin_error": self._last_margin_error,
+            "margin_circuit_open": self._margin_circuit_open,
+            "margin_circuit_remaining_s": max((self._margin_circuit_until_ts or 0.0) - now, 0.0),
+            "balance_stale": balance_stale,
+            "available_balance": self._last_margin_available_balance,
+            "balance_source": self._last_margin_balance_source or "unknown",
+            "trading_allowed_effect": trading_allowed_effect,
+            "order_api_available": self._last_order_api_error_type is None,
+            "last_order_api_error_type": self._last_order_api_error_type,
+            "last_order_api_error": self._last_order_api_error,
+        }
+
+    def _emit_broker_health_status(self, *, force: bool = False) -> None:
+        try:
+            now = time.time()
+            market_open, _reason = get_time_status()
+            snapshot = self.get_broker_health_snapshot()
+            changed_effect = snapshot["trading_allowed_effect"] != self._last_broker_health_effect
+            changed_circuit = bool(snapshot["margin_circuit_open"]) != self._last_broker_health_circuit_state
+            interval_elapsed = now - self._last_broker_health_emit_ts >= 30.0
+            if not (force or changed_effect or changed_circuit or (market_open and interval_elapsed)):
+                return
+            self._last_broker_health_emit_ts = now
+            self._last_broker_health_effect = str(snapshot["trading_allowed_effect"])
+            self._last_broker_health_circuit_state = bool(snapshot["margin_circuit_open"])
+            self._logger.info("BROKER_HEALTH_STATUS", extra={"event": "BROKER_HEALTH_STATUS", **snapshot})
+        except Exception as exc:  # noqa: BLE001
+            with suppress(Exception):
+                self._logger.debug(
+                    "BROKER_HEALTH_STATUS_EMIT_FAILED",
+                    extra={
+                        "event": "BROKER_HEALTH_STATUS_EMIT_FAILED",
+                        "error_type": type(exc).__name__,
+                        "error": self._sanitize_broker_error(exc),
+                    },
+                )
+
+    def _record_margin_refresh_failure(self, exc: Exception) -> None:
+        now = time.time()
+        self._last_margin_refresh_ts = now
+        self._last_margin_error_type = type(exc).__name__
+        self._last_margin_error = self._sanitize_broker_error(exc)
+        self._margin_circuit_open = True
+        self._margin_circuit_until_ts = now + 30.0
+
+    def _record_margin_refresh_success(self, available: float, source: str = "mdm") -> None:
+        now = time.time()
+        self._last_margin_success_ts = now
+        self._last_margin_refresh_ts = now
+        self._last_margin_available_balance = float(available)
+        self._last_margin_balance_source = source
+        self._last_margin_error_type = None
+        self._last_margin_error = None
+        self._margin_circuit_open = False
+        self._margin_circuit_until_ts = None
+
     def _resolve_margin_client(self) -> Any:
         client = getattr(self._broker, "_client", None)
         return client if client is not None else self._broker
@@ -7097,29 +7242,38 @@ class OrderManager:
             return None
         return float(number)
 
-    def _resolve_available_margin(self) -> tuple[float | None, str]:
+    def _resolve_available_margin_raw(self) -> tuple[float | None, str]:
         mdm = self._data_hub or self._market_data
         if mdm is not None:
+            self._last_margin_refresh_ts = time.time()
+            refresh_failed = False
             try:
                 mdm.refresh_margin_snapshot()
             except Exception as exc:  # noqa: BLE001
+                refresh_failed = True
+                self._record_margin_refresh_failure(exc)
                 self._logger.error(
                     "Failure in _resolve_available_margin mdm refresh: %s",
-                    exc,
-                    extra={"event": "order_margin_mdm_refresh_error"},
+                    self._sanitize_broker_error(exc),
+                    extra={"event": "order_margin_mdm_refresh_error", "error_type": type(exc).__name__},
                     exc_info=exc,
                 )
+            if refresh_failed:
+                return None, "margin_refresh_failed"
             try:
                 available = mdm.get_available_balance()
             except Exception as exc:  # noqa: BLE001
+                self._record_margin_refresh_failure(exc)
                 self._logger.error(
                     "Failure in _resolve_available_margin mdm get: %s",
-                    exc,
-                    extra={"event": "order_margin_mdm_read_error"},
+                    self._sanitize_broker_error(exc),
+                    extra={"event": "order_margin_mdm_read_error", "error_type": type(exc).__name__},
                     exc_info=exc,
                 )
+                return None, "margin_read_failed"
             else:
                 if available is not None and available > 0:
+                    self._record_margin_refresh_success(float(available), "mdm")
                     return float(available), "mdm"
         risk_manager = self._risk_manager
         if risk_manager is not None:
@@ -7128,6 +7282,40 @@ class OrderManager:
                 if math.isfinite(balance) and balance > 0:
                     return balance, "risk"
         return None, "unknown"
+
+    def _resolve_available_margin(self, *, for_entry: bool = True) -> tuple[float | None, str]:
+        available, source = self._resolve_available_margin_raw()
+        now = time.time()
+        if (
+            self._margin_circuit_open
+            and self._margin_circuit_until_ts is not None
+            and now >= self._margin_circuit_until_ts
+        ):
+            self._margin_circuit_open = False
+        if source == "mdm":
+            self._emit_broker_health_status()
+            return available, source
+        if self._last_margin_success_ts is not None:
+            age = now - self._last_margin_success_ts
+            cached = self._last_margin_available_balance
+            if age <= float(self._margin_cache_max_age_seconds) and cached is not None and cached > 0:
+                self._last_margin_balance_source = "margin_cache_used"
+                self._emit_broker_health_status(force=True)
+                return cached, "margin_cache_used"
+            if not for_entry:
+                self._emit_broker_health_status(force=True)
+                return available, "margin_unavailable_stale_exit_allowed"
+            if self._allow_entry_with_stale_margin and cached is not None and cached > 0:
+                self._last_margin_balance_source = "margin_cache_stale_allowed"
+                self._emit_broker_health_status(force=True)
+                return cached, "margin_cache_stale_allowed"
+            self._emit_broker_health_status(force=True)
+            return None, "margin_unavailable_stale"
+        if for_entry and source == "risk" and not self._allow_entry_with_stale_margin:
+            self._emit_broker_health_status(force=True)
+            return None, "margin_unavailable_stale"
+        self._emit_broker_health_status(force=True)
+        return available, source
 
     def _reference_price(self, symbol: str) -> float:
         """Return a best-effort reference price for margin planning.
