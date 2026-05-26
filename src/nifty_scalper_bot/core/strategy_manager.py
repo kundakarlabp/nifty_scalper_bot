@@ -1555,9 +1555,6 @@ class StrategyManager(_BaseStrategyManager):
             extra={"event": "elite_stats_collect"},
         )
         stats: list[dict[str, t.Any]] = []
-        eval_id = f"{symbol}:{int(time.time())}"
-        indicators.setdefault("eval_id", eval_id)
-        strategy_reasons: dict[str, str] = {}
         for strategy in self._strategies:
             if not isinstance(strategy, EliteStrategy):
                 continue
@@ -2706,6 +2703,9 @@ class StrategyManager(_BaseStrategyManager):
         symbol_is_option = bool(re.search(r"(CE|PE)$", symbol_upper))
         symbol_is_future = symbol_upper.endswith("FUT")
         direction_bias = str(indicators.get("direction_bias") or "").upper()
+        eval_id = f"{symbol}:{int(time.time())}"
+        indicators.setdefault("eval_id", eval_id)
+        strategy_reasons: dict[str, str] = {}
         for strategy in self._strategies:
             if strategy.name in self._disabled_strategies:
                 disabled.append(strategy.name)

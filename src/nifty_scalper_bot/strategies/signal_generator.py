@@ -28,9 +28,12 @@ def build_strategy_history_context(
     runner_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build domain-aware strategy history metadata."""
-    del data_hub
     bars: list[Any] = []
-    get_bars = getattr(indicator_engine, "get_ohlc_bars", None)
+    get_bars = getattr(data_hub, "get_ohlc_bars", None) if data_hub is not None else None
+    history_source = "data_hub"
+    if not callable(get_bars):
+        get_bars = getattr(indicator_engine, "get_ohlc_bars", None)
+        history_source = "indicator_engine"
     if callable(get_bars):
         with suppress(Exception):
             bars = list(get_bars(symbol) or [])
@@ -39,7 +42,7 @@ def build_strategy_history_context(
     is_option = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
     option_count = indicator_count if is_option else 0
     spot_count = indicator_count if symbol_upper.startswith("NSE:NIFTY") else 0
-    underlying_count = 0
+    underlying_count = 0 if is_option else indicator_count
     if runner_context:
         option_count = int(runner_context.get("option_history_count", option_count) or 0)
         spot_count = int(runner_context.get("spot_history_count", spot_count) or 0)
@@ -52,7 +55,7 @@ def build_strategy_history_context(
         "spot_history_count": spot_count,
         "underlying_history_count": underlying_count,
         "history_symbol_key": symbol,
-        "history_source": "indicator_engine",
+        "history_source": history_source,
         "history_domain_used": "options" if is_option else "underlying",
         "oldest_bar_ts": None,
         "latest_bar_ts": None,
