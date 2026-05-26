@@ -40,9 +40,10 @@ def build_strategy_history_context(
     indicator_count = len(bars)
     symbol_upper = str(symbol or "").upper()
     is_option = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
+    is_spot = symbol_upper in {"NSE:NIFTY", "NIFTY", "NSE:NIFTY50", "NIFTY50"}
     option_count = indicator_count if is_option else 0
-    spot_count = indicator_count if symbol_upper.startswith("NSE:NIFTY") else 0
-    underlying_count = 0 if is_option else indicator_count
+    spot_count = indicator_count if is_spot else 0
+    underlying_count = 0 if (is_option or is_spot) else indicator_count
     if runner_context:
         option_count = int(runner_context.get("option_history_count", option_count) or 0)
         spot_count = int(runner_context.get("spot_history_count", spot_count) or 0)
@@ -56,7 +57,7 @@ def build_strategy_history_context(
         "underlying_history_count": underlying_count,
         "history_symbol_key": symbol,
         "history_source": history_source,
-        "history_domain_used": "options" if is_option else "underlying",
+        "history_domain_used": "options" if is_option else "spot" if is_spot else "underlying",
         "oldest_bar_ts": None,
         "latest_bar_ts": None,
         "history_quality": "warm" if indicator_count >= min_required else "cold",

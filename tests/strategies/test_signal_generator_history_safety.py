@@ -66,10 +66,21 @@ def test_build_strategy_history_context_uses_data_hub_source() -> None:
 
 def test_build_strategy_history_context_sets_underlying_for_non_option() -> None:
     ctx = build_strategy_history_context(
-        symbol="NSE:NIFTY",
+        symbol="NFO:NIFTY26MAY24FUT",
         indicator_engine=_IndicatorEngineBars(),
         data_hub=None,
     )
     assert ctx["history_domain_used"] == "underlying"
     assert ctx["underlying_history_count"] == 35
+    assert ctx["spot_history_count"] == 0
+
+
+def test_build_strategy_history_context_sets_spot_domain_for_nifty_spot() -> None:
+    ctx = build_strategy_history_context(
+        symbol="NSE:NIFTY",
+        indicator_engine=_IndicatorEngineBars(),
+        data_hub=None,
+    )
+    assert ctx["history_domain_used"] == "spot"
     assert ctx["spot_history_count"] == 35
+    assert ctx["underlying_history_count"] == 0

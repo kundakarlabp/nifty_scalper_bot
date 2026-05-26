@@ -2720,6 +2720,7 @@ class StrategyManager(_BaseStrategyManager):
                 continue
             strategy_name = str(getattr(strategy, "name", "") or "")
             if strategy_name in {"VWAPPro", "OrderFlow"} and not symbol_is_option:
+                strategy_reasons[strategy_name] = "context_symbol_skipped_for_option_strategy"
                 no_vote_reason_counts["context_symbol_skipped_for_option_strategy"] = (
                     no_vote_reason_counts.get(
                         "context_symbol_skipped_for_option_strategy", 0
@@ -2741,6 +2742,7 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             if strategy_name == "BBSqueeze" and symbol_is_option:
+                strategy_reasons[strategy_name] = "context_symbol_skipped_for_underlying_strategy"
                 no_vote_reason_counts["context_symbol_skipped_for_underlying_strategy"] = (
                     no_vote_reason_counts.get(
                         "context_symbol_skipped_for_underlying_strategy", 0

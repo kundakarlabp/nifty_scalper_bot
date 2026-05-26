@@ -66,6 +66,15 @@ class SMCStrategy(EliteStrategy):
             raw_history_count = indicators.get("history_count")
             resolved_history_count = (
                 option_history_count if history_domain_used == "options"
+                else (
+                    spot_history_count
+                    if spot_history_count is not None
+                    else underlying_history_count
+                    if underlying_history_count is not None
+                    else raw_history_count
+                    if raw_history_count is not None
+                    else indicator_history_count
+                ) if history_domain_used == "spot"
                 else underlying_history_count if history_domain_used == "underlying"
                 else raw_history_count if raw_history_count is not None else indicator_history_count
             )
