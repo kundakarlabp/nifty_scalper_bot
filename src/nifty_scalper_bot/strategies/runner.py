@@ -177,6 +177,19 @@ def _safe_positive_float(value: object, fallback: float, *, minimum: float = 0.0
     return max(parsed, float(minimum))
 
 
+def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return max(int(default), int(minimum))
+    return max(parsed, int(minimum))
+
+
+def safe_positive_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    return _safe_positive_float(os.getenv(name, default), default, minimum=minimum)
+
+
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
 )
@@ -884,6 +897,7 @@ class StrategyRunner:
         # bar closes (up to 60 s after startup).
         self._live_bar_seen: set[str] = set()
         self._data_phase: dict[str, str] = {}
+        self._symbol_execution_phase: dict[str, str] = {}
         # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
         # for each symbol so Railway logs confirm the moment strategies become active.
         self._warmup_complete_logged: set[str] = set()
@@ -906,6 +920,13 @@ class StrategyRunner:
         self._market_regime_engine = MarketRegimeEngine()
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
         self._last_regime_inputs_by_symbol: dict[str, dict[str, Any]] = {}
+        self._build_info = {
+            "git_sha": os.getenv("GIT_SHA", "unknown"),
+            "git_branch": os.getenv("GIT_BRANCH", "unknown"),
+            "deployment_id": os.getenv("DEPLOYMENT_ID", "unknown"),
+            "build_time": os.getenv("BUILD_TIME", "unknown"),
+            "strategy_profile_version": os.getenv("STRATEGY_PROFILE_VERSION", "unknown"),
+        }
 
         # FIX S10-2: wire bracket-exit callback so direction lock clears on SL/TP
         if self._bracket_manager is not None and hasattr(
@@ -6589,6 +6610,41 @@ class StrategyRunner:
             return False
         return True
 
+    def _update_symbol_execution_phase(self, symbol: str, new_phase: str, reason: str) -> None:
+        old_phase = self._symbol_execution_phase.get(symbol)
+        if old_phase == new_phase:
+            return
+        self._symbol_execution_phase[symbol] = new_phase
+        self._logger.info(
+            "SYMBOL_EXECUTION_PHASE_UPDATE symbol=%s old_phase=%s new_phase=%s reason=%s",
+            symbol,
+            old_phase,
+            new_phase,
+            reason,
+            extra={
+                "event": "SYMBOL_EXECUTION_PHASE_UPDATE",
+                "symbol": symbol,
+                "old_phase": old_phase,
+                "new_phase": new_phase,
+                "reason": reason,
+                "data_phase_global": self._data_phase.get(symbol),
+                "live_orders_armed": bool(self._runtime_live_orders_armed),
+            },
+        )
+
+    def _symbol_live_entry_ready(self, symbol: str) -> tuple[bool, str]:
+        if not bool(self._runtime_live_orders_armed):
+            return False, "execution_not_armed"
+        if not self._is_tradable_symbol(symbol):
+            return False, "non_tradable_symbol"
+        required_bars = max(self._required_bars_for_symbol(symbol), safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
+        history_count = len(self._indicator_engine.get_history(symbol) or [])
+        if history_count < required_bars:
+            return False, "insufficient_indicator_bar_count"
+        if not self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0):
+            return False, "option_tick_stale"
+        return True, "symbol_live_ready"
+
     def _classify_no_trade_decision(
         self,
         *,
@@ -6603,6 +6659,12 @@ class StrategyRunner:
             return "broker_placement_failed", "broker_attempted_failed"
         if option_count < option_required:
             return "data_history_cold", "insufficient_indicator_bar_count"
+        if signal is None:
+            latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
+            if callable(latest_decision_getter):
+                decision = latest_decision_getter(symbol)
+                if decision is not None:
+                    return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
         conflict = bool(indicators_ctx.get("direction_conflict") or indicators_ctx.get("underlying_direction_conflict"))
         if conflict:
             return "context_direction_conflict", "underlying_direction_conflict"
@@ -6610,11 +6672,6 @@ class StrategyRunner:
         if not direction_bias:
             return "context_direction_unavailable", "direction_context_not_ready"
         if signal is None:
-            latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
-            if callable(latest_decision_getter):
-                decision = latest_decision_getter(symbol)
-                if decision is not None:
-                    return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
             return "strategy_no_trigger", "evaluation_no_signal"
         if not self._runtime_live_orders_armed:
             return "execution_readiness_false", str(self._runtime_readiness_reason or "runtime_live_orders_not_armed")
@@ -6674,6 +6731,9 @@ class StrategyRunner:
                     "broker_health_effect": None,
                     "margin_status": None,
                     "kill_switch_active": self._safe_kill_switch_active_for_diagnostics(),
+                    "git_sha": self._build_info.get("git_sha"),
+                    "git_branch": self._build_info.get("git_branch"),
+                    "deployment_id": self._build_info.get("deployment_id"),
                 },
             )
         except Exception:
@@ -6748,7 +6808,7 @@ class StrategyRunner:
                 return False
             required_bars = self._required_bars_for_symbol(symbol)
             if self._is_tradable_symbol(symbol):
-                option_execution_min_bars = int(os.getenv("OPTION_EXECUTION_MIN_BARS", "5") or "5")
+                option_execution_min_bars = safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1)
                 required_bars = max(required_bars, option_execution_min_bars)
             history_count = len(self._indicator_engine.get_history(symbol) or [])
             restored_from_cache = symbol in self._restored_from_cache_symbols
@@ -6788,7 +6848,7 @@ class StrategyRunner:
                         if sym
                     }
                     is_selected_option = normalize_symbol(symbol) in selected_symbols
-                    option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or "1")
+                    option_eval_min_live_bars = safe_positive_int_env("OPTION_EVAL_MIN_LIVE_BARS", 1, minimum=1)
                     spot_symbol = "NSE:NIFTY"
                     fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context" and not self._is_context_symbol_suspended(sym)), "")
                     if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
@@ -6859,20 +6919,27 @@ class StrategyRunner:
                         self._runtime_indicators[symbol]["futures_context_quality"] = "cold" if fut_symbol else "missing"
                         self._runtime_indicators[symbol]["context_confidence_multiplier"] = 0.75
                         self._runtime_indicators[symbol]["context_cold_reasons"] = ["spot_context_cold" if spot_bars < self._context_required_bars else "", "futures_context_cold" if fut_bars < self._context_required_bars else ""]
-                    if self._should_log_throttled(
-                        f"eval_block_cold_history:{symbol}", 120.0
-                    ):
-                        self._logger.warning(
-                            "EVALUATION_BLOCKED_COLD_HISTORY symbol=%s bars=%d required=%d",
+                    if soft_pass:
+                        self._logger.info(
+                            "EVALUATION_ALLOWED_COLD_HISTORY_SOFT_PASS symbol=%s bars=%d required=%d",
                             symbol,
                             history_count,
                             required_bars,
-                            extra={
-                                "event": "EVALUATION_BLOCKED_COLD_HISTORY",
-                                "symbol": symbol,
-                                "bars": history_count,
-                                "required": required_bars,
-                            },
+                            extra={"event": "EVALUATION_ALLOWED_COLD_HISTORY_SOFT_PASS", "symbol": symbol, "bars": history_count, "required": required_bars},
+                        )
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage='phase9',
+                            reason='cold_history_soft_pass',
+                            allowed=True,
+                            trace_id=trace_id,
+                        )
+                        return True
+                    if self._should_log_throttled(f"eval_block_cold_history:{symbol}", 120.0):
+                        self._logger.warning(
+                            "EVALUATION_BLOCKED_COLD_HISTORY symbol=%s bars=%d required=%d",
+                            symbol, history_count, required_bars,
+                            extra={"event": "EVALUATION_BLOCKED_COLD_HISTORY", "symbol": symbol, "bars": history_count, "required": required_bars},
                         )
                     category = "data_history_cold" if history_count < required_bars else "data_history_integrity_failed"
                     reason = 'insufficient_indicator_bar_count' if history_count < required_bars else 'indicator_history_integrity_failed'
@@ -6892,7 +6959,7 @@ class StrategyRunner:
                     allowed=False,
                     trace_id=trace_id,
                 )
-                return bool(soft_pass)
+                return False
             return True
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
@@ -8871,10 +8938,12 @@ class StrategyRunner:
                 phase = "phase10_signal_execution"
                 self._last_strategy_versions[symbol] = current_version
                 signal_phase = self._data_phase.get(symbol)
-                if signal_phase != "LIVE":
+                live_ready, live_ready_reason = self._symbol_live_entry_ready(symbol)
+                if not live_ready:
+                    self._update_symbol_execution_phase(symbol, "BLOCKED", live_ready_reason)
                     signal_metadata = dict(signal.metadata or {})
                     signal_metadata["shadow_only"] = True
-                    signal_metadata["blocked_reason"] = "non_live_data_phase_signal"
+                    signal_metadata["blocked_reason"] = live_ready_reason
                     signal_metadata["data_phase"] = signal_phase
                     self._logger.info(
                         "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s data_phase=%s",
@@ -8887,7 +8956,7 @@ class StrategyRunner:
                         or signal_metadata.get("side"),
                         False,
                         "runner_phase10",
-                        "non_live_data_phase_signal",
+                        live_ready_reason,
                         signal_phase,
                         extra={
                             "event": "TRADE_DECISION_TRACE",
@@ -8900,12 +8969,20 @@ class StrategyRunner:
                             or signal_metadata.get("side"),
                             "allowed": False,
                             "blocked_at": "runner_phase10",
-                            "blocked_reason": "non_live_data_phase_signal",
+                            "blocked_reason": live_ready_reason,
                             "data_phase": signal_phase,
                             "trace_id": trace_id,
                         },
                     )
                     return
+                self._update_symbol_execution_phase(symbol, "LIVE_READY", "symbol_live_ready")
+                if signal_phase == "HYDRATION":
+                    self._logger.info(
+                        "DATA_PHASE_HYDRATION_SYMBOL_LIVE_READY symbol=%s trace_id=%s",
+                        symbol,
+                        trace_id,
+                        extra={"event": "DATA_PHASE_HYDRATION_SYMBOL_LIVE_READY", "symbol": symbol, "trace_id": trace_id},
+                    )
                 current_regime = self._compute_regime_snapshot(symbol)
                 signal_metadata = dict(signal.metadata or {})
                 signal_metadata["runtime_regime"] = current_regime.value

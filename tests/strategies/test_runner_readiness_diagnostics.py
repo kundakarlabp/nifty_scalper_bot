@@ -5,7 +5,7 @@ import time
 from types import SimpleNamespace
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-from nifty_scalper_bot.strategies.runner import StrategyRunner, _safe_positive_float
+from nifty_scalper_bot.strategies.runner import StrategyRunner, _safe_positive_float, safe_positive_int_env
 
 
 class _DummyIndicator:
@@ -282,6 +282,25 @@ def test_emit_no_trade_decision_does_not_raise_with_missing_order_manager() -> N
     runner = _make_runner()
     del runner._order_manager
     runner._emit_no_trade_decision(symbol="NFO:CE", trace_id="t", category="strategy_no_trigger", reason="evaluation_no_signal")
+
+
+def test_invalid_option_execution_min_bars_env_does_not_crash(monkeypatch) -> None:
+    monkeypatch.setenv("OPTION_EXECUTION_MIN_BARS", "bad")
+    assert safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1) == 5
+
+
+def test_runner_no_trade_prefers_strategy_decision_before_context_unavailable() -> None:
+    runner = _make_runner()
+    runner._strategy_manager = SimpleNamespace(
+        get_last_no_signal_decision=lambda _sym: SimpleNamespace(
+            category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled"
+        )
+    )
+    category, reason = runner._classify_no_trade_decision(
+        symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False
+    )
+    assert category == "strategy_single_vote_disabled"
+    assert reason == "single_vote_scalp_disabled"
 
 
 def test_runner_emits_no_trade_decision_on_signal_none_strategy_no_trigger(caplog) -> None:
