@@ -1426,3 +1426,21 @@ def test_symbols_for_poll_excludes_expired_futures(monkeypatch: pytest.MonkeyPat
     symbols = manager._symbols_for_poll()  # noqa: SLF001
     assert "NFO:NIFTY26MAYFUT" not in symbols
     assert "NFO:NIFTY26JUNFUT" in symbols
+
+
+def test_get_ltp_expired_future_returns_none_and_never_dict(ws: DummyWebSocket) -> None:
+    class Resolver:
+        def list_instruments(self, *_a: Any, **_k: Any) -> list[dict[str, Any]]:
+            return [{"exchange": "NFO", "instrument_type": "FUT", "name": "NIFTY", "tradingsymbol": "NIFTY26JUNFUT", "expiry": date(2026, 6, 25)}]
+
+    manager = MarketDataManager(DummyBroker(), ws, resolver=Resolver())
+    out = manager.get_ltp("NFO:NIFTY26MAYFUT")
+    assert out is None
+    assert not isinstance(out, dict)
+
+
+def test_rotate_future_updates_readiness_when_initially_empty(ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(DummyBroker(), ws)
+    manager._readiness_requirements = {}  # noqa: SLF001
+    manager.rotate_active_nifty_future_context("NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT", reason="test")
+    assert manager._readiness_requirements.get("futures") == "NFO:NIFTY26JUNFUT"  # noqa: SLF001

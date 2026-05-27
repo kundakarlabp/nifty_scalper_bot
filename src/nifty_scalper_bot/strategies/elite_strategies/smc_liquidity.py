@@ -218,13 +218,24 @@ class SMCStrategy(EliteStrategy):
             feature_completeness = float(len(present_features)) / float(len(required_features))
             feature_threshold = safe_float_env("SMC_FEATURE_COMPLETENESS_THRESHOLD", 0.6)
             missing_features = [name for name in required_features if name not in present_features]
+            missing_feature_sources = {
+                name: f"{name}_missing"
+                for name in missing_features
+            }
             feature_ready = feature_completeness >= feature_threshold
-            LOGGER.info("SMC_FEATURE_READINESS symbol=%s feature_completeness=%.3f missing_features=%s live_enabled=%s vote_allowed=%s hard_veto=%s", symbol, feature_completeness, ",".join(missing_features), is_live, feature_ready, False, extra={"event": "SMC_FEATURE_READINESS", "symbol": symbol, "feature_completeness": feature_completeness, "missing_features": missing_features, "live_enabled": is_live, "vote_allowed": feature_ready, "hard_veto": False})
+            LOGGER.info("SMC_FEATURE_READINESS symbol=%s feature_completeness=%.3f missing_features=%s missing_feature_sources=%s live_enabled=%s vote_allowed=%s hard_veto=%s", symbol, feature_completeness, ",".join(missing_features), missing_feature_sources, is_live, feature_ready, False, extra={"event": "SMC_FEATURE_READINESS", "symbol": symbol, "feature_completeness": feature_completeness, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources, "live_enabled": is_live, "vote_allowed": feature_ready, "hard_veto": False})
             if option_premium_domain:
                 premium_reversal = bool(bullish_sweep or indicators.get('premium_reclaim') or indicators.get('bullish_reversal'))
                 structure_flip = bool(indicators.get('choch_confirmed') or indicators.get('bos_confirmed'))
                 if not feature_ready:
                     self._no_vote('strategy_feature_unavailable')
+                    LOGGER.info(
+                        "SMC_FEATURE_UNAVAILABLE symbol=%s missing_features=%s missing_feature_sources=%s",
+                        symbol,
+                        ",".join(missing_features),
+                        missing_feature_sources,
+                        extra={"event": "SMC_FEATURE_UNAVAILABLE", "symbol": symbol, "missing_features": missing_features, "missing_feature_sources": missing_feature_sources},
+                    )
                     return None
                 if not premium_reversal and not structure_flip:
                     self._no_vote('premium_not_reversing_up')

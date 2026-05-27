@@ -257,6 +257,8 @@ class MarketDataManager:
         ] = {}
         self._last_tick_wallclock: dict[str, float] = {}
         self._last_quote_ts_ms: dict[str, float] = {}
+        self._active_nifty_future_cache_symbol: str | None = None
+        self._active_nifty_future_cache_until_mono: float = 0.0
         self._last_mid: dict[str, tuple[float, float]] = {}
         self._lock = threading.RLock()
         self._authoritative_tick_lock = threading.Lock()
@@ -2527,6 +2529,17 @@ class MarketDataManager:
             self._quote_direct_miss_reason.pop(symbol_key, None)
 
         canonical_symbol = self._canonical_symbol(symbol)
+        if self._is_nifty_future_symbol_expired(canonical_symbol):
+            active = self.get_active_nifty_future_symbol_cached()
+            if active and self._canonical_symbol(active) != canonical_symbol:
+                self.rotate_active_nifty_future_context(canonical_symbol, active, reason="pull_quote_expired_future")
+            self._logger.warning(
+                "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=pull_quote",
+                canonical_symbol,
+                active,
+                extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote"},
+            )
+            return {"symbol": canonical_symbol, "quote_unavailable_reason": "suspended_expired_future", "active_future_symbol": active}
         if self.is_context_symbol_suspended(canonical_symbol):
             with self._lock:
                 cached_tick = self._latest_ticks.get(canonical_symbol)
@@ -6251,7 +6264,7 @@ class MarketDataManager:
         if sym.count(":") != 1:
             raise RuntimeError(f"Malformed canonical symbol: {sym}")
         if self._is_nifty_future_symbol_expired(sym):
-            active = self.resolve_active_nifty_future_symbol()
+            active = self.get_active_nifty_future_symbol_cached()
             if active and self._canonical_symbol(active) != sym:
                 self.rotate_active_nifty_future_context(sym, active, reason="ensure_tracking_expired_future")
             self._logger.warning(
@@ -6669,6 +6682,17 @@ class MarketDataManager:
                 best_symbol = f"NFO:{tradingsymbol}"
         return best_symbol
 
+    def get_active_nifty_future_symbol_cached(self, *, now: datetime | None = None, ttl_seconds: float = 30.0) -> str | None:
+        now_mono = time.monotonic()
+        cached = self._active_nifty_future_cache_symbol
+        if cached and now_mono < self._active_nifty_future_cache_until_mono:
+            return cached
+        resolved = self.resolve_active_nifty_future_symbol(now=now)
+        if resolved:
+            self._active_nifty_future_cache_symbol = self._canonical_symbol(resolved)
+            self._active_nifty_future_cache_until_mono = now_mono + max(1.0, float(ttl_seconds))
+        return resolved
+
     def _resolve_active_nifty_future_from_instruments(self, instruments: Iterable[Mapping[str, Any]], now: datetime | None = None) -> str | None:
         ref_now = now or datetime.now(timezone.utc)
         best_symbol: str | None = None
@@ -6709,7 +6733,7 @@ class MarketDataManager:
         now: datetime | None = None,
         selected_option_symbols: Sequence[str] | None = None,
     ) -> FuturesContextRotationResult:
-        active = self.resolve_active_nifty_future_symbol(now=now)
+        active = self.get_active_nifty_future_symbol_cached(now=now)
         source = "resolver"
         selected_symbols = [str(s or "") for s in (selected_option_symbols or []) if s]
         if not active:
@@ -6764,7 +6788,7 @@ class MarketDataManager:
         symbol_part = canonical.split(":", 1)[-1].upper()
         if not _NIFTY_FUT_RE.match(symbol_part):
             return False
-        active = self.resolve_active_nifty_future_symbol(now=now)
+        active = self.get_active_nifty_future_symbol_cached(now=now)
         if not active:
             return False
         return self._canonical_symbol(active) != canonical
@@ -6804,21 +6828,26 @@ class MarketDataManager:
                 self._quote_direct_miss_until.pop(old_canonical, None)
                 self._quote_direct_miss_reason.pop(old_canonical, None)
                 self._suspended_context_symbols.add(old_canonical)
-                self._suspended_context_symbol_until[old_canonical] = time.monotonic() + 3600.0
+                self._suspended_context_symbol_until[old_canonical] = time.monotonic() + (48.0 * 3600.0)
                 if old_token is not None:
                     self._desired_tokens.discard(old_token)
                     self._pending_subscription_tokens.discard(old_token)
                     self._pending_subscriptions.discard(old_token)
                     self._dispatched_subscriptions.discard(old_token)
                     self._confirmed_subscriptions.discard(old_token)
+                    ws = self._ws
+                    if ws is not None and hasattr(ws, "unsubscribe_tokens"):
+                        try:
+                            ws.unsubscribe_tokens([old_token])
+                        except (RuntimeError, ValueError, TypeError):
+                            self._logger.warning("FUTURES_CONTEXT_WS_UNSUBSCRIBE_FAILED symbol=%s token=%s", old_canonical, old_token, extra={"event": "FUTURES_CONTEXT_WS_UNSUBSCRIBE_FAILED", "symbol": old_canonical, "token": old_token})
             self._tracked_symbols.add(new_canonical)
             self._suspended_context_symbols.discard(new_canonical)
             self._suspended_context_symbol_until.pop(new_canonical, None)
         self.request_symbol_subscription(new_canonical)
         reqs = dict(self._readiness_requirements)
-        if reqs.get("futures"):
-            reqs["futures"] = new_canonical
-            self._readiness_requirements = reqs
+        reqs["futures"] = new_canonical
+        self._readiness_requirements = reqs
         self._logger.warning(
             "FUTURES_CONTEXT_ROTATED old=%s new=%s reason=%s",
             old_canonical or None,
