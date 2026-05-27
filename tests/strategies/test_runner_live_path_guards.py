@@ -238,6 +238,7 @@ def test_order_acceptance_notifies_orchestrator_entry() -> None:
     signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800CE', quantity=1, confidence=0.9, reason='test', stop_loss=100.0, take_profit=120.0, metadata={'strategy_score': 7, 'option_score': 7, 'data_score': 7, 'rr_score': 7})
     runner._handle_entry_signal_inner(signal, 'NFO:NIFTY26APR23800CE', 'NFO:NIFTY26APR23800CE', 110.0, datetime.now(timezone.utc), trace_id='notify')
     assert notified["symbol"] == 'NFO:NIFTY26APR23800CE'
+    assert notified["reason"] == "order_accepted"
 
 
 def test_selected_option_prewarm_accepts_sync_hydrator_list_result() -> None:
@@ -251,7 +252,25 @@ def test_selected_option_prewarm_accepts_sync_hydrator_list_result() -> None:
     import time as _t
     _t.sleep(0.05)
     assert "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight
-    assert notified["reason"] == "order_accepted"
+
+
+@pytest.mark.asyncio
+async def test_selected_option_prewarm_sync_hydrator_runs_off_event_loop() -> None:
+    runner = _build_runner()
+    runner._indicator_engine = SimpleNamespace(get_history=lambda _s: [1, 2, 3])
+    runner._selected_option_prewarm_last = {}
+    runner._selected_option_prewarm_inflight = set()
+    runner._selected_option_prewarm_cooldown_s = 0.0
+    import threading
+    called_thread = {"name": ""}
+    def _hydrate(*_a, **_k):
+        called_thread["name"] = threading.current_thread().name
+        return [1, 2, 3]
+    runner._data_hub = SimpleNamespace(hydrate_symbol_history=_hydrate)
+    runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t2")
+    await asyncio.sleep(0.05)
+    assert called_thread["name"]
+    assert called_thread["name"] != threading.current_thread().name
 
 
 def test_atr_fallback_used_for_insufficient_bars() -> None:

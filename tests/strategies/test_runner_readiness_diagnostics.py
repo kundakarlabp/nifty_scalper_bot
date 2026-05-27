@@ -192,3 +192,32 @@ def test_runner_no_trade_decision_reports_context_direction_conflict() -> None:
         broker_attempted=False,
     )
     assert category == "context_direction_conflict"
+
+
+def test_runner_no_trade_decision_reports_strategy_no_trigger_when_data_ready_but_signal_none() -> None:
+    runner = _make_runner()
+    runner._runtime_live_orders_armed = False
+    category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        signal=None,
+        indicators_ctx={"direction_bias": "CE"},
+        option_count=10,
+        option_required=5,
+        broker_attempted=False,
+    )
+    assert category == "strategy_no_trigger"
+
+
+def test_runner_emits_no_trade_decision_on_history_cold_eval_block(caplog) -> None:
+    runner = _make_runner()
+    runner._active_symbols = {"NFO:CE"}
+    runner._indicator_engine = _DummyIndicator({"NFO:CE": [1]})
+    runner._required_bars_for_symbol = lambda _s: 5
+    runner._is_tradable_symbol = lambda _s: True
+    runner._is_context_symbol = lambda _s: False
+    runner._is_option_symbol_tick_fresh = lambda _s, max_age_s=60.0: True
+    with caplog.at_level(logging.INFO):
+        allowed = runner._strategy_evaluation_allowed("NFO:CE", trace_id="t-cold")
+    assert allowed is False
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "RUNNER_NO_TRADE_DECISION")
+    assert rec.category == "data_history_cold"
+    assert rec.broker_attempted is False
