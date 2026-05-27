@@ -198,6 +198,36 @@ def test_pull_quote_403_marks_quote_api_unavailable(
     assert isinstance(status["last_checked_at"], float)
 
 
+def test_pull_quote_direct_missing_is_rate_limited(ws: DummyWebSocket) -> None:
+    class MissingBroker(DummyBroker):
+        def get_quote(self, symbol: str) -> dict[str, Any]:
+            self.calls.append(("get_quote", (symbol,)))
+            raise RuntimeError(f"Quote data missing for {symbol}")
+
+    manager = MarketDataManager(MissingBroker(), ws)
+    first = manager.pull_quote("NFO:NIFTY26MAYFUT")
+    second = manager.pull_quote("NFO:NIFTY26MAYFUT")
+    assert first["symbol"] == "NFO:NIFTY26MAYFUT"
+    assert second.get("quote_unavailable_reason") == "quote_symbol_missing_cooldown"
+    assert manager._quote_direct_miss_count["NFO:NIFTY26MAYFUT"] >= 1  # noqa: SLF001
+
+
+def test_active_future_resolver_replaces_expired_month_future(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    resolver = type(
+        "Resolver",
+        (),
+        {
+            "list_instruments": lambda self: [
+                {"segment": "NFO-FUT", "instrument_type": "FUT", "tradingsymbol": "NIFTY26MAYFUT", "expiry": "2026-05-20"},
+                {"segment": "NFO-FUT", "instrument_type": "FUT", "tradingsymbol": "NIFTY26JUNFUT", "expiry": "2026-06-25"},
+            ]
+        },
+    )()
+    manager = MarketDataManager(broker, ws, resolver=resolver)
+    symbol = manager.resolve_active_nifty_future_symbol(now=datetime(2026, 5, 27, tzinfo=timezone.utc))
+    assert symbol == "NFO:NIFTY26JUNFUT"
+
+
 @pytest.mark.asyncio
 async def test_wait_until_ready_not_ready_log_is_throttled(
     broker: DummyBroker,

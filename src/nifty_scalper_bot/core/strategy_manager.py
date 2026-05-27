@@ -34,6 +34,7 @@ from nifty_scalper_bot.strategies.signal_generator import (
 from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
+from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 
 log = get_logger(__name__)
 
@@ -2111,7 +2112,8 @@ class StrategyManager(_BaseStrategyManager):
         signal_score: float | None = None
         signal_confidence: float | None = None
         exit_result = "no_signal"
-        required_bars = int(getattr(self, "_required_candles", 20) or 20)
+        policy = HistoryReadinessPolicy.from_env()
+        required_bars = int(getattr(self, "_required_candles", policy.option_eval_min_bars) or policy.option_eval_min_bars)
         bars_available = len(self._indicator_engine.get_history(symbol) or [])
         indicators_ready = bars_available >= required_bars
         hub_ready = None
@@ -2398,7 +2400,7 @@ class StrategyManager(_BaseStrategyManager):
         # ✅ FIX S3: Inject exchange VWAP for options
         if self._data_hub is not None:
             try:
-                opt_quote = self._data_hub.get_quote(symbol)
+                opt_quote = _get_cached_quote_for_eval(self._data_hub, symbol)
                 if opt_quote:
                     _exch_vwap = self._extract_float(
                         opt_quote, ("vwap", "average_price")
@@ -4653,3 +4655,21 @@ __all__ = [
     "RegimeState",
     "RegimePerformanceBucket",
 ]
+def _get_cached_quote_for_eval(hub: t.Any, symbol: str) -> t.Mapping[str, t.Any] | None:
+    if hub is None:
+        return None
+    get_quote = getattr(hub, "get_quote", None)
+    if callable(get_quote):
+        try:
+            quote = get_quote(symbol, allow_pull=False)
+            if quote:
+                return t.cast(t.Mapping[str, t.Any], quote)
+        except TypeError:
+            pass
+    for method_name in ("get_latest_tick", "get_last_tick"):
+        method = getattr(hub, method_name, None)
+        if callable(method):
+            quote = method(symbol)
+            if quote:
+                return t.cast(t.Mapping[str, t.Any], dict(quote))
+    return None

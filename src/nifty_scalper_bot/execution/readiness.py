@@ -6,6 +6,29 @@ consistently from app startup, health endpoints, and supervisor checks.
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
+import os
+
+
+@dataclass(frozen=True)
+class HistoryReadinessPolicy:
+    option_eval_min_bars: int = 5
+    option_entry_min_bars: int = 5
+    context_min_bars: int = 50
+    smc_min_bars: int = 30
+    allow_synthetic_option_bars_for_eval: bool = False
+
+    @classmethod
+    def from_env(cls) -> "HistoryReadinessPolicy":
+        return cls(
+            option_eval_min_bars=max(1, int(os.getenv("OPTION_EVAL_MIN_BARS", "5") or "5")),
+            option_entry_min_bars=max(1, int(os.getenv("OPTION_ENTRY_MIN_BARS", "5") or "5")),
+            context_min_bars=max(1, int(os.getenv("CONTEXT_MIN_BARS", "50") or "50")),
+            smc_min_bars=max(1, int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")),
+            allow_synthetic_option_bars_for_eval=str(
+                os.getenv("ALLOW_SYNTHETIC_OPTION_BARS_FOR_EVAL", "false")
+            ).strip().lower() in {"1", "true", "yes", "on"},
+        )
 
 
 def compute_live_readiness(
@@ -20,7 +43,7 @@ def compute_live_readiness(
     selected_pe: str | None = None,
     ce_bars: int = 0,
     pe_bars: int = 0,
-    option_exec_min_bars: int = 30,
+    option_exec_min_bars: int = 0,
     ce_quote_ready: bool = False,
     pe_quote_ready: bool = False,
 ) -> tuple[bool, list[str]]:
@@ -62,9 +85,10 @@ def compute_live_readiness(
         reasons.append("strategy_runner_not_running")
     if not selected_ce or not selected_pe:
         reasons.append("selected_options_missing")
-    if int(ce_bars) < int(option_exec_min_bars):
+    min_bars = int(option_exec_min_bars) if int(option_exec_min_bars) > 0 else HistoryReadinessPolicy.from_env().option_entry_min_bars
+    if int(ce_bars) < min_bars:
         reasons.append("selected_ce_history_insufficient")
-    if int(pe_bars) < int(option_exec_min_bars):
+    if int(pe_bars) < min_bars:
         reasons.append("selected_pe_history_insufficient")
     if not ce_quote_ready:
         reasons.append("selected_ce_quote_missing")

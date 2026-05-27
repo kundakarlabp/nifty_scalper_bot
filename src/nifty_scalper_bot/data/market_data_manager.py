@@ -243,6 +243,10 @@ class MarketDataManager:
         self._quote_api_available = True
         self._quote_api_error: str | None = None
         self._quote_api_last_checked_at: float | None = None
+        self._quote_direct_miss_count: dict[str, int] = {}
+        self._quote_direct_miss_until: dict[str, float] = {}
+        self._quote_direct_miss_reason: dict[str, str] = {}
+        self._quote_direct_miss_cooldown_seconds = float(os.getenv("MDM_QUOTE_SYMBOL_MISS_COOLDOWN_SECONDS", "45") or "45")
         self._spot_ready_logged = False
         self._spot_refresh_last_attempt_mono: float = 0.0
         # Bounded queue: drops oldest when full so a stall in the async
@@ -2416,6 +2420,19 @@ class MarketDataManager:
         if not candidates:
             candidates = [canonical_symbol]
         quote: dict[str, Any] | None = None
+        cooldown_until = float(self._quote_direct_miss_until.get(canonical_symbol, 0.0) or 0.0)
+        now_mono = time.monotonic()
+        if cooldown_until > now_mono:
+            with self._lock:
+                cached_tick = self._latest_ticks.get(canonical_symbol)
+            if isinstance(cached_tick, Mapping) and cached_tick:
+                cached_quote = dict(cached_tick)
+                cached_quote.setdefault("source", "cache")
+                return cached_quote
+            return {
+                "symbol": canonical_symbol,
+                "quote_unavailable_reason": "quote_symbol_missing_cooldown",
+            }
         for key in candidates:
             broker_key: str | int
             if isinstance(key, int):
@@ -2434,6 +2451,27 @@ class MarketDataManager:
                     self._mark_quote_api_status(available=False, error="access_denied")
                 error_text = str(exc)
                 is_recoverable_miss = "Quote data missing" in error_text
+                if is_recoverable_miss:
+                    miss_count = int(self._quote_direct_miss_count.get(canonical_symbol, 0) or 0) + 1
+                    self._quote_direct_miss_count[canonical_symbol] = miss_count
+                    self._quote_direct_miss_reason[canonical_symbol] = "quote_data_missing"
+                    self._quote_direct_miss_until[canonical_symbol] = (
+                        time.monotonic() + self._quote_direct_miss_cooldown_seconds
+                    )
+                    self._logger.warning(
+                        "MDM_PULL_QUOTE_SYMBOL_MISSING symbol=%s miss_count=%s",
+                        canonical_symbol,
+                        miss_count,
+                        extra={
+                            "event": "MDM_PULL_QUOTE_SYMBOL_MISSING",
+                            "symbol": symbol,
+                            "canonical_symbol": canonical_symbol,
+                            "candidate_keys": [str(item) for item in candidates],
+                            "miss_count": miss_count,
+                            "cooldown_remaining_s": self._quote_direct_miss_cooldown_seconds,
+                            "reason": "quote_data_missing",
+                        },
+                    )
                 log_fn = self._logger.warning if is_recoverable_miss else self._logger.error
                 log_fn(
                     "Failure in pull_quote direct get_quote: %s",
@@ -2450,6 +2488,10 @@ class MarketDataManager:
                     exc_info=None if is_recoverable_miss else exc,
                 )
                 raw_quote = None
+            else:
+                self._quote_direct_miss_count.pop(canonical_symbol, None)
+                self._quote_direct_miss_until.pop(canonical_symbol, None)
+                self._quote_direct_miss_reason.pop(canonical_symbol, None)
             if isinstance(raw_quote, Mapping):
                 self._mark_quote_api_status(available=True)
                 quote = dict(raw_quote)
@@ -6423,6 +6465,45 @@ class MarketDataManager:
             self._last_mid[canonical_symbol] = (mid, now_ms)
         self._last_quote_ts_ms[canonical_symbol] = now_ms
         return quote
+
+    def resolve_active_nifty_future_symbol(self, now: datetime | None = None) -> str | None:
+        """Resolve nearest non-expired NIFTY futures symbol from resolver/instrument master."""
+        ref_now = now or datetime.now(timezone.utc)
+        resolver = getattr(self, "_resolver", None)
+        if resolver is None:
+            return None
+        fetchers = ("list_instruments", "get_instruments", "instruments")
+        instruments: list[Mapping[str, Any]] = []
+        for fetcher_name in fetchers:
+            fetcher = getattr(resolver, fetcher_name, None)
+            if callable(fetcher):
+                try:
+                    raw = fetcher() or []
+                except Exception:
+                    continue
+                if isinstance(raw, Sequence):
+                    instruments = [item for item in raw if isinstance(item, Mapping)]
+                    if instruments:
+                        break
+        best_symbol: str | None = None
+        best_expiry: datetime | None = None
+        for row in instruments:
+            segment = str(row.get("segment") or row.get("exchange") or "").upper()
+            if "NFO" not in segment:
+                continue
+            instrument_type = str(row.get("instrument_type") or row.get("type") or "").upper()
+            if instrument_type not in {"FUT", "FUTIDX"}:
+                continue
+            tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
+            if "NIFTY" not in tradingsymbol:
+                continue
+            expiry = _parse_expiry(row.get("expiry"))
+            if expiry is None or expiry < ref_now:
+                continue
+            if best_expiry is None or expiry < best_expiry:
+                best_expiry = expiry
+                best_symbol = f"NFO:{tradingsymbol}"
+        return best_symbol
 
     def get_symbol_snapshot(self, symbol: str) -> MarketSnapshot:
         """Return a unified MarketSnapshot for one symbol."""

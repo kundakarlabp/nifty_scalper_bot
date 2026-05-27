@@ -15,6 +15,7 @@ import os
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
+from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
@@ -79,7 +80,7 @@ def build_strategy_history_context(
         else spot_count if history_domain_used == "spot"
         else underlying_count
     )
-    min_required = int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")
+    min_required = HistoryReadinessPolicy.from_env().smc_min_bars
     context: dict[str, Any] = {
         "history_count": resolved_history_count,
         "indicator_history_count": raw_count,
