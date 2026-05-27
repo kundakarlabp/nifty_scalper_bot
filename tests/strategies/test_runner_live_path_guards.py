@@ -259,7 +259,6 @@ def test_order_acceptance_notifies_orchestrator_entry() -> None:
     assert notified["symbol"] == 'NFO:NIFTY26APR23800CE'
     assert notified["reason"] == "order_accepted"
 
-
 def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> None:
     runner = _build_runner()
     runner._logger = logging.getLogger("test.runner.prewarm.sync")
@@ -1233,6 +1232,15 @@ def test_signal_generated_log_occurs_after_regime_skip_guard_in_source() -> None
     assert source.index('Strategy skipped due to detected market regime') < source.index(
         'SIGNAL_GENERATED symbol=%s action=%s reason=%s trace_id=%s'
     )
+
+
+def test_runner_kill_switch_precheck_logs_status_details_in_source() -> None:
+    from pathlib import Path
+    source = Path('src/nifty_scalper_bot/strategies/runner.py').read_text(encoding='utf-8')
+    assert 'RUNNER_KILL_SWITCH_PRECHECK_BLOCK' in source
+    assert 'consecutive_failures' in source
+    assert 'kill_reason' in source
+    assert 'broker_attempted' in source
 
 
 def test_build_single_candidate_from_signal_includes_tick_fields() -> None:

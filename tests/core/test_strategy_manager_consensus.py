@@ -141,6 +141,10 @@ def test_live_context_only_vote_is_rejected_with_diagnostics(monkeypatch, caplog
     out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000CE', signals=[(signal,vote)], indicators={'context_age_seconds':10})
     assert out is None
     assert any('no_trigger_vote' in r.message for r in caplog.records)
+    decision = manager.get_last_no_signal_decision('NFO:NIFTY25000CE')
+    assert decision is not None
+    assert decision.category == "strategy_partial_no_consensus"
+    assert decision.final_block_reason == "partial"
 
 
 def test_live_context_promotion_rejects_without_depth_even_when_env_enabled(monkeypatch, caplog) -> None:

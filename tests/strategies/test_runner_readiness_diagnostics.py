@@ -5,7 +5,7 @@ import time
 from types import SimpleNamespace
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-from nifty_scalper_bot.strategies.runner import StrategyRunner, _safe_positive_float
+from nifty_scalper_bot.strategies.runner import StrategyRunner, _safe_positive_float, safe_positive_int_env
 
 
 class _DummyIndicator:
@@ -37,7 +37,7 @@ def _make_runner() -> StrategyRunner:
     runner._runtime_readiness_reason = "execution_not_armed:ce_depth_not_tradable"
     runner._active_selected_ce = "NFO:CE"
     runner._active_selected_pe = "NFO:PE"
-    runner._indicator_engine = _DummyIndicator({"NFO:CE": [1], "NFO:PE": [1], "NFO:SYM": [1]})
+    runner._indicator_engine = _DummyIndicator({"NFO:CE": [1], "NFO:PE": [1], "NFO:SYM": [1], "NFO:NIFTY26JUN23800CE": [1], "NFO:NIFTY26JUN23800PE": [1]})
     runner._market_data = SimpleNamespace(_last_tick_time={"NFO:CE": time.time() - 2, "NFO:PE": time.time() - 3}, get_ohlc_bars=lambda _s: [1])
     runner._last_same_bar_eval_block_reason_by_symbol = {}
     runner._last_same_bar_eval_block_detail_by_symbol = {}
@@ -282,6 +282,148 @@ def test_emit_no_trade_decision_does_not_raise_with_missing_order_manager() -> N
     runner = _make_runner()
     del runner._order_manager
     runner._emit_no_trade_decision(symbol="NFO:CE", trace_id="t", category="strategy_no_trigger", reason="evaluation_no_signal")
+
+
+def test_invalid_option_execution_min_bars_env_does_not_crash(monkeypatch) -> None:
+    monkeypatch.setenv("OPTION_EXECUTION_MIN_BARS", "bad")
+    assert safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1) == 5
+
+
+def test_runner_no_trade_prefers_strategy_decision_before_context_unavailable() -> None:
+    runner = _make_runner()
+    runner._strategy_manager = SimpleNamespace(
+        get_last_no_signal_decision=lambda _sym: SimpleNamespace(
+            category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled"
+        )
+    )
+    category, reason = runner._classify_no_trade_decision(
+        symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False
+    )
+    assert category == "strategy_single_vote_disabled"
+    assert reason == "single_vote_scalp_disabled"
+
+
+def test_symbol_live_entry_ready_false_when_kill_switch_active() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._runtime_live_orders_armed = True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (True, {"active": True, "kill_reason": "unexpected_exception", "consecutive_failures": 6, "last_exception_type": "RuntimeError", "last_exception_message": "test failure"})
+    ready, reason, details = runner._symbol_live_entry_ready("NFO:CE")
+    assert ready is False
+    assert reason == "order_manager_kill_switch_active"
+    assert details["kill_switch_status"]["consecutive_failures"] == 6
+
+
+def test_symbol_live_entry_ready_false_when_context_stale(monkeypatch) -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._runtime_indicators = {"NFO:CE": {"context_age_seconds": 11.0}}
+    monkeypatch.setenv("MAX_CONTEXT_AGE_SECONDS", "5")
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:CE")
+    assert ready is False
+    assert reason == "context_stale"
+
+
+def test_ce_signal_blocked_when_direction_bias_pe() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._runtime_indicators = {"NFO:NIFTY26JUN23800CE": {"direction_bias": "PE"}}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800CE")
+    assert ready is False
+    assert reason == "context_direction_conflict"
+
+
+def test_pe_signal_allowed_when_direction_bias_pe_and_other_gates_pass() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._runtime_indicators = {"NFO:NIFTY26JUN23800PE": {"direction_bias": "PE"}}
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
+    assert ready is True
+    assert reason == "symbol_live_ready"
+
+
+def test_runner_ignores_stale_strategy_decision() -> None:
+    runner = _make_runner()
+    stale = SimpleNamespace(symbol="NFO:CE", category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled", created_ts=time.time() - 10)
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _sym: stale)
+    category, _reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False, trace_id="t1")
+    assert category == "context_direction_unavailable"
+
+
+def test_symbol_live_entry_ready_does_not_crash_when_active_atm_strike_missing() -> None:
+    runner = _make_runner()
+    if hasattr(runner, "_active_atm_strike"):
+        delattr(runner, "_active_atm_strike")
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
+    assert ready is True
+    assert reason == "symbol_live_ready"
+
+
+def test_symbol_live_entry_ready_false_when_quote_missing() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
+    runner._get_cached_quote_for_live_entry = lambda _s: {}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
+    assert ready is False
+    assert reason == "quote_missing"
+
+
+def test_runner_uses_current_strategy_decision() -> None:
+    runner = _make_runner()
+    decision = SimpleNamespace(symbol="NFO:CE", category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled", trace_id="t1", created_ts=time.time())
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _sym: decision)
+    category, reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False, trace_id="t1")
+    assert category == "strategy_single_vote_disabled"
+    assert reason == "single_vote_scalp_disabled"
+
+
+def test_runner_ignores_strategy_decision_for_wrong_symbol() -> None:
+    runner = _make_runner()
+    decision = SimpleNamespace(symbol="NFO:PE", category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled", trace_id="t1", created_ts=time.time())
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _sym: decision)
+    category, _reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False, trace_id="t1")
+    assert category == "context_direction_unavailable"
+
+
+def test_runner_ignores_strategy_decision_for_wrong_trace_id() -> None:
+    runner = _make_runner()
+    decision = SimpleNamespace(symbol="NFO:CE", category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled", trace_id="tX", created_ts=time.time())
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _sym: decision)
+    category, _reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False, trace_id="t1")
+    assert category == "context_direction_unavailable"
+
+
+def test_symbol_live_entry_ready_false_when_depth_missing() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": False, "spread_pct": 0.2}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
+    assert ready is False
+    assert reason == "quote_depth_unavailable"
+
+
+def test_symbol_live_entry_ready_false_when_spread_unknown_by_default() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
+    assert ready is False
+    assert reason == "spread_unknown"
 
 
 def test_runner_emits_no_trade_decision_on_signal_none_strategy_no_trigger(caplog) -> None:

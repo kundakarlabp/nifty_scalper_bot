@@ -177,6 +177,19 @@ def _safe_positive_float(value: object, fallback: float, *, minimum: float = 0.0
     return max(parsed, float(minimum))
 
 
+def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return max(int(default), int(minimum))
+    return max(parsed, int(minimum))
+
+
+def safe_positive_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    return _safe_positive_float(os.getenv(name, default), default, minimum=minimum)
+
+
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
 )
@@ -884,6 +897,7 @@ class StrategyRunner:
         # bar closes (up to 60 s after startup).
         self._live_bar_seen: set[str] = set()
         self._data_phase: dict[str, str] = {}
+        self._symbol_execution_phase: dict[str, str] = {}
         # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
         # for each symbol so Railway logs confirm the moment strategies become active.
         self._warmup_complete_logged: set[str] = set()
@@ -906,6 +920,13 @@ class StrategyRunner:
         self._market_regime_engine = MarketRegimeEngine()
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
         self._last_regime_inputs_by_symbol: dict[str, dict[str, Any]] = {}
+        self._build_info = {
+            "git_sha": os.getenv("GIT_SHA", "unknown"),
+            "git_branch": os.getenv("GIT_BRANCH", "unknown"),
+            "deployment_id": os.getenv("DEPLOYMENT_ID", "unknown"),
+            "build_time": os.getenv("BUILD_TIME", "unknown"),
+            "strategy_profile_version": os.getenv("STRATEGY_PROFILE_VERSION", "unknown"),
+        }
 
         # FIX S10-2: wire bracket-exit callback so direction lock clears on SL/TP
         if self._bracket_manager is not None and hasattr(
@@ -6550,6 +6571,34 @@ class StrategyRunner:
                     return payload
         return None
 
+    def _get_cached_quote_for_live_entry(self, symbol: str) -> dict[str, Any]:
+        symbol_norm = normalize_symbol(symbol)
+        hub = getattr(self, "_data_hub", None)
+        get_quote = getattr(hub, "get_quote", None)
+        if callable(get_quote):
+            try:
+                quote = get_quote(symbol_norm, allow_pull=False)
+                if quote:
+                    return dict(quote)
+            except TypeError:
+                pass
+            except Exception:
+                return {}
+        tick = getattr(self, "_last_tick", {}).get(symbol_norm) or getattr(self, "_last_tick", {}).get(symbol)
+        if isinstance(tick, dict):
+            return dict(tick)
+        mdm = getattr(self, "_market_data", None)
+        for method_name in ("get_cached_quote", "get_latest_tick", "get_last_tick"):
+            fn = getattr(mdm, method_name, None)
+            if callable(fn):
+                try:
+                    quote = fn(symbol_norm)
+                    if quote:
+                        return dict(quote)
+                except Exception:
+                    return {}
+        return {}
+
     def _is_option_symbol_tick_fresh(self, symbol: str, *, max_age_s: float | None = None) -> bool:
         """Freshness guard for selected option soft-pass and live execution readiness."""
         if not self._is_tradable_symbol(symbol):
@@ -6589,6 +6638,155 @@ class StrategyRunner:
             return False
         return True
 
+    def _contract_side_from_symbol(self, symbol: str) -> str | None:
+        upper = str(symbol or "").upper()
+        if upper.endswith("CE"):
+            return "CE"
+        if upper.endswith("PE"):
+            return "PE"
+        return None
+
+    def _order_manager_kill_switch_status_for_entry(self) -> tuple[bool, dict[str, Any]]:
+        om = getattr(self, "_order_manager", None)
+        if om is None:
+            return False, {}
+        try:
+            checker = getattr(om, "is_kill_switch_active", None)
+            active = bool(checker()) if callable(checker) else False
+            status_fn = getattr(om, "get_kill_switch_status", None)
+            status = dict(status_fn() or {}) if callable(status_fn) else {}
+            status["active"] = active
+            return active, status
+        except Exception as exc:
+            return True, {"active": True, "kill_reason": "kill_switch_status_check_failed", "last_exception_type": type(exc).__name__, "last_exception_message": str(exc)}
+
+    def _strategy_decision_is_current(self, decision: Any, *, symbol: str, trace_id: str | None, max_age_s: float = 3.0) -> bool:
+        if decision is None:
+            return False
+        if str(getattr(decision, "symbol", "")).upper() != str(symbol).upper():
+            return False
+        decision_trace = getattr(decision, "trace_id", None)
+        if trace_id and decision_trace and str(decision_trace) != str(trace_id):
+            return False
+        created_ts = getattr(decision, "created_ts", None)
+        if created_ts is not None:
+            try:
+                if time.time() - float(created_ts) > max_age_s:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _update_symbol_execution_phase(self, symbol: str, new_phase: str, reason: str) -> None:
+        old_phase = self._symbol_execution_phase.get(symbol)
+        if old_phase == new_phase:
+            return
+        self._symbol_execution_phase[symbol] = new_phase
+        self._logger.info(
+            "SYMBOL_EXECUTION_PHASE_UPDATE symbol=%s old_phase=%s new_phase=%s reason=%s",
+            symbol,
+            old_phase,
+            new_phase,
+            reason,
+            extra={
+                "event": "SYMBOL_EXECUTION_PHASE_UPDATE",
+                "symbol": symbol,
+                "old_phase": old_phase,
+                "new_phase": new_phase,
+                "reason": reason,
+                "data_phase_global": self._data_phase.get(symbol),
+                "live_orders_armed": bool(self._runtime_live_orders_armed),
+            },
+        )
+
+    def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
+        details: dict[str, Any] = {"symbol": symbol, "trace_id": trace_id, "live_orders_armed": bool(self._runtime_live_orders_armed)}
+        if not bool(self._runtime_live_orders_armed):
+            return False, "execution_not_armed", details
+        if not self._is_tradable_symbol(symbol):
+            return False, "non_tradable_symbol", details
+        ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
+        details["kill_switch_active"] = ks_active
+        details["kill_switch_status"] = ks_status
+        if ks_active:
+            return False, "order_manager_kill_switch_active", details
+        ctx = self._runtime_indicators.get(symbol, {}) or {}
+        contract_side = self._contract_side_from_symbol(symbol)
+        direction_bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
+        details["contract_side"] = contract_side
+        details["direction_bias"] = direction_bias
+        details["underlying_direction_bias"] = ctx.get("underlying_direction_bias")
+        if direction_bias in {"CE", "PE"} and contract_side in {"CE", "PE"} and direction_bias != contract_side:
+            return False, "context_direction_conflict", details
+        required_bars = max(self._required_bars_for_symbol(symbol), safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
+        history_count = len(self._indicator_engine.get_history(symbol) or [])
+        details["history_count"] = history_count
+        details["required_bars"] = required_bars
+        if history_count < required_bars:
+            return False, "insufficient_indicator_bar_count", details
+        quote_fresh = self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0)
+        details["quote_fresh"] = quote_fresh
+        if not quote_fresh:
+            return False, "option_tick_stale", details
+        max_context_age = safe_positive_float_env("MAX_CONTEXT_AGE_SECONDS", 5.0, minimum=0.1)
+        ctx_age = _extract_float(ctx, "context_age_seconds")
+        details["context_age_seconds"] = ctx_age
+        if ctx_age is not None and ctx_age > max_context_age:
+            return False, "context_stale", details
+        symbol_norm = normalize_symbol(symbol)
+        strike = self._extract_strike_from_symbol(symbol_norm)
+        details["strike"] = strike
+        selected_set = {normalize_symbol(str(self._active_selected_ce or "")), normalize_symbol(str(self._active_selected_pe or ""))}
+        selected_set.discard("")
+        selected_option = symbol_norm in selected_set
+        near_atm = False
+        near_atm_threshold = safe_positive_float_env("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 50.0, minimum=0.0)
+        details["near_atm_threshold"] = near_atm_threshold
+        active_atm_strike = getattr(self, "_active_atm_strike", None)
+        details["active_atm_strike"] = active_atm_strike
+        if strike is not None and active_atm_strike is not None:
+            try:
+                near_atm = abs(float(strike) - float(active_atm_strike)) <= near_atm_threshold
+            except (TypeError, ValueError):
+                near_atm = False
+        details["selected_option"] = selected_option
+        details["near_atm"] = near_atm
+        if strike is None and not selected_option:
+            return False, "candidate_distance_unknown", details
+        if not (selected_option or near_atm):
+            return False, "candidate_not_selected_or_near_atm", details
+        quote = self._get_cached_quote_for_live_entry(symbol_norm)
+        if not quote:
+            details["tradable_quote"] = False
+            details["depth_available"] = False
+            details["spread_pct"] = None
+            return False, "quote_missing", details
+        tradable_quote = bool(quote.get("tradable_quote"))
+        depth_available = bool(quote.get("depth_available") or quote.get("depth"))
+        spread_pct = _extract_float(quote, "spread_pct")
+        details["tradable_quote"] = tradable_quote
+        details["depth_available"] = depth_available
+        details["spread_pct"] = spread_pct
+        if not tradable_quote:
+            return False, "quote_not_tradable", details
+        if _env_bool("LIVE_REQUIRE_OPTION_DEPTH", True) and not depth_available:
+            return False, "quote_depth_unavailable", details
+        max_spread_pct = safe_positive_float_env("LIVE_MAX_SPREAD_PCT", 0.75, minimum=0.01)
+        require_spread = _env_bool("LIVE_REQUIRE_SPREAD_PCT", True)
+        if require_spread and spread_pct is None:
+            return False, "spread_unknown", details
+        if spread_pct is not None and spread_pct > max_spread_pct:
+            return False, "spread_too_wide", details
+        om = getattr(self, "_order_manager", None)
+        health_fn = getattr(om, "get_broker_health_snapshot", None)
+        if callable(health_fn):
+            health = dict(health_fn() or {})
+            details["broker_health_effect"] = health.get("trading_allowed_effect")
+            if details["broker_health_effect"] == "live_orders_blocked":
+                return False, "broker_health_live_orders_blocked", details
+        self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, True, "symbol_live_ready", trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": True, "reason": "symbol_live_ready", "trace_id": trace_id, **details})
+        return True, "symbol_live_ready", details
+
     def _classify_no_trade_decision(
         self,
         *,
@@ -6598,11 +6796,18 @@ class StrategyRunner:
         option_count: int,
         option_required: int,
         broker_attempted: bool = False,
+        trace_id: str | None = None,
     ) -> tuple[str, str]:
         if broker_attempted:
             return "broker_placement_failed", "broker_attempted_failed"
         if option_count < option_required:
             return "data_history_cold", "insufficient_indicator_bar_count"
+        if signal is None:
+            latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
+            if callable(latest_decision_getter):
+                decision = latest_decision_getter(symbol)
+                if self._strategy_decision_is_current(decision, symbol=symbol, trace_id=trace_id):
+                    return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
         conflict = bool(indicators_ctx.get("direction_conflict") or indicators_ctx.get("underlying_direction_conflict"))
         if conflict:
             return "context_direction_conflict", "underlying_direction_conflict"
@@ -6610,11 +6815,6 @@ class StrategyRunner:
         if not direction_bias:
             return "context_direction_unavailable", "direction_context_not_ready"
         if signal is None:
-            latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
-            if callable(latest_decision_getter):
-                decision = latest_decision_getter(symbol)
-                if decision is not None:
-                    return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
             return "strategy_no_trigger", "evaluation_no_signal"
         if not self._runtime_live_orders_armed:
             return "execution_readiness_false", str(self._runtime_readiness_reason or "runtime_live_orders_not_armed")
@@ -6674,6 +6874,9 @@ class StrategyRunner:
                     "broker_health_effect": None,
                     "margin_status": None,
                     "kill_switch_active": self._safe_kill_switch_active_for_diagnostics(),
+                    "git_sha": self._build_info.get("git_sha"),
+                    "git_branch": self._build_info.get("git_branch"),
+                    "deployment_id": self._build_info.get("deployment_id"),
                 },
             )
         except Exception:
@@ -6748,7 +6951,7 @@ class StrategyRunner:
                 return False
             required_bars = self._required_bars_for_symbol(symbol)
             if self._is_tradable_symbol(symbol):
-                option_execution_min_bars = int(os.getenv("OPTION_EXECUTION_MIN_BARS", "5") or "5")
+                option_execution_min_bars = safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1)
                 required_bars = max(required_bars, option_execution_min_bars)
             history_count = len(self._indicator_engine.get_history(symbol) or [])
             restored_from_cache = symbol in self._restored_from_cache_symbols
@@ -6788,7 +6991,7 @@ class StrategyRunner:
                         if sym
                     }
                     is_selected_option = normalize_symbol(symbol) in selected_symbols
-                    option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or "1")
+                    option_eval_min_live_bars = safe_positive_int_env("OPTION_EVAL_MIN_LIVE_BARS", 1, minimum=1)
                     spot_symbol = "NSE:NIFTY"
                     fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context" and not self._is_context_symbol_suspended(sym)), "")
                     if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
@@ -6859,20 +7062,27 @@ class StrategyRunner:
                         self._runtime_indicators[symbol]["futures_context_quality"] = "cold" if fut_symbol else "missing"
                         self._runtime_indicators[symbol]["context_confidence_multiplier"] = 0.75
                         self._runtime_indicators[symbol]["context_cold_reasons"] = ["spot_context_cold" if spot_bars < self._context_required_bars else "", "futures_context_cold" if fut_bars < self._context_required_bars else ""]
-                    if self._should_log_throttled(
-                        f"eval_block_cold_history:{symbol}", 120.0
-                    ):
-                        self._logger.warning(
-                            "EVALUATION_BLOCKED_COLD_HISTORY symbol=%s bars=%d required=%d",
+                    if soft_pass:
+                        self._logger.info(
+                            "EVALUATION_ALLOWED_COLD_HISTORY_SOFT_PASS symbol=%s bars=%d required=%d",
                             symbol,
                             history_count,
                             required_bars,
-                            extra={
-                                "event": "EVALUATION_BLOCKED_COLD_HISTORY",
-                                "symbol": symbol,
-                                "bars": history_count,
-                                "required": required_bars,
-                            },
+                            extra={"event": "EVALUATION_ALLOWED_COLD_HISTORY_SOFT_PASS", "symbol": symbol, "bars": history_count, "required": required_bars},
+                        )
+                        self._emit_runner_eval_decision(
+                            symbol=symbol,
+                            stage='phase9',
+                            reason='cold_history_soft_pass',
+                            allowed=True,
+                            trace_id=trace_id,
+                        )
+                        return True
+                    if self._should_log_throttled(f"eval_block_cold_history:{symbol}", 120.0):
+                        self._logger.warning(
+                            "EVALUATION_BLOCKED_COLD_HISTORY symbol=%s bars=%d required=%d",
+                            symbol, history_count, required_bars,
+                            extra={"event": "EVALUATION_BLOCKED_COLD_HISTORY", "symbol": symbol, "bars": history_count, "required": required_bars},
                         )
                     category = "data_history_cold" if history_count < required_bars else "data_history_integrity_failed"
                     reason = 'insufficient_indicator_bar_count' if history_count < required_bars else 'indicator_history_integrity_failed'
@@ -6892,7 +7102,7 @@ class StrategyRunner:
                     allowed=False,
                     trace_id=trace_id,
                 )
-                return bool(soft_pass)
+                return False
             return True
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
@@ -8726,6 +8936,7 @@ class StrategyRunner:
                                 option_count=option_count,
                                 option_required=option_required,
                                 broker_attempted=False,
+                                trace_id=trace_id,
                             )
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
@@ -8871,10 +9082,13 @@ class StrategyRunner:
                 phase = "phase10_signal_execution"
                 self._last_strategy_versions[symbol] = current_version
                 signal_phase = self._data_phase.get(symbol)
-                if signal_phase != "LIVE":
+                live_ready, live_ready_reason, live_ready_details = self._symbol_live_entry_ready(symbol, signal=signal, trace_id=trace_id)
+                if not live_ready:
+                    self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, False, live_ready_reason, trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": False, "reason": live_ready_reason, "trace_id": trace_id, **live_ready_details})
+                    self._update_symbol_execution_phase(symbol, "BLOCKED", live_ready_reason)
                     signal_metadata = dict(signal.metadata or {})
                     signal_metadata["shadow_only"] = True
-                    signal_metadata["blocked_reason"] = "non_live_data_phase_signal"
+                    signal_metadata["blocked_reason"] = live_ready_reason
                     signal_metadata["data_phase"] = signal_phase
                     self._logger.info(
                         "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s data_phase=%s",
@@ -8887,7 +9101,7 @@ class StrategyRunner:
                         or signal_metadata.get("side"),
                         False,
                         "runner_phase10",
-                        "non_live_data_phase_signal",
+                        live_ready_reason,
                         signal_phase,
                         extra={
                             "event": "TRADE_DECISION_TRACE",
@@ -8900,12 +9114,20 @@ class StrategyRunner:
                             or signal_metadata.get("side"),
                             "allowed": False,
                             "blocked_at": "runner_phase10",
-                            "blocked_reason": "non_live_data_phase_signal",
+                            "blocked_reason": live_ready_reason,
                             "data_phase": signal_phase,
                             "trace_id": trace_id,
                         },
                     )
                     return
+                self._update_symbol_execution_phase(symbol, "LIVE_READY", "symbol_live_ready")
+                if signal_phase == "HYDRATION":
+                    self._logger.info(
+                        "DATA_PHASE_HYDRATION_SYMBOL_LIVE_READY symbol=%s trace_id=%s",
+                        symbol,
+                        trace_id,
+                        extra={"event": "DATA_PHASE_HYDRATION_SYMBOL_LIVE_READY", "symbol": symbol, "trace_id": trace_id},
+                    )
                 current_regime = self._compute_regime_snapshot(symbol)
                 signal_metadata = dict(signal.metadata or {})
                 signal_metadata["runtime_regime"] = current_regime.value
@@ -8984,6 +9206,20 @@ class StrategyRunner:
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
+                ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
+                if ks_active:
+                    self._logger.warning(
+                        "RUNNER_KILL_SWITCH_PRECHECK_BLOCK symbol=%s trace_id=%s",
+                        symbol,
+                        trace_id,
+                        extra={"event": "RUNNER_KILL_SWITCH_PRECHECK_BLOCK", "symbol": symbol, "trace_id": trace_id, "reason": "order_manager_kill_switch_active", "kill_switch_status": ks_status, "broker_attempted": False, "consecutive_failures": ks_status.get("consecutive_failures"), "kill_reason": ks_status.get("kill_reason"), "last_exception_type": (ks_status.get("last_failure") or {}).get("exception_type"), "last_exception_message": (ks_status.get("last_failure") or {}).get("exception_message"), "recent_failures": ks_status.get("recent_failures")},
+                    )
+                    self._logger.info(
+                        "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
+                        symbol, False, "order_manager_kill_switch_active", None, trace_id,
+                        extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": symbol, "accepted": False, "reason": "order_manager_kill_switch_active", "order_id": None, "trace_id": trace_id, "broker_attempted": False},
+                    )
+                    return
                 self._logger.info(
                     "SIGNAL_GENERATED symbol=%s action=%s reason=%s trace_id=%s",
                     symbol,
@@ -11321,7 +11557,8 @@ class StrategyRunner:
                 if submit_result.accepted and submit_result.order_id:
                     order_id = submit_result.order_id
                 else:
-                    submit_reason = f"order_manager_{submit_result.reason}"
+                    reason_base = str(submit_result.reason or "order_rejected")
+                    submit_reason = reason_base if reason_base.startswith("order_manager_") else f"order_manager_{reason_base}"
                     submit_details = {**dict(getattr(submit_result, "details", {}) or {}), "trace_id": trace_id}
                     if submit_result.reason == "kill_switch_active" and hasattr(self._order_manager, "get_kill_switch_status"):
                         submit_details["kill_switch_status"] = self._order_manager.get_kill_switch_status()
