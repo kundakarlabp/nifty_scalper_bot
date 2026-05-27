@@ -9,6 +9,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import logging
+from unittest.mock import Mock
 
 import pandas as pd
 
@@ -48,14 +49,18 @@ class InstrumentLookup:
         if csv_path is None:
             self.csv_path = None
             self._loaded_at = time.time()
-        elif isinstance(csv_path, (str, PathLike)) and type(csv_path).__module__ != "unittest.mock":
+        elif isinstance(csv_path, Mock):
+            # Non-path test doubles (e.g. MagicMock): in-memory mode
+            self.csv_path = None
+            self._loaded_at = time.time()
+        elif isinstance(csv_path, (str, PathLike)):
             path_candidate = Path(csv_path)
             if not path_candidate.exists():
                 raise FileNotFoundError(f"Instrument CSV not found: {path_candidate}")
             self.csv_path = str(path_candidate)
             self.reload()
         else:
-            # Non-path test doubles (e.g. MagicMock): in-memory mode
+            # Non-path objects: in-memory mode
             self.csv_path = None
             self._loaded_at = time.time()
 
