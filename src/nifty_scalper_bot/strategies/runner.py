@@ -661,6 +661,8 @@ class StrategyRunner:
         self._runtime_execution_ready_by_symbol: dict[str, bool] = {}
         self._runtime_symbol_last_ready_at: dict[str, float] = {}
         self._runtime_readiness_reason: str | None = None
+        self._runtime_indicators: dict[str, dict[str, Any]] = {}
+        self._last_direction_context: dict[str, Any] | None = None
         self._runtime_startup_ready = False
         self._startup_gate_last_log_ts = 0.0
         self._active_selected_ce: str | None = None
@@ -6710,7 +6712,8 @@ class StrategyRunner:
         details["kill_switch_status"] = ks_status
         if ks_active:
             return False, "order_manager_kill_switch_active", details
-        ctx = self._runtime_indicators.get(symbol, {}) or {}
+        runtime_indicators = getattr(self, "_runtime_indicators", {}) or {}
+        ctx = runtime_indicators.get(symbol, {}) or {}
         contract_side = self._contract_side_from_symbol(symbol)
         direction_bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
         details["contract_side"] = contract_side
@@ -7057,11 +7060,15 @@ class StrategyRunner:
                     )
                     if soft_pass and not context_ready:
                         self._logger.warning("LIVE_CONTEXT_COLD_CONTINUE domain=futures penalty=quality_threshold_plus_1")
-                        self._runtime_indicators.setdefault(symbol, {})
-                        self._runtime_indicators[symbol]["underlying_context_quality"] = "cold"
-                        self._runtime_indicators[symbol]["futures_context_quality"] = "cold" if fut_symbol else "missing"
-                        self._runtime_indicators[symbol]["context_confidence_multiplier"] = 0.75
-                        self._runtime_indicators[symbol]["context_cold_reasons"] = ["spot_context_cold" if spot_bars < self._context_required_bars else "", "futures_context_cold" if fut_bars < self._context_required_bars else ""]
+                        runtime_indicators = getattr(self, "_runtime_indicators", None)
+                        if runtime_indicators is None:
+                            self._runtime_indicators = {}
+                            runtime_indicators = self._runtime_indicators
+                        runtime_indicators.setdefault(symbol, {})
+                        runtime_indicators[symbol]["underlying_context_quality"] = "cold"
+                        runtime_indicators[symbol]["futures_context_quality"] = "cold" if fut_symbol else "missing"
+                        runtime_indicators[symbol]["context_confidence_multiplier"] = 0.75
+                        runtime_indicators[symbol]["context_cold_reasons"] = ["spot_context_cold" if spot_bars < self._context_required_bars else "", "futures_context_cold" if fut_bars < self._context_required_bars else ""]
                     if soft_pass:
                         self._logger.info(
                             "EVALUATION_ALLOWED_COLD_HISTORY_SOFT_PASS symbol=%s bars=%d required=%d",
@@ -8880,6 +8887,18 @@ class StrategyRunner:
                             or indicators_ctx.get("underlying_direction_confidence")
                             or 0.0
                         )
+                        runtime_indicators = getattr(self, "_runtime_indicators", None)
+                        if runtime_indicators is None:
+                            self._runtime_indicators = {}
+                            runtime_indicators = self._runtime_indicators
+                        runtime_indicators[symbol] = {
+                            **(runtime_indicators.get(symbol, {}) or {}),
+                            "direction_bias": indicators_ctx.get("direction_bias"),
+                            "underlying_direction_bias": indicators_ctx.get("underlying_direction_bias"),
+                            "context_age_seconds": indicators_ctx.get("context_age_seconds"),
+                            "underlying_direction_confidence": indicators_ctx.get("underlying_direction_confidence"),
+                        }
+                        self._last_direction_context = runtime_indicators[symbol]
                         spot_fresh = bool(indicators_ctx.get("spot_fresh"))
                         if spot_fresh and not direction_bias and not underlying_bias:
                             self._logger.warning(
