@@ -2404,6 +2404,31 @@ def test_runner_rejects_broker_placement_exception_with_details(monkeypatch) -> 
     result = runner._handle_entry_signal_inner(signal, sym, sym, 100.0, datetime.now(timezone.utc), trace_id='bpx-1')
     assert result.reason == 'order_manager_broker_placement_exception'
     assert result.details.get('error_type') == 'RuntimeError'
+    assert any(str(k).startswith(f'{sym}|BUY|OrderFlow|RuntimeError') for k in runner._order_failure_cooldown_until.keys())
+
+
+def test_failure_cooldown_blocks_immediate_same_symbol_retry_without_broker_attempt(monkeypatch) -> None:
+    runner = _build_runner()
+    monkeypatch.setenv('EXECUTION_MODE', 'LIVE'); monkeypatch.setenv('ENABLE_LIVE_TRADING', 'true'); monkeypatch.setenv('PAPER__ENABLED', 'false'); monkeypatch.setenv('SHADOW_MODE', 'false')
+    sym='NFO:NIFTY26MAY23700PE'
+    runner._is_symbol_execution_ready = MagicMock(return_value=True)
+    runner._ensure_symbol_execution_ready_result = MagicMock(return_value=ExecutionReadinessResult(True,'ok',{}))
+    runner._trade_candidate_selector.select_ranked_candidates = MagicMock(return_value=[SimpleNamespace(symbol=sym, stop_loss=300.0, target=450.0, score=8.0, data_quality_score=9.0, spread_pct=0.1, rr=2.0, side='PE', entry_price=110.0, tick_age_s=0.1)])
+    runner._order_failure_cooldown_until[f"{sym}|BUY|OrderFlow|RuntimeError"] = time.time() + 60.0
+    runner._order_manager.submit_trade_plan_result = MagicMock(return_value=SimpleNamespace(accepted=True, order_id='oid', reason='accepted', details={}, broker_attempted=True))
+    signal=Signal(action='BUY',symbol=sym,quantity=1,confidence=0.9,reason='OrderFlow',stop_loss=300.0,take_profit=450.0,metadata={'strategy_name':'OrderFlow','candidate_snapshots':[{'symbol':sym,'side':'PE','strike':23700,'atm_strike':23700,'ltp':110.0,'bid':109.5,'ask':110.0,'tick_age_s':0.1,'tradable_quote':True}]})
+    result = runner._handle_entry_signal_inner(signal, sym, sym, 100.0, datetime.now(timezone.utc), trace_id='cooldown')
+    assert result.reason == "order_failure_cooldown_active"
+    runner._order_manager.submit_trade_plan_result.assert_not_called()
+
+
+def test_suspended_future_ttl_expiry_allows_reconsideration() -> None:
+    runner = _build_runner()
+    sym = "NFO:NIFTY26MAYFUT"
+    runner._suspended_context_symbols.add(sym)
+    runner._suspended_context_symbol_until[sym] = time.monotonic() - 1.0
+    assert runner._is_context_symbol_suspended(sym) is False
+    assert sym not in runner._suspended_context_symbols
 
 
 def test_entry_exception_rolls_back_dedup(monkeypatch) -> None:

@@ -1310,3 +1310,21 @@ def test_coerce_timestamp_prefers_exchange_timestamp() -> None:
     tick = {"exchange_timestamp": "2026-05-06T10:00:00+00:00", "timestamp": 0}
     coerced = MarketDataManager._coerce_timestamp(tick)  # noqa: SLF001
     assert coerced > 1_700_000_000
+
+
+def test_selected_option_month_fallback_rotates_may_future_to_jun_future(ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(DummyBroker(), ws, resolver=None)
+    out = manager.maybe_rotate_nifty_futures_context_result(
+        "NFO:NIFTY26MAYFUT",
+        reason="test",
+        selected_option_symbols=["NFO:NIFTY26JUN23950CE", "NFO:NIFTY26JUN23950PE"],
+    )
+    assert out.symbol == "NFO:NIFTY26JUNFUT"
+    assert out.rotated is True
+
+
+def test_maybe_rotate_unresolved_returns_symbol_none(ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(DummyBroker(), ws, resolver=None)
+    out = manager.maybe_rotate_nifty_futures_context_result("NFO:NIFTY26MAYFUT", reason="no_data")
+    assert out.unresolved is True
+    assert out.symbol is None

@@ -166,6 +166,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _safe_positive_float(value: object, fallback: float, *, minimum: float = 0.0) -> float:
+    fallback_value = max(float(fallback), float(minimum))
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback_value
+    if parsed <= 0:
+        return fallback_value
+    return max(parsed, float(minimum))
+
+
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
 )
@@ -739,6 +750,11 @@ class StrategyRunner:
         self._trading_paused = False
         self.ready = False
         self._active_symbols: set[str] = set()
+        self._suspended_context_symbols: set[str] = set()
+        self._suspended_context_symbol_until: dict[str, float] = {}
+        self._order_failure_cooldown_until: dict[str, float] = {}
+        self._order_failure_cooldown_seconds = _safe_positive_float(os.getenv("ORDER_FAILURE_COOLDOWN_SECONDS"), 120.0, minimum=1.0)
+        self._futures_context_suspension_seconds = _safe_positive_float(os.getenv("FUTURES_CONTEXT_SUSPENSION_SECONDS"), 300.0, minimum=1.0)
         self._tracked_symbols: set[str] = set()
         self._live_symbols: set[str] = set()
         self._symbol_state: Dict[str, SymbolRuntimeState] = {}
@@ -6562,9 +6578,21 @@ class StrategyRunner:
         value = str(symbol or "").upper()
         return value == "NSE:NIFTY" or (value.startswith("NFO:NIFTY") and value.endswith("FUT"))
 
+    def _is_context_symbol_suspended(self, symbol: str) -> bool:
+        until = self._suspended_context_symbol_until.get(symbol)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            self._suspended_context_symbol_until.pop(symbol, None)
+            self._suspended_context_symbols.discard(symbol)
+            self._logger.info("CONTEXT_FUTURES_SYMBOL_SUSPENSION_EXPIRED symbol=%s", symbol, extra={"event": "CONTEXT_FUTURES_SYMBOL_SUSPENSION_EXPIRED", "symbol": symbol})
+            return False
+        return True
+
     def _classify_no_trade_decision(
         self,
         *,
+        symbol: str,
         signal: Any | None,
         indicators_ctx: Mapping[str, Any],
         option_count: int,
@@ -6582,6 +6610,11 @@ class StrategyRunner:
         if not direction_bias:
             return "context_direction_unavailable", "direction_context_not_ready"
         if signal is None:
+            latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
+            if callable(latest_decision_getter):
+                decision = latest_decision_getter(symbol)
+                if decision is not None:
+                    return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
             return "strategy_no_trigger", "evaluation_no_signal"
         if not self._runtime_live_orders_armed:
             return "execution_readiness_false", str(self._runtime_readiness_reason or "runtime_live_orders_not_armed")
@@ -6599,6 +6632,21 @@ class StrategyRunner:
         option_history_count: int | None = None,
         option_history_required: int | None = None,
     ) -> None:
+        if self._is_context_symbol(symbol):
+            self._logger.info(
+                "RUNNER_CONTEXT_EVAL_STATUS symbol=%s category=%s reason=%s",
+                symbol,
+                category,
+                reason,
+                extra={
+                    "event": "RUNNER_CONTEXT_EVAL_STATUS",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "category": category,
+                    "reason": reason,
+                },
+            )
+            return
         try:
             ctx = dict(indicators_ctx or {})
             self._logger.info(
@@ -6728,7 +6776,7 @@ class StrategyRunner:
                                 trace_id=trace_id,
                             )
                         spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
-                        fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY"), "")
+                        fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY" and not self._is_context_symbol_suspended(sym)), "")
                         fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
                         if (spot_bars < self._context_required_bars or fut_bars < self._context_required_bars) and self._should_log_throttled(f"opt_ctx_cold:{symbol}", 120.0):
                             self._logger.warning("OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d", symbol, spot_bars, fut_bars, self._context_required_bars)
@@ -6742,25 +6790,46 @@ class StrategyRunner:
                     is_selected_option = normalize_symbol(symbol) in selected_symbols
                     option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or "1")
                     spot_symbol = "NSE:NIFTY"
-                    fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context"), "")
+                    fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context" and not self._is_context_symbol_suspended(sym)), "")
                     if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
                         self._logger.warning("CONTEXT_FUTURES_UNRESOLVED symbol=%s", symbol)
                     if not fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
-                        rotated = self._market_data.maybe_rotate_nifty_futures_context(
-                            None, reason="context_futures_missing", trace_id=trace_id
-                        )
-                        if rotated:
-                            fut_symbol = str(rotated)
+                        rotate_result = getattr(self._market_data, "maybe_rotate_nifty_futures_context_result", None)
+                        rotated = rotate_result(None, reason="context_futures_missing", trace_id=trace_id, selected_option_symbols=[self._active_selected_ce, self._active_selected_pe]) if callable(rotate_result) else self._market_data.maybe_rotate_nifty_futures_context(None, reason="context_futures_missing", trace_id=trace_id)
+                        if getattr(rotated, "symbol", rotated):
+                            fut_symbol = str(getattr(rotated, "symbol", rotated))
                             self._active_symbols.add(fut_symbol)
                     if fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
                         old_fut_symbol = fut_symbol
-                        rotated = self._market_data.maybe_rotate_nifty_futures_context(
-                            fut_symbol, reason="context_futures_unresolved", trace_id=trace_id
-                        )
-                        if rotated and rotated != fut_symbol:
+                        rotate_result = getattr(self._market_data, "maybe_rotate_nifty_futures_context_result", None)
+                        rotated = rotate_result(fut_symbol, reason="context_futures_unresolved", trace_id=trace_id, selected_option_symbols=[self._active_selected_ce, self._active_selected_pe]) if callable(rotate_result) else self._market_data.maybe_rotate_nifty_futures_context(fut_symbol, reason="context_futures_unresolved", trace_id=trace_id)
+                        if bool(getattr(rotated, "unresolved", False)):
+                            stale_symbol = old_fut_symbol
+                            if stale_symbol:
+                                self._active_symbols.discard(stale_symbol)
+                                self._suspended_context_symbols.add(stale_symbol)
+                                cooldown_seconds = self._futures_context_suspension_seconds
+                                self._suspended_context_symbol_until[stale_symbol] = time.monotonic() + cooldown_seconds
+                                self._logger.warning(
+                                    "CONTEXT_FUTURES_SYMBOL_SUSPENDED symbol=%s reason=%s trace_id=%s cooldown_seconds=%s",
+                                    stale_symbol,
+                                    "active_future_resolution_failed",
+                                    trace_id,
+                                    cooldown_seconds,
+                                    extra={"event": "CONTEXT_FUTURES_SYMBOL_SUSPENDED", "symbol": stale_symbol, "reason": "active_future_resolution_failed", "trace_id": trace_id, "cooldown_seconds": cooldown_seconds},
+                                )
+                            self._logger.warning(
+                                "CONTEXT_FUTURES_UNRESOLVED_ACTIVE_RESOLUTION_FAILED old_symbol=%s reason=%s",
+                                stale_symbol,
+                                "context_futures_unresolved",
+                                extra={"event": "CONTEXT_FUTURES_UNRESOLVED_ACTIVE_RESOLUTION_FAILED", "old_symbol": fut_symbol, "trace_id": trace_id},
+                            )
+                            fut_symbol = ""
+                        rotated_symbol = getattr(rotated, "symbol", rotated)
+                        if rotated_symbol and rotated_symbol != fut_symbol:
                             self._active_symbols.discard(fut_symbol)
-                            self._active_symbols.add(str(rotated))
-                            fut_symbol = str(rotated)
+                            self._active_symbols.add(str(rotated_symbol))
+                            fut_symbol = str(rotated_symbol)
                             self._logger.info(
                                 "RUNNER_FUTURES_CONTEXT_ROTATED old_symbol=%s new_symbol=%s",
                                 old_fut_symbol,
@@ -8651,6 +8720,7 @@ class StrategyRunner:
                             option_required = self._required_bars_for_symbol(symbol)
                             option_count = len(self._indicator_engine.get_history(symbol) or [])
                             category, reason = self._classify_no_trade_decision(
+                                symbol=symbol,
                                 signal=None,
                                 indicators_ctx=indicators_ctx,
                                 option_count=option_count,
@@ -11171,6 +11241,15 @@ class StrategyRunner:
                 or signal.metadata.get("strategy")
                 or "runner"
             )
+            failure_cd_prefix = f"{base_symbol}|{signal.action}|{strategy_name}|"
+            failure_cd_until = max((float(v) for k, v in self._order_failure_cooldown_until.items() if str(k).startswith(failure_cd_prefix)), default=0.0)
+            if now_epoch < failure_cd_until:
+                self._logger.warning(
+                    "ORDER_FAILURE_COOLDOWN_ACTIVE symbol=%s side=%s strategy=%s cooldown_remaining_s=%.1f trace_id=%s",
+                    base_symbol, signal.action, strategy_name, failure_cd_until - now_epoch, trace_id,
+                    extra={"event": "ORDER_FAILURE_COOLDOWN_ACTIVE", "symbol": base_symbol, "side": signal.action, "strategy": strategy_name, "cooldown_until": failure_cd_until, "trace_id": trace_id},
+                )
+                return self._reject_signal_execution(symbol=base_symbol, trace_id=trace_id, reason="order_failure_cooldown_active")
 
             if not self._transition_execution_state(
                 base_symbol, ExecutionState.ORDER_PENDING
@@ -11251,6 +11330,16 @@ class StrategyRunner:
                         base_symbol, order_symbol, submit_result.reason, submit_reason, submit_result.broker_attempted, trace_id,
                         extra={"event": "RUNNER_ORDER_MANAGER_REJECTED", "symbol": base_symbol, "order_symbol": order_symbol, "reason": submit_result.reason, "runner_reason": submit_reason, "broker_attempted": submit_result.broker_attempted, "details": submit_details, "trace_id": trace_id},
                     )
+                    if submit_result.reason == "broker_placement_exception":
+                        error_type = str((submit_details or {}).get("error_type") or "unknown")
+                        cd_key = f"{base_symbol}|{signal.action}|{strategy_name}|{error_type}"
+                        cd_seconds = self._order_failure_cooldown_seconds
+                        self._order_failure_cooldown_until[cd_key] = now_epoch + cd_seconds
+                        self._logger.warning(
+                            "ORDER_FAILURE_COOLDOWN_MARKED symbol=%s side=%s strategy=%s error_type=%s cooldown_seconds=%s trace_id=%s",
+                            base_symbol, signal.action, strategy_name, error_type, cd_seconds, trace_id,
+                            extra={"event": "ORDER_FAILURE_COOLDOWN_MARKED", "symbol": base_symbol, "side": signal.action, "strategy": strategy_name, "error_type": error_type, "cooldown_seconds": cd_seconds, "trace_id": trace_id},
+                        )
             else:
                 order_id = self._order_manager.submit_trade_plan(plan)
                 broker_attempted = True
