@@ -6565,6 +6565,7 @@ class StrategyRunner:
     def _classify_no_trade_decision(
         self,
         *,
+        symbol: str,
         signal: Any | None,
         indicators_ctx: Mapping[str, Any],
         option_count: int,
@@ -6573,7 +6574,7 @@ class StrategyRunner:
     ) -> tuple[str, str]:
         latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
         if callable(latest_decision_getter):
-            decision = latest_decision_getter(str(indicators_ctx.get("symbol") or ""))
+            decision = latest_decision_getter(symbol)
             if decision is not None:
                 return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
         if broker_attempted:
@@ -6775,6 +6776,14 @@ class StrategyRunner:
                         old_fut_symbol = fut_symbol
                         rotate_result = getattr(self._market_data, "maybe_rotate_nifty_futures_context_result", None)
                         rotated = rotate_result(fut_symbol, reason="context_futures_unresolved", trace_id=trace_id, selected_option_symbols=[self._active_selected_ce, self._active_selected_pe]) if callable(rotate_result) else self._market_data.maybe_rotate_nifty_futures_context(fut_symbol, reason="context_futures_unresolved", trace_id=trace_id)
+                        if bool(getattr(rotated, "unresolved", False)):
+                            self._logger.warning(
+                                "CONTEXT_FUTURES_UNRESOLVED_ACTIVE_RESOLUTION_FAILED old_symbol=%s reason=%s",
+                                fut_symbol,
+                                "context_futures_unresolved",
+                                extra={"event": "CONTEXT_FUTURES_UNRESOLVED_ACTIVE_RESOLUTION_FAILED", "old_symbol": fut_symbol, "trace_id": trace_id},
+                            )
+                            fut_symbol = ""
                         rotated_symbol = getattr(rotated, "symbol", rotated)
                         if rotated_symbol and rotated_symbol != fut_symbol:
                             self._active_symbols.discard(fut_symbol)
@@ -8670,6 +8679,7 @@ class StrategyRunner:
                             option_required = self._required_bars_for_symbol(symbol)
                             option_count = len(self._indicator_engine.get_history(symbol) or [])
                             category, reason = self._classify_no_trade_decision(
+                                symbol=symbol,
                                 signal=None,
                                 indicators_ctx=indicators_ctx,
                                 option_count=option_count,

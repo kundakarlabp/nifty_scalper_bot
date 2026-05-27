@@ -6636,6 +6636,8 @@ class MarketDataManager:
                 except Exception:
                     pass
         if not active and selected_symbols:
+            selected_ce = next((s for s in selected_symbols if str(s).upper().endswith("CE")), None)
+            selected_pe = next((s for s in selected_symbols if str(s).upper().endswith("PE")), None)
             months: set[str] = set()
             for symbol in selected_symbols:
                 match = re.search(r"NIFTY(\d{2}[A-Z]{3})\d{5}(CE|PE)$", str(symbol).upper())
@@ -6649,7 +6651,7 @@ class MarketDataManager:
                     self._logger.warning(
                         "FUTURES_CONTEXT_FALLBACK_FROM_SELECTED_OPTION old_symbol=%s new_symbol=%s reason=%s source=%s",
                         current_symbol, active, reason, source,
-                        extra={"event": "FUTURES_CONTEXT_FALLBACK_FROM_SELECTED_OPTION", "old_symbol": current_symbol, "new_symbol": active, "reason": reason, "source": source, "selected_ce": selected_symbols[0] if selected_symbols else None, "selected_pe": selected_symbols[1] if len(selected_symbols) > 1 else None, "trace_id": trace_id},
+                        extra={"event": "FUTURES_CONTEXT_FALLBACK_FROM_SELECTED_OPTION", "old_symbol": current_symbol, "new_symbol": active, "reason": reason, "source": source, "selected_ce": selected_ce, "selected_pe": selected_pe, "trace_id": trace_id},
                     )
         if not active:
             self._logger.warning(
@@ -6657,7 +6659,7 @@ class MarketDataManager:
                 current_symbol, reason,
                 extra={"event": "FUTURES_CONTEXT_STALE_OR_UNRESOLVED", "current_symbol": current_symbol, "reason": reason, "trace_id": trace_id, "source": "unresolved"},
             )
-            return FuturesContextRotationResult(current_symbol, current_symbol, False, True, reason, "unresolved")
+            return FuturesContextRotationResult(None, current_symbol, False, True, reason, "unresolved")
         if current_symbol and self._canonical_symbol(current_symbol) == self._canonical_symbol(active):
             return FuturesContextRotationResult(current_symbol, current_symbol, False, False, reason, source)
         old_symbol = current_symbol

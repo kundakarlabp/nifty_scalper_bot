@@ -96,6 +96,18 @@ def test_single_vote_scalp_disabled_rejects_single_vote(monkeypatch) -> None:
     assert combined is None
 
 
+def test_strategy_manager_records_single_vote_disabled_decision(monkeypatch) -> None:
+    monkeypatch.setenv('STRATEGY_ALLOW_SINGLE_VOTE_SCALP', 'false')
+    manager = _manager_stub()
+    manager._last_no_signal_decision_by_symbol = {}
+    signal = _make_signal()
+    vote = StrategyVote(strategy='VWAPPro', side='CE', score=7.5, confidence=0.8, reasons=[], metadata={})
+    manager._combine_strategy_votes(symbol='NFO:NIFTY25000CE', signals=[(signal, vote)], indicators={'selected_ce': 'NFO:NIFTY25000CE'})
+    decision = manager.get_last_no_signal_decision('NFO:NIFTY25000CE')
+    assert decision is not None
+    assert decision.reason == 'single_vote_scalp_disabled'
+
+
 
 def test_context_only_vote_returns_none_and_logs(caplog) -> None:
     manager = _manager_stub()

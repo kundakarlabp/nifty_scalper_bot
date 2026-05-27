@@ -40,3 +40,5 @@ def test_single_vote_scalp_disabled_reason(monkeypatch, caplog):
     assert combined is None
     assert any('single_vote_scalp_disabled' in r.message for r in caplog.records)
     assert not any('blocked_reason=context_veto' in r.message for r in caplog.records)
+    svd = next(r for r in caplog.records if "SINGLE_VOTE_DECISION" in r.message)
+    assert getattr(svd, "final_allowed", False) is False

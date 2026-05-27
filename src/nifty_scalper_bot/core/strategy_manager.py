@@ -2110,6 +2110,8 @@ class StrategyManager(_BaseStrategyManager):
         """
 
         symbol = normalize_symbol(symbol)
+        symbol_norm = str(symbol or "").strip().upper()
+        self._last_no_signal_decision_by_symbol.pop(symbol_norm, None)
         log.debug(
             "Entered StrategyManager.generate_signal",
             extra={"event": "scored_strategy_generate", "symbol": symbol},
@@ -3002,6 +3004,32 @@ class StrategyManager(_BaseStrategyManager):
                 indicators=indicators,
                 error_strategies=errors,
             )
+            primary_reason = "no_strategy_signal"
+            category = "strategy_no_trigger"
+            if no_vote_reason_counts.get("underlying_direction_conflict"):
+                primary_reason = "underlying_direction_conflict"
+                category = "context_direction_conflict"
+            elif no_vote_reason_counts.get("weak_score"):
+                primary_reason = "weak_score"
+                category = "strategy_score_below_threshold"
+            elif any(no_vote_reason_counts.get(r) for r in ("no_liquidity_sweep", "premium_not_reversing_up", "smc_structure_required_live")):
+                primary_reason = next((r for r in ("no_liquidity_sweep", "premium_not_reversing_up", "smc_structure_required_live") if no_vote_reason_counts.get(r)), "no_strategy_signal")
+                category = "strategy_no_trigger"
+            elif errors:
+                primary_reason = "strategy_error"
+                category = "strategy_error"
+            self._record_no_signal_decision(
+                symbol=symbol_norm,
+                category=category,
+                reason=primary_reason,
+                blocked_at="generate_signal_no_signals",
+                indicators=indicators,
+                no_vote_reason_counts=no_vote_reason_counts,
+                strategy_reasons=strategy_reasons,
+                trigger_vote_count=0,
+                context_vote_count=0,
+                trace_id=trace_id,
+            )
             _log_reject(
                 "no_strategy_signal",
                 {
@@ -3545,10 +3573,15 @@ class StrategyManager(_BaseStrategyManager):
             metadata["strike_distance_from_atm"] = strike_distance_from_atm
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
+            threshold_passed = bool(raw_trigger_score >= score_min and best_vote.confidence >= conf_min and selected_ok and not vetoed)
+            final_allowed = bool(allow_scalp_single and threshold_passed)
+            blocked_reason = None if final_allowed else ("single_vote_scalp_disabled" if threshold_passed and not allow_scalp_single else "threshold_not_met")
             log.info(
-                "SINGLE_VOTE_DECISION allowed=%s reason=%s strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
-                bool(raw_trigger_score >= score_min and best_vote.confidence >= conf_min and selected_ok and not vetoed),
-                "ok",
+                "SINGLE_VOTE_DECISION threshold_passed=%s final_allowed=%s allow_scalp_single=%s reason=%s strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
+                threshold_passed,
+                final_allowed,
+                allow_scalp_single,
+                blocked_reason or "ok",
                 best_vote.strategy,
                 raw_trigger_score,
                 weighted_trigger_score,
@@ -3560,6 +3593,11 @@ class StrategyManager(_BaseStrategyManager):
                 vetoed,
                 extra={
                     "event": "SINGLE_VOTE_DECISION",
+                    "allowed": final_allowed,
+                    "threshold_passed": threshold_passed,
+                    "final_allowed": final_allowed,
+                    "allow_scalp_single": allow_scalp_single,
+                    "blocked_reason": blocked_reason,
                     "symbol": symbol_norm,
                     "strategy": best_vote.strategy,
                     "raw_score": raw_trigger_score,
@@ -3718,6 +3756,38 @@ class StrategyManager(_BaseStrategyManager):
 
     def get_last_no_signal_decision(self, symbol: str) -> StrategyNoSignalDecision | None:
         return self._last_no_signal_decision_by_symbol.get(str(symbol or "").strip().upper())
+
+    def _record_no_signal_decision(
+        self,
+        *,
+        symbol: str,
+        category: str,
+        reason: str,
+        blocked_at: str,
+        indicators: t.Mapping[str, t.Any],
+        no_vote_reason_counts: t.Mapping[str, int] | None = None,
+        strategy_reasons: t.Mapping[str, str] | None = None,
+        trigger_vote_count: int = 0,
+        context_vote_count: int = 0,
+        trace_id: str | None = None,
+    ) -> None:
+        symbol_norm = str(symbol or "").strip().upper()
+        self._last_no_signal_decision_by_symbol[symbol_norm] = StrategyNoSignalDecision(
+            symbol=symbol_norm,
+            category=category,
+            reason=reason,
+            blocked_at=blocked_at,
+            no_vote_reason_counts=dict(no_vote_reason_counts or {}),
+            strategy_reasons=dict(strategy_reasons or {}),
+            direction_bias=str(indicators.get("direction_bias") or "").upper() or None,
+            underlying_direction_bias=str(indicators.get("underlying_direction_bias") or "").upper() or None,
+            context_age_seconds=float(indicators.get("context_age_seconds")) if indicators.get("context_age_seconds") is not None else None,
+            trigger_vote_count=trigger_vote_count,
+            context_vote_count=context_vote_count,
+            selected_ce=str(indicators.get("selected_ce") or "") or None,
+            selected_pe=str(indicators.get("selected_pe") or "") or None,
+            trace_id=trace_id,
+        )
 
     def get_strategy_mode_profile(self) -> dict[str, t.Any]:
         """Return strategy gating profile based on effective execution mode."""

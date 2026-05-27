@@ -3300,10 +3300,20 @@ class OrderManager:
         """Validate TradePlan and delegate to place_managed_order/place_order."""
         symbol = normalize_symbol(plan.symbol)
         if self.is_kill_switch_active():
+            ks = self.get_kill_switch_status()
+            self._logger.warning(
+                "ORDER_MANAGER_KILL_SWITCH_REJECTED symbol=%s reason=%s broker_attempted=False consecutive_failures=%s kill_reason=%s trace_id=%s",
+                symbol,
+                "order_manager_kill_switch_active",
+                ks.get("consecutive_failures"),
+                ks.get("last_reason"),
+                plan.trace_id,
+                extra={"event": "ORDER_MANAGER_KILL_SWITCH_REJECTED", "symbol": symbol, "reason": "order_manager_kill_switch_active", "broker_attempted": False, "kill_switch_status": ks, "trace_id": plan.trace_id},
+            )
             return TradePlanSubmitResult(
                 False,
                 reason="order_manager_kill_switch_active",
-                details={"kill_switch_status": self.get_kill_switch_status(), "symbol": symbol, "trace_id": plan.trace_id},
+                details={"kill_switch_status": ks, "symbol": symbol, "trace_id": plan.trace_id},
                 broker_attempted=False,
             )
         validation = self._validate_trade_plan(plan)

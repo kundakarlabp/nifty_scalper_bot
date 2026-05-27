@@ -160,6 +160,7 @@ def test_stale_selected_symbol_does_not_arm_live_orders(caplog) -> None:
 def test_no_trade_decision_reports_history_cold_not_broker(caplog) -> None:
     runner = _make_runner()
     category, reason = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        symbol="NFO:CE",
         signal=None,
         indicators_ctx={},
         option_count=1,
@@ -173,6 +174,7 @@ def test_no_trade_decision_reports_history_cold_not_broker(caplog) -> None:
 def test_runner_no_trade_decision_reports_context_direction_unavailable() -> None:
     runner = _make_runner()
     category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        symbol="NFO:CE",
         signal=None,
         indicators_ctx={},
         option_count=10,
@@ -185,6 +187,7 @@ def test_runner_no_trade_decision_reports_context_direction_unavailable() -> Non
 def test_runner_no_trade_decision_reports_context_direction_conflict() -> None:
     runner = _make_runner()
     category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        symbol="NFO:CE",
         signal=None,
         indicators_ctx={"direction_conflict": True},
         option_count=10,
@@ -198,6 +201,7 @@ def test_runner_no_trade_decision_reports_strategy_no_trigger_when_data_ready_bu
     runner = _make_runner()
     runner._runtime_live_orders_armed = False
     category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        symbol="NFO:CE",
         signal=None,
         indicators_ctx={"direction_bias": "CE"},
         option_count=10,
@@ -205,6 +209,14 @@ def test_runner_no_trade_decision_reports_strategy_no_trigger_when_data_ready_bu
         broker_attempted=False,
     )
     assert category == "strategy_no_trigger"
+
+
+def test_runner_no_trade_uses_strategy_decision_by_symbol_even_when_indicators_lacks_symbol() -> None:
+    runner = _make_runner()
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda sym: SimpleNamespace(category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled") if sym == "NFO:CE" else None)
+    category, reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False)  # type: ignore[attr-defined]
+    assert category == "strategy_single_vote_disabled"
+    assert reason == "single_vote_scalp_disabled"
 
 
 def test_runner_emits_no_trade_decision_on_history_cold_eval_block(caplog) -> None:
