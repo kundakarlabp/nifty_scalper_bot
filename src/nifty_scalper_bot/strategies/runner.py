@@ -6571,6 +6571,11 @@ class StrategyRunner:
         option_required: int,
         broker_attempted: bool = False,
     ) -> tuple[str, str]:
+        latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
+        if callable(latest_decision_getter):
+            decision = latest_decision_getter(str(indicators_ctx.get("symbol") or ""))
+            if decision is not None:
+                return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
         if broker_attempted:
             return "broker_placement_failed", "broker_attempted_failed"
         if option_count < option_required:
@@ -6599,6 +6604,21 @@ class StrategyRunner:
         option_history_count: int | None = None,
         option_history_required: int | None = None,
     ) -> None:
+        if self._is_context_symbol(symbol):
+            self._logger.info(
+                "RUNNER_CONTEXT_EVAL_STATUS symbol=%s category=%s reason=%s",
+                symbol,
+                category,
+                reason,
+                extra={
+                    "event": "RUNNER_CONTEXT_EVAL_STATUS",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "category": category,
+                    "reason": reason,
+                },
+            )
+            return
         try:
             ctx = dict(indicators_ctx or {})
             self._logger.info(
@@ -6746,21 +6766,20 @@ class StrategyRunner:
                     if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
                         self._logger.warning("CONTEXT_FUTURES_UNRESOLVED symbol=%s", symbol)
                     if not fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
-                        rotated = self._market_data.maybe_rotate_nifty_futures_context(
-                            None, reason="context_futures_missing", trace_id=trace_id
-                        )
-                        if rotated:
-                            fut_symbol = str(rotated)
+                        rotate_result = getattr(self._market_data, "maybe_rotate_nifty_futures_context_result", None)
+                        rotated = rotate_result(None, reason="context_futures_missing", trace_id=trace_id, selected_option_symbols=[self._active_selected_ce, self._active_selected_pe]) if callable(rotate_result) else self._market_data.maybe_rotate_nifty_futures_context(None, reason="context_futures_missing", trace_id=trace_id)
+                        if getattr(rotated, "symbol", rotated):
+                            fut_symbol = str(getattr(rotated, "symbol", rotated))
                             self._active_symbols.add(fut_symbol)
                     if fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
                         old_fut_symbol = fut_symbol
-                        rotated = self._market_data.maybe_rotate_nifty_futures_context(
-                            fut_symbol, reason="context_futures_unresolved", trace_id=trace_id
-                        )
-                        if rotated and rotated != fut_symbol:
+                        rotate_result = getattr(self._market_data, "maybe_rotate_nifty_futures_context_result", None)
+                        rotated = rotate_result(fut_symbol, reason="context_futures_unresolved", trace_id=trace_id, selected_option_symbols=[self._active_selected_ce, self._active_selected_pe]) if callable(rotate_result) else self._market_data.maybe_rotate_nifty_futures_context(fut_symbol, reason="context_futures_unresolved", trace_id=trace_id)
+                        rotated_symbol = getattr(rotated, "symbol", rotated)
+                        if rotated_symbol and rotated_symbol != fut_symbol:
                             self._active_symbols.discard(fut_symbol)
-                            self._active_symbols.add(str(rotated))
-                            fut_symbol = str(rotated)
+                            self._active_symbols.add(str(rotated_symbol))
+                            fut_symbol = str(rotated_symbol)
                             self._logger.info(
                                 "RUNNER_FUTURES_CONTEXT_ROTATED old_symbol=%s new_symbol=%s",
                                 old_fut_symbol,

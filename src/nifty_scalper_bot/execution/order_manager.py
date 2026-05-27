@@ -3299,6 +3299,13 @@ class OrderManager:
     def submit_trade_plan_result(self, plan: TradePlan) -> TradePlanSubmitResult:
         """Validate TradePlan and delegate to place_managed_order/place_order."""
         symbol = normalize_symbol(plan.symbol)
+        if self.is_kill_switch_active():
+            return TradePlanSubmitResult(
+                False,
+                reason="order_manager_kill_switch_active",
+                details={"kill_switch_status": self.get_kill_switch_status(), "symbol": symbol, "trace_id": plan.trace_id},
+                broker_attempted=False,
+            )
         validation = self._validate_trade_plan(plan)
         if not validation.allowed:
             self._logger.warning(
@@ -7177,7 +7184,18 @@ class OrderManager:
             self._last_broker_health_emit_ts = now
             self._last_broker_health_effect = str(snapshot["trading_allowed_effect"])
             self._last_broker_health_circuit_state = bool(snapshot["margin_circuit_open"])
-            self._logger.info("BROKER_HEALTH_STATUS", extra={"event": "BROKER_HEALTH_STATUS", **snapshot})
+            self._logger.info(
+                "BROKER_HEALTH_STATUS broker_connected=%s margin_api_available=%s order_api_available=%s margin_circuit_open=%s balance_stale=%s trading_allowed_effect=%s last_order_api_error_type=%s last_margin_error_type=%s",
+                snapshot.get("broker_connected"),
+                snapshot.get("margin_api_available"),
+                snapshot.get("order_api_available"),
+                snapshot.get("margin_circuit_open"),
+                snapshot.get("balance_stale"),
+                snapshot.get("trading_allowed_effect"),
+                snapshot.get("last_order_api_error_type"),
+                snapshot.get("last_margin_error_type"),
+                extra={"event": "BROKER_HEALTH_STATUS", **snapshot},
+            )
         except Exception as exc:  # noqa: BLE001
             with suppress(Exception):
                 self._logger.debug(

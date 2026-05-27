@@ -61,6 +61,24 @@ REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
 }
 
 
+@dataclass(frozen=True)
+class StrategyNoSignalDecision:
+    symbol: str
+    category: str
+    reason: str
+    blocked_at: str
+    no_vote_reason_counts: dict[str, int]
+    strategy_reasons: dict[str, str]
+    direction_bias: str | None
+    underlying_direction_bias: str | None
+    context_age_seconds: float | None
+    trigger_vote_count: int
+    context_vote_count: int
+    selected_ce: str | None
+    selected_pe: str | None
+    trace_id: str | None = None
+
+
 class StrategyInterface(ABC):
     """Define the standardised contract expected from all strategies."""
 
@@ -1058,6 +1076,7 @@ class StrategyManager(_BaseStrategyManager):
         self._score_cache: dict[str, StrategyScore] = {}
         self._score_floor = 0.05
         self._score_ceiling = 3.0
+        self._last_no_signal_decision_by_symbol: dict[str, StrategyNoSignalDecision] = {}
         self._allocation_state: dict[str, float] = {}
         self._regime_last_key: str | None = None
         self._dynamic_disable_threshold = 0.2
@@ -3275,6 +3294,22 @@ class StrategyManager(_BaseStrategyManager):
     ) -> Signal | None:
         """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
         symbol_norm = str(symbol or "").strip().upper()
+        def _record_no_signal(category: str, reason_text: str, blocked_at: str, *, no_vote_reason_counts: dict[str, int] | None = None, strategy_reasons: dict[str, str] | None = None, trigger_vote_count: int = 0, context_vote_count: int = 0) -> None:
+            self._last_no_signal_decision_by_symbol[symbol_norm] = StrategyNoSignalDecision(
+                symbol=symbol_norm,
+                category=category,
+                reason=reason_text,
+                blocked_at=blocked_at,
+                no_vote_reason_counts=dict(no_vote_reason_counts or {}),
+                strategy_reasons=dict(strategy_reasons or {}),
+                direction_bias=str(indicator_map.get("direction_bias") or "").upper() or None,
+                underlying_direction_bias=str(indicator_map.get("underlying_direction_bias") or "").upper() or None,
+                context_age_seconds=float(indicator_map.get("context_age_seconds")) if indicator_map.get("context_age_seconds") is not None else None,
+                trigger_vote_count=trigger_vote_count,
+                context_vote_count=context_vote_count,
+                selected_ce=str(indicator_map.get("selected_ce") or "") or None,
+                selected_pe=str(indicator_map.get("selected_pe") or "") or None,
+            )
         indicator_map = dict(indicators or {})
         selected_symbols = {
             str(indicator_map.get("selected_ce") or "").strip().upper(),
@@ -3425,6 +3460,7 @@ class StrategyManager(_BaseStrategyManager):
                         "context_age_seconds": indicator_map.get("context_age_seconds"),
                     },
                 )
+                _record_no_signal("strategy_no_trigger", "no_trigger_vote", "no_trigger_vote", trigger_vote_count=0, context_vote_count=len(context_votes))
                 return None
         else:
             best_signal, best_vote = max(trigger_votes, key=lambda pair: self._extract_raw_score(pair[1]))
@@ -3590,6 +3626,8 @@ class StrategyManager(_BaseStrategyManager):
                         best_vote.confidence,
                         extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "allowed": False, "blocked_at": "single_vote_gate", "blocked_reason": blocked_reason, "selected_ce": selected_ce, "selected_pe": selected_pe, "strike_distance_from_atm": strike_distance_from_atm, "near_atm_threshold": near_atm_threshold, "selected_ok_reason": selected_ok_reason, "raw_score": raw_trigger_score, "confidence": best_vote.confidence},
                     )
+                    category = "strategy_single_vote_disabled" if blocked_reason == "single_vote_scalp_disabled" else ("context_direction_conflict" if blocked_reason == "underlying_direction_conflict" else "strategy_no_trigger")
+                    _record_no_signal(category, blocked_reason, "single_vote_gate", trigger_vote_count=len(trigger_votes), context_vote_count=len(context_votes))
                     return None
         elif trigger_votes:
             metadata_stage = "multi_vote_confirmed"
@@ -3612,6 +3650,7 @@ class StrategyManager(_BaseStrategyManager):
                 symbol_norm, best_vote.strategy, best_vote.side, True, raw_trigger_score, threshold, weighted_trigger_score, _regime_weight(best_vote), context_bonus, context_penalty, final_score, threshold, False, "strategy_manager_combine", blocked_reason,
                 extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "data_gate": True, "setup_score": raw_trigger_score, "setup_min": threshold, "weighted_score": weighted_trigger_score, "regime_weight": _regime_weight(best_vote), "context_bonus": context_bonus, "context_penalty": context_penalty, "final_score": final_score, "final_min": threshold, "allowed": False, "blocked_at": "strategy_manager_combine", "blocked_reason": blocked_reason},
             )
+            _record_no_signal("strategy_score_below_threshold", blocked_reason, "strategy_manager_combine", trigger_vote_count=len(trigger_votes), context_vote_count=len(context_votes))
             return None
         quality_score, quality_meta = self._compute_trade_quality_score(
             best_vote,
@@ -3645,6 +3684,7 @@ class StrategyManager(_BaseStrategyManager):
                 "trade_quality_gate",
                 metadata["quality_block_reason"],
             )
+            _record_no_signal("strategy_no_trigger", str(metadata["quality_block_reason"]), "trade_quality_gate", trigger_vote_count=len(trigger_votes), context_vote_count=len(context_votes))
             return None
 
         metadata.setdefault("trigger_strategy_score", metadata.get("strategy_score"))
@@ -3675,6 +3715,9 @@ class StrategyManager(_BaseStrategyManager):
             take_profit=best_signal.take_profit,
             metadata=metadata,
         )
+
+    def get_last_no_signal_decision(self, symbol: str) -> StrategyNoSignalDecision | None:
+        return self._last_no_signal_decision_by_symbol.get(str(symbol or "").strip().upper())
 
     def get_strategy_mode_profile(self) -> dict[str, t.Any]:
         """Return strategy gating profile based on effective execution mode."""

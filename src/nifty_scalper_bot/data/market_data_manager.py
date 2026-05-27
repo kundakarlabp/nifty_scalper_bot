@@ -137,6 +137,16 @@ class PollingPolicy:
             max_symbols=int(getattr(settings, "poll_max_symbols", 12)),
             error_log_throttle_seconds=float(getattr(settings, "poll_error_log_throttle_seconds", 30.0)),
         )
+
+
+@dataclass(frozen=True)
+class FuturesContextRotationResult:
+    symbol: str | None
+    old_symbol: str | None
+    rotated: bool
+    unresolved: bool
+    reason: str
+    source: str
 def canonical_symbol(symbol: str) -> str:
     """Canonicalize symbols (including NIFTY spot aliases) to EXCHANGE:SYMBOL."""
     normalized = enforce_canonical(normalize_symbol(str(symbol or "")))
@@ -6571,6 +6581,22 @@ class MarketDataManager:
                 best_symbol = f"NFO:{tradingsymbol}"
         return best_symbol
 
+    def _resolve_active_nifty_future_from_instruments(self, instruments: Iterable[Mapping[str, Any]], now: datetime | None = None) -> str | None:
+        ref_now = now or datetime.now(timezone.utc)
+        best_symbol: str | None = None
+        best_expiry: datetime | None = None
+        for row in instruments:
+            if not isinstance(row, Mapping) or not _is_nifty_index_future_row(row):
+                continue
+            tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
+            expiry = _parse_instrument_expiry(row.get("expiry"))
+            if expiry is None or expiry < ref_now:
+                continue
+            if best_expiry is None or expiry < best_expiry:
+                best_expiry = expiry
+                best_symbol = f"NFO:{tradingsymbol}"
+        return best_symbol
+
     def maybe_rotate_nifty_futures_context(
         self,
         current_symbol: str | None,
@@ -6579,38 +6605,69 @@ class MarketDataManager:
         trace_id: str | None = None,
         now: datetime | None = None,
     ) -> str | None:
+        return self.maybe_rotate_nifty_futures_context_result(
+            current_symbol,
+            reason=reason,
+            trace_id=trace_id,
+            now=now,
+        ).symbol
+
+    def maybe_rotate_nifty_futures_context_result(
+        self,
+        current_symbol: str | None,
+        *,
+        reason: str,
+        trace_id: str | None = None,
+        now: datetime | None = None,
+        selected_option_symbols: Sequence[str] | None = None,
+    ) -> FuturesContextRotationResult:
         active = self.resolve_active_nifty_future_symbol(now=now)
+        source = "resolver"
+        selected_symbols = [str(s or "") for s in (selected_option_symbols or []) if s]
+        if not active:
+            broker_instruments = getattr(self._broker, "instruments", None)
+            if callable(broker_instruments):
+                try:
+                    rows = broker_instruments("NFO") or []
+                    resolved = self._resolve_active_nifty_future_from_instruments(rows, now=now)
+                    if resolved:
+                        active = resolved
+                        source = "broker_instruments"
+                except Exception:
+                    pass
+        if not active and selected_symbols:
+            months: set[str] = set()
+            for symbol in selected_symbols:
+                match = re.search(r"NIFTY(\d{2}[A-Z]{3})\d{5}(CE|PE)$", str(symbol).upper())
+                if match:
+                    months.add(match.group(1))
+            if len(months) == 1:
+                candidate = f"NFO:NIFTY{next(iter(months))}FUT"
+                if _NIFTY_FUT_RE.match(candidate.split(":", 1)[-1]):
+                    active = candidate
+                    source = "selected_option_month"
+                    self._logger.warning(
+                        "FUTURES_CONTEXT_FALLBACK_FROM_SELECTED_OPTION old_symbol=%s new_symbol=%s reason=%s source=%s",
+                        current_symbol, active, reason, source,
+                        extra={"event": "FUTURES_CONTEXT_FALLBACK_FROM_SELECTED_OPTION", "old_symbol": current_symbol, "new_symbol": active, "reason": reason, "source": source, "selected_ce": selected_symbols[0] if selected_symbols else None, "selected_pe": selected_symbols[1] if len(selected_symbols) > 1 else None, "trace_id": trace_id},
+                    )
         if not active:
             self._logger.warning(
                 "FUTURES_CONTEXT_STALE_OR_UNRESOLVED current_symbol=%s reason=%s",
-                current_symbol,
-                reason,
-                extra={
-                    "event": "FUTURES_CONTEXT_STALE_OR_UNRESOLVED",
-                    "current_symbol": current_symbol,
-                    "reason": reason,
-                    "trace_id": trace_id,
-                },
+                current_symbol, reason,
+                extra={"event": "FUTURES_CONTEXT_STALE_OR_UNRESOLVED", "current_symbol": current_symbol, "reason": reason, "trace_id": trace_id, "source": "unresolved"},
             )
-            return current_symbol
+            return FuturesContextRotationResult(current_symbol, current_symbol, False, True, reason, "unresolved")
         if current_symbol and self._canonical_symbol(current_symbol) == self._canonical_symbol(active):
-            return current_symbol
+            return FuturesContextRotationResult(current_symbol, current_symbol, False, False, reason, source)
         old_symbol = current_symbol
         self.request_symbol_subscription(active)
         self._logger.warning(
             "FUTURES_CONTEXT_SYMBOL_ROTATED old_symbol=%s new_symbol=%s reason=%s",
-            old_symbol,
-            active,
-            reason,
-            extra={
-                "event": "FUTURES_CONTEXT_SYMBOL_ROTATED",
-                "old_symbol": old_symbol,
-                "new_symbol": active,
-                "reason": reason,
-                "trace_id": trace_id,
-            },
+            old_symbol, active, reason,
+            extra={"event": "FUTURES_CONTEXT_SYMBOL_ROTATED", "old_symbol": old_symbol, "new_symbol": active, "reason": reason, "trace_id": trace_id, "source": source},
         )
-        return active
+        return FuturesContextRotationResult(active, old_symbol, True, False, reason, source)
 
     def get_symbol_snapshot(self, symbol: str) -> MarketSnapshot:
         """Return a unified MarketSnapshot for one symbol."""
