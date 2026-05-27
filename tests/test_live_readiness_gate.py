@@ -166,3 +166,8 @@ def test_compute_live_readiness_explicit_positive_override_still_works(monkeypat
     )
     assert armed is True
     assert reasons == []
+
+def test_runner_emits_live_universe_bootstrap_status_hook_present() -> None:
+    text = Path('src/nifty_scalper_bot/strategies/runner.py').read_text(encoding='utf-8')
+    assert 'LIVE_UNIVERSE_BOOTSTRAP_STATUS' in text
+    assert 'selected_option_subscription_pending' in text

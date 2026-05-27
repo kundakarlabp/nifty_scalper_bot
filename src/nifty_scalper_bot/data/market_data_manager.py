@@ -325,6 +325,8 @@ class MarketDataManager:
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
+        self._suspended_context_symbols: set[str] = set()
+        self._suspended_context_symbol_until: dict[str, float] = {}
         self._active_subscribed_symbols: set[str] = set()
         self._symbols_with_tick: set[str] = set()
         self._ticks_received_per_symbol: dict[str, int] = defaultdict(int)
@@ -2022,6 +2024,43 @@ class MarketDataManager:
             await asyncio.sleep(0.1)
         raise RuntimeError("Live tick unavailable")
 
+
+    def suspend_context_symbol(self, symbol: str, *, reason: str, ttl_s: float = 300.0) -> None:
+        canonical = self._canonical_symbol(symbol)
+        ttl = max(1.0, float(ttl_s or 300.0))
+        self._suspended_context_symbols.add(canonical)
+        self._suspended_context_symbol_until[canonical] = time.monotonic() + ttl
+        self._logger.warning(
+            "CONTEXT_SYMBOL_SUSPENDED symbol=%s reason=%s ttl_s=%.1f",
+            canonical,
+            reason,
+            ttl,
+            extra={"event": "CONTEXT_SYMBOL_SUSPENDED", "symbol": canonical, "reason": reason, "ttl_s": ttl},
+        )
+
+    def is_context_symbol_suspended(self, symbol: str) -> bool:
+        canonical = self._canonical_symbol(symbol)
+        until = self._suspended_context_symbol_until.get(canonical)
+        if until is None:
+            return canonical in self._suspended_context_symbols
+        if time.monotonic() >= until:
+            self._suspended_context_symbol_until.pop(canonical, None)
+            self._suspended_context_symbols.discard(canonical)
+            return False
+        return True
+
+    def _extract_ltp_from_quote(self, quote: Mapping[str, Any]) -> float | None:
+        for key in ("ltp", "last_price", "price", "close"):
+            try:
+                value = quote.get(key)
+                if value is not None:
+                    parsed = float(value)
+                    if parsed > 0:
+                        return parsed
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def get_cached_ltp(
         self,
         symbol: str,
@@ -2031,6 +2070,12 @@ class MarketDataManager:
     ) -> float | None:
         """Cached-only LTP accessor. Args: symbol/guards. Returns: ltp. Raises: none."""
         canonical_symbol = self._canonical_symbol(symbol)
+        if self.is_context_symbol_suspended(canonical_symbol):
+            with self._lock:
+                cached_tick = self._latest_ticks.get(canonical_symbol)
+            if isinstance(cached_tick, Mapping):
+                return self._extract_ltp_from_quote(cached_tick)
+            return None
         tick = self.get_latest_tick(canonical_symbol)
         if not isinstance(tick, Mapping):
             return None
@@ -2043,13 +2088,7 @@ class MarketDataManager:
         ).lower()
         if require_ws and source not in {"ws", "ws_full", "full"}:
             return None
-        price = _coerce_positive_float(
-            tick.get("last_price")
-            or tick.get("ltp")
-            or tick.get("price")
-            or tick.get("close")
-        )
-        return float(price) if price and price > 0 else None
+        return self._extract_ltp_from_quote(tick)
 
     def get_ltp(
         self,
@@ -2477,6 +2516,14 @@ class MarketDataManager:
             self._quote_direct_miss_reason.pop(symbol_key, None)
 
         canonical_symbol = self._canonical_symbol(symbol)
+        if self.is_context_symbol_suspended(canonical_symbol):
+            with self._lock:
+                cached_tick = self._latest_ticks.get(canonical_symbol)
+            if isinstance(cached_tick, Mapping) and cached_tick:
+                cached_quote = dict(cached_tick)
+                cached_quote.setdefault("source", "cache")
+                return cached_quote
+            return {"symbol": canonical_symbol, "quote_unavailable_reason": "suspended_stale_future"}
         candidates: list[str | int] = self._candidate_quote_keys(canonical_symbol)
         if not candidates:
             candidates = [canonical_symbol]
@@ -5153,6 +5200,13 @@ class MarketDataManager:
                         % (tick.get("symbol"), exc),
                         interval_sec=10.0,
                         level=logging.ERROR,
+                    )
+                    log_throttled(
+                        self._logger,
+                        "mdm_bus_backpressure",
+                        "MDM_BUS_BACKPRESSURE symbol=%s dropped_ticks=%s coalesced_ticks=%s latest_cache_updated=True" % (tick.get("symbol"), 1, 1),
+                        interval_sec=10.0,
+                        level=logging.WARNING,
                     )
 
             future.add_done_callback(_done)

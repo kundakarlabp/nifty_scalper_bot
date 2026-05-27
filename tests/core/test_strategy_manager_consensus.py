@@ -390,3 +390,84 @@ def test_derive_direction_fresh_context_and_stale_context_age() -> None:
     )
     assert side == 'CE'
     assert conf > 0.0
+
+def test_ce_two_trigger_blocked_when_direction_bias_pe() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000CE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000CE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    v1 = StrategyVote(strategy='VWAPPro', side='CE', score=8.5, confidence=0.9, reasons=[], metadata={'strategy_score':8.5})
+    v2 = StrategyVote(strategy='OrderFlow', side='CE', score=8.2, confidence=0.85, reasons=[], metadata={'strategy_score':8.2})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000CE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True})
+    assert out is None
+
+
+def test_aligned_two_trigger_pe_consensus_allowed_without_smc_confirmation() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000PE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2,'strategy_score':8.5}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000PE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2,'strategy_score':8.2}
+    v1 = StrategyVote(strategy='VWAPPro', side='PE', score=8.5, confidence=0.9, reasons=[], metadata={'strategy_score':8.5})
+    v2 = StrategyVote(strategy='OrderFlow', side='PE', score=8.2, confidence=0.85, reasons=[], metadata={'strategy_score':8.2})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000PE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True})
+    assert out is not None
+    assert out.metadata is not None
+    assert out.metadata.get('approval_path') in {'aligned_two_trigger_consensus','multi_trigger'}
+
+def test_negative_premium_flow_in_no_vote_counts_blocks_two_trigger() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000PE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000PE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    v1 = StrategyVote(strategy='VWAPPro', side='PE', score=8.5, confidence=0.9, reasons=[], metadata={})
+    v2 = StrategyVote(strategy='OrderFlow', side='PE', score=8.2, confidence=0.85, reasons=[], metadata={})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000PE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True}, no_vote_reason_counts={'negative_premium_flow':1})
+    assert out is None
+
+def test_combine_receives_no_vote_reason_counts_from_generate_signal(monkeypatch) -> None:
+    manager = _manager_stub()
+    received = {}
+    def _capture(**kwargs):
+        received.update(kwargs)
+        return None
+    manager._combine_strategy_votes = _capture  # type: ignore[method-assign]
+    manager._required_indicators = set()
+    manager._active_strategies = []
+    manager._record_no_signal_summary = lambda **_k: None
+    manager._record_no_signal_decision = lambda **_k: None
+    manager._emit_no_signal_event = lambda *_a, **_k: None
+    manager._symbol_filter_allows = lambda *_a, **_k: True
+    manager._strategy_for_role = lambda *_a, **_k: []
+    manager._filter_signal = lambda _s: True
+    manager._orchestrator = None
+    manager.generate_signal('NFO:NIFTY25000PE', {'direction_bias':'PE'})
+    assert 'no_vote_reason_counts' in received
+
+
+def test_aligned_two_trigger_blocks_underlying_direction_conflict_from_no_vote_counts() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000PE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000PE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    v1 = StrategyVote(strategy='VWAPPro', side='PE', score=8.5, confidence=0.9, reasons=[], metadata={})
+    v2 = StrategyVote(strategy='OrderFlow', side='PE', score=8.2, confidence=0.85, reasons=[], metadata={})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000PE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True}, no_vote_reason_counts={'underlying_direction_conflict':1})
+    assert out is None
+
+
+def test_aligned_two_trigger_allows_smc_insufficient_history_neutral() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000PE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2,'strategy_score':8.5}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000PE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2,'strategy_score':8.2}
+    v1 = StrategyVote(strategy='VWAPPro', side='PE', score=8.5, confidence=0.9, reasons=[], metadata={'strategy_score':8.5})
+    v2 = StrategyVote(strategy='OrderFlow', side='PE', score=8.2, confidence=0.85, reasons=[], metadata={'strategy_score':8.2})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000PE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True}, no_vote_reason_counts={'smc_insufficient_history':1})
+    assert out is not None
+    assert out.metadata is not None
+    assert out.metadata.get('approval_path') == 'aligned_two_trigger_consensus'
+
+
+def test_aligned_two_trigger_allows_strategy_feature_unavailable_neutral() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000PE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2,'strategy_score':8.5}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000PE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2,'strategy_score':8.2}
+    v1 = StrategyVote(strategy='VWAPPro', side='PE', score=8.5, confidence=0.9, reasons=[], metadata={'strategy_score':8.5})
+    v2 = StrategyVote(strategy='OrderFlow', side='PE', score=8.2, confidence=0.85, reasons=[], metadata={'strategy_score':8.2})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000PE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True}, no_vote_reason_counts={'strategy_feature_unavailable':1})
+    assert out is not None

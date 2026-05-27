@@ -25,6 +25,13 @@ def _first_not_none(*values: int | None) -> int | None:
     return next((value for value in values if value is not None), None)
 
 
+def safe_float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 class SMCStrategy(EliteStrategy):
     """SMC liquidity sweep strategy producing structured votes only."""
 
@@ -206,9 +213,19 @@ class SMCStrategy(EliteStrategy):
                 return None
 
             contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
+            required_features = ("premium_reclaim", "bullish_reversal", "choch_confirmed", "bos_confirmed", "retest_confirmed")
+            present_features = [name for name in required_features if indicators.get(name) is not None]
+            feature_completeness = float(len(present_features)) / float(len(required_features))
+            feature_threshold = safe_float_env("SMC_FEATURE_COMPLETENESS_THRESHOLD", 0.6)
+            missing_features = [name for name in required_features if name not in present_features]
+            feature_ready = feature_completeness >= feature_threshold
+            LOGGER.info("SMC_FEATURE_READINESS symbol=%s feature_completeness=%.3f missing_features=%s live_enabled=%s vote_allowed=%s hard_veto=%s", symbol, feature_completeness, ",".join(missing_features), is_live, feature_ready, False, extra={"event": "SMC_FEATURE_READINESS", "symbol": symbol, "feature_completeness": feature_completeness, "missing_features": missing_features, "live_enabled": is_live, "vote_allowed": feature_ready, "hard_veto": False})
             if option_premium_domain:
                 premium_reversal = bool(bullish_sweep or indicators.get('premium_reclaim') or indicators.get('bullish_reversal'))
                 structure_flip = bool(indicators.get('choch_confirmed') or indicators.get('bos_confirmed'))
+                if not feature_ready:
+                    self._no_vote('strategy_feature_unavailable')
+                    return None
                 if not premium_reversal and not structure_flip:
                     self._no_vote('premium_not_reversing_up')
                     LOGGER.info(
@@ -288,7 +305,7 @@ class SMCStrategy(EliteStrategy):
                 and direction_aligned
                 and (premium_reclaim or retest_confirmed or str(os.getenv("SMC_MOMENTUM_REQUIRE_PREMIUM_RECLAIM_OR_RETEST", "true")).lower() not in {"1", "true", "yes", "on"})
             )
-            if is_live and require_structure_live and not (structure_confirmed or momentum_confirmed):
+            if is_live and require_structure_live and feature_ready and not (structure_confirmed or momentum_confirmed):
                 self._no_vote('smc_structure_required_live')
                 premium_reclaim_source = indicators.get("premium_reclaim_source")
                 premium_current = indicators.get("premium_current")

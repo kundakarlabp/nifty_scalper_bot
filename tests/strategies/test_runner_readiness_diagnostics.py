@@ -468,3 +468,76 @@ def test_runner_emits_no_trade_decision_on_signal_none_strategy_no_trigger(caplo
     assert rec.category == "strategy_no_trigger"
     assert rec.reason == "evaluation_no_signal"
     assert rec.broker_attempted is False
+
+def test_is_option_symbol_tick_fresh_uses_cache_only_no_pull_quote() -> None:
+    runner = _make_runner()
+    calls: list[bool] = []
+    runner._is_tradable_symbol = lambda _s: True
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tick_age_s": 1.0}
+    runner._data_hub = SimpleNamespace(get_quote=lambda *_a, **_k: calls.append(True))
+    assert runner._is_option_symbol_tick_fresh("NFO:CE", max_age_s=5.0) is True
+    assert calls == []
+
+
+def test_tick_fresh_returns_false_when_cache_missing() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._get_cached_quote_for_live_entry = lambda _s: {}
+    runner._market_data = SimpleNamespace(time_since_last_tick=lambda _s: None)
+    runner._data_hub = SimpleNamespace(time_since_last_tick=lambda _s: None)
+    assert runner._is_option_symbol_tick_fresh("NFO:CE", max_age_s=5.0) is False
+
+def test_symbol_live_entry_ready_does_not_call_datahub_get_quote_with_allow_pull_true() -> None:
+    runner = _make_runner()
+    pulled = {"called": False}
+    runner._is_tradable_symbol = lambda _s: True
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tick_age_s": 0.5}
+    runner._data_hub = SimpleNamespace(get_quote=lambda *_a, **kwargs: pulled.__setitem__("called", kwargs.get("allow_pull", True)))
+    assert runner._is_option_symbol_tick_fresh("NFO:CE", max_age_s=5.0) is True
+    assert pulled["called"] is False
+
+def test_symbol_live_entry_ready_no_runtime_indicators_attribute_does_not_crash() -> None:
+    runner = _make_runner()
+    delattr(runner, '_runtime_execution_ready_by_symbol') if hasattr(runner, '_runtime_execution_ready_by_symbol') else None
+    if hasattr(runner, '_runtime_indicators'):
+        delattr(runner, '_runtime_indicators')
+    runner._runtime_live_orders_armed = True
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._indicator_engine = _DummyIndicator({'NFO:CE':[1,2,3,4,5,6]})
+    runner._required_bars_for_symbol = lambda _s: 1
+    runner._is_option_symbol_tick_fresh = lambda _s, max_age_s=60.0: True
+    runner._active_selected_ce = 'NFO:CE'; runner._active_selected_pe = 'NFO:PE'
+    runner._extract_strike_from_symbol = lambda _s: 24000
+    runner._active_atm_strike = 24000
+    runner._get_cached_quote_for_live_entry = lambda _s: {'tradable_quote':True,'quote_depth_valid':True,'spread_pct':0.2}
+    ready, reason, _ = runner._symbol_live_entry_ready('NFO:CE')
+    assert isinstance(ready, bool)
+    assert reason != 'runner_error'
+
+
+def test_live_trading_readiness_snapshot_defines_universe_status(caplog) -> None:
+    runner = _make_runner()
+    runner._emit_live_universe_bootstrap_status = lambda **_k: (False, "selected_option_quote_missing")
+    with caplog.at_level(logging.INFO):
+        runner._emit_live_trading_readiness_snapshot(symbol="NFO:SYM", strategy_signal_present=False, order_path_entered=False)
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "LIVE_TRADING_READINESS_SNAPSHOT")
+    assert rec.live_universe_ready is False
+    assert rec.live_block_reason == "selected_option_quote_missing"
+
+
+def test_live_trading_readiness_snapshot_emits_when_universe_not_ready(caplog) -> None:
+    runner = _make_runner()
+    runner._emit_live_universe_bootstrap_status = lambda **_k: (False, "selected_option_subscription_pending")
+    with caplog.at_level(logging.INFO):
+        runner._emit_live_trading_readiness_snapshot(symbol="NFO:SYM", strategy_signal_present=False, order_path_entered=False)
+    assert any(getattr(r, "event", "") == "LIVE_TRADING_READINESS_SNAPSHOT" for r in caplog.records)
+
+
+def test_live_trading_readiness_snapshot_failure_is_logged_not_silent(caplog) -> None:
+    runner = _make_runner()
+    runner._emit_live_universe_bootstrap_status = lambda **_k: (_ for _ in ()).throw(RuntimeError("boom"))
+    with caplog.at_level(logging.WARNING):
+        runner._emit_live_trading_readiness_snapshot(symbol="NFO:SYM", strategy_signal_present=False, order_path_entered=False)
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "LIVE_TRADING_READINESS_SNAPSHOT_FAILED")
+    assert rec.error_type == "RuntimeError"
