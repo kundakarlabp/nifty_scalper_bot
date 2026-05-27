@@ -6754,6 +6754,23 @@ class StrategyRunner:
         )
 
     def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
+        def _resolve_live_entry_atm_reference(context: Mapping[str, Any]) -> int | None:
+            active = getattr(self, "_active_atm_strike", None)
+            if active:
+                try:
+                    return int(active)
+                except (TypeError, ValueError):
+                    pass
+            for key in ("atm_strike", "active_atm_strike", "spot_price", "underlying_ltp", "futures_ltp", "last_price"):
+                value = context.get(key)
+                try:
+                    px = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if px > 0:
+                    return int(round(px / 50.0) * 50)
+            return None
+
         def _refresh_selected_candidates_for_symbol(
             symbol_norm: str,
             *,
@@ -6854,9 +6871,10 @@ class StrategyRunner:
                 or (str(metadata.get("strategy") or getattr(signal, "reason", "")).upper() == "ORDERFLOW" and float(metadata.get("strategy_score") or 0.0) >= 5.0)
             )
             if trigger_evidence and quote_fresh and (ctx_age is None or ctx_age <= max_context_age):
+                atm_reference = _resolve_live_entry_atm_reference(ctx)
                 refreshed = _refresh_selected_candidates_for_symbol(
                     symbol_norm,
-                    atm_reference=int(active_atm_strike) if active_atm_strike is not None else None,
+                    atm_reference=atm_reference,
                 )
                 details["candidate_refresh_attempted"] = True
                 details["candidate_refresh_succeeded"] = refreshed

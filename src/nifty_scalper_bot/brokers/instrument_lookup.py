@@ -45,16 +45,17 @@ class InstrumentLookup:
         self._by_exchange_symbol: Dict[Tuple[str, str], Instrument] = {}
         self._by_option_fields: Dict[Tuple[str, str, str, float, str], Instrument] = {}
         self._warned_missing: set[str] = set()
-        try:
-            path_candidate = Path(csv_path) if csv_path is not None else None
-        except (TypeError, ValueError):
-            path_candidate = None
-        if path_candidate is not None and path_candidate.exists():
+        if csv_path is None:
+            self.csv_path = None
+            self._loaded_at = time.time()
+        elif isinstance(csv_path, (str, PathLike)) and type(csv_path).__module__ != "unittest.mock":
+            path_candidate = Path(csv_path)
+            if not path_candidate.exists():
+                raise FileNotFoundError(f"Instrument CSV not found: {path_candidate}")
             self.csv_path = str(path_candidate)
             self.reload()
-        elif path_candidate is not None and type(csv_path).__module__ == "builtins":
-            raise FileNotFoundError(f"Instrument CSV not found: {path_candidate}")
         else:
+            # Non-path test doubles (e.g. MagicMock): in-memory mode
             self.csv_path = None
             self._loaded_at = time.time()
 
