@@ -6632,18 +6632,33 @@ class StrategyRunner:
             },
         )
 
-    def _symbol_live_entry_ready(self, symbol: str) -> tuple[bool, str]:
+    def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
+        details: dict[str, Any] = {"symbol": symbol, "trace_id": trace_id, "live_orders_armed": bool(self._runtime_live_orders_armed)}
         if not bool(self._runtime_live_orders_armed):
-            return False, "execution_not_armed"
+            return False, "execution_not_armed", details
         if not self._is_tradable_symbol(symbol):
-            return False, "non_tradable_symbol"
+            return False, "non_tradable_symbol", details
+        ks_active = self._safe_kill_switch_active_for_diagnostics()
+        details["kill_switch_active"] = ks_active
+        if ks_active:
+            return False, "order_manager_kill_switch_active", details
         required_bars = max(self._required_bars_for_symbol(symbol), safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
         history_count = len(self._indicator_engine.get_history(symbol) or [])
+        details["history_count"] = history_count
+        details["required_bars"] = required_bars
         if history_count < required_bars:
-            return False, "insufficient_indicator_bar_count"
-        if not self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0):
-            return False, "option_tick_stale"
-        return True, "symbol_live_ready"
+            return False, "insufficient_indicator_bar_count", details
+        quote_fresh = self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0)
+        details["quote_fresh"] = quote_fresh
+        if not quote_fresh:
+            return False, "option_tick_stale", details
+        max_context_age = safe_positive_float_env("MAX_CONTEXT_AGE_SECONDS", 5.0, minimum=0.1)
+        ctx_age = _extract_float(self._runtime_indicators.get(symbol, {}), "context_age_seconds")
+        details["context_age_seconds"] = ctx_age
+        if ctx_age is not None and ctx_age > max_context_age:
+            return False, "context_stale", details
+        self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, True, "symbol_live_ready", trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": True, "reason": "symbol_live_ready", "trace_id": trace_id, **details})
+        return True, "symbol_live_ready", details
 
     def _classify_no_trade_decision(
         self,
@@ -8938,8 +8953,9 @@ class StrategyRunner:
                 phase = "phase10_signal_execution"
                 self._last_strategy_versions[symbol] = current_version
                 signal_phase = self._data_phase.get(symbol)
-                live_ready, live_ready_reason = self._symbol_live_entry_ready(symbol)
+                live_ready, live_ready_reason, live_ready_details = self._symbol_live_entry_ready(symbol, signal=signal, trace_id=trace_id)
                 if not live_ready:
+                    self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, False, live_ready_reason, trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": False, "reason": live_ready_reason, "trace_id": trace_id, **live_ready_details})
                     self._update_symbol_execution_phase(symbol, "BLOCKED", live_ready_reason)
                     signal_metadata = dict(signal.metadata or {})
                     signal_metadata["shadow_only"] = True
@@ -9061,6 +9077,19 @@ class StrategyRunner:
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
+                if self._safe_kill_switch_active_for_diagnostics():
+                    self._logger.warning(
+                        "RUNNER_KILL_SWITCH_PRECHECK_BLOCK symbol=%s trace_id=%s",
+                        symbol,
+                        trace_id,
+                        extra={"event": "RUNNER_KILL_SWITCH_PRECHECK_BLOCK", "symbol": symbol, "trace_id": trace_id, "reason": "order_manager_kill_switch_active"},
+                    )
+                    self._logger.info(
+                        "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
+                        symbol, False, "order_manager_kill_switch_active", None, trace_id,
+                        extra={"event": "SIGNAL_EXECUTION_RESULT", "symbol": symbol, "accepted": False, "reason": "order_manager_kill_switch_active", "order_id": None, "trace_id": trace_id, "broker_attempted": False},
+                    )
+                    return
                 self._logger.info(
                     "SIGNAL_GENERATED symbol=%s action=%s reason=%s trace_id=%s",
                     symbol,
@@ -11398,7 +11427,8 @@ class StrategyRunner:
                 if submit_result.accepted and submit_result.order_id:
                     order_id = submit_result.order_id
                 else:
-                    submit_reason = f"order_manager_{submit_result.reason}"
+                    reason_base = str(submit_result.reason or "order_rejected")
+                    submit_reason = reason_base if reason_base.startswith("order_manager_") else f"order_manager_{reason_base}"
                     submit_details = {**dict(getattr(submit_result, "details", {}) or {}), "trace_id": trace_id}
                     if submit_result.reason == "kill_switch_active" and hasattr(self._order_manager, "get_kill_switch_status"):
                         submit_details["kill_switch_status"] = self._order_manager.get_kill_switch_status()

@@ -303,6 +303,27 @@ def test_runner_no_trade_prefers_strategy_decision_before_context_unavailable() 
     assert reason == "single_vote_scalp_disabled"
 
 
+def test_symbol_live_entry_ready_false_when_kill_switch_active() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._runtime_live_orders_armed = True
+    runner._safe_kill_switch_active_for_diagnostics = lambda: True
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:CE")
+    assert ready is False
+    assert reason == "order_manager_kill_switch_active"
+
+
+def test_symbol_live_entry_ready_false_when_context_stale(monkeypatch) -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._safe_kill_switch_active_for_diagnostics = lambda: False
+    runner._runtime_indicators = {"NFO:CE": {"context_age_seconds": 11.0}}
+    monkeypatch.setenv("MAX_CONTEXT_AGE_SECONDS", "5")
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:CE")
+    assert ready is False
+    assert reason == "context_stale"
+
+
 def test_runner_emits_no_trade_decision_on_signal_none_strategy_no_trigger(caplog) -> None:
     runner = _make_runner()
     with caplog.at_level(logging.INFO):

@@ -64,6 +64,8 @@ REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
 @dataclass(frozen=True)
 class StrategyNoSignalDecision:
     symbol: str
+    eval_id: str | None
+    final_block_reason: str | None
     category: str
     reason: str
     blocked_at: str
@@ -77,6 +79,7 @@ class StrategyNoSignalDecision:
     selected_ce: str | None
     selected_pe: str | None
     trace_id: str | None = None
+    created_ts: float = field(default_factory=time.time)
 
 
 class StrategyInterface(ABC):
@@ -3009,12 +3012,27 @@ class StrategyManager(_BaseStrategyManager):
             if no_vote_reason_counts.get("underlying_direction_conflict"):
                 primary_reason = "underlying_direction_conflict"
                 category = "context_direction_conflict"
+            elif no_vote_reason_counts.get("tick_direction_missing_or_neutral"):
+                primary_reason = "tick_direction_missing_or_neutral"
+                category = "option_tick_direction_neutral"
+            elif no_vote_reason_counts.get("negative_premium_flow"):
+                primary_reason = "negative_premium_flow"
+                category = "premium_flow_negative"
+            elif no_vote_reason_counts.get("raw_score_below_min"):
+                primary_reason = "raw_score_below_min"
+                category = "strategy_score_below_threshold"
             elif no_vote_reason_counts.get("weak_score"):
                 primary_reason = "weak_score"
                 category = "strategy_score_below_threshold"
+            elif no_vote_reason_counts.get("single_vote_scalp_disabled"):
+                primary_reason = "single_vote_scalp_disabled"
+                category = "strategy_single_vote_disabled"
+            elif no_vote_reason_counts.get("not_selected_or_near_atm"):
+                primary_reason = "not_selected_or_near_atm"
+                category = "candidate_not_selected_or_near_atm"
             elif any(no_vote_reason_counts.get(r) for r in ("no_liquidity_sweep", "premium_not_reversing_up", "smc_structure_required_live")):
                 primary_reason = next((r for r in ("no_liquidity_sweep", "premium_not_reversing_up", "smc_structure_required_live") if no_vote_reason_counts.get(r)), "no_strategy_signal")
-                category = "strategy_no_trigger"
+                category = "strategy_structure_not_confirmed" if primary_reason == "smc_structure_required_live" else "strategy_no_trigger"
             elif errors:
                 primary_reason = "strategy_error"
                 category = "strategy_error"
@@ -3029,6 +3047,8 @@ class StrategyManager(_BaseStrategyManager):
                 trigger_vote_count=0,
                 context_vote_count=0,
                 trace_id=trace_id,
+                eval_id=eval_id,
+                final_block_reason="no_strategy_signal",
             )
             _log_reject(
                 "no_strategy_signal",
@@ -3322,9 +3342,11 @@ class StrategyManager(_BaseStrategyManager):
     ) -> Signal | None:
         """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
         symbol_norm = str(symbol or "").strip().upper()
-        def _record_no_signal(category: str, reason_text: str, blocked_at: str, *, no_vote_reason_counts: dict[str, int] | None = None, strategy_reasons: dict[str, str] | None = None, trigger_vote_count: int = 0, context_vote_count: int = 0) -> None:
+        def _record_no_signal(category: str, reason_text: str, blocked_at: str, *, no_vote_reason_counts: dict[str, int] | None = None, strategy_reasons: dict[str, str] | None = None, trigger_vote_count: int = 0, context_vote_count: int = 0, final_block_reason: str | None = None) -> None:
             self._last_no_signal_decision_by_symbol[symbol_norm] = StrategyNoSignalDecision(
                 symbol=symbol_norm,
+                eval_id=str(indicator_map.get("eval_id") or indicator_map.get("trace_id") or "") or None,
+                final_block_reason=final_block_reason,
                 category=category,
                 reason=reason_text,
                 blocked_at=blocked_at,
@@ -3337,6 +3359,7 @@ class StrategyManager(_BaseStrategyManager):
                 context_vote_count=context_vote_count,
                 selected_ce=str(indicator_map.get("selected_ce") or "") or None,
                 selected_pe=str(indicator_map.get("selected_pe") or "") or None,
+                trace_id=str(indicator_map.get("trace_id") or "") or None,
             )
         indicator_map = dict(indicators or {})
         selected_symbols = {
@@ -3794,10 +3817,14 @@ class StrategyManager(_BaseStrategyManager):
         trigger_vote_count: int = 0,
         context_vote_count: int = 0,
         trace_id: str | None = None,
+        eval_id: str | None = None,
+        final_block_reason: str | None = None,
     ) -> None:
         symbol_norm = str(symbol or "").strip().upper()
         self._last_no_signal_decision_by_symbol[symbol_norm] = StrategyNoSignalDecision(
             symbol=symbol_norm,
+            eval_id=eval_id,
+            final_block_reason=final_block_reason,
             category=category,
             reason=reason,
             blocked_at=blocked_at,

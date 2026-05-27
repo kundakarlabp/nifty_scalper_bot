@@ -259,7 +259,6 @@ def test_order_acceptance_notifies_orchestrator_entry() -> None:
     assert notified["symbol"] == 'NFO:NIFTY26APR23800CE'
     assert notified["reason"] == "order_accepted"
 
-
 def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> None:
     runner = _build_runner()
     runner._logger = logging.getLogger("test.runner.prewarm.sync")
