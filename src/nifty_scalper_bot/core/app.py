@@ -54,6 +54,7 @@ from nifty_scalper_bot.data.robust_provider import (
     RobustDataProvider,
 )
 from nifty_scalper_bot.infra.watchdog import start_watchdog
+from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 
 LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 SYNC_LOCK = threading.Lock()
@@ -1086,24 +1087,28 @@ _LATEST_CTX: "BotContext | None" = None
 
 def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None) -> str:
     """Return authoritative active NIFTY futures symbol for runtime basket."""
-    requested_symbol = str(requested or "").strip().upper()
     mdm = getattr(ctx, "market_data_manager", None)
     for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
         method = getattr(mdm, method_name, None)
-        if callable(method):
+        if not callable(method):
+            continue
+        try:
+            resolved = method()
+        except TypeError:
             try:
-                resolved = method()
-            except TypeError:
-                try:
-                    resolved = method(now=None)
-                except Exception:
-                    resolved = None
+                resolved = method(now=None)
             except Exception:
                 resolved = None
-            if resolved:
-                return str(resolved).strip().upper()
-    fallback = _get_current_nifty_futures_symbol()
-    return fallback or requested_symbol
+        except Exception:
+            resolved = None
+        canonical = canonical_nifty_future_symbol(resolved)
+        if canonical:
+            return canonical
+    fallback = canonical_nifty_future_symbol(_get_current_nifty_futures_symbol())
+    if fallback:
+        return fallback
+    requested_canonical = canonical_nifty_future_symbol(requested)
+    return requested_canonical or ""
 
 
 class _LifecycleTrackerAdapter:
@@ -7396,11 +7401,9 @@ def _commit_active_dynamic_basket(
     atm_strike: int | float | str | None,
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
+    requested_futures_symbol = basket.get("futures_symbol") or basket.get("future_symbol")
     basket = normalize_active_basket_schema(basket)
-    active_futures_symbol = _resolve_active_futures_for_basket(
-        ctx,
-        basket.get("futures_symbol") or basket.get("future_symbol"),
-    )
+    active_futures_symbol = _resolve_active_futures_for_basket(ctx, requested_futures_symbol)
     basket = dict(basket)
     basket["futures_symbol"] = active_futures_symbol
     current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
@@ -7489,9 +7492,13 @@ def _commit_active_dynamic_basket(
             "symbols": list(
                 dict.fromkeys(
                     [
-                        basket.get("spot_symbol") or "NSE:NIFTY",
-                        active_futures_symbol,
-                        *current_options,
+                        s
+                        for s in [
+                            basket.get("spot_symbol") or "NSE:NIFTY",
+                            active_futures_symbol or None,
+                            *current_options,
+                        ]
+                        if s
                     ]
                 )
             ),
@@ -7512,7 +7519,7 @@ def _commit_active_dynamic_basket(
     if callable(rotate_result):
         try:
             rotate_result(
-                basket.get("futures_symbol"),
+                requested_futures_symbol,
                 reason="active_dynamic_basket_commit",
                 selected_option_symbols=list(current_options),
             )
@@ -8547,7 +8554,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 dict.fromkeys(
                     [
                         "NSE:NIFTY",
-                        basket.get("futures_symbol"),
+                        requested_futures_symbol,
                         *selected_symbols,
                         *other_option_symbols,
                     ]
@@ -8805,7 +8812,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
             readiness_symbols = list(dict.fromkeys([
                 basket.get("spot_symbol"),
-                basket.get("futures_symbol"),
+                requested_futures_symbol,
                 *active_option_symbols,
             ]))
             readiness_symbols = [str(sym) for sym in readiness_symbols if sym]
@@ -8813,7 +8820,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 "READINESS_SYMBOLS_SELECTED count=%d spot=%s futures=%s option_count=%d symbols=%s",
                 len(readiness_symbols),
                 basket.get("spot_symbol"),
-                basket.get("futures_symbol"),
+                requested_futures_symbol,
                 len(basket.get("option_symbols", []) or []),
                 readiness_symbols,
                 extra={

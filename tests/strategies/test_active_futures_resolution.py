@@ -19,9 +19,13 @@ class _MDM:
 
 
 class _Hub:
-    def __init__(self) -> None:
+    def __init__(self, active: str | None = "NFO:NIFTY26JUNFUT") -> None:
         self._mdm = _MDM()
         self.calls: list[str] = []
+        self._active = active
+
+    def get_active_futures_symbol(self):
+        return self._active
 
     def get_quote(self, symbol: str, allow_pull: bool = False):
         self.calls.append(symbol)
@@ -56,3 +60,9 @@ def test_configured_bare_nifty_does_not_generate_nfo_niftyfut() -> None:
     manager = _manager(futures_symbol="NIFTY")
     assert manager._futures_symbol is None
     assert manager._resolve_active_futures_symbol_for_metrics() != "NFO:NIFTYFUT"
+
+
+def test_resolve_active_future_does_not_fallback_to_cached_stale_symbol() -> None:
+    hub = _Hub(active=None)
+    manager = _manager(futures_symbol="NFO:NIFTY26MAYFUT", hub=hub)
+    assert manager._resolve_active_futures_symbol_for_metrics() is None

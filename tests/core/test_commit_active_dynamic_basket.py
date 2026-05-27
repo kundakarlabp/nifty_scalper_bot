@@ -53,8 +53,15 @@ def test_commit_active_dynamic_basket_preserves_old_selected_when_valid() -> Non
 
 def test_commit_active_dynamic_basket_replaces_stale_futures_with_active_mdm_future() -> None:
     class _Mdm:
+        def __init__(self) -> None:
+            self.rotate_args = None
+
         def get_active_nifty_future_symbol_cached(self) -> str:
             return "NFO:NIFTY26JUNFUT"
+        def maybe_rotate_nifty_futures_context_result(self, current_symbol, **kwargs):
+            self.rotate_args = (current_symbol, kwargs)
+            return None
+    mdm = _Mdm()
 
     ctx = SimpleNamespace(
         selected_ce=None,
@@ -63,7 +70,7 @@ def test_commit_active_dynamic_basket_replaces_stale_futures_with_active_mdm_fut
         atm_pe_symbol=None,
         active_trading_universe={},
         strategy_runner=None,
-        market_data_manager=_Mdm(),
+        market_data_manager=mdm,
         strategy_manager=None,
     )
     ce = "NFO:NIFTY26JUN23900CE"
@@ -78,3 +85,5 @@ def test_commit_active_dynamic_basket_replaces_stale_futures_with_active_mdm_fut
     committed = ctx.active_trading_universe
     assert committed["futures_symbol"] == "NFO:NIFTY26JUNFUT"
     assert "NFO:NIFTY26MAYFUT" not in committed["symbols"]
+    assert mdm.rotate_args is not None
+    assert mdm.rotate_args[0] == "NFO:NIFTY26MAYFUT"

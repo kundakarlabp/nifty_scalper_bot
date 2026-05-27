@@ -1357,7 +1357,7 @@ def test_pull_quote_suspended_future_returns_unavailable_dict_without_broker_cal
     manager = MarketDataManager(FailBroker(), ws)
     manager._suspended_context_symbols.add("NFO:NIFTY26MAYFUT")  # noqa: SLF001
     out = manager.pull_quote("NFO:NIFTY26MAYFUT")
-    assert out.get("quote_unavailable_reason") == "suspended_stale_future"
+    assert out == {}
 
 def test_market_data_manager_initializes_suspended_context_symbols(broker: DummyBroker, ws: DummyWebSocket) -> None:
     manager = MarketDataManager(broker, ws)
@@ -1369,7 +1369,7 @@ def test_suspend_context_symbol_blocks_pull_quote_until_ttl(broker: DummyBroker,
     manager = MarketDataManager(broker, ws)
     manager.suspend_context_symbol('NFO:NIFTY26MAYFUT', reason='stale', ttl_s=300)
     out = manager.pull_quote('NFO:NIFTY26MAYFUT')
-    assert out.get('quote_unavailable_reason') == 'suspended_stale_future'
+    assert out == {}
 
 
 def test_suspended_context_symbol_expires_after_ttl(broker: DummyBroker, ws: DummyWebSocket) -> None:
@@ -1410,7 +1410,7 @@ def test_pull_quote_expired_future_is_suppressed_without_broker_call(ws: DummyWe
 
     manager = MarketDataManager(FailBroker(), ws, resolver=Resolver())
     out = manager.pull_quote("NFO:NIFTY26MAYFUT")
-    assert out.get("quote_unavailable_reason") == "suspended_expired_future"
+    assert out == {}
 
 
 def test_repeated_expired_future_pull_quote_rotates_only_once(ws: DummyWebSocket, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1426,8 +1426,8 @@ def test_repeated_expired_future_pull_quote_rotates_only_once(ws: DummyWebSocket
     monkeypatch.setattr(manager, "rotate_active_nifty_future_context", _rotate)
     first = manager.pull_quote("NFO:NIFTY26MAYFUT")
     second = manager.pull_quote("NFO:NIFTY26MAYFUT")
-    assert first.get("quote_unavailable_reason") == "suspended_expired_future"
-    assert second.get("quote_unavailable_reason") == "suspended_expired_future"
+    assert first == {}
+    assert second == {}
     assert len(calls) == 1
 
 

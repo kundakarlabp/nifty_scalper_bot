@@ -33,6 +33,12 @@ from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.data.source import DataIntegrityError
+from nifty_scalper_bot.instruments.active_contracts import (
+    canonical_nifty_future_symbol,
+    is_nifty_future_expired,
+    resolve_active_nifty_future,
+    resolve_active_nifty_future_from_instruments,
+)
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.streaming.websocket_manager import (
     ConnectionState,
@@ -2538,28 +2544,18 @@ class MarketDataManager:
                     active,
                     reason="pull_quote_expired_future",
                 )
-            log_fn = getattr(self, "_log_throttled", None)
-            log_key = f"expired_future_suppressed:{canonical_symbol}:pull_quote"
-            if callable(log_fn):
-                log_fn(
-                    log_key,
-                    "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=pull_quote already_suspended=%s",
-                    canonical_symbol,
-                    active,
-                    already_suspended,
-                    interval_sec=60.0,
-                    level=logging.WARNING,
-                    extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote", "already_suspended": already_suspended},
-                )
-            else:
-                self._logger.warning(
-                    "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=pull_quote already_suspended=%s",
-                    canonical_symbol,
-                    active,
-                    already_suspended,
-                    extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote", "already_suspended": already_suspended},
-                )
-            return {"symbol": canonical_symbol, "quote_unavailable_reason": "suspended_expired_future", "active_future_symbol": active}
+            log_throttled(
+                self._logger,
+                f"expired_future_suppressed:{canonical_symbol}:pull_quote",
+                "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=pull_quote already_suspended=%s",
+                canonical_symbol,
+                active,
+                already_suspended,
+                interval_sec=60.0,
+                level=logging.WARNING,
+                extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote", "already_suspended": already_suspended},
+            )
+            return {}
         if self.is_context_symbol_suspended(canonical_symbol):
             with self._lock:
                 cached_tick = self._latest_ticks.get(canonical_symbol)
@@ -2567,7 +2563,7 @@ class MarketDataManager:
                 cached_quote = dict(cached_tick)
                 cached_quote.setdefault("source", "cache")
                 return cached_quote
-            return {"symbol": canonical_symbol, "quote_unavailable_reason": "suspended_stale_future"}
+            return {}
         candidates: list[str | int] = self._candidate_quote_keys(canonical_symbol)
         if not candidates:
             candidates = [canonical_symbol]
@@ -6719,20 +6715,7 @@ class MarketDataManager:
         return canonical
 
     def _resolve_active_nifty_future_from_instruments(self, instruments: Iterable[Mapping[str, Any]], now: datetime | None = None) -> str | None:
-        ref_now = now or datetime.now(timezone.utc)
-        best_symbol: str | None = None
-        best_expiry: datetime | None = None
-        for row in instruments:
-            if not isinstance(row, Mapping) or not _is_nifty_index_future_row(row):
-                continue
-            tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
-            expiry = _parse_instrument_expiry(row.get("expiry"))
-            if expiry is None or expiry < ref_now:
-                continue
-            if best_expiry is None or expiry < best_expiry:
-                best_expiry = expiry
-                best_symbol = f"NFO:{tradingsymbol}"
-        return best_symbol
+        return resolve_active_nifty_future_from_instruments(instruments, now=now).symbol
 
     def maybe_rotate_nifty_futures_context(
         self,
@@ -6773,23 +6756,13 @@ class MarketDataManager:
                 except Exception:
                     pass
         if not active and selected_symbols:
-            selected_ce = next((s for s in selected_symbols if str(s).upper().endswith("CE")), None)
-            selected_pe = next((s for s in selected_symbols if str(s).upper().endswith("PE")), None)
-            months: set[str] = set()
-            for symbol in selected_symbols:
-                match = re.search(r"NIFTY(\d{2}[A-Z]{3})\d{5}(CE|PE)$", str(symbol).upper())
-                if match:
-                    months.add(match.group(1))
-            if len(months) == 1:
-                candidate = f"NFO:NIFTY{next(iter(months))}FUT"
-                if _NIFTY_FUT_RE.match(candidate.split(":", 1)[-1]):
-                    active = self._set_active_nifty_future_cache(candidate)
-                    source = "selected_option_month"
-                    self._logger.warning(
-                        "FUTURES_CONTEXT_FALLBACK_FROM_SELECTED_OPTION old_symbol=%s new_symbol=%s reason=%s source=%s",
-                        current_symbol, active, reason, source,
-                        extra={"event": "FUTURES_CONTEXT_FALLBACK_FROM_SELECTED_OPTION", "old_symbol": current_symbol, "new_symbol": active, "reason": reason, "source": source, "selected_ce": selected_ce, "selected_pe": selected_pe, "trace_id": trace_id},
-                    )
+            resolved = resolve_active_nifty_future(
+                selected_option_symbols=selected_symbols,
+                now=now,
+            )
+            if resolved.symbol:
+                active = self._set_active_nifty_future_cache(resolved.symbol)
+                source = resolved.source
         if not active:
             self._logger.warning(
                 "FUTURES_CONTEXT_STALE_OR_UNRESOLVED current_symbol=%s reason=%s",
@@ -6809,14 +6782,13 @@ class MarketDataManager:
         return FuturesContextRotationResult(active, old_symbol, True, False, reason, source)
 
     def _is_nifty_future_symbol_expired(self, symbol: str, *, now: datetime | None = None) -> bool:
-        canonical = self._canonical_symbol(symbol)
-        symbol_part = canonical.split(":", 1)[-1].upper()
-        if not _NIFTY_FUT_RE.match(symbol_part):
+        canonical = canonical_nifty_future_symbol(symbol)
+        if not canonical:
             return False
         active = self.get_active_nifty_future_symbol_cached(now=now)
-        if not active:
-            return False
-        return self._canonical_symbol(active) != canonical
+        if active:
+            return canonical_nifty_future_symbol(active) != canonical
+        return is_nifty_future_expired(canonical, now=now)
 
     def rotate_active_nifty_future_context(
         self,

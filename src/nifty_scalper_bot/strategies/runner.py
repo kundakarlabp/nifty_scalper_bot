@@ -2278,11 +2278,12 @@ class StrategyRunner:
 
     def set_active_trading_universe(self, basket: Mapping[str, Any]) -> None:
         """Set active trading universe snapshot. Args: basket. Returns: none. Raises: none."""
-        option_symbols = [
-            normalize_symbol(str(sym))
-            for sym in (basket.get("option_symbols") or basket.get("symbols") or [])
-            if str(sym).endswith(("CE", "PE"))
-        ]
+        raw_symbols = basket.get("option_symbols") or basket.get("symbols") or []
+        option_symbols: list[str] = []
+        for sym in raw_symbols:
+            normalized = normalize_symbol(str(sym))
+            if normalized.endswith(("CE", "PE")):
+                option_symbols.append(normalized)
         futures_symbol = normalize_symbol(str(basket.get("futures_symbol") or ""))
         previous_futures = normalize_symbol(str(getattr(self, "_active_futures_symbol", "") or ""))
         self._active_futures_symbol = futures_symbol or None

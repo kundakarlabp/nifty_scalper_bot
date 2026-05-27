@@ -1310,6 +1310,27 @@ class DataHub:
             return None
         return self._tick_price(quote)
 
+
+    def get_active_futures_symbol(self) -> str | None:
+        """Return authoritative active NIFTY future from MDM."""
+        mdm = getattr(self, "_mdm", None)
+        for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
+            method = getattr(mdm, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                symbol = method()
+            except TypeError:
+                try:
+                    symbol = method(now=None)
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            if symbol:
+                return str(symbol).strip().upper()
+        return None
+
     def pull_quote(self, symbol: str) -> Dict[str, Any]:
         mdm_fn = getattr(self._mdm, "pull_quote", None)
         if callable(mdm_fn):
@@ -1318,16 +1339,6 @@ class DataHub:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("pull_quote delegate failed for %s: %s", symbol, exc)
                 return {}
-            if isinstance(quote, Mapping) and quote.get("quote_unavailable_reason"):
-                LOGGER.info(
-                    "DATAHUB_PULL_QUOTE_UNAVAILABLE symbol=%s reason=%s active_future_symbol=%s",
-                    symbol,
-                    quote.get("quote_unavailable_reason"),
-                    quote.get("active_future_symbol"),
-                    extra={"event": "DATAHUB_PULL_QUOTE_UNAVAILABLE", "symbol": symbol, "reason": quote.get("quote_unavailable_reason"), "active_future_symbol": quote.get("active_future_symbol")},
-                )
-                return dict(quote)
-
             if quote:
                 self.store_quote(symbol, quote, source=str(quote.get("source") or "poll"))
                 return self.get_quote(symbol, allow_pull=False) or {}
