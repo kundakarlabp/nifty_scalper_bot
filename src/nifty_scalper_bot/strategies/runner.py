@@ -6571,6 +6571,34 @@ class StrategyRunner:
                     return payload
         return None
 
+    def _get_cached_quote_for_live_entry(self, symbol: str) -> dict[str, Any]:
+        symbol_norm = normalize_symbol(symbol)
+        hub = getattr(self, "_data_hub", None)
+        get_quote = getattr(hub, "get_quote", None)
+        if callable(get_quote):
+            try:
+                quote = get_quote(symbol_norm, allow_pull=False)
+                if quote:
+                    return dict(quote)
+            except TypeError:
+                pass
+            except Exception:
+                return {}
+        tick = getattr(self, "_last_tick", {}).get(symbol_norm) or getattr(self, "_last_tick", {}).get(symbol)
+        if isinstance(tick, dict):
+            return dict(tick)
+        mdm = getattr(self, "_market_data", None)
+        for method_name in ("get_cached_quote", "get_latest_tick", "get_last_tick"):
+            fn = getattr(mdm, method_name, None)
+            if callable(fn):
+                try:
+                    quote = fn(symbol_norm)
+                    if quote:
+                        return dict(quote)
+                except Exception:
+                    return {}
+        return {}
+
     def _is_option_symbol_tick_fresh(self, symbol: str, *, max_age_s: float | None = None) -> bool:
         """Freshness guard for selected option soft-pass and live execution readiness."""
         if not self._is_tradable_symbol(symbol):
@@ -6712,26 +6740,33 @@ class StrategyRunner:
         selected_set.discard("")
         selected_option = symbol_norm in selected_set
         near_atm = False
+        near_atm_threshold = safe_positive_float_env("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 50.0, minimum=0.0)
+        details["near_atm_threshold"] = near_atm_threshold
         if strike is not None and self._active_atm_strike:
-            near_atm = abs(float(strike) - float(self._active_atm_strike)) <= float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
+            near_atm = abs(float(strike) - float(self._active_atm_strike)) <= near_atm_threshold
         details["selected_option"] = selected_option
         details["near_atm"] = near_atm
         if strike is None and not selected_option:
             return False, "candidate_distance_unknown", details
         if not (selected_option or near_atm):
             return False, "candidate_not_selected_or_near_atm", details
-        quote = self.get_quote(symbol_norm) or {}
+        quote = self._get_cached_quote_for_live_entry(symbol_norm)
         tradable_quote = bool(quote.get("tradable_quote"))
         depth_available = bool(quote.get("depth_available") or quote.get("depth"))
         spread_pct = _extract_float(quote, "spread_pct")
         details["tradable_quote"] = tradable_quote
         details["depth_available"] = depth_available
         details["spread_pct"] = spread_pct
+        if not quote:
+            return False, "quote_missing", details
         if not tradable_quote:
             return False, "quote_not_tradable", details
         if _env_bool("LIVE_REQUIRE_OPTION_DEPTH", True) and not depth_available:
             return False, "quote_depth_unavailable", details
         max_spread_pct = safe_positive_float_env("LIVE_MAX_SPREAD_PCT", 0.75, minimum=0.01)
+        require_spread = _env_bool("LIVE_REQUIRE_SPREAD_PCT", True)
+        if require_spread and spread_pct is None:
+            return False, "spread_unknown", details
         if spread_pct is not None and spread_pct > max_spread_pct:
             return False, "spread_too_wide", details
         om = getattr(self, "_order_manager", None)
