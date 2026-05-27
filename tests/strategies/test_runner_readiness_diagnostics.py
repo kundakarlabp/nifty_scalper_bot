@@ -45,7 +45,32 @@ def _make_runner() -> StrategyRunner:
     runner._selected_option_symbol_for_side = lambda side, _metadata: "NFO:CE" if side == "CE" else "NFO:PE"
     runner._is_option_symbol_tick_fresh = lambda _sym, max_age_s=60.0: True
     runner._is_symbol_execution_ready = lambda _sym: False
+    runner._runtime_indicators = {}
     return runner
+
+
+def test_runtime_indicators_initialized_in_constructor() -> None:
+    runner = _make_runner()
+    assert hasattr(runner, "_runtime_indicators")
+    assert isinstance(runner._runtime_indicators, dict)
+
+
+def test_symbol_live_entry_ready_no_runtime_indicators_attribute_does_not_crash() -> None:
+    runner = _make_runner()
+    if hasattr(runner, "_runtime_indicators"):
+        delattr(runner, "_runtime_indicators")
+    runner._runtime_live_orders_armed = True
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._contract_side_from_symbol = lambda _s: "PE"
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.1}
+    runner._active_atm_strike = 23800
+    runner._extract_strike_from_symbol = lambda _s: 23800
+    runner._indicator_engine = _DummyIndicator({"NFO:NIFTY26JUN23800PE": [1, 2, 3, 4, 5, 6]})
+    runner._required_bars_for_symbol = lambda _s: 1
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", trace_id="t-no-attr")
+    assert reason in {"symbol_live_ready", "quote_depth_unavailable", "spread_unknown", "spread_too_wide", "broker_health_live_orders_blocked"}
+    assert isinstance(ready, bool)
 
 
 def test_live_trading_readiness_snapshot_emitted(caplog) -> None:

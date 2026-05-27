@@ -259,6 +259,28 @@ def test_order_acceptance_notifies_orchestrator_entry() -> None:
     assert notified["symbol"] == 'NFO:NIFTY26APR23800CE'
     assert notified["reason"] == "order_accepted"
 
+
+def test_phase10_no_runtime_indicators_attribute_logs_clean_block_not_runner_error(caplog) -> None:
+    runner = _build_runner()
+    runner._runtime_live_orders_armed = True
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (True, {"active": True})
+    if hasattr(runner, "_runtime_indicators"):
+        delattr(runner, "_runtime_indicators")
+    with caplog.at_level(logging.INFO):
+        ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", trace_id="phase10-guard")
+        runner._reject_signal_execution(
+            symbol="NFO:NIFTY26JUN23800PE",
+            trace_id="phase10-guard",
+            reason=reason,
+            details=details,
+        )
+    assert ready is False
+    assert reason == "order_manager_kill_switch_active"
+    events = {getattr(r, "event", "") for r in caplog.records}
+    assert "RUNNER_ON_TICK_ERROR" not in events
+    assert "SIGNAL_EXECUTION_RESULT" in events
+
 def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> None:
     runner = _build_runner()
     runner._logger = logging.getLogger("test.runner.prewarm.sync")
