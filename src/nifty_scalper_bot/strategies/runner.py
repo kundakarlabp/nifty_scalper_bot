@@ -6599,34 +6599,46 @@ class StrategyRunner:
         option_history_count: int | None = None,
         option_history_required: int | None = None,
     ) -> None:
-        ctx = dict(indicators_ctx or {})
-        self._logger.info(
-            "RUNNER_NO_TRADE_DECISION symbol=%s category=%s reason=%s",
-            symbol,
-            category,
-            reason,
-            extra={
-                "event": "RUNNER_NO_TRADE_DECISION",
-                "symbol": symbol,
-                "trace_id": trace_id,
-                "broker_attempted": bool(broker_attempted),
-                "category": category,
-                "reason": reason,
-                "data_phase": self._data_phase.get(symbol),
-                "option_history_count": int(option_history_count or 0),
-                "option_history_required": int(option_history_required or 0),
-                "context_fresh": bool(ctx.get("spot_fresh") or ctx.get("futures_fresh")),
-                "context_direction_valid": bool((ctx.get("direction_bias") or ctx.get("underlying_direction_bias"))),
-                "direction_bias": ctx.get("underlying_direction_bias") or ctx.get("direction_bias"),
-                "strategy_vote_count": 0,
-                "no_vote_reason_counts": {},
-                "execution_readiness_allowed": bool(self._runtime_live_orders_armed),
-                "execution_readiness_reason": self._runtime_readiness_reason,
-                "broker_health_effect": None,
-                "margin_status": None,
-                "kill_switch_active": bool(getattr(self._order_manager, "is_kill_switch_active", lambda: False)()),
-            },
-        )
+        try:
+            ctx = dict(indicators_ctx or {})
+            self._logger.info(
+                "RUNNER_NO_TRADE_DECISION symbol=%s category=%s reason=%s",
+                symbol,
+                category,
+                reason,
+                extra={
+                    "event": "RUNNER_NO_TRADE_DECISION",
+                    "symbol": symbol,
+                    "trace_id": trace_id,
+                    "broker_attempted": bool(broker_attempted),
+                    "category": category,
+                    "reason": reason,
+                    "data_phase": self._data_phase.get(symbol),
+                    "option_history_count": int(option_history_count or 0),
+                    "option_history_required": int(option_history_required or 0),
+                    "context_fresh": bool(ctx.get("spot_fresh") or ctx.get("futures_fresh")),
+                    "context_direction_valid": bool((ctx.get("direction_bias") or ctx.get("underlying_direction_bias"))),
+                    "direction_bias": ctx.get("underlying_direction_bias") or ctx.get("direction_bias"),
+                    "strategy_vote_count": 0,
+                    "no_vote_reason_counts": {},
+                    "execution_readiness_allowed": bool(self._runtime_live_orders_armed),
+                    "execution_readiness_reason": self._runtime_readiness_reason,
+                    "broker_health_effect": None,
+                    "margin_status": None,
+                    "kill_switch_active": self._safe_kill_switch_active_for_diagnostics(),
+                },
+            )
+        except Exception:
+            return
+
+    def _safe_kill_switch_active_for_diagnostics(self) -> bool:
+        try:
+            checker = getattr(self._order_manager, "is_kill_switch_active", None)
+            if callable(checker):
+                return bool(checker())
+        except Exception:
+            return False
+        return False
 
     def _symbol_role_for_runner(self, symbol: str) -> str:
         """Return runner role label for a symbol. Args: symbol. Returns: role. Raises: none."""
@@ -6793,11 +6805,13 @@ class StrategyRunner:
                                 "required": required_bars,
                             },
                         )
+                    category = "data_history_cold" if history_count < required_bars else "data_history_integrity_failed"
+                    reason = 'insufficient_indicator_bar_count' if history_count < required_bars else 'indicator_history_integrity_failed'
                     self._emit_no_trade_decision(
                         symbol=symbol,
                         trace_id=trace_id,
-                        category="data_history_cold",
-                        reason="insufficient_indicator_bar_count",
+                        category=category,
+                        reason=reason,
                         option_history_count=history_count,
                         option_history_required=required_bars,
                     )
