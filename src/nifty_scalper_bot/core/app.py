@@ -6518,7 +6518,9 @@ def _create_named_task(coro: Any, *, name: str) -> asyncio.Task[Any]:
 
 async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> None:
     """Refresh readiness after startup tick proof. Args: ctx/reason. Returns: none. Raises: none."""
-    configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+    configured_mode = str(
+        getattr(getattr(ctx, "settings", None), "execution_mode", None) or "LIVE"
+    ).strip().upper()
     mdm = ctx.market_data_manager
     runner = ctx.strategy_runner
     spot_tick: Mapping[str, Any] | None = None
