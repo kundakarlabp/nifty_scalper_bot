@@ -25,6 +25,13 @@ def _first_not_none(*values: int | None) -> int | None:
     return next((value for value in values if value is not None), None)
 
 
+def safe_float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 class SMCStrategy(EliteStrategy):
     """SMC liquidity sweep strategy producing structured votes only."""
 
@@ -209,7 +216,7 @@ class SMCStrategy(EliteStrategy):
             required_features = ("premium_reclaim", "bullish_reversal", "choch_confirmed", "bos_confirmed", "retest_confirmed")
             present_features = [name for name in required_features if indicators.get(name) is not None]
             feature_completeness = float(len(present_features)) / float(len(required_features))
-            feature_threshold = float(os.getenv("SMC_FEATURE_COMPLETENESS_THRESHOLD", "0.6") or "0.6")
+            feature_threshold = safe_float_env("SMC_FEATURE_COMPLETENESS_THRESHOLD", 0.6)
             missing_features = [name for name in required_features if name not in present_features]
             feature_ready = feature_completeness >= feature_threshold
             LOGGER.info("SMC_FEATURE_READINESS symbol=%s feature_completeness=%.3f missing_features=%s live_enabled=%s vote_allowed=%s hard_veto=%s", symbol, feature_completeness, ",".join(missing_features), is_live, feature_ready, False, extra={"event": "SMC_FEATURE_READINESS", "symbol": symbol, "feature_completeness": feature_completeness, "missing_features": missing_features, "live_enabled": is_live, "vote_allowed": feature_ready, "hard_veto": False})

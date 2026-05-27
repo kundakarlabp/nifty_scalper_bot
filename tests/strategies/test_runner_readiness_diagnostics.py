@@ -443,3 +443,30 @@ def test_runner_emits_no_trade_decision_on_signal_none_strategy_no_trigger(caplo
     assert rec.category == "strategy_no_trigger"
     assert rec.reason == "evaluation_no_signal"
     assert rec.broker_attempted is False
+
+def test_is_option_symbol_tick_fresh_uses_cache_only_no_pull_quote() -> None:
+    runner = _make_runner()
+    calls: list[bool] = []
+    runner._is_tradable_symbol = lambda _s: True
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tick_age_s": 1.0}
+    runner._data_hub = SimpleNamespace(get_quote=lambda *_a, **_k: calls.append(True))
+    assert runner._is_option_symbol_tick_fresh("NFO:CE", max_age_s=5.0) is True
+    assert calls == []
+
+
+def test_tick_fresh_returns_false_when_cache_missing() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._get_cached_quote_for_live_entry = lambda _s: {}
+    runner._market_data = SimpleNamespace(time_since_last_tick=lambda _s: None)
+    runner._data_hub = SimpleNamespace(time_since_last_tick=lambda _s: None)
+    assert runner._is_option_symbol_tick_fresh("NFO:CE", max_age_s=5.0) is False
+
+def test_symbol_live_entry_ready_does_not_call_datahub_get_quote_with_allow_pull_true() -> None:
+    runner = _make_runner()
+    pulled = {"called": False}
+    runner._is_tradable_symbol = lambda _s: True
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tick_age_s": 0.5}
+    runner._data_hub = SimpleNamespace(get_quote=lambda *_a, **kwargs: pulled.__setitem__("called", kwargs.get("allow_pull", True)))
+    assert runner._is_option_symbol_tick_fresh("NFO:CE", max_age_s=5.0) is True
+    assert pulled["called"] is False

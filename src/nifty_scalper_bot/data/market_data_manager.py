@@ -2022,6 +2022,18 @@ class MarketDataManager:
             await asyncio.sleep(0.1)
         raise RuntimeError("Live tick unavailable")
 
+    def _extract_ltp_from_quote(self, quote: Mapping[str, Any]) -> float | None:
+        for key in ("ltp", "last_price", "price", "close"):
+            try:
+                value = quote.get(key)
+                if value is not None:
+                    parsed = float(value)
+                    if parsed > 0:
+                        return parsed
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def get_cached_ltp(
         self,
         symbol: str,
@@ -2034,11 +2046,9 @@ class MarketDataManager:
         if canonical_symbol in getattr(self, "_suspended_context_symbols", set()):
             with self._lock:
                 cached_tick = self._latest_ticks.get(canonical_symbol)
-            if isinstance(cached_tick, Mapping) and cached_tick:
-                cached_quote = dict(cached_tick)
-                cached_quote.setdefault("source", "cache")
-                return cached_quote
-            return {"symbol": canonical_symbol, "quote_unavailable_reason": "suspended_stale_future"}
+            if isinstance(cached_tick, Mapping):
+                return self._extract_ltp_from_quote(cached_tick)
+            return None
         tick = self.get_latest_tick(canonical_symbol)
         if not isinstance(tick, Mapping):
             return None
@@ -2051,13 +2061,7 @@ class MarketDataManager:
         ).lower()
         if require_ws and source not in {"ws", "ws_full", "full"}:
             return None
-        price = _coerce_positive_float(
-            tick.get("last_price")
-            or tick.get("ltp")
-            or tick.get("price")
-            or tick.get("close")
-        )
-        return float(price) if price and price > 0 else None
+        return self._extract_ltp_from_quote(tick)
 
     def get_ltp(
         self,

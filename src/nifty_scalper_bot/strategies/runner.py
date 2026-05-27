@@ -6086,6 +6086,7 @@ class StrategyRunner:
         )
         try:
             reserved_extra_keys = set(logging.makeLogRecord({}).__dict__)
+            universe_ready, universe_reason = self._emit_live_universe_bootstrap_status(symbol=symbol)
             payload = {
                 "level": "WARNING",
                 "symbol": symbol,
@@ -6308,7 +6309,7 @@ class StrategyRunner:
                 "trading_allowed": bool(self._runtime_evaluation_ready),
                 "diagnostic_allowed": True,
                 "live_orders_armed": bool(self._runtime_live_orders_armed),
-                "live_block_reason": self._runtime_readiness_reason,
+                "live_block_reason": universe_reason or self._runtime_readiness_reason,
                 "selected_ce_symbol": ce_symbol,
                 "selected_pe_symbol": pe_symbol,
                 "ce_exec_ready": bool(self._runtime_execution_ready_by_symbol.get(ce_symbol, False)) if ce_symbol else False,
@@ -6331,11 +6332,47 @@ class StrategyRunner:
                 "candidate_refresh_pending": False,
                 "strategy_signal_present": bool(strategy_signal_present),
                 "order_path_entered": bool(order_path_entered),
+                "live_universe_ready": universe_ready,
                 "order_manager_block_reason": order_manager_block_reason,
             }
             self._logger.info("LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s", symbol, bool(self._runtime_live_orders_armed), self._runtime_readiness_reason, extra=payload)
         except Exception:
             return
+
+
+    def _emit_live_universe_bootstrap_status(self, *, symbol: str) -> tuple[bool, str | None]:
+        ce_symbol = self._selected_option_symbol_for_side("CE", {}) or getattr(self, "_active_selected_ce", None)
+        pe_symbol = self._selected_option_symbol_for_side("PE", {}) or getattr(self, "_active_selected_pe", None)
+        fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context" and not self._is_context_symbol_suspended(sym)), "")
+        mdm = getattr(self, "_market_data", None)
+        token_by_symbol = getattr(mdm, "_token_by_symbol", {}) if mdm is not None else {}
+        ce_token = token_by_symbol.get(ce_symbol) if ce_symbol else None
+        pe_token = token_by_symbol.get(pe_symbol) if pe_symbol else None
+        fut_token = token_by_symbol.get(fut_symbol) if fut_symbol else None
+        active_subs = set(getattr(mdm, "_active_subscribed_symbols", set()) or set())
+        ce_sub = bool(ce_symbol and ce_symbol in active_subs)
+        pe_sub = bool(pe_symbol and pe_symbol in active_subs)
+        fut_sub = bool(fut_symbol and fut_symbol in active_subs)
+        ce_quote = bool(ce_symbol and self._is_option_symbol_tick_fresh(ce_symbol, max_age_s=60.0))
+        pe_quote = bool(pe_symbol and self._is_option_symbol_tick_fresh(pe_symbol, max_age_s=60.0))
+        fut_quote = bool(fut_symbol and self._is_option_symbol_tick_fresh(fut_symbol, max_age_s=60.0)) if fut_symbol else False
+        ce_depth = bool(ce_symbol and self._is_symbol_execution_ready(ce_symbol))
+        pe_depth = bool(pe_symbol and self._is_symbol_execution_ready(pe_symbol))
+        ce_hist = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
+        pe_hist = len(self._indicator_engine.get_history(pe_symbol) or []) if pe_symbol else 0
+        min_bars = int(self._required_bars_for_symbol(ce_symbol or pe_symbol or symbol))
+        reason = None
+        if not (ce_sub and pe_sub):
+            reason = "selected_option_subscription_pending"
+        elif not (ce_quote and pe_quote):
+            reason = "selected_option_quote_missing"
+        elif not (ce_depth and pe_depth):
+            reason = "selected_option_depth_missing"
+        elif ce_hist < min_bars or pe_hist < min_bars:
+            reason = "selected_option_history_cold"
+        ready = reason is None
+        self._logger.info("LIVE_UNIVERSE_BOOTSTRAP_STATUS symbol=%s ready=%s reason=%s", symbol, ready, reason, extra={"event":"LIVE_UNIVERSE_BOOTSTRAP_STATUS","symbol":symbol,"selected_ce":ce_symbol,"selected_pe":pe_symbol,"active_future":fut_symbol or None,"ce_token":ce_token,"pe_token":pe_token,"fut_token":fut_token,"ce_subscribed":ce_sub,"pe_subscribed":pe_sub,"fut_subscribed":fut_sub,"ce_quote_fresh":ce_quote,"pe_quote_fresh":pe_quote,"fut_quote_fresh":fut_quote,"ce_depth_available":ce_depth,"pe_depth_available":pe_depth,"ce_history_count":ce_hist,"pe_history_count":pe_hist,"ready":ready,"reason":reason})
+        return ready, reason
 
     def _request_selected_option_history_prewarm(
         self, symbol: str, *, bars_before: int, required_bars: int, trace_id: str | None = None

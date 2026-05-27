@@ -183,6 +183,12 @@ class OrderFlowStrategy(EliteStrategy):
             direction_context_missing = direction not in {'CE', 'PE'}
             allow_without_direction_live = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_WITHOUT_DIRECTION_LIVE', 'false')).strip().lower() in {'1', 'true', 'yes', 'on'}
             direction_context_ok = (direction in {'CE', 'PE'}) or (not is_live_mode) or allow_without_direction_live
+            max_context_age = float(os.getenv('ORDERFLOW_MAX_CONTEXT_AGE_SECONDS', '5') or '5')
+            age_raw = indicators.get('context_age_seconds')
+            try:
+                context_age_ok = age_raw is not None and float(age_raw) <= max_context_age
+            except (TypeError, ValueError):
+                context_age_ok = False
             trigger_conditions_met = bool(
                 allow_orderflow_trigger
                 and quote_depth_valid
@@ -194,7 +200,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and spread_pct <= trigger_max_spread_pct
                 and side_alignment_ok
                 and direction_context_ok
-                and float(indicators.get('context_age_seconds') or 0.0) <= float(os.getenv('ORDERFLOW_MAX_CONTEXT_AGE_SECONDS', '5') or '5')
+                and context_age_ok
                 and tick_supports
                 and tick_age_ms <= max_tick_age_ms
             )
@@ -211,6 +217,10 @@ class OrderFlowStrategy(EliteStrategy):
                 trigger_block_reason = 'tick_direction_missing_or_neutral'
             elif not direction_context_ok:
                 trigger_block_reason = 'direction_context_missing_live'
+            elif age_raw is None:
+                trigger_block_reason = 'context_age_missing'
+            elif not context_age_ok:
+                trigger_block_reason = 'context_stale'
             elif not side_alignment_ok:
                 trigger_block_reason = 'direction_bias_conflict'
             elif spread_pct > trigger_max_spread_pct:

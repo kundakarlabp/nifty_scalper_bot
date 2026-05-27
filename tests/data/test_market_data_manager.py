@@ -1328,3 +1328,33 @@ def test_maybe_rotate_unresolved_returns_symbol_none(ws: DummyWebSocket) -> None
     out = manager.maybe_rotate_nifty_futures_context_result("NFO:NIFTY26MAYFUT", reason="no_data")
     assert out.unresolved is True
     assert out.symbol is None
+
+def test_get_cached_ltp_suspended_future_returns_float_from_cache(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager._suspended_context_symbols.add("NFO:NIFTY26MAYFUT")  # noqa: SLF001
+    manager._latest_ticks["NFO:NIFTY26MAYFUT"] = {"ltp": 123.5}  # noqa: SLF001
+    assert manager.get_cached_ltp("NFO:NIFTY26MAYFUT") == 123.5
+
+
+def test_get_cached_ltp_suspended_future_returns_none_without_cache(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager._suspended_context_symbols.add("NFO:NIFTY26MAYFUT")  # noqa: SLF001
+    assert manager.get_cached_ltp("NFO:NIFTY26MAYFUT") is None
+
+
+def test_get_cached_ltp_never_returns_dict(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager._suspended_context_symbols.add("NFO:NIFTY26MAYFUT")  # noqa: SLF001
+    value = manager.get_cached_ltp("NFO:NIFTY26MAYFUT")
+    assert value is None or isinstance(value, float)
+
+
+def test_pull_quote_suspended_future_returns_unavailable_dict_without_broker_call(ws: DummyWebSocket) -> None:
+    class FailBroker(DummyBroker):
+        def get_quote(self, symbol: str) -> dict[str, Any]:
+            raise AssertionError("broker must not be called")
+
+    manager = MarketDataManager(FailBroker(), ws)
+    manager._suspended_context_symbols.add("NFO:NIFTY26MAYFUT")  # noqa: SLF001
+    out = manager.pull_quote("NFO:NIFTY26MAYFUT")
+    assert out.get("quote_unavailable_reason") == "suspended_stale_future"

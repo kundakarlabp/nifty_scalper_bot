@@ -390,3 +390,24 @@ def test_derive_direction_fresh_context_and_stale_context_age() -> None:
     )
     assert side == 'CE'
     assert conf > 0.0
+
+def test_ce_two_trigger_blocked_when_direction_bias_pe() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000CE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000CE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    v1 = StrategyVote(strategy='VWAPPro', side='CE', score=8.5, confidence=0.9, reasons=[], metadata={'strategy_score':8.5})
+    v2 = StrategyVote(strategy='OrderFlow', side='CE', score=8.2, confidence=0.85, reasons=[], metadata={'strategy_score':8.2})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000CE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True})
+    assert out is None
+
+
+def test_aligned_two_trigger_pe_consensus_allowed_without_smc_confirmation() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000PE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2,'strategy_score':8.5}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000PE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2,'strategy_score':8.2}
+    v1 = StrategyVote(strategy='VWAPPro', side='PE', score=8.5, confidence=0.9, reasons=[], metadata={'strategy_score':8.5})
+    v2 = StrategyVote(strategy='OrderFlow', side='PE', score=8.2, confidence=0.85, reasons=[], metadata={'strategy_score':8.2})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000PE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True})
+    assert out is not None
+    assert out.metadata is not None
+    assert out.metadata.get('approval_path') in {'aligned_two_trigger_consensus','multi_trigger'}
