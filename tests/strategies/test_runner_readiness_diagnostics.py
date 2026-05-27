@@ -158,21 +158,37 @@ def test_stale_selected_symbol_does_not_arm_live_orders(caplog) -> None:
 
 
 def test_no_trade_decision_reports_history_cold_not_broker(caplog) -> None:
-    logger = logging.getLogger("test.runner.no_trade")
-    with caplog.at_level(logging.INFO):
-        logger.info(
-            "RUNNER_NO_TRADE_DECISION symbol=%s category=%s reason=%s",
-            "NFO:CE",
-            "data_history_cold",
-            "insufficient_indicator_bar_count",
-            extra={
-                "event": "RUNNER_NO_TRADE_DECISION",
-                "symbol": "NFO:CE",
-                "broker_attempted": False,
-                "category": "data_history_cold",
-                "reason": "insufficient_indicator_bar_count",
-            },
-        )
-    rec = next(r for r in caplog.records if getattr(r, "event", "") == "RUNNER_NO_TRADE_DECISION")
-    assert rec.broker_attempted is False
-    assert rec.category == "data_history_cold"
+    runner = _make_runner()
+    category, reason = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        signal=None,
+        indicators_ctx={},
+        option_count=1,
+        option_required=5,
+        broker_attempted=False,
+    )
+    assert category == "data_history_cold"
+    assert reason == "insufficient_indicator_bar_count"
+
+
+def test_runner_no_trade_decision_reports_context_direction_unavailable() -> None:
+    runner = _make_runner()
+    category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        signal=None,
+        indicators_ctx={},
+        option_count=10,
+        option_required=5,
+        broker_attempted=False,
+    )
+    assert category == "context_direction_unavailable"
+
+
+def test_runner_no_trade_decision_reports_context_direction_conflict() -> None:
+    runner = _make_runner()
+    category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        signal=None,
+        indicators_ctx={"direction_conflict": True},
+        option_count=10,
+        option_required=5,
+        broker_attempted=False,
+    )
+    assert category == "context_direction_conflict"

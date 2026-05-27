@@ -238,6 +238,19 @@ def test_order_acceptance_notifies_orchestrator_entry() -> None:
     signal = Signal(action='BUY', symbol='NFO:NIFTY26APR23800CE', quantity=1, confidence=0.9, reason='test', stop_loss=100.0, take_profit=120.0, metadata={'strategy_score': 7, 'option_score': 7, 'data_score': 7, 'rr_score': 7})
     runner._handle_entry_signal_inner(signal, 'NFO:NIFTY26APR23800CE', 'NFO:NIFTY26APR23800CE', 110.0, datetime.now(timezone.utc), trace_id='notify')
     assert notified["symbol"] == 'NFO:NIFTY26APR23800CE'
+
+
+def test_selected_option_prewarm_accepts_sync_hydrator_list_result() -> None:
+    runner = _build_runner()
+    runner._indicator_engine = SimpleNamespace(get_history=lambda _s: [1, 2, 3])
+    runner._selected_option_prewarm_last = {}
+    runner._selected_option_prewarm_inflight = set()
+    runner._selected_option_prewarm_cooldown_s = 0.0
+    runner._data_hub = SimpleNamespace(hydrate_symbol_history=lambda *a, **k: [1, 2, 3, 4, 5])
+    runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t1")
+    import time as _t
+    _t.sleep(0.05)
+    assert "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight
     assert notified["reason"] == "order_accepted"
 
 

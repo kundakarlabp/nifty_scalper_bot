@@ -12,6 +12,7 @@ from datetime import datetime, time as dt_time, timedelta, timezone
 from enum import Enum
 import json
 import inspect
+import inspect as pyinspect
 import logging
 import os
 from pathlib import Path
@@ -6326,24 +6327,49 @@ class StrategyRunner:
         async def _do_prewarm() -> None:
             success = False
             bars_after = bars_before
+            reason = "selected_option_history_cold"
+            source = "data_hub_hydrate"
             try:
-                out = await hydrate(symbol, interval="minute", days=2, max_bars=max_bars, reason="selected_option_history_cold")
-                success = True
-                bars_after = len(out or []) if isinstance(out, list) else int(bars_before)
-            except Exception:
+                result = hydrate(symbol, interval="minute", days=2, max_bars=max_bars, reason=reason)
+                if pyinspect.isawaitable(result):
+                    result = await result
+                success = result is not None
+                if isinstance(result, list):
+                    bars_after = len(result)
+                elif isinstance(result, Mapping):
+                    bars_after = int(result.get("bars_after") or result.get("count") or bars_before)
+                    success = bool(result.get("success", success))
+                else:
+                    bars_after = self._history_count_for_symbol(symbol)
+            except Exception as exc:
                 success = False
+                source = "data_hub_hydrate_exception"
+                reason = type(exc).__name__
             finally:
                 self._selected_option_prewarm_inflight.discard(symbol)
                 self._logger.info(
                     "SELECTED_OPTION_HISTORY_PREWARM_RESULT symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
                     symbol, bars_before, bars_after, required_bars, success,
-                    extra={"event": "SELECTED_OPTION_HISTORY_PREWARM_RESULT", "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": "selected_option_history_cold", "source": "data_hub_hydrate", "trace_id": trace_id},
+                    extra={"event": "SELECTED_OPTION_HISTORY_PREWARM_RESULT", "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": reason, "source": source, "trace_id": trace_id},
                 )
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(_do_prewarm())
         except RuntimeError:
+            threading.Thread(target=lambda: asyncio.run(_do_prewarm()), name=f"selected-option-prewarm-{symbol}", daemon=True).start()
+        except Exception as exc:
             self._selected_option_prewarm_inflight.discard(symbol)
+            self._logger.info(
+                "SELECTED_OPTION_HISTORY_PREWARM_RESULT symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
+                symbol, bars_before, bars_before, required_bars, False,
+                extra={"event": "SELECTED_OPTION_HISTORY_PREWARM_RESULT", "symbol": symbol, "bars_before": bars_before, "bars_after": bars_before, "required_bars": required_bars, "success": False, "reason": type(exc).__name__, "source": "prewarm_scheduler_exception", "trace_id": trace_id},
+            )
+
+    def _history_count_for_symbol(self, symbol: str) -> int:
+        try:
+            return len(self._indicator_engine.get_history(symbol) or [])
+        except Exception:
+            return 0
 
     def _same_bar_eval_reason(
         self,
@@ -6528,6 +6554,31 @@ class StrategyRunner:
         value = str(symbol or "").upper()
         return value == "NSE:NIFTY" or (value.startswith("NFO:NIFTY") and value.endswith("FUT"))
 
+    def _classify_no_trade_decision(
+        self,
+        *,
+        signal: Any | None,
+        indicators_ctx: Mapping[str, Any],
+        option_count: int,
+        option_required: int,
+        broker_attempted: bool = False,
+    ) -> tuple[str, str]:
+        if broker_attempted:
+            return "broker_placement_failed", "broker_attempted_failed"
+        if option_count < option_required:
+            return "data_history_cold", "insufficient_indicator_bar_count"
+        conflict = bool(indicators_ctx.get("direction_conflict") or indicators_ctx.get("underlying_direction_conflict"))
+        if conflict:
+            return "context_direction_conflict", "underlying_direction_conflict"
+        direction_bias = indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias")
+        if not direction_bias:
+            return "context_direction_unavailable", "direction_context_not_ready"
+        if not self._runtime_live_orders_armed:
+            return "execution_readiness_false", str(self._runtime_readiness_reason or "runtime_live_orders_not_armed")
+        if signal is None:
+            return "strategy_no_trigger", "evaluation_no_signal"
+        return "strategy_no_trigger", "no_order_condition"
+
     def _symbol_role_for_runner(self, symbol: str) -> str:
         """Return runner role label for a symbol. Args: symbol. Returns: role. Raises: none."""
         s = normalize_symbol(str(symbol or "")).upper()
@@ -6627,13 +6678,28 @@ class StrategyRunner:
                     fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context"), "")
                     if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
                         self._logger.warning("CONTEXT_FUTURES_UNRESOLVED symbol=%s", symbol)
+                    if not fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
+                        rotated = self._market_data.maybe_rotate_nifty_futures_context(
+                            None, reason="context_futures_missing", trace_id=trace_id
+                        )
+                        if rotated:
+                            fut_symbol = str(rotated)
+                            self._active_symbols.add(fut_symbol)
                     if fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
+                        old_fut_symbol = fut_symbol
                         rotated = self._market_data.maybe_rotate_nifty_futures_context(
                             fut_symbol, reason="context_futures_unresolved", trace_id=trace_id
                         )
                         if rotated and rotated != fut_symbol:
                             self._active_symbols.discard(fut_symbol)
                             self._active_symbols.add(str(rotated))
+                            fut_symbol = str(rotated)
+                            self._logger.info(
+                                "RUNNER_FUTURES_CONTEXT_ROTATED old_symbol=%s new_symbol=%s",
+                                old_fut_symbol,
+                                fut_symbol,
+                                extra={"event": "RUNNER_FUTURES_CONTEXT_ROTATED", "old_symbol": old_fut_symbol, "new_symbol": fut_symbol, "trace_id": trace_id, "reason": "context_futures_unresolved", "stage": "phase9"},
+                            )
                     spot_bars = len(self._indicator_engine.get_history(spot_symbol) or [])
                     fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
                     opt_bars = history_count
@@ -8507,11 +8573,13 @@ class StrategyRunner:
                         if signal is None:
                             option_required = self._required_bars_for_symbol(symbol)
                             option_count = len(self._indicator_engine.get_history(symbol) or [])
-                            category = "strategy_no_trigger"
-                            reason = "evaluation_no_signal"
-                            if option_count < option_required:
-                                category = "data_history_cold"
-                                reason = "insufficient_indicator_bar_count"
+                            category, reason = self._classify_no_trade_decision(
+                                signal=None,
+                                indicators_ctx=indicators_ctx,
+                                option_count=option_count,
+                                option_required=option_required,
+                                broker_attempted=False,
+                            )
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
                                 stage="phase9",
