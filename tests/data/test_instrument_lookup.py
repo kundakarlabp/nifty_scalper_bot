@@ -12,6 +12,8 @@ def test_instrument_lookup_missing_real_csv_raises(tmp_path: Path) -> None:
     missing = tmp_path / "missing.csv"
     with pytest.raises(FileNotFoundError):
         InstrumentLookup(str(missing))
+    with pytest.raises(FileNotFoundError):
+        InstrumentLookup(missing)
 
 
 def test_instrument_lookup_magicmock_enables_in_memory_mode() -> None:

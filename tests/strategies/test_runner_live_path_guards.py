@@ -296,10 +296,48 @@ def test_symbol_live_entry_ready_refreshes_stale_candidate_for_trigger_signal() 
     runner._active_option_symbols = ["NFO:NIFTY26JUN23800PE", "NFO:NIFTY26JUN23900PE"]
     runner._active_atm_strike = 23900
     runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
+    runner._build_candidate_snapshots_sync_safe = lambda **_k: (  # type: ignore[method-assign]
+        [
+            {"symbol": "NFO:NIFTY26JUN23900CE"},
+            {"symbol": "NFO:NIFTY26JUN23900PE"},
+            {"symbol": "NFO:NIFTY26JUN23850PE"},
+        ],
+        False,
+        "test",
+    )
     signal = Signal(action="BUY", symbol="NFO:NIFTY26JUN23800PE", quantity=1, confidence=0.8, reason="OrderFlow", metadata={"trigger_conditions_met": True})
     ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE", signal=signal, trace_id="refresh-candidate")
     assert ready is True
     assert reason == "symbol_live_ready"
+    assert details.get("candidate_refresh_attempted") is True
+
+
+def test_symbol_live_entry_ready_refresh_does_not_force_far_otm_ready() -> None:
+    runner = _build_runner()
+    runner._runtime_live_orders_armed = True
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._required_bars_for_symbol = lambda _s: 1
+    runner._indicator_engine.get_history = lambda _s: [1, 2, 3, 4, 5]
+    runner._is_option_symbol_tick_fresh = lambda *_a, **_k: True
+    runner._runtime_indicators = {"NFO:NIFTY26JUN25000PE": {"direction_bias": "PE", "context_age_seconds": 1.0}}
+    runner._active_selected_ce = "NFO:NIFTY26JUN23900CE"
+    runner._active_selected_pe = "NFO:NIFTY26JUN23900PE"
+    runner._active_option_symbols = ["NFO:NIFTY26JUN23900CE", "NFO:NIFTY26JUN23900PE"]
+    runner._active_atm_strike = 23900
+    runner._get_cached_quote_for_live_entry = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
+    runner._build_candidate_snapshots_sync_safe = lambda **_k: (  # type: ignore[method-assign]
+        [
+            {"symbol": "NFO:NIFTY26JUN23900CE"},
+            {"symbol": "NFO:NIFTY26JUN23900PE"},
+        ],
+        False,
+        "test",
+    )
+    signal = Signal(action="BUY", symbol="NFO:NIFTY26JUN25000PE", quantity=1, confidence=0.8, reason="OrderFlow", metadata={"trigger_conditions_met": True})
+    ready, reason, details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN25000PE", signal=signal, trace_id="refresh-far-otm")
+    assert ready is False
+    assert reason == "candidate_not_selected_or_near_atm"
     assert details.get("candidate_refresh_attempted") is True
 
 def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> None:

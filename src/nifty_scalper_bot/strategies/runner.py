@@ -6754,18 +6754,21 @@ class StrategyRunner:
         )
 
     def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
-        def _refresh_selected_candidates_for_symbol(symbol_norm: str) -> bool:
+        def _refresh_selected_candidates_for_symbol(
+            symbol_norm: str,
+            *,
+            atm_reference: int | None,
+        ) -> bool:
             side = self._contract_side_from_symbol(symbol_norm)
             if side not in {"CE", "PE"}:
                 return False
-            strike_here = self._extract_strike_from_symbol(symbol_norm)
-            if strike_here is None:
+            if atm_reference is None or int(atm_reference) <= 0:
                 return False
             snapshots, pending, _source = self._build_candidate_snapshots_sync_safe(
                 symbol=symbol_norm,
                 underlying="NIFTY",
                 direction_bias=cast(Literal["CE", "PE"], side),
-                atm_strike=int(strike_here),
+                atm_strike=int(atm_reference),
                 existing_snapshots=[],
                 window_each_side=2,
             )
@@ -6777,7 +6780,7 @@ class StrategyRunner:
             self.set_active_option_context(
                 selected_ce=selected_ce,
                 selected_pe=selected_pe,
-                atm_strike=int(strike_here),
+                atm_strike=int(atm_reference),
                 option_symbols=option_symbols,
             )
             return bool(option_symbols)
@@ -6851,7 +6854,10 @@ class StrategyRunner:
                 or (str(metadata.get("strategy") or getattr(signal, "reason", "")).upper() == "ORDERFLOW" and float(metadata.get("strategy_score") or 0.0) >= 5.0)
             )
             if trigger_evidence and quote_fresh and (ctx_age is None or ctx_age <= max_context_age):
-                refreshed = _refresh_selected_candidates_for_symbol(symbol_norm)
+                refreshed = _refresh_selected_candidates_for_symbol(
+                    symbol_norm,
+                    atm_reference=int(active_atm_strike) if active_atm_strike is not None else None,
+                )
                 details["candidate_refresh_attempted"] = True
                 details["candidate_refresh_succeeded"] = refreshed
                 if refreshed:
