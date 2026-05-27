@@ -6604,7 +6604,7 @@ class StrategyRunner:
         if not self._is_tradable_symbol(symbol):
             return False
         limit = float(max_age_s or os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0)
-        quote = self.get_quote(symbol)
+        quote = self._get_cached_quote_for_live_entry(symbol)
         if isinstance(quote, Mapping):
             age = _extract_float(quote, "tick_age_s", "age_s")
             if age is not None:

@@ -2031,6 +2031,14 @@ class MarketDataManager:
     ) -> float | None:
         """Cached-only LTP accessor. Args: symbol/guards. Returns: ltp. Raises: none."""
         canonical_symbol = self._canonical_symbol(symbol)
+        if canonical_symbol in getattr(self, "_suspended_context_symbols", set()):
+            with self._lock:
+                cached_tick = self._latest_ticks.get(canonical_symbol)
+            if isinstance(cached_tick, Mapping) and cached_tick:
+                cached_quote = dict(cached_tick)
+                cached_quote.setdefault("source", "cache")
+                return cached_quote
+            return {"symbol": canonical_symbol, "quote_unavailable_reason": "suspended_stale_future"}
         tick = self.get_latest_tick(canonical_symbol)
         if not isinstance(tick, Mapping):
             return None
@@ -2477,6 +2485,14 @@ class MarketDataManager:
             self._quote_direct_miss_reason.pop(symbol_key, None)
 
         canonical_symbol = self._canonical_symbol(symbol)
+        if canonical_symbol in getattr(self, "_suspended_context_symbols", set()):
+            with self._lock:
+                cached_tick = self._latest_ticks.get(canonical_symbol)
+            if isinstance(cached_tick, Mapping) and cached_tick:
+                cached_quote = dict(cached_tick)
+                cached_quote.setdefault("source", "cache")
+                return cached_quote
+            return {"symbol": canonical_symbol, "quote_unavailable_reason": "suspended_stale_future"}
         candidates: list[str | int] = self._candidate_quote_keys(canonical_symbol)
         if not candidates:
             candidates = [canonical_symbol]
@@ -5153,6 +5169,13 @@ class MarketDataManager:
                         % (tick.get("symbol"), exc),
                         interval_sec=10.0,
                         level=logging.ERROR,
+                    )
+                    log_throttled(
+                        self._logger,
+                        "mdm_bus_backpressure",
+                        "MDM_BUS_BACKPRESSURE symbol=%s dropped_ticks=%s coalesced_ticks=%s latest_cache_updated=True" % (tick.get("symbol"), 1, 1),
+                        interval_sec=10.0,
+                        level=logging.WARNING,
                     )
 
             future.add_done_callback(_done)

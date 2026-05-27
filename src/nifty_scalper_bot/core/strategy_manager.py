@@ -2639,7 +2639,7 @@ class StrategyManager(_BaseStrategyManager):
             context_snapshots = getattr(self, "_latest_context_snapshots", {})
             spot_ctx = context_snapshots.get("spot_context", {})
             fut_ctx = context_snapshots.get("futures_context", {})
-            max_context_age = self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0)
+            max_context_age = self._live_context_max_age_seconds()
             now_ts = time.time()
             def _fresh(ctx: t.Mapping[str, t.Any]) -> bool:
                 try:
@@ -3277,6 +3277,14 @@ class StrategyManager(_BaseStrategyManager):
             return float(os.getenv(name, str(default)) or default)
         except (TypeError, ValueError):
             return float(default)
+
+
+    def _live_context_max_age_seconds(self) -> float:
+        """Args: none. Returns: live context max age seconds. Raises: none."""
+        default_age = self._env_float("MAX_CONTEXT_AGE_SECONDS", 5.0)
+        if self._is_live_mode():
+            return max(0.1, default_age)
+        return max(0.1, self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0))
 
     def _extract_raw_score(self, vote: StrategyVote) -> float:
         """Args: vote. Returns: raw score. Raises: none."""
@@ -3930,7 +3938,7 @@ class StrategyManager(_BaseStrategyManager):
             live_min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_LIVE_MIN_SCORE", 8.5)
             live_min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_LIVE_MIN_CONFIDENCE", 0.75)
             max_spread = self._env_float("STRATEGY_MAX_SPREAD_PCT", 12.0)
-            max_context_age = self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0)
+            max_context_age = self._live_context_max_age_seconds()
             try:
                 spread_pct = float(md0.get("spread_pct") or indicators.get("spread_pct") or 999.0)
             except (TypeError, ValueError):
@@ -4027,7 +4035,7 @@ class StrategyManager(_BaseStrategyManager):
             md0.get("context_fresh")
             if md0.get("context_fresh") is not None
             else indicators.get("context_fresh")
-        ) and context_age_seconds <= self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0)
+        ) and context_age_seconds <= self._live_context_max_age_seconds()
         conf_raw = md0.get("underlying_direction_confidence")
         if conf_raw is None:
             conf_raw = indicators.get("underlying_direction_confidence")

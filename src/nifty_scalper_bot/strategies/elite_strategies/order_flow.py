@@ -39,10 +39,10 @@ class OrderFlowStrategy(EliteStrategy):
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
             execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
             is_live_mode = execution_mode == 'LIVE'
-            allow_orderflow_trigger = str(os.getenv('ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
+            allow_orderflow_trigger = str(os.getenv('ORDERFLOW_ALLOW_LIVE_TRIGGER' if is_live_mode else 'ORDERFLOW_ALLOW_TRIGGER_ROLE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
             allow_ltp_trigger = str(os.getenv('ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER', os.getenv('ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER', 'false'))).strip().lower() in {'1', 'true', 'yes', 'on'}
-            trigger_min_score = float(os.getenv('ORDERFLOW_TRIGGER_MIN_SCORE_LIVE' if is_live_mode else 'ORDERFLOW_TRIGGER_MIN_SCORE', '6.5' if is_live_mode else '5.0') or ('6.5' if is_live_mode else '5.0'))
-            trigger_max_spread_pct = float(os.getenv('ORDERFLOW_TRIGGER_MAX_SPREAD_PCT_LIVE' if is_live_mode else 'ORDERFLOW_TRIGGER_MAX_SPREAD_PCT', '8.0' if is_live_mode else '12.0') or ('8.0' if is_live_mode else '12.0'))
+            trigger_min_score = float(os.getenv('ORDERFLOW_MIN_SCORE_LIVE' if is_live_mode else 'ORDERFLOW_TRIGGER_MIN_SCORE', '8.0' if is_live_mode else '5.0') or ('8.0' if is_live_mode else '5.0'))
+            trigger_max_spread_pct = float(os.getenv('ORDERFLOW_MAX_SPREAD_PCT' if is_live_mode else 'ORDERFLOW_TRIGGER_MAX_SPREAD_PCT', '0.75' if is_live_mode else '12.0') or ('0.75' if is_live_mode else '12.0'))
             context_min_score = float(os.getenv('ORDERFLOW_CONTEXT_MIN_SCORE', '4.0') or '4.0')
             require_tradable_quote_live = str(os.getenv('ORDERFLOW_REQUIRE_TRADABLE_QUOTE_LIVE', 'true')).strip().lower() in {'1', 'true', 'yes', 'on'}
             tradable_quote = bool(indicators.get('tradable_quote', True))
@@ -194,6 +194,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and spread_pct <= trigger_max_spread_pct
                 and side_alignment_ok
                 and direction_context_ok
+                and float(indicators.get('context_age_seconds') or 0.0) <= float(os.getenv('ORDERFLOW_MAX_CONTEXT_AGE_SECONDS', '5') or '5')
                 and tick_supports
                 and tick_age_ms <= max_tick_age_ms
             )
@@ -250,7 +251,7 @@ class OrderFlowStrategy(EliteStrategy):
             if trigger_conditions_met:
                 metadata['approval_candidate'] = 'orderflow_live_depth_trigger'
             metadata.update({'context_role': 'confirmation', 'context_bonus_score': strategy_score if side_aligns else 0.0, 'context_veto_score': strategy_score if (direction in {'CE', 'PE'} and direction != side) else 0.0})
-            return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
+            LOGGER.info('ORDERFLOW_TRIGGER_DECISION symbol=%s side=%s trigger_conditions_met=%s trigger_block_reason=%s score=%.2f spread_pct=%.2f context_age_seconds=%s', symbol, side, trigger_conditions_met, trigger_block_reason, strategy_score, spread_pct, indicators.get('context_age_seconds'), extra={'event':'ORDERFLOW_TRIGGER_DECISION','symbol':symbol,'side':side,'trigger_conditions_met':trigger_conditions_met,'trigger_block_reason':trigger_block_reason}); return EliteSignal(symbol=symbol, signal='BUY', confidence=max(0.1, min(0.85, strategy_score / 10.0)), entry_price=current_price, stop_loss=None, target=None, quantity=self._cfg.quantity or 1, strategy_name='OrderFlow', metadata=metadata)
         except Exception as e:
             LOGGER.error('Failure in OrderFlowStrategy._evaluate_signal: %s', e, exc_info=e)
             return None
