@@ -6755,28 +6755,32 @@ class StrategyRunner:
 
     def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
         def _refresh_selected_candidates_for_symbol(symbol_norm: str) -> bool:
-            active = list(getattr(self, "_active_option_symbols", []) or [])
-            if not active:
-                return False
             side = self._contract_side_from_symbol(symbol_norm)
             if side not in {"CE", "PE"}:
-                return False
-            filtered = [s for s in active if str(s).upper().endswith(side)]
-            if not filtered:
                 return False
             strike_here = self._extract_strike_from_symbol(symbol_norm)
             if strike_here is None:
                 return False
-            nearest = min(
-                filtered,
-                key=lambda s: abs(float(self._extract_strike_from_symbol(str(s)) or strike_here) - float(strike_here)),
+            snapshots, pending, _source = self._build_candidate_snapshots_sync_safe(
+                symbol=symbol_norm,
+                underlying="NIFTY",
+                direction_bias=cast(Literal["CE", "PE"], side),
+                atm_strike=int(strike_here),
+                existing_snapshots=[],
+                window_each_side=2,
             )
-            if side == "CE":
-                self._active_selected_ce = normalize_symbol(nearest)
-            else:
-                self._active_selected_pe = normalize_symbol(nearest)
-            self._active_atm_strike = int(strike_here)
-            return True
+            if pending or not snapshots:
+                return False
+            selected_ce = next((normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if str(s.get("symbol") or "").upper().endswith("CE")), None)
+            selected_pe = next((normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if str(s.get("symbol") or "").upper().endswith("PE")), None)
+            option_symbols = [normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if s.get("symbol")]
+            self.set_active_option_context(
+                selected_ce=selected_ce,
+                selected_pe=selected_pe,
+                atm_strike=int(strike_here),
+                option_symbols=option_symbols,
+            )
+            return bool(option_symbols)
 
         details: dict[str, Any] = {"symbol": symbol, "trace_id": trace_id, "live_orders_armed": bool(self._runtime_live_orders_armed)}
         if not bool(self._runtime_live_orders_armed):
@@ -6840,7 +6844,12 @@ class StrategyRunner:
             self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_distance_unknown", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_distance_unknown", **details})
             return False, "candidate_distance_unknown", details
         if not (selected_option or near_atm):
-            trigger_evidence = bool((getattr(signal, "metadata", {}) or {}).get("trigger_conditions_met")) if signal is not None else False
+            metadata = (getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+            trigger_evidence = bool(
+                metadata.get("trigger_conditions_met")
+                or metadata.get("trigger_eligible")
+                or (str(metadata.get("strategy") or getattr(signal, "reason", "")).upper() == "ORDERFLOW" and float(metadata.get("strategy_score") or 0.0) >= 5.0)
+            )
             if trigger_evidence and quote_fresh and (ctx_age is None or ctx_age <= max_context_age):
                 refreshed = _refresh_selected_candidates_for_symbol(symbol_norm)
                 details["candidate_refresh_attempted"] = True
@@ -6857,8 +6866,8 @@ class StrategyRunner:
                             near_atm = False
                     details["selected_option"] = selected_option
                     details["near_atm"] = near_atm
-            self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_not_selected_or_near_atm", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_not_selected_or_near_atm", **details})
             if not (selected_option or near_atm):
+                self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_not_selected_or_near_atm", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_not_selected_or_near_atm", **details})
                 return False, "candidate_not_selected_or_near_atm", details
         quote = self._get_cached_quote_for_live_entry(symbol_norm)
         if not quote:

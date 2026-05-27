@@ -52,6 +52,8 @@ class InstrumentLookup:
         if path_candidate is not None and path_candidate.exists():
             self.csv_path = str(path_candidate)
             self.reload()
+        elif path_candidate is not None and type(csv_path).__module__ == "builtins":
+            raise FileNotFoundError(f"Instrument CSV not found: {path_candidate}")
         else:
             self.csv_path = None
             self._loaded_at = time.time()
@@ -168,6 +170,18 @@ class InstrumentLookup:
         )
         with self._lock:
             self._by_exchange_symbol[(inst.exchange, inst.tradingsymbol)] = inst
+            if inst.option_type and inst.expiry and inst.strike is not None:
+                under = inst.tradingsymbol
+                base = ""
+                for ch in under:
+                    if ch.isalpha():
+                        base += ch
+                    else:
+                        break
+                base = base or under
+                self._by_option_fields[
+                    (inst.exchange, base, inst.expiry, float(inst.strike), inst.option_type)
+                ] = inst
 
     def resolve(self, symbol: str, exchange: str = "NFO") -> int | None:
         try:

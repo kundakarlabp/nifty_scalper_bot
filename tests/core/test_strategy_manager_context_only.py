@@ -49,3 +49,26 @@ def test_context_promotion_blocked_in_live(monkeypatch):
     monkeypatch.setenv('STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED', 'false')
     out = manager._combine_strategy_votes(symbol=signal.symbol, signals=[(signal, vote)], indicators={'is_selected_option': True})
     assert out is None
+
+
+def test_smc_zero_feature_completeness_does_not_block_valid_orderflow(monkeypatch):
+    manager = StrategyManager.__new__(StrategyManager)
+    signal, vote = _context_signal()
+    vote.metadata = {
+        "role": "trigger",
+        "strategy": "OrderFlow",
+        "raw_setup_score": 6.5,
+        "trigger_conditions_met": True,
+    }
+    monkeypatch.setenv('STRATEGY_ALLOW_CONTEXT_PROMOTION', 'true')
+    out = manager._combine_strategy_votes(
+        symbol=signal.symbol,
+        signals=[(signal, vote)],
+        indicators={
+            "is_selected_option": True,
+            "direction_bias": "CE",
+            "underlying_direction_bias": "CE",
+            "no_vote_reason_counts": {"strategy_feature_unavailable": 1},
+        },
+    )
+    assert out is not None
