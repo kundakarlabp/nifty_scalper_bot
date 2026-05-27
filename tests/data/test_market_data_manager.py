@@ -228,6 +228,31 @@ def test_active_future_resolver_replaces_expired_month_future(broker: DummyBroke
     assert symbol == "NFO:NIFTY26JUNFUT"
 
 
+def test_active_future_resolver_rejects_banknifty_and_finnifty(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    resolver = type(
+        "Resolver",
+        (),
+        {"list_instruments": lambda self: [
+            {"segment": "NFO-FUT", "instrument_type": "FUT", "tradingsymbol": "BANKNIFTY26JUNFUT", "expiry": "2026-06-25"},
+            {"segment": "NFO-FUT", "instrument_type": "FUT", "tradingsymbol": "FINNIFTY26JUNFUT", "expiry": "2026-06-25"},
+            {"segment": "NFO-FUT", "instrument_type": "FUT", "tradingsymbol": "NIFTY26JUN24000CE", "expiry": "2026-06-25"},
+            {"segment": "NFO-FUT", "instrument_type": "FUT", "name": "NIFTY", "tradingsymbol": "NIFTY26JUNFUT", "expiry": "2026-06-25"},
+        ]}
+    )()
+    manager = MarketDataManager(broker, ws, resolver=resolver)
+    assert manager.resolve_active_nifty_future_symbol(now=datetime(2026, 5, 27, tzinfo=timezone.utc)) == "NFO:NIFTY26JUNFUT"
+
+
+def test_active_future_resolver_calls_instruments_with_nfo_when_required(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    class Resolver:
+        def instruments(self, exchange=None):
+            if exchange == "NFO":
+                return [{"segment": "NFO-FUT", "instrument_type": "FUTIDX", "name": "NIFTY", "tradingsymbol": "NIFTY26JUNFUT", "expiry": "2026-06-25"}]
+            return []
+    manager = MarketDataManager(broker, ws, resolver=Resolver())
+    assert manager.resolve_active_nifty_future_symbol(now=datetime(2026, 5, 27, tzinfo=timezone.utc)) == "NFO:NIFTY26JUNFUT"
+
+
 @pytest.mark.asyncio
 async def test_wait_until_ready_not_ready_log_is_throttled(
     broker: DummyBroker,

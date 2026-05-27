@@ -80,7 +80,12 @@ def build_strategy_history_context(
         else spot_count if history_domain_used == "spot"
         else underlying_count
     )
-    min_required = HistoryReadinessPolicy.from_env().smc_min_bars
+    policy = HistoryReadinessPolicy.from_env()
+    if history_domain_used == "options":
+        domain_min_required = policy.option_eval_min_bars
+    else:
+        domain_min_required = policy.context_min_bars
+    smc_min_required = policy.smc_min_bars
     context: dict[str, Any] = {
         "history_count": resolved_history_count,
         "indicator_history_count": raw_count,
@@ -93,9 +98,11 @@ def build_strategy_history_context(
         "history_resolved_count": resolved_history_count,
         "oldest_bar_ts": None,
         "latest_bar_ts": None,
-        "history_quality": "warm" if resolved_history_count >= min_required else "cold",
-        "history_required_min": min_required,
-        "history_ready_for_smc": resolved_history_count >= min_required,
+        "history_quality": "warm" if resolved_history_count >= domain_min_required else "cold",
+        "history_required_min": domain_min_required,
+        "history_ready": resolved_history_count >= domain_min_required,
+        "smc_history_required_min": smc_min_required,
+        "history_ready_for_smc": resolved_history_count >= smc_min_required,
     }
     if bars:
         context["oldest_bar_ts"] = _bar_ts(bars[0])

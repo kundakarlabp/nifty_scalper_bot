@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nifty_scalper_bot.execution.readiness import compute_live_readiness
+from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy, compute_live_readiness
 
 
 class TestComputeLiveReadiness:
@@ -121,3 +121,27 @@ def test_live_readiness_accepts_fresh_ws_ltp() -> None:
     text = Path('src/nifty_scalper_bot/core/app.py').read_text(encoding='utf-8')
     assert 'has_fresh_ws_ltp' in text
     assert 'ws_quote_for_gate = bool(ws_quote_proof or ws_ltp_proof)' in text
+
+
+def test_history_policy_invalid_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPTION_ENTRY_MIN_BARS", "bad")
+    policy = HistoryReadinessPolicy.from_env()
+    assert policy.option_entry_min_bars == 5
+
+
+def test_compute_live_readiness_bad_option_exec_min_bars_does_not_crash() -> None:
+    armed, reasons = compute_live_readiness(
+        live_mode=True,
+        hard_ready=True,
+        quote_available=True,
+        ws_quote_proof=True,
+        market_open=True,
+        runner_running=True,
+        selected_ce="NFO:CE",
+        selected_pe="NFO:PE",
+        ce_bars=0,
+        pe_bars=0,
+        option_exec_min_bars="bad",  # type: ignore[arg-type]
+    )
+    assert armed is False
+    assert "selected_ce_history_insufficient" in reasons

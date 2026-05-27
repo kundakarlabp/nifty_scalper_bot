@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import math
 import os
+import re
 from random import uniform
 import threading
 import time
@@ -73,6 +74,7 @@ _EXPIRY_FORMATS: tuple[str, ...] = (
 )
 
 _COMPACT_EXPIRY_FORMATS: tuple[str, ...] = ("%d%b%Y", "%d%b%y")
+_NIFTY_FUT_RE = re.compile(r"^NIFTY\d{2}[A-Z]{3}FUT$")
 
 _logger = get_tracer_logger(__name__)
 
@@ -141,6 +143,50 @@ def canonical_symbol(symbol: str) -> str:
     if normalized == "NSE:NIFTY 50":
         return "NSE:NIFTY"
     return normalized
+
+
+def _parse_instrument_expiry(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed_dt = value
+    elif isinstance(value, date):
+        parsed_dt = datetime.combine(value, datetime.min.time())
+    else:
+        text = str(value).strip()
+        parsed_dt = None
+        for fmt in _EXPIRY_FORMATS + _COMPACT_EXPIRY_FORMATS:
+            try:
+                parsed_dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed_dt is None:
+            try:
+                maybe = pd.to_datetime(text, utc=True, errors="coerce")
+                if pd.isna(maybe):
+                    return None
+                parsed_dt = maybe.to_pydatetime()
+            except Exception:
+                return None
+    if parsed_dt.tzinfo is None:
+        return parsed_dt.replace(tzinfo=timezone.utc)
+    return parsed_dt.astimezone(timezone.utc)
+
+
+def _is_nifty_index_future_row(row: Mapping[str, Any]) -> bool:
+    exchange = str(row.get("exchange") or "").upper()
+    segment = str(row.get("segment") or "").upper()
+    instrument_type = str(row.get("instrument_type") or row.get("type") or "").upper()
+    name = str(row.get("name") or "").upper()
+    tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
+    if "NFO" not in {exchange, segment} and "NFO" not in segment:
+        return False
+    if instrument_type not in {"FUT", "FUTIDX"}:
+        return False
+    if name and name != "NIFTY":
+        return False
+    return bool(_NIFTY_FUT_RE.match(tradingsymbol))
 
 
 NIFTY_SPOT_TOKEN = 256265
@@ -2415,6 +2461,11 @@ class MarketDataManager:
             None.
         """
 
+        def _clear_quote_direct_miss(symbol_key: str) -> None:
+            self._quote_direct_miss_count.pop(symbol_key, None)
+            self._quote_direct_miss_until.pop(symbol_key, None)
+            self._quote_direct_miss_reason.pop(symbol_key, None)
+
         canonical_symbol = self._canonical_symbol(symbol)
         candidates: list[str | int] = self._candidate_quote_keys(canonical_symbol)
         if not candidates:
@@ -2423,6 +2474,7 @@ class MarketDataManager:
         cooldown_until = float(self._quote_direct_miss_until.get(canonical_symbol, 0.0) or 0.0)
         now_mono = time.monotonic()
         if cooldown_until > now_mono:
+            remaining = max(0.0, cooldown_until - now_mono)
             with self._lock:
                 cached_tick = self._latest_ticks.get(canonical_symbol)
             if isinstance(cached_tick, Mapping) and cached_tick:
@@ -2432,6 +2484,7 @@ class MarketDataManager:
             return {
                 "symbol": canonical_symbol,
                 "quote_unavailable_reason": "quote_symbol_missing_cooldown",
+                "cooldown_remaining_s": round(remaining, 3),
             }
         for key in candidates:
             broker_key: str | int
@@ -2442,6 +2495,7 @@ class MarketDataManager:
             fetched = self._broker_quote_any(broker_key)
             if fetched:
                 quote = fetched
+                _clear_quote_direct_miss(canonical_symbol)
                 break
         if quote is None:
             try:
@@ -2472,8 +2526,8 @@ class MarketDataManager:
                             "reason": "quote_data_missing",
                         },
                     )
-                log_fn = self._logger.warning if is_recoverable_miss else self._logger.error
-                log_fn(
+                if not is_recoverable_miss:
+                    self._logger.error(
                     "Failure in pull_quote direct get_quote: %s",
                     exc,
                     extra={
@@ -2485,13 +2539,11 @@ class MarketDataManager:
                         "symbol": canonical_symbol,
                         "error": error_text,
                     },
-                    exc_info=None if is_recoverable_miss else exc,
-                )
+                    exc_info=exc,
+                    )
                 raw_quote = None
             else:
-                self._quote_direct_miss_count.pop(canonical_symbol, None)
-                self._quote_direct_miss_until.pop(canonical_symbol, None)
-                self._quote_direct_miss_reason.pop(canonical_symbol, None)
+                _clear_quote_direct_miss(canonical_symbol)
             if isinstance(raw_quote, Mapping):
                 self._mark_quote_api_status(available=True)
                 quote = dict(raw_quote)
@@ -2511,6 +2563,14 @@ class MarketDataManager:
                         "reason": "no_quote_from_broker_or_cache",
                     },
                 )
+            miss_count = int(self._quote_direct_miss_count.get(canonical_symbol, 0) or 0)
+            if miss_count > 0:
+                return {
+                    "symbol": canonical_symbol,
+                    "quote_unavailable_reason": "quote_data_missing",
+                    "quote_miss_count": miss_count,
+                    "cooldown_remaining_s": self._quote_direct_miss_cooldown_seconds,
+                }
             return {"symbol": canonical_symbol}
         quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:
@@ -2519,6 +2579,7 @@ class MarketDataManager:
         normalized = self._normalize_tick(canonical_symbol, quote, previous)
         if normalized is not None:
             self._store_tick(canonical_symbol, normalized)
+            _clear_quote_direct_miss(canonical_symbol)
             return normalized
         return {"symbol": canonical_symbol, **quote}
 
@@ -6474,30 +6535,35 @@ class MarketDataManager:
             return None
         fetchers = ("list_instruments", "get_instruments", "instruments")
         instruments: list[Mapping[str, Any]] = []
+        def _call_instrument_fetcher(fetcher: Callable[..., Any]) -> list[Mapping[str, Any]]:
+            attempts = (lambda: fetcher(), lambda: fetcher("NFO"), lambda: fetcher(exchange="NFO"))
+            for call in attempts:
+                try:
+                    raw = call() or []
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+                if isinstance(raw, Mapping):
+                    raw = raw.values()
+                if isinstance(raw, Iterable):
+                    rows = [item for item in raw if isinstance(item, Mapping)]
+                    if rows:
+                        return rows
+            return []
         for fetcher_name in fetchers:
             fetcher = getattr(resolver, fetcher_name, None)
             if callable(fetcher):
-                try:
-                    raw = fetcher() or []
-                except Exception:
-                    continue
-                if isinstance(raw, Sequence):
-                    instruments = [item for item in raw if isinstance(item, Mapping)]
-                    if instruments:
-                        break
+                instruments = _call_instrument_fetcher(fetcher)
+                if instruments:
+                    break
         best_symbol: str | None = None
         best_expiry: datetime | None = None
         for row in instruments:
-            segment = str(row.get("segment") or row.get("exchange") or "").upper()
-            if "NFO" not in segment:
-                continue
-            instrument_type = str(row.get("instrument_type") or row.get("type") or "").upper()
-            if instrument_type not in {"FUT", "FUTIDX"}:
+            if not _is_nifty_index_future_row(row):
                 continue
             tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
-            if "NIFTY" not in tradingsymbol:
-                continue
-            expiry = _parse_expiry(row.get("expiry"))
+            expiry = _parse_instrument_expiry(row.get("expiry"))
             if expiry is None or expiry < ref_now:
                 continue
             if best_expiry is None or expiry < best_expiry:

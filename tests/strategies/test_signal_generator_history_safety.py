@@ -103,9 +103,22 @@ def test_build_strategy_history_context_falls_back_to_indicator_engine_when_data
 
 def test_history_policy_option_eval_min_bars_consistent_across_runner_and_signal_context(monkeypatch) -> None:
     monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "7")
+    monkeypatch.setenv("OPTION_EVAL_MIN_BARS", "5")
     ctx = build_strategy_history_context(
         symbol="NFO:NIFTY26MAY24350PE",
         indicator_engine=_IndicatorEngineBars(),
         data_hub=_DataHubBars(),
     )
-    assert ctx["history_required_min"] == 7
+    assert ctx["history_required_min"] == 5
+    assert ctx["smc_history_required_min"] == 7
+
+
+def test_context_history_uses_context_min_bars(monkeypatch) -> None:
+    monkeypatch.setenv("CONTEXT_MIN_BARS", "50")
+    ctx = build_strategy_history_context(
+        symbol="NSE:NIFTY",
+        indicator_engine=_IndicatorEngineBars(),
+        data_hub=None,
+    )
+    assert ctx["history_required_min"] == 50
+    assert ctx["history_ready_for_smc"] is True
