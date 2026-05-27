@@ -166,6 +166,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _safe_positive_float(value: object, fallback: float, *, minimum: float = 0.0) -> float:
+    fallback_value = max(float(fallback), float(minimum))
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback_value
+    if parsed <= 0:
+        return fallback_value
+    return max(parsed, float(minimum))
+
+
 _STRATEGY_SKIP_COUNTER = Counter(
     "strategy_skips_total", "Strategy skip counts by reason", ["reason"]
 )
@@ -740,7 +751,10 @@ class StrategyRunner:
         self.ready = False
         self._active_symbols: set[str] = set()
         self._suspended_context_symbols: set[str] = set()
+        self._suspended_context_symbol_until: dict[str, float] = {}
         self._order_failure_cooldown_until: dict[str, float] = {}
+        self._order_failure_cooldown_seconds = _safe_positive_float(os.getenv("ORDER_FAILURE_COOLDOWN_SECONDS"), 120.0, minimum=1.0)
+        self._futures_context_suspension_seconds = _safe_positive_float(os.getenv("FUTURES_CONTEXT_SUSPENSION_SECONDS"), 300.0, minimum=1.0)
         self._tracked_symbols: set[str] = set()
         self._live_symbols: set[str] = set()
         self._symbol_state: Dict[str, SymbolRuntimeState] = {}
@@ -6564,6 +6578,17 @@ class StrategyRunner:
         value = str(symbol or "").upper()
         return value == "NSE:NIFTY" or (value.startswith("NFO:NIFTY") and value.endswith("FUT"))
 
+    def _is_context_symbol_suspended(self, symbol: str) -> bool:
+        until = self._suspended_context_symbol_until.get(symbol)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            self._suspended_context_symbol_until.pop(symbol, None)
+            self._suspended_context_symbols.discard(symbol)
+            self._logger.info("CONTEXT_FUTURES_SYMBOL_SUSPENSION_EXPIRED symbol=%s", symbol, extra={"event": "CONTEXT_FUTURES_SYMBOL_SUSPENSION_EXPIRED", "symbol": symbol})
+            return False
+        return True
+
     def _classify_no_trade_decision(
         self,
         *,
@@ -6751,7 +6776,7 @@ class StrategyRunner:
                                 trace_id=trace_id,
                             )
                         spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
-                        fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY"), "")
+                        fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY" and not self._is_context_symbol_suspended(sym)), "")
                         fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
                         if (spot_bars < self._context_required_bars or fut_bars < self._context_required_bars) and self._should_log_throttled(f"opt_ctx_cold:{symbol}", 120.0):
                             self._logger.warning("OPTION_EVAL_BLOCKED_CONTEXT_COLD option=%s spot_bars=%d futures_bars=%d required=%d", symbol, spot_bars, fut_bars, self._context_required_bars)
@@ -6765,7 +6790,7 @@ class StrategyRunner:
                     is_selected_option = normalize_symbol(symbol) in selected_symbols
                     option_eval_min_live_bars = int(os.getenv("OPTION_EVAL_MIN_LIVE_BARS", "1") or "1")
                     spot_symbol = "NSE:NIFTY"
-                    fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context"), "")
+                    fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context" and not self._is_context_symbol_suspended(sym)), "")
                     if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
                         self._logger.warning("CONTEXT_FUTURES_UNRESOLVED symbol=%s", symbol)
                     if not fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
@@ -6783,13 +6808,15 @@ class StrategyRunner:
                             if stale_symbol:
                                 self._active_symbols.discard(stale_symbol)
                                 self._suspended_context_symbols.add(stale_symbol)
+                                cooldown_seconds = self._futures_context_suspension_seconds
+                                self._suspended_context_symbol_until[stale_symbol] = time.monotonic() + cooldown_seconds
                                 self._logger.warning(
                                     "CONTEXT_FUTURES_SYMBOL_SUSPENDED symbol=%s reason=%s trace_id=%s cooldown_seconds=%s",
                                     stale_symbol,
                                     "active_future_resolution_failed",
                                     trace_id,
-                                    300,
-                                    extra={"event": "CONTEXT_FUTURES_SYMBOL_SUSPENDED", "symbol": stale_symbol, "reason": "active_future_resolution_failed", "trace_id": trace_id, "cooldown_seconds": 300},
+                                    cooldown_seconds,
+                                    extra={"event": "CONTEXT_FUTURES_SYMBOL_SUSPENDED", "symbol": stale_symbol, "reason": "active_future_resolution_failed", "trace_id": trace_id, "cooldown_seconds": cooldown_seconds},
                                 )
                             self._logger.warning(
                                 "CONTEXT_FUTURES_UNRESOLVED_ACTIVE_RESOLUTION_FAILED old_symbol=%s reason=%s",
@@ -11306,7 +11333,7 @@ class StrategyRunner:
                     if submit_result.reason == "broker_placement_exception":
                         error_type = str((submit_details or {}).get("error_type") or "unknown")
                         cd_key = f"{base_symbol}|{signal.action}|{strategy_name}|{error_type}"
-                        cd_seconds = float(os.getenv("ORDER_FAILURE_COOLDOWN_SECONDS", "120") or "120")
+                        cd_seconds = self._order_failure_cooldown_seconds
                         self._order_failure_cooldown_until[cd_key] = now_epoch + cd_seconds
                         self._logger.warning(
                             "ORDER_FAILURE_COOLDOWN_MARKED symbol=%s side=%s strategy=%s error_type=%s cooldown_seconds=%s trace_id=%s",

@@ -5,7 +5,7 @@ import time
 from types import SimpleNamespace
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-from nifty_scalper_bot.strategies.runner import StrategyRunner
+from nifty_scalper_bot.strategies.runner import StrategyRunner, _safe_positive_float
 
 
 class _DummyIndicator:
@@ -225,6 +225,18 @@ def test_runner_history_cold_overrides_stale_strategy_no_signal_decision() -> No
     category, reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=1, option_required=5, broker_attempted=False)  # type: ignore[attr-defined]
     assert category == "data_history_cold"
     assert reason == "insufficient_indicator_bar_count"
+
+
+def test_order_failure_cooldown_invalid_env_does_not_crash() -> None:
+    assert _safe_positive_float("abc", 120.0, minimum=1.0) == 120.0
+
+
+def test_order_failure_cooldown_zero_env_uses_default() -> None:
+    assert _safe_positive_float("0", 120.0, minimum=1.0) == 120.0
+
+
+def test_order_failure_cooldown_negative_env_uses_default() -> None:
+    assert _safe_positive_float("-5", 120.0, minimum=1.0) == 120.0
 
 
 def test_runner_emits_no_trade_decision_on_history_cold_eval_block(caplog) -> None:
