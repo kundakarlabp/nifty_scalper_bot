@@ -3574,13 +3574,32 @@ class StrategyManager(_BaseStrategyManager):
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
             threshold_passed = bool(raw_trigger_score >= score_min and best_vote.confidence >= conf_min and selected_ok and not vetoed)
-            final_allowed = bool(allow_scalp_single and threshold_passed)
-            blocked_reason = None if final_allowed else ("single_vote_scalp_disabled" if threshold_passed and not allow_scalp_single else "threshold_not_met")
+            high_conviction_allowed = bool(raw_trigger_score >= single_high and selected_ok and not vetoed)
+            scalp_fallback_allowed = bool(allow_scalp_single and threshold_passed)
+            final_allowed = bool(high_conviction_allowed or scalp_fallback_allowed)
+            approval_path_single = "single_vote_high_conviction" if high_conviction_allowed else "single_vote_fallback" if scalp_fallback_allowed else None
+            blocked_reason = None
+            if not final_allowed:
+                if threshold_passed and not allow_scalp_single:
+                    blocked_reason = "single_vote_scalp_disabled"
+                elif not score_ok:
+                    blocked_reason = "raw_score_below_min"
+                elif not conf_ok:
+                    blocked_reason = "confidence_below_min"
+                elif not selected_ok:
+                    blocked_reason = "not_selected_or_near_atm"
+                elif vetoed:
+                    blocked_reason = "hard_context_veto"
+                else:
+                    blocked_reason = "single_vote_gate_failed_unknown"
             log.info(
-                "SINGLE_VOTE_DECISION threshold_passed=%s final_allowed=%s allow_scalp_single=%s reason=%s strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
+                "SINGLE_VOTE_DECISION threshold_passed=%s high_conviction_allowed=%s scalp_fallback_allowed=%s final_allowed=%s allow_scalp_single=%s approval_path=%s reason=%s strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
                 threshold_passed,
+                high_conviction_allowed,
+                scalp_fallback_allowed,
                 final_allowed,
                 allow_scalp_single,
+                approval_path_single,
                 blocked_reason or "ok",
                 best_vote.strategy,
                 raw_trigger_score,
@@ -3595,8 +3614,11 @@ class StrategyManager(_BaseStrategyManager):
                     "event": "SINGLE_VOTE_DECISION",
                     "allowed": final_allowed,
                     "threshold_passed": threshold_passed,
+                    "high_conviction_allowed": high_conviction_allowed,
+                    "scalp_fallback_allowed": scalp_fallback_allowed,
                     "final_allowed": final_allowed,
                     "allow_scalp_single": allow_scalp_single,
+                    "approval_path": approval_path_single,
                     "blocked_reason": blocked_reason,
                     "symbol": symbol_norm,
                     "strategy": best_vote.strategy,
@@ -3611,9 +3633,10 @@ class StrategyManager(_BaseStrategyManager):
                     "vetoed": vetoed,
                 },
             )
-            if raw_trigger_score >= single_high and selected_ok and not vetoed:
+            if high_conviction_allowed:
                 metadata_stage = "preliminary_single_high_conviction"
-            elif allow_scalp_single and score_ok and conf_ok and selected_ok and not vetoed:
+                approval_path = "single_vote_high_conviction"
+            elif scalp_fallback_allowed:
                 metadata_stage = "single_vote_scalp_controlled"
                 approval_path = "single_vote_fallback"
             else:
@@ -3743,6 +3766,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata["manager_score_source"] = "strategy_score_plus_context_arbitration"
         metadata["approval_path"] = approval_path
         log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s strategy=%s", approval_path, symbol_norm, best_vote.strategy)
+        self._last_no_signal_decision_by_symbol.pop(symbol_norm, None)
         return Signal(
             action="BUY",
             symbol=best_signal.symbol,

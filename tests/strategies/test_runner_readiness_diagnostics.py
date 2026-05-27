@@ -219,6 +219,14 @@ def test_runner_no_trade_uses_strategy_decision_by_symbol_even_when_indicators_l
     assert reason == "single_vote_scalp_disabled"
 
 
+def test_runner_history_cold_overrides_stale_strategy_no_signal_decision() -> None:
+    runner = _make_runner()
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _sym: SimpleNamespace(category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled"))
+    category, reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=1, option_required=5, broker_attempted=False)  # type: ignore[attr-defined]
+    assert category == "data_history_cold"
+    assert reason == "insufficient_indicator_bar_count"
+
+
 def test_runner_emits_no_trade_decision_on_history_cold_eval_block(caplog) -> None:
     runner = _make_runner()
     runner._active_symbols = {"NFO:CE"}

@@ -51,6 +51,7 @@ def test_submit_trade_plan_kill_switch_returns_kill_switch_reason_without_broker
     out = OrderManager.submit_trade_plan_result(m, TradePlan(symbol='NFO:NIFTY', side='BUY', quantity=75, entry_price=100.0, stop_loss=90.0, take_profit=110.0, trace_id="t1"))
     assert out.reason == "order_manager_kill_switch_active"
     assert out.broker_attempted is False
+    assert out.details.get("kill_reason") == "unexpected_exception"
 
 
 def test_managed_order_local_reject_does_not_attempt_broker() -> None:
