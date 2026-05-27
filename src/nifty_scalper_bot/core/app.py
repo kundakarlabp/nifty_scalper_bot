@@ -6856,6 +6856,14 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
     """Re-arm LIVE trading when market opens. Args: ctx. Returns: none. Raises: none."""
 
     interval_seconds = 30.0
+    if not hasattr(ctx, "live_orders_armed"):
+        ctx.live_orders_armed = False
+    if not hasattr(ctx, "trading_ready"):
+        ctx.trading_ready = False
+    if not hasattr(ctx, "readiness_mode"):
+        ctx.readiness_mode = "DATA_WARMUP"
+    if not hasattr(ctx, "effective_mode"):
+        ctx.effective_mode = str(ctx.readiness_mode)
     LOGGER.info("LIVE_READINESS_REARM_LOOP_STARTED")
     while True:
         try:
