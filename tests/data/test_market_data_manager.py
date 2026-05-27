@@ -1358,3 +1358,23 @@ def test_pull_quote_suspended_future_returns_unavailable_dict_without_broker_cal
     manager._suspended_context_symbols.add("NFO:NIFTY26MAYFUT")  # noqa: SLF001
     out = manager.pull_quote("NFO:NIFTY26MAYFUT")
     assert out.get("quote_unavailable_reason") == "suspended_stale_future"
+
+def test_market_data_manager_initializes_suspended_context_symbols(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(broker, ws)
+    assert isinstance(manager._suspended_context_symbols, set)  # noqa: SLF001
+    assert isinstance(manager._suspended_context_symbol_until, dict)  # noqa: SLF001
+
+
+def test_suspend_context_symbol_blocks_pull_quote_until_ttl(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager.suspend_context_symbol('NFO:NIFTY26MAYFUT', reason='stale', ttl_s=300)
+    out = manager.pull_quote('NFO:NIFTY26MAYFUT')
+    assert out.get('quote_unavailable_reason') == 'suspended_stale_future'
+
+
+def test_suspended_context_symbol_expires_after_ttl(broker: DummyBroker, ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(broker, ws)
+    manager.suspend_context_symbol('NFO:NIFTY26MAYFUT', reason='stale', ttl_s=0.001)
+    import time as _t
+    _t.sleep(0.01)
+    assert manager.is_context_symbol_suspended('NFO:NIFTY26MAYFUT') is False

@@ -3347,6 +3347,7 @@ class StrategyManager(_BaseStrategyManager):
         symbol: str,
         signals: list[tuple[Signal, StrategyVote]],
         indicators: t.Mapping[str, t.Any],
+        no_vote_reason_counts: t.Mapping[str, int] | None = None,
     ) -> Signal | None:
         """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
         symbol_norm = str(symbol or "").strip().upper()
@@ -3788,7 +3789,7 @@ class StrategyManager(_BaseStrategyManager):
         spread_pct = float(metadata.get("spread_pct") or indicator_map.get("spread_pct") or 999.0)
         selected_ok_combined = bool(selected_ok or near_atm)
         quote_depth_ok = bool(metadata.get("quote_depth_valid") or indicator_map.get("quote_depth_valid") or metadata.get("tradable_quote") or indicator_map.get("tradable_quote"))
-        no_vote_counts = dict(indicator_map.get("no_vote_reason_counts") or {}) if isinstance(indicator_map.get("no_vote_reason_counts"), dict) else {}
+        no_vote_counts = dict(no_vote_reason_counts or indicator_map.get("no_vote_reason_counts") or {})
         hard_veto_reasons = [r for r in ("underlying_direction_conflict", "negative_premium_flow", "smc_structure_required_live") if no_vote_counts.get(r)]
         two_trigger_aligned = bool(
             len(trigger_votes) >= 2
@@ -3797,7 +3798,7 @@ class StrategyManager(_BaseStrategyManager):
             and context_age_seconds <= max_context_age
             and selected_ok_combined
             and quote_depth_ok
-            and spread_pct <= float(os.getenv("LIVE_MAX_SPREAD_PCT", "0.75") or "0.75")
+            and spread_pct <= self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)
             and quality_pass
             and not hard_veto_reasons
             and not no_vote_counts.get("negative_premium_flow")

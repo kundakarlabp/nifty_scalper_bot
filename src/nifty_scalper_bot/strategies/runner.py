@@ -818,6 +818,8 @@ class StrategyRunner:
         self._last_global_eval_ts: float = time.monotonic()
         self._last_tick_seen_ts: float = time.monotonic()
         self._last_tick_time_by_symbol: dict[str, float] = defaultdict(float)
+        self._runtime_indicators: dict[str, dict[str, Any]] = {}
+        self._last_direction_context: dict[str, Any] | None = None
         self._last_tick: dict[str, dict[str, Any]] = {}
         self._symbol_locks: defaultdict[str, threading.Lock] = defaultdict(
             threading.Lock
@@ -6747,7 +6749,8 @@ class StrategyRunner:
         details["kill_switch_status"] = ks_status
         if ks_active:
             return False, "order_manager_kill_switch_active", details
-        ctx = self._runtime_indicators.get(symbol, {}) or {}
+        runtime_indicators = getattr(self, "_runtime_indicators", {}) or {}
+        ctx = runtime_indicators.get(symbol, {}) or {}
         contract_side = self._contract_side_from_symbol(symbol)
         direction_bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
         details["contract_side"] = contract_side

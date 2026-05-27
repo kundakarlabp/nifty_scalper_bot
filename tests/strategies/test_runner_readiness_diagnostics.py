@@ -470,3 +470,22 @@ def test_symbol_live_entry_ready_does_not_call_datahub_get_quote_with_allow_pull
     runner._data_hub = SimpleNamespace(get_quote=lambda *_a, **kwargs: pulled.__setitem__("called", kwargs.get("allow_pull", True)))
     assert runner._is_option_symbol_tick_fresh("NFO:CE", max_age_s=5.0) is True
     assert pulled["called"] is False
+
+def test_symbol_live_entry_ready_no_runtime_indicators_attribute_does_not_crash() -> None:
+    runner = _make_runner()
+    delattr(runner, '_runtime_execution_ready_by_symbol') if hasattr(runner, '_runtime_execution_ready_by_symbol') else None
+    if hasattr(runner, '_runtime_indicators'):
+        delattr(runner, '_runtime_indicators')
+    runner._runtime_live_orders_armed = True
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._indicator_engine = _DummyIndicator({'NFO:CE':[1,2,3,4,5,6]})
+    runner._required_bars_for_symbol = lambda _s: 1
+    runner._is_option_symbol_tick_fresh = lambda _s, max_age_s=60.0: True
+    runner._active_selected_ce = 'NFO:CE'; runner._active_selected_pe = 'NFO:PE'
+    runner._extract_strike_from_symbol = lambda _s: 24000
+    runner._active_atm_strike = 24000
+    runner._get_cached_quote_for_live_entry = lambda _s: {'tradable_quote':True,'quote_depth_valid':True,'spread_pct':0.2}
+    ready, reason, _ = runner._symbol_live_entry_ready('NFO:CE')
+    assert isinstance(ready, bool)
+    assert reason != 'runner_error'

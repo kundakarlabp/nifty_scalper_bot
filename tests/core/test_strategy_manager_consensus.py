@@ -411,3 +411,12 @@ def test_aligned_two_trigger_pe_consensus_allowed_without_smc_confirmation() -> 
     assert out is not None
     assert out.metadata is not None
     assert out.metadata.get('approval_path') in {'aligned_two_trigger_consensus','multi_trigger'}
+
+def test_negative_premium_flow_in_no_vote_counts_blocks_two_trigger() -> None:
+    manager = _manager_stub()
+    s1 = _make_signal(); s1.symbol='NFO:NIFTY25000PE'; s1.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    s2 = _make_signal(); s2.symbol='NFO:NIFTY25000PE'; s2.metadata={'quote_depth_valid':True,'spread_pct':0.2,'is_selected_option':True,'context_age_seconds':2}
+    v1 = StrategyVote(strategy='VWAPPro', side='PE', score=8.5, confidence=0.9, reasons=[], metadata={})
+    v2 = StrategyVote(strategy='OrderFlow', side='PE', score=8.2, confidence=0.85, reasons=[], metadata={})
+    out = manager._combine_strategy_votes(symbol='NFO:NIFTY25000PE', signals=[(s1,v1),(s2,v2)], indicators={'direction_bias':'PE','context_age_seconds':2,'spread_pct':0.2,'quote_depth_valid':True,'is_selected_option':True}, no_vote_reason_counts={'negative_premium_flow':1})
+    assert out is None

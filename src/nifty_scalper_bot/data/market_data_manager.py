@@ -325,6 +325,8 @@ class MarketDataManager:
         self._account_snapshot: dict[str, float] = {}
         self._account_updated_at: float = 0.0
         self._tracked_symbols: set[str] = set()
+        self._suspended_context_symbols: set[str] = set()
+        self._suspended_context_symbol_until: dict[str, float] = {}
         self._active_subscribed_symbols: set[str] = set()
         self._symbols_with_tick: set[str] = set()
         self._ticks_received_per_symbol: dict[str, int] = defaultdict(int)
@@ -2022,6 +2024,31 @@ class MarketDataManager:
             await asyncio.sleep(0.1)
         raise RuntimeError("Live tick unavailable")
 
+
+    def suspend_context_symbol(self, symbol: str, *, reason: str, ttl_s: float = 300.0) -> None:
+        canonical = self._canonical_symbol(symbol)
+        ttl = max(1.0, float(ttl_s or 300.0))
+        self._suspended_context_symbols.add(canonical)
+        self._suspended_context_symbol_until[canonical] = time.monotonic() + ttl
+        self._logger.warning(
+            "CONTEXT_SYMBOL_SUSPENDED symbol=%s reason=%s ttl_s=%.1f",
+            canonical,
+            reason,
+            ttl,
+            extra={"event": "CONTEXT_SYMBOL_SUSPENDED", "symbol": canonical, "reason": reason, "ttl_s": ttl},
+        )
+
+    def is_context_symbol_suspended(self, symbol: str) -> bool:
+        canonical = self._canonical_symbol(symbol)
+        until = self._suspended_context_symbol_until.get(canonical)
+        if until is None:
+            return canonical in self._suspended_context_symbols
+        if time.monotonic() >= until:
+            self._suspended_context_symbol_until.pop(canonical, None)
+            self._suspended_context_symbols.discard(canonical)
+            return False
+        return True
+
     def _extract_ltp_from_quote(self, quote: Mapping[str, Any]) -> float | None:
         for key in ("ltp", "last_price", "price", "close"):
             try:
@@ -2043,7 +2070,7 @@ class MarketDataManager:
     ) -> float | None:
         """Cached-only LTP accessor. Args: symbol/guards. Returns: ltp. Raises: none."""
         canonical_symbol = self._canonical_symbol(symbol)
-        if canonical_symbol in getattr(self, "_suspended_context_symbols", set()):
+        if self.is_context_symbol_suspended(canonical_symbol):
             with self._lock:
                 cached_tick = self._latest_ticks.get(canonical_symbol)
             if isinstance(cached_tick, Mapping):
@@ -2489,7 +2516,7 @@ class MarketDataManager:
             self._quote_direct_miss_reason.pop(symbol_key, None)
 
         canonical_symbol = self._canonical_symbol(symbol)
-        if canonical_symbol in getattr(self, "_suspended_context_symbols", set()):
+        if self.is_context_symbol_suspended(canonical_symbol):
             with self._lock:
                 cached_tick = self._latest_ticks.get(canonical_symbol)
             if isinstance(cached_tick, Mapping) and cached_tick:
