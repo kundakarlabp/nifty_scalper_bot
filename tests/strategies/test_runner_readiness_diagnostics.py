@@ -339,6 +339,8 @@ def test_pe_signal_allowed_when_direction_bias_pe_and_other_gates_pass() -> None
     runner._is_tradable_symbol = lambda _s: True
     runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
     runner._runtime_indicators = {"NFO:NIFTY26JUN23800PE": {"direction_bias": "PE"}}
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
+    runner.get_quote = lambda _s: {"tradable_quote": True, "depth_available": True, "spread_pct": 0.2}
     ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
     assert ready is True
     assert reason == "symbol_live_ready"
@@ -350,6 +352,17 @@ def test_runner_ignores_stale_strategy_decision() -> None:
     runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _sym: stale)
     category, _reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False, trace_id="t1")
     assert category == "context_direction_unavailable"
+
+
+def test_symbol_live_entry_ready_false_when_depth_missing() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._active_selected_pe = "NFO:NIFTY26JUN23800PE"
+    runner.get_quote = lambda _s: {"tradable_quote": True, "depth_available": False, "spread_pct": 0.2}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
+    assert ready is False
+    assert reason == "quote_depth_unavailable"
 
 
 def test_runner_emits_no_trade_decision_on_signal_none_strategy_no_trigger(caplog) -> None:

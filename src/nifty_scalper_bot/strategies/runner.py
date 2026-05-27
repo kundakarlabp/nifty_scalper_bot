@@ -6705,6 +6705,42 @@ class StrategyRunner:
         details["context_age_seconds"] = ctx_age
         if ctx_age is not None and ctx_age > max_context_age:
             return False, "context_stale", details
+        symbol_norm = normalize_symbol(symbol)
+        strike = self._extract_strike_from_symbol(symbol_norm)
+        details["strike"] = strike
+        selected_set = {normalize_symbol(str(self._active_selected_ce or "")), normalize_symbol(str(self._active_selected_pe or ""))}
+        selected_set.discard("")
+        selected_option = symbol_norm in selected_set
+        near_atm = False
+        if strike is not None and self._active_atm_strike:
+            near_atm = abs(float(strike) - float(self._active_atm_strike)) <= float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
+        details["selected_option"] = selected_option
+        details["near_atm"] = near_atm
+        if strike is None and not selected_option:
+            return False, "candidate_distance_unknown", details
+        if not (selected_option or near_atm):
+            return False, "candidate_not_selected_or_near_atm", details
+        quote = self.get_quote(symbol_norm) or {}
+        tradable_quote = bool(quote.get("tradable_quote"))
+        depth_available = bool(quote.get("depth_available") or quote.get("depth"))
+        spread_pct = _extract_float(quote, "spread_pct")
+        details["tradable_quote"] = tradable_quote
+        details["depth_available"] = depth_available
+        details["spread_pct"] = spread_pct
+        if not tradable_quote:
+            return False, "quote_not_tradable", details
+        if _env_bool("LIVE_REQUIRE_OPTION_DEPTH", True) and not depth_available:
+            return False, "quote_depth_unavailable", details
+        max_spread_pct = safe_positive_float_env("LIVE_MAX_SPREAD_PCT", 0.75, minimum=0.01)
+        if spread_pct is not None and spread_pct > max_spread_pct:
+            return False, "spread_too_wide", details
+        om = getattr(self, "_order_manager", None)
+        health_fn = getattr(om, "get_broker_health_snapshot", None)
+        if callable(health_fn):
+            health = dict(health_fn() or {})
+            details["broker_health_effect"] = health.get("trading_allowed_effect")
+            if details["broker_health_effect"] == "live_orders_blocked":
+                return False, "broker_health_live_orders_blocked", details
         self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, True, "symbol_live_ready", trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": True, "reason": "symbol_live_ready", "trace_id": trace_id, **details})
         return True, "symbol_live_ready", details
 
