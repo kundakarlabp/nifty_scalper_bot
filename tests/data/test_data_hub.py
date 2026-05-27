@@ -188,6 +188,18 @@ def test_get_quote_pulls_when_missing(
     assert quote["ltp"] == pytest.approx(150.0)
 
 
+def test_datahub_does_not_store_quote_unavailable_payload() -> None:
+    class _Mdm:
+        def pull_quote(self, _symbol: str) -> dict[str, Any]:
+            return {"symbol": "NFO:NIFTY26MAYFUT", "quote_unavailable_reason": "suspended_expired_future", "active_future_symbol": "NFO:NIFTY26JUNFUT"}
+
+    hub = DataHub(_Mdm(), _StubResolver(), options_only=True)
+    out = hub.pull_quote("NFO:NIFTY26MAYFUT")
+    assert out.get("quote_unavailable_reason") == "suspended_expired_future"
+    cached = hub.get_quote("NFO:NIFTY26MAYFUT", allow_pull=False)
+    assert cached is None or not any(key in cached for key in ("ltp", "last_price", "timestamp"))
+
+
 def test_upsert_order_drops_duplicate_sequences(hub: DataHub) -> None:
     payload = {
         "order_id": "OID1",

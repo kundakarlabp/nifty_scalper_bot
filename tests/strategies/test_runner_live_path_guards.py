@@ -260,6 +260,19 @@ def test_order_acceptance_notifies_orchestrator_entry() -> None:
     assert notified["reason"] == "order_accepted"
 
 
+def test_runner_set_active_trading_universe_rotates_futures_symbol() -> None:
+    runner = _build_runner()
+    runner._active_symbols = {"NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUN23900CE"}
+    runner._active_futures_symbol = "NFO:NIFTY26MAYFUT"
+    runner._latest_context_snapshots = {"futures_context": {"symbol": "NFO:NIFTY26MAYFUT"}}
+    runner.set_active_trading_universe(
+        {"futures_symbol": "NFO:NIFTY26JUNFUT", "option_symbols": ["NFO:NIFTY26JUN23900CE"]}
+    )
+    assert "NFO:NIFTY26MAYFUT" not in runner._active_symbols
+    assert "NFO:NIFTY26JUNFUT" in runner._active_symbols
+    assert runner._active_futures_symbol == "NFO:NIFTY26JUNFUT"
+
+
 def test_phase10_no_runtime_indicators_attribute_logs_clean_block_not_runner_error(caplog) -> None:
     runner = _build_runner()
     runner._runtime_live_orders_armed = True

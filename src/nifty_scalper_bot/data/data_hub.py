@@ -1318,6 +1318,16 @@ class DataHub:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("pull_quote delegate failed for %s: %s", symbol, exc)
                 return {}
+            if isinstance(quote, Mapping) and quote.get("quote_unavailable_reason"):
+                LOGGER.info(
+                    "DATAHUB_PULL_QUOTE_UNAVAILABLE symbol=%s reason=%s active_future_symbol=%s",
+                    symbol,
+                    quote.get("quote_unavailable_reason"),
+                    quote.get("active_future_symbol"),
+                    extra={"event": "DATAHUB_PULL_QUOTE_UNAVAILABLE", "symbol": symbol, "reason": quote.get("quote_unavailable_reason"), "active_future_symbol": quote.get("active_future_symbol")},
+                )
+                return dict(quote)
+
             if quote:
                 self.store_quote(symbol, quote, source=str(quote.get("source") or "poll"))
                 return self.get_quote(symbol, allow_pull=False) or {}

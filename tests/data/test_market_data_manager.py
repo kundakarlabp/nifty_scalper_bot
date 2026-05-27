@@ -1413,6 +1413,24 @@ def test_pull_quote_expired_future_is_suppressed_without_broker_call(ws: DummyWe
     assert out.get("quote_unavailable_reason") == "suspended_expired_future"
 
 
+def test_repeated_expired_future_pull_quote_rotates_only_once(ws: DummyWebSocket, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = MarketDataManager(DummyBroker(), ws)
+    monkeypatch.setattr(manager, "_is_nifty_future_symbol_expired", lambda sym: str(sym).upper() == "NFO:NIFTY26MAYFUT")
+    monkeypatch.setattr(manager, "get_active_nifty_future_symbol_cached", lambda: "NFO:NIFTY26JUNFUT")
+    calls: list[tuple[str | None, str, str]] = []
+
+    def _rotate(old_symbol: str | None, new_symbol: str, *, reason: str, trace_id: str | None = None) -> None:
+        calls.append((old_symbol, new_symbol, reason))
+        manager._suspended_context_symbols.add("NFO:NIFTY26MAYFUT")  # noqa: SLF001
+
+    monkeypatch.setattr(manager, "rotate_active_nifty_future_context", _rotate)
+    first = manager.pull_quote("NFO:NIFTY26MAYFUT")
+    second = manager.pull_quote("NFO:NIFTY26MAYFUT")
+    assert first.get("quote_unavailable_reason") == "suspended_expired_future"
+    assert second.get("quote_unavailable_reason") == "suspended_expired_future"
+    assert len(calls) == 1
+
+
 def test_symbols_for_poll_excludes_expired_futures(monkeypatch: pytest.MonkeyPatch, ws: DummyWebSocket) -> None:
     manager = MarketDataManager(DummyBroker(), ws)
     manager._tracked_symbols.update({"NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT"})  # noqa: SLF001

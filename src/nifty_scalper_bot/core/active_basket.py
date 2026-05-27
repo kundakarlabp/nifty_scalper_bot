@@ -66,6 +66,14 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
     out = dict(basket or {})
     spot_symbol = str(out.get("spot_symbol") or "NSE:NIFTY")
     futures_symbol = str(out.get("futures_symbol") or out.get("future_symbol") or "")
+    futures_symbol_valid = (
+        not futures_symbol
+        or (
+            futures_symbol.startswith("NFO:NIFTY")
+            and futures_symbol.endswith("FUT")
+            and len(futures_symbol.split(":", 1)[-1]) >= len("NIFTY26JUNFUT")
+        )
+    )
     option_symbols = [
         str(s)
         for s in list(out.get("option_symbols") or out.get("symbols") or [])
@@ -102,6 +110,7 @@ def normalize_active_basket_schema(basket: Mapping[str, object]) -> dict[str, ob
     out["selected_pe"] = selected_pe
     out["atm_ce"] = out.get("atm_ce") or selected_ce
     out["atm_pe"] = out.get("atm_pe") or selected_pe
+    out["futures_symbol_valid_shape"] = futures_symbol_valid
     out["symbols"] = list(dict.fromkeys([s for s in [spot_symbol, futures_symbol, *option_symbols] if s]))
     return out
 

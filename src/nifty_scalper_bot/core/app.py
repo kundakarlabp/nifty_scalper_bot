@@ -1084,6 +1084,28 @@ _HTTP_CONTROLLER: TelegramWebhookController | None = None
 _LATEST_CTX: "BotContext | None" = None
 
 
+def _resolve_active_futures_for_basket(ctx: BotContext, requested: object | None) -> str:
+    """Return authoritative active NIFTY futures symbol for runtime basket."""
+    requested_symbol = str(requested or "").strip().upper()
+    mdm = getattr(ctx, "market_data_manager", None)
+    for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
+        method = getattr(mdm, method_name, None)
+        if callable(method):
+            try:
+                resolved = method()
+            except TypeError:
+                try:
+                    resolved = method(now=None)
+                except Exception:
+                    resolved = None
+            except Exception:
+                resolved = None
+            if resolved:
+                return str(resolved).strip().upper()
+    fallback = _get_current_nifty_futures_symbol()
+    return fallback or requested_symbol
+
+
 class _LifecycleTrackerAdapter:
     """Adapter exposing tracker hooks required by the lifecycle manager."""
 
@@ -7375,6 +7397,12 @@ def _commit_active_dynamic_basket(
 ) -> tuple[str | None, str | None]:
     """Commit active dynamic basket atomically. Args: ctx/basket/option_symbols/symbols/atm_strike. Returns: selected CE/PE. Raises: none."""
     basket = normalize_active_basket_schema(basket)
+    active_futures_symbol = _resolve_active_futures_for_basket(
+        ctx,
+        basket.get("futures_symbol") or basket.get("future_symbol"),
+    )
+    basket = dict(basket)
+    basket["futures_symbol"] = active_futures_symbol
     current_options = [str(sym) for sym in option_symbols if str(sym).endswith(("CE", "PE"))]
     current_symbols = [str(sym) for sym in symbols if sym]
     local_basket = dict(basket or {})
@@ -7449,7 +7477,7 @@ def _commit_active_dynamic_basket(
         {
             "spot_symbol": basket.get("spot_symbol") or "NSE:NIFTY",
             "spot_token": basket.get("spot_token"),
-            "futures_symbol": basket.get("futures_symbol") or "",
+            "futures_symbol": active_futures_symbol,
             "futures_token": basket.get("futures_token"),
             "selected_ce": selected_ce,
             "selected_pe": selected_pe,
@@ -7462,7 +7490,7 @@ def _commit_active_dynamic_basket(
                 dict.fromkeys(
                     [
                         basket.get("spot_symbol") or "NSE:NIFTY",
-                        basket.get("futures_symbol") or "",
+                        active_futures_symbol,
                         *current_options,
                     ]
                 )
@@ -7475,6 +7503,25 @@ def _commit_active_dynamic_basket(
     runner = getattr(ctx, "strategy_runner", None)
     if runner is not None and hasattr(runner, "set_active_trading_universe"):
         runner.set_active_trading_universe(committed)
+    strategy_manager = getattr(ctx, "strategy_manager", None)
+    set_fut = getattr(strategy_manager, "set_active_futures_symbol", None)
+    if callable(set_fut):
+        set_fut(active_futures_symbol, source="active_dynamic_basket_commit")
+    mdm = getattr(ctx, "market_data_manager", None)
+    rotate_result = getattr(mdm, "maybe_rotate_nifty_futures_context_result", None)
+    if callable(rotate_result):
+        try:
+            rotate_result(
+                basket.get("futures_symbol"),
+                reason="active_dynamic_basket_commit",
+                selected_option_symbols=list(current_options),
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "ACTIVE_BASKET_FUTURES_ROTATION_CHECK_FAILED error=%s",
+                exc,
+                extra={"event": "ACTIVE_BASKET_FUTURES_ROTATION_CHECK_FAILED", "error": str(exc)},
+            )
     return selected_ce, selected_pe
 
 

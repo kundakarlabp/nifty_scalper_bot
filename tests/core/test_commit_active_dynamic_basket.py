@@ -49,3 +49,32 @@ def test_commit_active_dynamic_basket_preserves_old_selected_when_valid() -> Non
     )
     assert selected_ce == old_ce
     assert selected_pe == old_pe
+
+
+def test_commit_active_dynamic_basket_replaces_stale_futures_with_active_mdm_future() -> None:
+    class _Mdm:
+        def get_active_nifty_future_symbol_cached(self) -> str:
+            return "NFO:NIFTY26JUNFUT"
+
+    ctx = SimpleNamespace(
+        selected_ce=None,
+        selected_pe=None,
+        atm_ce_symbol=None,
+        atm_pe_symbol=None,
+        active_trading_universe={},
+        strategy_runner=None,
+        market_data_manager=_Mdm(),
+        strategy_manager=None,
+    )
+    ce = "NFO:NIFTY26JUN23900CE"
+    pe = "NFO:NIFTY26JUN23900PE"
+    app._commit_active_dynamic_basket(
+        ctx,
+        basket={"futures_symbol": "NFO:NIFTY26MAYFUT"},
+        option_symbols=[ce, pe],
+        symbols=["NSE:NIFTY", "NFO:NIFTY26MAYFUT", ce, pe],
+        atm_strike=23900,
+    )
+    committed = ctx.active_trading_universe
+    assert committed["futures_symbol"] == "NFO:NIFTY26JUNFUT"
+    assert "NFO:NIFTY26MAYFUT" not in committed["symbols"]

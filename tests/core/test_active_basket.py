@@ -48,3 +48,17 @@ def test_build_canonical_active_basket_returns_selected_symbols() -> None:
     )
     assert basket['selected_ce'] == basket['atm_ce']
     assert basket['selected_pe'] == basket['atm_pe']
+
+from nifty_scalper_bot.core.active_basket import normalize_active_basket_schema
+
+
+def test_normalize_active_basket_marks_futures_symbol_shape() -> None:
+    out = normalize_active_basket_schema({"futures_symbol": "NFO:NIFTY26JUNFUT", "option_symbols": ["NFO:NIFTY26JUN23900CE"]})
+    assert out["futures_symbol"] == "NFO:NIFTY26JUNFUT"
+    assert out["futures_symbol_valid_shape"] is True
+
+
+def test_normalize_active_basket_marks_invalid_shape_without_expiry_decision() -> None:
+    out = normalize_active_basket_schema({"futures_symbol": "NFO:NIFTYFUT", "option_symbols": []})
+    assert out["futures_symbol"] == "NFO:NIFTYFUT"
+    assert out["futures_symbol_valid_shape"] is False

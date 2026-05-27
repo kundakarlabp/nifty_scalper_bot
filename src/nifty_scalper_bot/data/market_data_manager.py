@@ -2531,14 +2531,34 @@ class MarketDataManager:
         canonical_symbol = self._canonical_symbol(symbol)
         if self._is_nifty_future_symbol_expired(canonical_symbol):
             active = self.get_active_nifty_future_symbol_cached()
-            if active and self._canonical_symbol(active) != canonical_symbol:
-                self.rotate_active_nifty_future_context(canonical_symbol, active, reason="pull_quote_expired_future")
-            self._logger.warning(
-                "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=pull_quote",
-                canonical_symbol,
-                active,
-                extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote"},
-            )
+            already_suspended = self.is_context_symbol_suspended(canonical_symbol)
+            if active and self._canonical_symbol(active) != canonical_symbol and not already_suspended:
+                self.rotate_active_nifty_future_context(
+                    canonical_symbol,
+                    active,
+                    reason="pull_quote_expired_future",
+                )
+            log_fn = getattr(self, "_log_throttled", None)
+            log_key = f"expired_future_suppressed:{canonical_symbol}:pull_quote"
+            if callable(log_fn):
+                log_fn(
+                    log_key,
+                    "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=pull_quote already_suspended=%s",
+                    canonical_symbol,
+                    active,
+                    already_suspended,
+                    interval_sec=60.0,
+                    level=logging.WARNING,
+                    extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote", "already_suspended": already_suspended},
+                )
+            else:
+                self._logger.warning(
+                    "EXPIRED_FUTURE_SUPPRESSED symbol=%s active=%s stage=pull_quote already_suspended=%s",
+                    canonical_symbol,
+                    active,
+                    already_suspended,
+                    extra={"event": "EXPIRED_FUTURE_SUPPRESSED", "symbol": canonical_symbol, "active_symbol": active, "stage": "pull_quote", "already_suspended": already_suspended},
+                )
             return {"symbol": canonical_symbol, "quote_unavailable_reason": "suspended_expired_future", "active_future_symbol": active}
         if self.is_context_symbol_suspended(canonical_symbol):
             with self._lock:
@@ -6812,6 +6832,7 @@ class MarketDataManager:
             raise RuntimeError("rotate_active_nifty_future_context requires new_symbol")
         old_token_to_unsubscribe: int | None = None
         with self._lock:
+            already_suspended_old = bool(old_canonical and old_canonical in self._suspended_context_symbols)
             if old_canonical and old_canonical != new_canonical:
                 old_token = self._token_by_symbol.get(old_canonical)
                 self._tracked_symbols.discard(old_canonical)
@@ -6866,13 +6887,15 @@ class MarketDataManager:
         reqs = dict(self._readiness_requirements)
         reqs["futures"] = new_canonical
         self._readiness_requirements = reqs
-        self._logger.warning(
-            "FUTURES_CONTEXT_ROTATED old=%s new=%s reason=%s",
-            old_canonical or None,
-            new_canonical,
-            reason,
-            extra={"event": "FUTURES_CONTEXT_ROTATED", "old_symbol": old_canonical or None, "new_symbol": new_canonical, "reason": reason, "trace_id": trace_id},
-        )
+        rotated = bool(old_canonical and old_canonical != new_canonical)
+        if rotated and not already_suspended_old:
+            self._logger.warning(
+                "FUTURES_CONTEXT_ROTATED old=%s new=%s reason=%s",
+                old_canonical or None,
+                new_canonical,
+                reason,
+                extra={"event": "FUTURES_CONTEXT_ROTATED", "old_symbol": old_canonical or None, "new_symbol": new_canonical, "reason": reason, "trace_id": trace_id},
+            )
         self._logger.info(
             "ACTIVE_FUTURE_READY symbol=%s reason=%s",
             new_canonical,
