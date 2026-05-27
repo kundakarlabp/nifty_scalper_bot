@@ -489,3 +489,30 @@ def test_symbol_live_entry_ready_no_runtime_indicators_attribute_does_not_crash(
     ready, reason, _ = runner._symbol_live_entry_ready('NFO:CE')
     assert isinstance(ready, bool)
     assert reason != 'runner_error'
+
+
+def test_live_trading_readiness_snapshot_defines_universe_status(caplog) -> None:
+    runner = _make_runner()
+    runner._emit_live_universe_bootstrap_status = lambda **_k: (False, "selected_option_quote_missing")
+    with caplog.at_level(logging.INFO):
+        runner._emit_live_trading_readiness_snapshot(symbol="NFO:SYM", strategy_signal_present=False, order_path_entered=False)
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "LIVE_TRADING_READINESS_SNAPSHOT")
+    assert rec.live_universe_ready is False
+    assert rec.live_block_reason == "selected_option_quote_missing"
+
+
+def test_live_trading_readiness_snapshot_emits_when_universe_not_ready(caplog) -> None:
+    runner = _make_runner()
+    runner._emit_live_universe_bootstrap_status = lambda **_k: (False, "selected_option_subscription_pending")
+    with caplog.at_level(logging.INFO):
+        runner._emit_live_trading_readiness_snapshot(symbol="NFO:SYM", strategy_signal_present=False, order_path_entered=False)
+    assert any(getattr(r, "event", "") == "LIVE_TRADING_READINESS_SNAPSHOT" for r in caplog.records)
+
+
+def test_live_trading_readiness_snapshot_failure_is_logged_not_silent(caplog) -> None:
+    runner = _make_runner()
+    runner._emit_live_universe_bootstrap_status = lambda **_k: (_ for _ in ()).throw(RuntimeError("boom"))
+    with caplog.at_level(logging.WARNING):
+        runner._emit_live_trading_readiness_snapshot(symbol="NFO:SYM", strategy_signal_present=False, order_path_entered=False)
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "LIVE_TRADING_READINESS_SNAPSHOT_FAILED")
+    assert rec.error_type == "RuntimeError"

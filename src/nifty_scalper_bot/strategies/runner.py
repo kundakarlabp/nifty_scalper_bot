@@ -6294,6 +6294,7 @@ class StrategyRunner:
 
     def _emit_live_trading_readiness_snapshot(self, *, symbol: str, strategy_signal_present: bool, order_path_entered: bool, order_manager_block_reason: str | None = None) -> None:
         try:
+            universe_ready, universe_reason = self._emit_live_universe_bootstrap_status(symbol=symbol)
             ce_symbol = self._selected_option_symbol_for_side("CE", {}) or getattr(self, "_active_selected_ce", None)
             pe_symbol = self._selected_option_symbol_for_side("PE", {}) or getattr(self, "_active_selected_pe", None)
             ce_history = len(self._indicator_engine.get_history(ce_symbol) or []) if ce_symbol else 0
@@ -6338,7 +6339,19 @@ class StrategyRunner:
                 "order_manager_block_reason": order_manager_block_reason,
             }
             self._logger.info("LIVE_TRADING_READINESS_SNAPSHOT symbol=%s live_orders_armed=%s reason=%s", symbol, bool(self._runtime_live_orders_armed), self._runtime_readiness_reason, extra=payload)
-        except Exception:
+        except Exception as exc:
+            self._logger.warning(
+                "LIVE_TRADING_READINESS_SNAPSHOT_FAILED symbol=%s error_type=%s error=%s",
+                symbol,
+                type(exc).__name__,
+                str(exc),
+                extra={
+                    "event": "LIVE_TRADING_READINESS_SNAPSHOT_FAILED",
+                    "symbol": symbol,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
             return
 
 
