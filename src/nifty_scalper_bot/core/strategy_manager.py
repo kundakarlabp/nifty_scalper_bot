@@ -3760,7 +3760,8 @@ class StrategyManager(_BaseStrategyManager):
         metadata["quality_min_required"] = quality_min_required
         metadata["quality_pass"] = quality_pass
         if not quality_pass:
-            metadata["quality_block_reason"] = str(metadata.get("quality_block_reason") or "trade_quality_below_threshold")
+            raw_reason = str(metadata.get("quality_block_reason") or "").strip().lower()
+            metadata["quality_block_reason"] = "trade_quality_below_threshold" if raw_reason in {"", "ok"} else str(metadata.get("quality_block_reason"))
             log.info(
                 "STRATEGY_QUALITY_REJECT symbol=%s strategy=%s side=%s score=%.2f reason=%s",
                 symbol_norm,

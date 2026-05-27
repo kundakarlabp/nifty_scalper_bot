@@ -6518,7 +6518,9 @@ def _create_named_task(coro: Any, *, name: str) -> asyncio.Task[Any]:
 
 async def _refresh_readiness_after_first_tick(ctx: BotContext, reason: str) -> None:
     """Refresh readiness after startup tick proof. Args: ctx/reason. Returns: none. Raises: none."""
-    configured_mode = str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+    configured_mode = str(
+        getattr(getattr(ctx, "settings", None), "execution_mode", None) or "LIVE"
+    ).strip().upper()
     mdm = ctx.market_data_manager
     runner = ctx.strategy_runner
     spot_tick: Mapping[str, Any] | None = None
@@ -6856,6 +6858,14 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
     """Re-arm LIVE trading when market opens. Args: ctx. Returns: none. Raises: none."""
 
     interval_seconds = 30.0
+    if not hasattr(ctx, "live_orders_armed"):
+        ctx.live_orders_armed = False
+    if not hasattr(ctx, "trading_ready"):
+        ctx.trading_ready = False
+    if not hasattr(ctx, "readiness_mode"):
+        ctx.readiness_mode = "DATA_WARMUP"
+    if not hasattr(ctx, "effective_mode"):
+        ctx.effective_mode = str(ctx.readiness_mode)
     LOGGER.info("LIVE_READINESS_REARM_LOOP_STARTED")
     while True:
         try:

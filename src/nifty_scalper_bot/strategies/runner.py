@@ -6754,6 +6754,54 @@ class StrategyRunner:
         )
 
     def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
+        def _resolve_live_entry_atm_reference(context: Mapping[str, Any]) -> int | None:
+            active = getattr(self, "_active_atm_strike", None)
+            if active:
+                try:
+                    return int(active)
+                except (TypeError, ValueError):
+                    pass
+            for key in ("atm_strike", "active_atm_strike", "spot_price", "underlying_ltp", "futures_ltp", "last_price"):
+                value = context.get(key)
+                try:
+                    px = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if px > 0:
+                    return int(round(px / 50.0) * 50)
+            return None
+
+        def _refresh_selected_candidates_for_symbol(
+            symbol_norm: str,
+            *,
+            atm_reference: int | None,
+        ) -> bool:
+            side = self._contract_side_from_symbol(symbol_norm)
+            if side not in {"CE", "PE"}:
+                return False
+            if atm_reference is None or int(atm_reference) <= 0:
+                return False
+            snapshots, pending, _source = self._build_candidate_snapshots_sync_safe(
+                symbol=symbol_norm,
+                underlying="NIFTY",
+                direction_bias=cast(Literal["CE", "PE"], side),
+                atm_strike=int(atm_reference),
+                existing_snapshots=[],
+                window_each_side=2,
+            )
+            if pending or not snapshots:
+                return False
+            selected_ce = next((normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if str(s.get("symbol") or "").upper().endswith("CE")), None)
+            selected_pe = next((normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if str(s.get("symbol") or "").upper().endswith("PE")), None)
+            option_symbols = [normalize_symbol(str(s.get("symbol") or "")) for s in snapshots if s.get("symbol")]
+            self.set_active_option_context(
+                selected_ce=selected_ce,
+                selected_pe=selected_pe,
+                atm_strike=int(atm_reference),
+                option_symbols=option_symbols,
+            )
+            return bool(option_symbols)
+
         details: dict[str, Any] = {"symbol": symbol, "trace_id": trace_id, "live_orders_armed": bool(self._runtime_live_orders_armed)}
         if not bool(self._runtime_live_orders_armed):
             return False, "execution_not_armed", details
@@ -6806,10 +6854,45 @@ class StrategyRunner:
                 near_atm = False
         details["selected_option"] = selected_option
         details["near_atm"] = near_atm
+        details["candidate_symbol"] = symbol_norm
+        details["selected_ce"] = normalize_symbol(str(self._active_selected_ce or ""))
+        details["selected_pe"] = normalize_symbol(str(self._active_selected_pe or ""))
+        details["candidate_strike"] = strike
+        details["distance_from_atm"] = abs(float(strike) - float(active_atm_strike)) if strike is not None and active_atm_strike is not None else None
+        details["allowed_distance"] = near_atm_threshold
         if strike is None and not selected_option:
+            self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_distance_unknown", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_distance_unknown", **details})
             return False, "candidate_distance_unknown", details
         if not (selected_option or near_atm):
-            return False, "candidate_not_selected_or_near_atm", details
+            metadata = (getattr(signal, "metadata", {}) or {}) if signal is not None else {}
+            trigger_evidence = bool(
+                metadata.get("trigger_conditions_met")
+                or metadata.get("trigger_eligible")
+                or (str(metadata.get("strategy") or getattr(signal, "reason", "")).upper() == "ORDERFLOW" and float(metadata.get("strategy_score") or 0.0) >= 5.0)
+            )
+            if trigger_evidence and quote_fresh and (ctx_age is None or ctx_age <= max_context_age):
+                atm_reference = _resolve_live_entry_atm_reference(ctx)
+                refreshed = _refresh_selected_candidates_for_symbol(
+                    symbol_norm,
+                    atm_reference=atm_reference,
+                )
+                details["candidate_refresh_attempted"] = True
+                details["candidate_refresh_succeeded"] = refreshed
+                if refreshed:
+                    selected_set = {normalize_symbol(str(self._active_selected_ce or "")), normalize_symbol(str(self._active_selected_pe or ""))}
+                    selected_set.discard("")
+                    selected_option = symbol_norm in selected_set
+                    active_atm_strike = getattr(self, "_active_atm_strike", None)
+                    if strike is not None and active_atm_strike is not None:
+                        try:
+                            near_atm = abs(float(strike) - float(active_atm_strike)) <= near_atm_threshold
+                        except (TypeError, ValueError):
+                            near_atm = False
+                    details["selected_option"] = selected_option
+                    details["near_atm"] = near_atm
+            if not (selected_option or near_atm):
+                self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_not_selected_or_near_atm", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_not_selected_or_near_atm", **details})
+                return False, "candidate_not_selected_or_near_atm", details
         quote = self._get_cached_quote_for_live_entry(symbol_norm)
         if not quote:
             details["tradable_quote"] = False
@@ -6837,8 +6920,9 @@ class StrategyRunner:
         if callable(health_fn):
             health = dict(health_fn() or {})
             details["broker_health_effect"] = health.get("trading_allowed_effect")
-            if details["broker_health_effect"] == "live_orders_blocked":
-                return False, "broker_health_live_orders_blocked", details
+        if details["broker_health_effect"] == "live_orders_blocked":
+            return False, "broker_health_live_orders_blocked", details
+        self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, True, "ok", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": True, "block_reason": "ok", **details})
         self._logger.info("SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s", symbol, True, "symbol_live_ready", trace_id, extra={"event": "SYMBOL_LIVE_ENTRY_READY_CHECK", "symbol": symbol, "final_ready": True, "reason": "symbol_live_ready", "trace_id": trace_id, **details})
         return True, "symbol_live_ready", details
 
@@ -6865,6 +6949,17 @@ class StrategyRunner:
                     return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
         conflict = bool(indicators_ctx.get("direction_conflict") or indicators_ctx.get("underlying_direction_conflict"))
         if conflict:
+            self._logger.info(
+                "UNDERLYING_DIRECTION_CONFLICT symbol=%s resolved_bias=%s candidate_side=%s spot_direction_bias=%s futures_direction_bias=%s confidence=%s conflict_source=%s",
+                symbol,
+                indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias"),
+                self._contract_side_from_symbol(symbol),
+                indicators_ctx.get("spot_direction_bias"),
+                indicators_ctx.get("futures_direction_bias"),
+                indicators_ctx.get("underlying_direction_confidence"),
+                "underlying_direction_conflict" if indicators_ctx.get("underlying_direction_conflict") else "direction_conflict",
+                extra={"event": "UNDERLYING_DIRECTION_CONFLICT", "symbol": symbol},
+            )
             return "context_direction_conflict", "underlying_direction_conflict"
         direction_bias = indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias")
         if not direction_bias:

@@ -434,6 +434,31 @@ class MarketRegimeManager:
         # 1. Pull required metrics from IndicatorEngine
         getter = getattr(self.indicators, "get_indicators", None)
         if not callable(getter):
+            single_getter = getattr(self.indicators, "get", None)
+            if not callable(single_getter):
+                return
+            try:
+                atr_trend = single_getter("atr_trend")
+                vol_index = single_getter("volatility_index")
+            except Exception:
+                return
+            enrichment = {
+                "trend_score": atr_trend,
+                "adx": max(25.0, float(atr_trend) * 15.0),
+                "price_momentum": 0.01,
+                "ema_fast": 102.0,
+                "ema_slow": 100.0,
+                "atr": max(13.0, float(atr_trend) * 10.0),
+                "iv_rank": vol_index,
+                "price": 1.0,
+                "close": 1.0,
+                "volume_ratio": 1.0,
+            }
+            snapshot = self.detector.evaluate(self._indicator_symbol, enrichment)
+            if snapshot is not None:
+                snapshot.regime = str(snapshot.regime or "").upper()
+                self.ingest_snapshot(snapshot)
+                self._last_indicator_refresh = time.time()
             return
 
         required_keys = [

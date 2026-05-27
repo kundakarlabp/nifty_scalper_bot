@@ -1378,3 +1378,69 @@ def test_suspended_context_symbol_expires_after_ttl(broker: DummyBroker, ws: Dum
     import time as _t
     _t.sleep(0.01)
     assert manager.is_context_symbol_suspended('NFO:NIFTY26MAYFUT') is False
+
+
+def test_rotate_active_future_context_purges_expired_future_state(ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(DummyBroker(), ws)
+    manager._readiness_requirements = {"spot": "NSE:NIFTY", "futures": "NFO:NIFTY26MAYFUT", "options": []}  # noqa: SLF001
+    manager._tracked_symbols.update({"NFO:NIFTY26MAYFUT"})  # noqa: SLF001
+    manager._subscribers["NFO:NIFTY26MAYFUT"].add(lambda *_a: None)  # noqa: SLF001
+    manager._latest_ticks["NFO:NIFTY26MAYFUT"] = {"ltp": 1.0}  # noqa: SLF001
+    manager._tick_cache["NFO:NIFTY26MAYFUT"] = {"ltp": 1.0}  # noqa: SLF001
+    manager._history["NFO:NIFTY26MAYFUT"].append({"ltp": 1.0})  # noqa: SLF001
+    manager._ohlc[manager._bar_symbol_key("NFO:NIFTY26MAYFUT")].append({"close": 1.0})  # noqa: SLF001
+    manager.rotate_active_nifty_future_context("NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT", reason="test")
+    assert "NFO:NIFTY26MAYFUT" not in manager._tracked_symbols  # noqa: SLF001
+    assert "NFO:NIFTY26MAYFUT" not in manager._subscribers  # noqa: SLF001
+    assert "NFO:NIFTY26MAYFUT" not in manager._latest_ticks  # noqa: SLF001
+    assert "NFO:NIFTY26MAYFUT" not in manager._tick_cache  # noqa: SLF001
+    assert "NFO:NIFTY26MAYFUT" not in manager._history  # noqa: SLF001
+    assert manager._readiness_requirements["futures"] == "NFO:NIFTY26JUNFUT"  # noqa: SLF001
+    assert "NFO:NIFTY26JUNFUT" in manager._tracked_symbols  # noqa: SLF001
+
+
+def test_pull_quote_expired_future_is_suppressed_without_broker_call(ws: DummyWebSocket) -> None:
+    class Resolver:
+        def list_instruments(self, *_a: Any, **_k: Any) -> list[dict[str, Any]]:
+            return [{"exchange": "NFO", "instrument_type": "FUT", "name": "NIFTY", "tradingsymbol": "NIFTY26JUNFUT", "expiry": date(2026, 6, 25)}]
+
+    class FailBroker(DummyBroker):
+        def get_quote(self, symbol: str) -> dict[str, Any]:
+            raise AssertionError(f"broker.get_quote must not be called for {symbol}")
+
+    manager = MarketDataManager(FailBroker(), ws, resolver=Resolver())
+    out = manager.pull_quote("NFO:NIFTY26MAYFUT")
+    assert out.get("quote_unavailable_reason") == "suspended_expired_future"
+
+
+def test_symbols_for_poll_excludes_expired_futures(monkeypatch: pytest.MonkeyPatch, ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(DummyBroker(), ws)
+    manager._tracked_symbols.update({"NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT"})  # noqa: SLF001
+    monkeypatch.setattr(manager, "_is_ws_healthy", lambda: False)
+    monkeypatch.setattr(manager, "_poll_candidates", lambda _now: ["NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT"])
+    monkeypatch.setattr(
+        manager,
+        "resolve_active_nifty_future_symbol",
+        lambda now=None: "NFO:NIFTY26JUNFUT",
+    )
+    symbols = manager._symbols_for_poll()  # noqa: SLF001
+    assert "NFO:NIFTY26MAYFUT" not in symbols
+    assert "NFO:NIFTY26JUNFUT" in symbols
+
+
+def test_get_ltp_expired_future_returns_none_and_never_dict(ws: DummyWebSocket) -> None:
+    class Resolver:
+        def list_instruments(self, *_a: Any, **_k: Any) -> list[dict[str, Any]]:
+            return [{"exchange": "NFO", "instrument_type": "FUT", "name": "NIFTY", "tradingsymbol": "NIFTY26JUNFUT", "expiry": date(2026, 6, 25)}]
+
+    manager = MarketDataManager(DummyBroker(), ws, resolver=Resolver())
+    out = manager.get_ltp("NFO:NIFTY26MAYFUT")
+    assert out is None
+    assert not isinstance(out, dict)
+
+
+def test_rotate_future_updates_readiness_when_initially_empty(ws: DummyWebSocket) -> None:
+    manager = MarketDataManager(DummyBroker(), ws)
+    manager._readiness_requirements = {}  # noqa: SLF001
+    manager.rotate_active_nifty_future_context("NFO:NIFTY26MAYFUT", "NFO:NIFTY26JUNFUT", reason="test")
+    assert manager._readiness_requirements.get("futures") == "NFO:NIFTY26JUNFUT"  # noqa: SLF001
