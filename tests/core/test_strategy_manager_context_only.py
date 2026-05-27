@@ -38,6 +38,7 @@ def test_context_promotion_quality_reject(monkeypatch, caplog):
     out = manager._combine_strategy_votes(symbol=signal.symbol, signals=[(signal, vote)], indicators={'is_selected_option': True})
     assert out is None
     assert any('STRATEGY_QUALITY_REJECT' in rec.message for rec in caplog.records)
+    assert not any('reason=ok' in rec.message for rec in caplog.records if 'STRATEGY_QUALITY_REJECT' in rec.message)
 
 
 def test_context_promotion_blocked_in_live(monkeypatch):

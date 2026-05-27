@@ -5,7 +5,10 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from os import PathLike
+from pathlib import Path
 from typing import Dict, Optional, Tuple
+import logging
 
 import pandas as pd
 
@@ -34,14 +37,24 @@ class InstrumentLookup:
         )
     """
 
-    def __init__(self, csv_path: str, ttl_seconds: int = 600):
+    def __init__(self, csv_path: str | PathLike[str] | None = None, ttl_seconds: int = 600):
         self.csv_path = csv_path
         self.ttl_seconds = int(ttl_seconds)
         self._lock = threading.RLock()
         self._loaded_at = 0.0
         self._by_exchange_symbol: Dict[Tuple[str, str], Instrument] = {}
         self._by_option_fields: Dict[Tuple[str, str, str, float, str], Instrument] = {}
-        self.reload()
+        self._warned_missing: set[str] = set()
+        try:
+            path_candidate = Path(csv_path) if csv_path is not None else None
+        except (TypeError, ValueError):
+            path_candidate = None
+        if path_candidate is not None and path_candidate.exists():
+            self.csv_path = str(path_candidate)
+            self.reload()
+        else:
+            self.csv_path = None
+            self._loaded_at = time.time()
 
     def _normalize_expiry(self, expiry) -> Optional[str]:
         if expiry is None:
@@ -130,8 +143,48 @@ class InstrumentLookup:
             self._loaded_at = time.time()
 
     def _ensure_fresh(self) -> None:
-        if time.time() - self._loaded_at > self.ttl_seconds:
+        if isinstance(self.csv_path, str) and time.time() - self._loaded_at > self.ttl_seconds:
             self.reload()
+
+    def upsert(
+        self,
+        tradingsymbol: str,
+        instrument_token: int,
+        *,
+        exchange: str = "NFO",
+        name: str | None = None,
+        expiry: str | None = None,
+        strike: float | None = None,
+        option_type: str | None = None,
+    ) -> None:
+        inst = Instrument(
+            exchange=str(exchange).upper(),
+            tradingsymbol=str(tradingsymbol).upper(),
+            instrument_token=int(instrument_token),
+            name=name,
+            expiry=self._normalize_expiry(expiry),
+            strike=float(strike) if strike is not None else None,
+            option_type=str(option_type).upper() if option_type else None,
+        )
+        with self._lock:
+            self._by_exchange_symbol[(inst.exchange, inst.tradingsymbol)] = inst
+
+    def resolve(self, symbol: str, exchange: str = "NFO") -> int | None:
+        try:
+            return self.get_token(exchange, symbol)
+        except KeyError:
+            key = str(symbol).upper()
+            logger = logging.getLogger("nifty_scalper_bot.data.instruments")
+            if key not in self._warned_missing:
+                self._warned_missing.add(key)
+                logger.warning("resolver no token for %s", symbol)
+            else:
+                logger.debug("resolver no token warning suppressed for %s", symbol)
+            return None
+
+    def lookup(self, symbol: str, exchange: str = "NFO") -> dict[str, object]:
+        token = self.resolve(symbol, exchange=exchange)
+        return {"symbol": str(symbol), "exchange": str(exchange).upper(), "token": token}
 
     def get_token(self, exchange: str, tradingsymbol: str) -> int:
         """Args: exchange, tradingsymbol. Returns: token. Raises: KeyError."""

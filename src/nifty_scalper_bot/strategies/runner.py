@@ -6754,6 +6754,30 @@ class StrategyRunner:
         )
 
     def _symbol_live_entry_ready(self, symbol: str, *, signal: Signal | None = None, trace_id: str | None = None) -> tuple[bool, str, dict[str, Any]]:
+        def _refresh_selected_candidates_for_symbol(symbol_norm: str) -> bool:
+            active = list(getattr(self, "_active_option_symbols", []) or [])
+            if not active:
+                return False
+            side = self._contract_side_from_symbol(symbol_norm)
+            if side not in {"CE", "PE"}:
+                return False
+            filtered = [s for s in active if str(s).upper().endswith(side)]
+            if not filtered:
+                return False
+            strike_here = self._extract_strike_from_symbol(symbol_norm)
+            if strike_here is None:
+                return False
+            nearest = min(
+                filtered,
+                key=lambda s: abs(float(self._extract_strike_from_symbol(str(s)) or strike_here) - float(strike_here)),
+            )
+            if side == "CE":
+                self._active_selected_ce = normalize_symbol(nearest)
+            else:
+                self._active_selected_pe = normalize_symbol(nearest)
+            self._active_atm_strike = int(strike_here)
+            return True
+
         details: dict[str, Any] = {"symbol": symbol, "trace_id": trace_id, "live_orders_armed": bool(self._runtime_live_orders_armed)}
         if not bool(self._runtime_live_orders_armed):
             return False, "execution_not_armed", details
@@ -6816,8 +6840,26 @@ class StrategyRunner:
             self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_distance_unknown", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_distance_unknown", **details})
             return False, "candidate_distance_unknown", details
         if not (selected_option or near_atm):
+            trigger_evidence = bool((getattr(signal, "metadata", {}) or {}).get("trigger_conditions_met")) if signal is not None else False
+            if trigger_evidence and quote_fresh and (ctx_age is None or ctx_age <= max_context_age):
+                refreshed = _refresh_selected_candidates_for_symbol(symbol_norm)
+                details["candidate_refresh_attempted"] = True
+                details["candidate_refresh_succeeded"] = refreshed
+                if refreshed:
+                    selected_set = {normalize_symbol(str(self._active_selected_ce or "")), normalize_symbol(str(self._active_selected_pe or ""))}
+                    selected_set.discard("")
+                    selected_option = symbol_norm in selected_set
+                    active_atm_strike = getattr(self, "_active_atm_strike", None)
+                    if strike is not None and active_atm_strike is not None:
+                        try:
+                            near_atm = abs(float(strike) - float(active_atm_strike)) <= near_atm_threshold
+                        except (TypeError, ValueError):
+                            near_atm = False
+                    details["selected_option"] = selected_option
+                    details["near_atm"] = near_atm
             self._logger.info("CANDIDATE_GATE_CHECK symbol=%s final_ready=%s block_reason=%s", symbol, False, "candidate_not_selected_or_near_atm", extra={"event": "CANDIDATE_GATE_CHECK", "final_ready": False, "block_reason": "candidate_not_selected_or_near_atm", **details})
-            return False, "candidate_not_selected_or_near_atm", details
+            if not (selected_option or near_atm):
+                return False, "candidate_not_selected_or_near_atm", details
         quote = self._get_cached_quote_for_live_entry(symbol_norm)
         if not quote:
             details["tradable_quote"] = False
