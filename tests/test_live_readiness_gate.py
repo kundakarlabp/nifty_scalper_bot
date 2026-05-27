@@ -145,3 +145,24 @@ def test_compute_live_readiness_bad_option_exec_min_bars_does_not_crash() -> Non
     )
     assert armed is False
     assert "selected_ce_history_insufficient" in reasons
+
+
+def test_compute_live_readiness_default_uses_policy_entry_min_bars(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPTION_ENTRY_MIN_BARS", "5")
+    armed, reasons = compute_live_readiness(
+        live_mode=True, hard_ready=True, quote_available=True, ws_quote_proof=True, market_open=True, runner_running=True,
+        selected_ce="NFO:NIFTY26JUN24000CE", selected_pe="NFO:NIFTY26JUN24000PE", ce_bars=1, pe_bars=1, ce_quote_ready=True, pe_quote_ready=True
+    )
+    assert armed is False
+    assert "selected_ce_history_insufficient" in reasons
+    assert "selected_pe_history_insufficient" in reasons
+
+
+def test_compute_live_readiness_explicit_positive_override_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPTION_ENTRY_MIN_BARS", "5")
+    armed, reasons = compute_live_readiness(
+        live_mode=True, hard_ready=True, quote_available=True, ws_quote_proof=True, market_open=True, runner_running=True,
+        selected_ce="NFO:CE", selected_pe="NFO:PE", ce_bars=3, pe_bars=3, option_exec_min_bars=3, ce_quote_ready=True, pe_quote_ready=True
+    )
+    assert armed is True
+    assert reasons == []

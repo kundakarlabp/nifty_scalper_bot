@@ -6571,6 +6571,47 @@ class MarketDataManager:
                 best_symbol = f"NFO:{tradingsymbol}"
         return best_symbol
 
+    def maybe_rotate_nifty_futures_context(
+        self,
+        current_symbol: str | None,
+        *,
+        reason: str,
+        trace_id: str | None = None,
+        now: datetime | None = None,
+    ) -> str | None:
+        active = self.resolve_active_nifty_future_symbol(now=now)
+        if not active:
+            self._logger.warning(
+                "FUTURES_CONTEXT_STALE_OR_UNRESOLVED current_symbol=%s reason=%s",
+                current_symbol,
+                reason,
+                extra={
+                    "event": "FUTURES_CONTEXT_STALE_OR_UNRESOLVED",
+                    "current_symbol": current_symbol,
+                    "reason": reason,
+                    "trace_id": trace_id,
+                },
+            )
+            return current_symbol
+        if current_symbol and self._canonical_symbol(current_symbol) == self._canonical_symbol(active):
+            return current_symbol
+        old_symbol = current_symbol
+        self.request_symbol_subscription(active)
+        self._logger.warning(
+            "FUTURES_CONTEXT_SYMBOL_ROTATED old_symbol=%s new_symbol=%s reason=%s",
+            old_symbol,
+            active,
+            reason,
+            extra={
+                "event": "FUTURES_CONTEXT_SYMBOL_ROTATED",
+                "old_symbol": old_symbol,
+                "new_symbol": active,
+                "reason": reason,
+                "trace_id": trace_id,
+            },
+        )
+        return active
+
     def get_symbol_snapshot(self, symbol: str) -> MarketSnapshot:
         """Return a unified MarketSnapshot for one symbol."""
         canonical = self._canonical_symbol(symbol)

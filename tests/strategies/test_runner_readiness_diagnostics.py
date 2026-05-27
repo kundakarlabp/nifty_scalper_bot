@@ -155,3 +155,24 @@ def test_stale_selected_symbol_does_not_arm_live_orders(caplog) -> None:
     rec = next(r for r in caplog.records if getattr(r, "event", "") == "RUNNER_EVAL_DECISION")
     assert rec.trading_allowed is False
     assert rec.order_forwarding_allowed is False
+
+
+def test_no_trade_decision_reports_history_cold_not_broker(caplog) -> None:
+    logger = logging.getLogger("test.runner.no_trade")
+    with caplog.at_level(logging.INFO):
+        logger.info(
+            "RUNNER_NO_TRADE_DECISION symbol=%s category=%s reason=%s",
+            "NFO:CE",
+            "data_history_cold",
+            "insufficient_indicator_bar_count",
+            extra={
+                "event": "RUNNER_NO_TRADE_DECISION",
+                "symbol": "NFO:CE",
+                "broker_attempted": False,
+                "category": "data_history_cold",
+                "reason": "insufficient_indicator_bar_count",
+            },
+        )
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "RUNNER_NO_TRADE_DECISION")
+    assert rec.broker_attempted is False
+    assert rec.category == "data_history_cold"

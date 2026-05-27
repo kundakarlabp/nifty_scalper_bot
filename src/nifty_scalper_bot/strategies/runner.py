@@ -67,6 +67,7 @@ from nifty_scalper_bot.data.source import (
 )
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
+from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.execution.order_state_machine import (
     ExecutionState,
     OrderStateMachine,
@@ -644,6 +645,9 @@ class StrategyRunner:
         self._selected_pe_symbol: str | None = None
         self._active_atm_strike: int | None = None
         self._active_option_symbols: set[str] = set()
+        self._selected_option_prewarm_inflight: set[str] = set()
+        self._selected_option_prewarm_last: dict[str, float] = {}
+        self._selected_option_prewarm_cooldown_s = max(1.0, float(os.getenv("SELECTED_OPTION_PREWARM_COOLDOWN_SECONDS", "45") or 45))
 
         if self._message_bus is None:
             raise RuntimeError("MessageBus not injected into StrategyRunner")
@@ -6296,6 +6300,51 @@ class StrategyRunner:
         except Exception:
             return
 
+    def _request_selected_option_history_prewarm(
+        self, symbol: str, *, bars_before: int, required_bars: int, trace_id: str | None = None
+    ) -> None:
+        now = time.monotonic()
+        last = float(self._selected_option_prewarm_last.get(symbol, 0.0) or 0.0)
+        if (now - last) < self._selected_option_prewarm_cooldown_s or symbol in self._selected_option_prewarm_inflight:
+            return
+        self._selected_option_prewarm_last[symbol] = now
+        self._selected_option_prewarm_inflight.add(symbol)
+        self._logger.info(
+            "SELECTED_OPTION_HISTORY_PREWARM_REQUESTED symbol=%s bars_before=%s required_bars=%s",
+            symbol,
+            bars_before,
+            required_bars,
+            extra={"event": "SELECTED_OPTION_HISTORY_PREWARM_REQUESTED", "symbol": symbol, "bars_before": bars_before, "required_bars": required_bars, "trace_id": trace_id},
+        )
+        data_hub = getattr(self, "_data_hub", None)
+        hydrate = getattr(data_hub, "hydrate_symbol_history", None)
+        if not callable(hydrate):
+            self._selected_option_prewarm_inflight.discard(symbol)
+            return
+        policy = HistoryReadinessPolicy.from_env()
+        max_bars = max(required_bars, policy.smc_min_bars)
+        async def _do_prewarm() -> None:
+            success = False
+            bars_after = bars_before
+            try:
+                out = await hydrate(symbol, interval="minute", days=2, max_bars=max_bars, reason="selected_option_history_cold")
+                success = True
+                bars_after = len(out or []) if isinstance(out, list) else int(bars_before)
+            except Exception:
+                success = False
+            finally:
+                self._selected_option_prewarm_inflight.discard(symbol)
+                self._logger.info(
+                    "SELECTED_OPTION_HISTORY_PREWARM_RESULT symbol=%s bars_before=%s bars_after=%s required_bars=%s success=%s",
+                    symbol, bars_before, bars_after, required_bars, success,
+                    extra={"event": "SELECTED_OPTION_HISTORY_PREWARM_RESULT", "symbol": symbol, "bars_before": bars_before, "bars_after": bars_after, "required_bars": required_bars, "success": success, "reason": "selected_option_history_cold", "source": "data_hub_hydrate", "trace_id": trace_id},
+                )
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_do_prewarm())
+        except RuntimeError:
+            self._selected_option_prewarm_inflight.discard(symbol)
+
     def _same_bar_eval_reason(
         self,
         *,
@@ -6553,6 +6602,13 @@ class StrategyRunner:
                     elif self._is_tradable_symbol(symbol):
                         if self._should_log_throttled(f"opt_cold:{symbol}", 120.0):
                             self._logger.warning("OPTION_HISTORY_COLD symbol=%s bars=%d required=%d", symbol, history_count, required_bars)
+                        if self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0):
+                            self._request_selected_option_history_prewarm(
+                                symbol,
+                                bars_before=int(history_count),
+                                required_bars=int(required_bars),
+                                trace_id=trace_id,
+                            )
                         spot_bars = len(self._indicator_engine.get_history("NSE:NIFTY") or [])
                         fut_symbol = next((sym for sym in self._active_symbols if self._is_context_symbol(sym) and sym != "NSE:NIFTY"), "")
                         fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
@@ -6571,6 +6627,13 @@ class StrategyRunner:
                     fut_symbol = next((sym for sym in self._active_symbols if self._symbol_role_for_runner(sym) == "futures_context"), "")
                     if not fut_symbol and self._should_log_throttled("fut_unresolved", 120.0):
                         self._logger.warning("CONTEXT_FUTURES_UNRESOLVED symbol=%s", symbol)
+                    if fut_symbol and hasattr(self._market_data, "maybe_rotate_nifty_futures_context"):
+                        rotated = self._market_data.maybe_rotate_nifty_futures_context(
+                            fut_symbol, reason="context_futures_unresolved", trace_id=trace_id
+                        )
+                        if rotated and rotated != fut_symbol:
+                            self._active_symbols.discard(fut_symbol)
+                            self._active_symbols.add(str(rotated))
                     spot_bars = len(self._indicator_engine.get_history(spot_symbol) or [])
                     fut_bars = len(self._indicator_engine.get_history(fut_symbol) or []) if fut_symbol else 0
                     opt_bars = history_count
@@ -8442,6 +8505,13 @@ class StrategyRunner:
                                 if state_after is not None:
                                     state_after._last_eval_bar_ts = pending_eval_bar_ts
                         if signal is None:
+                            option_required = self._required_bars_for_symbol(symbol)
+                            option_count = len(self._indicator_engine.get_history(symbol) or [])
+                            category = "strategy_no_trigger"
+                            reason = "evaluation_no_signal"
+                            if option_count < option_required:
+                                category = "data_history_cold"
+                                reason = "insufficient_indicator_bar_count"
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
                                 stage="phase9",
@@ -8449,6 +8519,33 @@ class StrategyRunner:
                                 allowed=True,
                                 trace_id=trace_id,
                                 price=price,
+                            )
+                            self._logger.info(
+                                "RUNNER_NO_TRADE_DECISION symbol=%s category=%s reason=%s",
+                                symbol,
+                                category,
+                                reason,
+                                extra={
+                                    "event": "RUNNER_NO_TRADE_DECISION",
+                                    "symbol": symbol,
+                                    "trace_id": trace_id,
+                                    "broker_attempted": False,
+                                    "category": category,
+                                    "reason": reason,
+                                    "data_phase": self._data_phase.get(symbol),
+                                    "option_history_count": option_count,
+                                    "option_history_required": option_required,
+                                    "context_fresh": bool(indicators_ctx.get("spot_fresh") or indicators_ctx.get("futures_fresh")),
+                                    "context_direction_valid": bool((indicators_ctx.get("direction_bias") or indicators_ctx.get("underlying_direction_bias"))),
+                                    "direction_bias": indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias"),
+                                    "strategy_vote_count": 0,
+                                    "no_vote_reason_counts": {},
+                                    "execution_readiness_allowed": bool(self._runtime_live_orders_armed),
+                                    "execution_readiness_reason": self._runtime_readiness_reason,
+                                    "broker_health_effect": None,
+                                    "margin_status": None,
+                                    "kill_switch_active": bool(getattr(self._order_manager, "is_kill_switch_active", lambda: False)()),
+                                },
                             )
                         else:
                             self._emit_runner_eval_decision(

@@ -31,10 +31,22 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 
 
 def _safe_positive_int(value: object, fallback: int) -> int:
+    fallback_value = max(int(fallback), 1)
     try:
-        return max(int(float(value)), 1)
+        parsed = int(float(value))
     except (TypeError, ValueError):
-        return max(int(fallback), 1)
+        return fallback_value
+    if parsed <= 0:
+        return fallback_value
+    return parsed
+
+
+def _safe_non_negative_int(value: object, fallback: int = 0) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return max(int(fallback), 0)
+    return max(parsed, 0)
 
 
 @dataclass(frozen=True)
@@ -112,10 +124,13 @@ def compute_live_readiness(
         reasons.append("strategy_runner_not_running")
     if not selected_ce or not selected_pe:
         reasons.append("selected_options_missing")
-    min_bars = _safe_positive_int(option_exec_min_bars, HistoryReadinessPolicy.from_env().option_entry_min_bars)
-    if int(ce_bars) < min_bars:
+    policy = HistoryReadinessPolicy.from_env()
+    min_bars = _safe_positive_int(option_exec_min_bars, policy.option_entry_min_bars)
+    ce_count = _safe_non_negative_int(ce_bars, 0)
+    pe_count = _safe_non_negative_int(pe_bars, 0)
+    if ce_count < min_bars:
         reasons.append("selected_ce_history_insufficient")
-    if int(pe_bars) < min_bars:
+    if pe_count < min_bars:
         reasons.append("selected_pe_history_insufficient")
     if not ce_quote_ready:
         reasons.append("selected_ce_quote_missing")
