@@ -6,6 +6,68 @@ consistently from app startup, health endpoints, and supervisor checks.
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
+import os
+import logging
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return max(default, minimum)
+    try:
+        return max(int(float(str(raw).strip())), minimum)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "INVALID_HISTORY_POLICY_ENV name=%s value=%r default=%s",
+            name,
+            raw,
+            default,
+            extra={"event": "INVALID_HISTORY_POLICY_ENV", "name": name, "value": raw, "default": default},
+        )
+        return max(default, minimum)
+
+
+def _safe_positive_int(value: object, fallback: int) -> int:
+    fallback_value = max(int(fallback), 1)
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return fallback_value
+    if parsed <= 0:
+        return fallback_value
+    return parsed
+
+
+def _safe_non_negative_int(value: object, fallback: int = 0) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return max(int(fallback), 0)
+    return max(parsed, 0)
+
+
+@dataclass(frozen=True)
+class HistoryReadinessPolicy:
+    option_eval_min_bars: int = 5
+    option_entry_min_bars: int = 5
+    context_min_bars: int = 50
+    smc_min_bars: int = 30
+    allow_synthetic_option_bars_for_eval: bool = False
+
+    @classmethod
+    def from_env(cls) -> "HistoryReadinessPolicy":
+        return cls(
+            option_eval_min_bars=_env_int("OPTION_EVAL_MIN_BARS", 5),
+            option_entry_min_bars=_env_int("OPTION_ENTRY_MIN_BARS", 5),
+            context_min_bars=_env_int("CONTEXT_MIN_BARS", 50),
+            smc_min_bars=_env_int("SMC_MIN_BARS_REQUIRED", 30),
+            allow_synthetic_option_bars_for_eval=str(
+                os.getenv("ALLOW_SYNTHETIC_OPTION_BARS_FOR_EVAL", "false")
+            ).strip().lower() in {"1", "true", "yes", "on"},
+        )
 
 
 def compute_live_readiness(
@@ -20,7 +82,7 @@ def compute_live_readiness(
     selected_pe: str | None = None,
     ce_bars: int = 0,
     pe_bars: int = 0,
-    option_exec_min_bars: int = 30,
+    option_exec_min_bars: int = 0,
     ce_quote_ready: bool = False,
     pe_quote_ready: bool = False,
 ) -> tuple[bool, list[str]]:
@@ -62,9 +124,13 @@ def compute_live_readiness(
         reasons.append("strategy_runner_not_running")
     if not selected_ce or not selected_pe:
         reasons.append("selected_options_missing")
-    if int(ce_bars) < int(option_exec_min_bars):
+    policy = HistoryReadinessPolicy.from_env()
+    min_bars = _safe_positive_int(option_exec_min_bars, policy.option_entry_min_bars)
+    ce_count = _safe_non_negative_int(ce_bars, 0)
+    pe_count = _safe_non_negative_int(pe_bars, 0)
+    if ce_count < min_bars:
         reasons.append("selected_ce_history_insufficient")
-    if int(pe_bars) < int(option_exec_min_bars):
+    if pe_count < min_bars:
         reasons.append("selected_pe_history_insufficient")
     if not ce_quote_ready:
         reasons.append("selected_ce_quote_missing")

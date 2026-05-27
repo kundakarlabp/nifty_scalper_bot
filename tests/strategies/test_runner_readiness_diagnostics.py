@@ -155,3 +155,117 @@ def test_stale_selected_symbol_does_not_arm_live_orders(caplog) -> None:
     rec = next(r for r in caplog.records if getattr(r, "event", "") == "RUNNER_EVAL_DECISION")
     assert rec.trading_allowed is False
     assert rec.order_forwarding_allowed is False
+
+
+def test_no_trade_decision_reports_history_cold_not_broker(caplog) -> None:
+    runner = _make_runner()
+    category, reason = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        signal=None,
+        indicators_ctx={},
+        option_count=1,
+        option_required=5,
+        broker_attempted=False,
+    )
+    assert category == "data_history_cold"
+    assert reason == "insufficient_indicator_bar_count"
+
+
+def test_runner_no_trade_decision_reports_context_direction_unavailable() -> None:
+    runner = _make_runner()
+    category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        signal=None,
+        indicators_ctx={},
+        option_count=10,
+        option_required=5,
+        broker_attempted=False,
+    )
+    assert category == "context_direction_unavailable"
+
+
+def test_runner_no_trade_decision_reports_context_direction_conflict() -> None:
+    runner = _make_runner()
+    category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        signal=None,
+        indicators_ctx={"direction_conflict": True},
+        option_count=10,
+        option_required=5,
+        broker_attempted=False,
+    )
+    assert category == "context_direction_conflict"
+
+
+def test_runner_no_trade_decision_reports_strategy_no_trigger_when_data_ready_but_signal_none() -> None:
+    runner = _make_runner()
+    runner._runtime_live_orders_armed = False
+    category, _ = runner._classify_no_trade_decision(  # type: ignore[attr-defined]
+        signal=None,
+        indicators_ctx={"direction_bias": "CE"},
+        option_count=10,
+        option_required=5,
+        broker_attempted=False,
+    )
+    assert category == "strategy_no_trigger"
+
+
+def test_runner_emits_no_trade_decision_on_history_cold_eval_block(caplog) -> None:
+    runner = _make_runner()
+    runner._active_symbols = {"NFO:CE"}
+    runner._indicator_engine = _DummyIndicator({"NFO:CE": [1]})
+    runner._required_bars_for_symbol = lambda _s: 5
+    runner._is_tradable_symbol = lambda _s: True
+    runner._is_context_symbol = lambda _s: False
+    runner._is_option_symbol_tick_fresh = lambda _s, max_age_s=60.0: True
+    with caplog.at_level(logging.INFO):
+        allowed = runner._strategy_evaluation_allowed("NFO:CE", trace_id="t-cold")
+    assert allowed is False
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "RUNNER_NO_TRADE_DECISION")
+    assert rec.category == "data_history_cold"
+    assert rec.broker_attempted is False
+
+
+def test_runner_no_trade_decision_reports_integrity_failure_when_count_sufficient_but_has_min_bars_false(caplog) -> None:
+    runner = _make_runner()
+    runner._active_symbols = {"NFO:CE"}
+    runner._indicator_engine = _DummyIndicator({"NFO:CE": [1, 2, 3, 4, 5]})
+    runner._required_bars_for_symbol = lambda _s: 5
+    runner._is_tradable_symbol = lambda _s: True
+    runner._is_context_symbol = lambda _s: False
+    runner._is_option_symbol_tick_fresh = lambda _s, max_age_s=60.0: True
+    runner._indicator_engine.has_min_bars = lambda _s, _r: False  # type: ignore[attr-defined]
+    with caplog.at_level(logging.INFO):
+        allowed = runner._strategy_evaluation_allowed("NFO:CE", trace_id="t-integrity")
+    assert allowed is False
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "RUNNER_NO_TRADE_DECISION")
+    assert rec.category == "data_history_integrity_failed"
+    assert rec.reason == "indicator_history_integrity_failed"
+
+
+def test_emit_no_trade_decision_does_not_raise_when_kill_switch_status_raises() -> None:
+    runner = _make_runner()
+    runner._order_manager = SimpleNamespace(is_kill_switch_active=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    runner._emit_no_trade_decision(symbol="NFO:CE", trace_id="t", category="strategy_no_trigger", reason="evaluation_no_signal")
+
+
+def test_emit_no_trade_decision_does_not_raise_with_missing_order_manager() -> None:
+    runner = _make_runner()
+    del runner._order_manager
+    runner._emit_no_trade_decision(symbol="NFO:CE", trace_id="t", category="strategy_no_trigger", reason="evaluation_no_signal")
+
+
+def test_runner_emits_no_trade_decision_on_signal_none_strategy_no_trigger(caplog) -> None:
+    runner = _make_runner()
+    with caplog.at_level(logging.INFO):
+        runner._emit_no_trade_decision(
+            symbol="NFO:CE",
+            trace_id="t-no-signal",
+            category="strategy_no_trigger",
+            reason="evaluation_no_signal",
+            broker_attempted=False,
+            indicators_ctx={"direction_bias": "CE"},
+            option_history_count=10,
+            option_history_required=5,
+        )
+    rec = next(r for r in caplog.records if getattr(r, "event", "") == "RUNNER_NO_TRADE_DECISION")
+    assert rec.category == "strategy_no_trigger"
+    assert rec.reason == "evaluation_no_signal"
+    assert rec.broker_attempted is False

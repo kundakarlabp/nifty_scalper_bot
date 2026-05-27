@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
 from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
@@ -68,7 +69,7 @@ class SMCStrategy(EliteStrategy):
                     extra={"event": "STRATEGY_NO_VOTE", "strategy": "SMC", "symbol": symbol, "reason": "direction_context_not_ready"},
                 )
                 return None
-            min_bars_required = int(os.getenv("SMC_MIN_BARS_REQUIRED", "30") or "30")
+            min_bars_required = HistoryReadinessPolicy.from_env().smc_min_bars
             execution_mode = str(os.getenv('EXECUTION_MODE', 'SHADOW') or 'SHADOW').strip().upper()
             is_live = execution_mode == 'LIVE'
             history_domain_used = str(indicators.get("history_domain_used") or "unknown").lower()

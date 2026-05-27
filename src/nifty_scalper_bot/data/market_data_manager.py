@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import math
 import os
+import re
 from random import uniform
 import threading
 import time
@@ -73,6 +74,7 @@ _EXPIRY_FORMATS: tuple[str, ...] = (
 )
 
 _COMPACT_EXPIRY_FORMATS: tuple[str, ...] = ("%d%b%Y", "%d%b%y")
+_NIFTY_FUT_RE = re.compile(r"^NIFTY\d{2}[A-Z]{3}FUT$")
 
 _logger = get_tracer_logger(__name__)
 
@@ -141,6 +143,50 @@ def canonical_symbol(symbol: str) -> str:
     if normalized == "NSE:NIFTY 50":
         return "NSE:NIFTY"
     return normalized
+
+
+def _parse_instrument_expiry(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed_dt = value
+    elif isinstance(value, date):
+        parsed_dt = datetime.combine(value, datetime.min.time())
+    else:
+        text = str(value).strip()
+        parsed_dt = None
+        for fmt in _EXPIRY_FORMATS + _COMPACT_EXPIRY_FORMATS:
+            try:
+                parsed_dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed_dt is None:
+            try:
+                maybe = pd.to_datetime(text, utc=True, errors="coerce")
+                if pd.isna(maybe):
+                    return None
+                parsed_dt = maybe.to_pydatetime()
+            except Exception:
+                return None
+    if parsed_dt.tzinfo is None:
+        return parsed_dt.replace(tzinfo=timezone.utc)
+    return parsed_dt.astimezone(timezone.utc)
+
+
+def _is_nifty_index_future_row(row: Mapping[str, Any]) -> bool:
+    exchange = str(row.get("exchange") or "").upper()
+    segment = str(row.get("segment") or "").upper()
+    instrument_type = str(row.get("instrument_type") or row.get("type") or "").upper()
+    name = str(row.get("name") or "").upper()
+    tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
+    if "NFO" not in {exchange, segment} and "NFO" not in segment:
+        return False
+    if instrument_type not in {"FUT", "FUTIDX"}:
+        return False
+    if name and name != "NIFTY":
+        return False
+    return bool(_NIFTY_FUT_RE.match(tradingsymbol))
 
 
 NIFTY_SPOT_TOKEN = 256265
@@ -243,6 +289,10 @@ class MarketDataManager:
         self._quote_api_available = True
         self._quote_api_error: str | None = None
         self._quote_api_last_checked_at: float | None = None
+        self._quote_direct_miss_count: dict[str, int] = {}
+        self._quote_direct_miss_until: dict[str, float] = {}
+        self._quote_direct_miss_reason: dict[str, str] = {}
+        self._quote_direct_miss_cooldown_seconds = float(os.getenv("MDM_QUOTE_SYMBOL_MISS_COOLDOWN_SECONDS", "45") or "45")
         self._spot_ready_logged = False
         self._spot_refresh_last_attempt_mono: float = 0.0
         # Bounded queue: drops oldest when full so a stall in the async
@@ -2411,11 +2461,31 @@ class MarketDataManager:
             None.
         """
 
+        def _clear_quote_direct_miss(symbol_key: str) -> None:
+            self._quote_direct_miss_count.pop(symbol_key, None)
+            self._quote_direct_miss_until.pop(symbol_key, None)
+            self._quote_direct_miss_reason.pop(symbol_key, None)
+
         canonical_symbol = self._canonical_symbol(symbol)
         candidates: list[str | int] = self._candidate_quote_keys(canonical_symbol)
         if not candidates:
             candidates = [canonical_symbol]
         quote: dict[str, Any] | None = None
+        cooldown_until = float(self._quote_direct_miss_until.get(canonical_symbol, 0.0) or 0.0)
+        now_mono = time.monotonic()
+        if cooldown_until > now_mono:
+            remaining = max(0.0, cooldown_until - now_mono)
+            with self._lock:
+                cached_tick = self._latest_ticks.get(canonical_symbol)
+            if isinstance(cached_tick, Mapping) and cached_tick:
+                cached_quote = dict(cached_tick)
+                cached_quote.setdefault("source", "cache")
+                return cached_quote
+            return {
+                "symbol": canonical_symbol,
+                "quote_unavailable_reason": "quote_symbol_missing_cooldown",
+                "cooldown_remaining_s": round(remaining, 3),
+            }
         for key in candidates:
             broker_key: str | int
             if isinstance(key, int):
@@ -2425,6 +2495,7 @@ class MarketDataManager:
             fetched = self._broker_quote_any(broker_key)
             if fetched:
                 quote = fetched
+                _clear_quote_direct_miss(canonical_symbol)
                 break
         if quote is None:
             try:
@@ -2434,8 +2505,29 @@ class MarketDataManager:
                     self._mark_quote_api_status(available=False, error="access_denied")
                 error_text = str(exc)
                 is_recoverable_miss = "Quote data missing" in error_text
-                log_fn = self._logger.warning if is_recoverable_miss else self._logger.error
-                log_fn(
+                if is_recoverable_miss:
+                    miss_count = int(self._quote_direct_miss_count.get(canonical_symbol, 0) or 0) + 1
+                    self._quote_direct_miss_count[canonical_symbol] = miss_count
+                    self._quote_direct_miss_reason[canonical_symbol] = "quote_data_missing"
+                    self._quote_direct_miss_until[canonical_symbol] = (
+                        time.monotonic() + self._quote_direct_miss_cooldown_seconds
+                    )
+                    self._logger.warning(
+                        "MDM_PULL_QUOTE_SYMBOL_MISSING symbol=%s miss_count=%s",
+                        canonical_symbol,
+                        miss_count,
+                        extra={
+                            "event": "MDM_PULL_QUOTE_SYMBOL_MISSING",
+                            "symbol": symbol,
+                            "canonical_symbol": canonical_symbol,
+                            "candidate_keys": [str(item) for item in candidates],
+                            "miss_count": miss_count,
+                            "cooldown_remaining_s": self._quote_direct_miss_cooldown_seconds,
+                            "reason": "quote_data_missing",
+                        },
+                    )
+                if not is_recoverable_miss:
+                    self._logger.error(
                     "Failure in pull_quote direct get_quote: %s",
                     exc,
                     extra={
@@ -2447,9 +2539,11 @@ class MarketDataManager:
                         "symbol": canonical_symbol,
                         "error": error_text,
                     },
-                    exc_info=None if is_recoverable_miss else exc,
-                )
+                    exc_info=exc,
+                    )
                 raw_quote = None
+            else:
+                _clear_quote_direct_miss(canonical_symbol)
             if isinstance(raw_quote, Mapping):
                 self._mark_quote_api_status(available=True)
                 quote = dict(raw_quote)
@@ -2469,6 +2563,14 @@ class MarketDataManager:
                         "reason": "no_quote_from_broker_or_cache",
                     },
                 )
+            miss_count = int(self._quote_direct_miss_count.get(canonical_symbol, 0) or 0)
+            if miss_count > 0:
+                return {
+                    "symbol": canonical_symbol,
+                    "quote_unavailable_reason": "quote_data_missing",
+                    "quote_miss_count": miss_count,
+                    "cooldown_remaining_s": self._quote_direct_miss_cooldown_seconds,
+                }
             return {"symbol": canonical_symbol}
         quote = self._prepare_rest_tick(quote, source="rest")
         with self._lock:
@@ -2477,6 +2579,7 @@ class MarketDataManager:
         normalized = self._normalize_tick(canonical_symbol, quote, previous)
         if normalized is not None:
             self._store_tick(canonical_symbol, normalized)
+            _clear_quote_direct_miss(canonical_symbol)
             return normalized
         return {"symbol": canonical_symbol, **quote}
 
@@ -6423,6 +6526,91 @@ class MarketDataManager:
             self._last_mid[canonical_symbol] = (mid, now_ms)
         self._last_quote_ts_ms[canonical_symbol] = now_ms
         return quote
+
+    def resolve_active_nifty_future_symbol(self, now: datetime | None = None) -> str | None:
+        """Resolve nearest non-expired NIFTY futures symbol from resolver/instrument master."""
+        ref_now = now or datetime.now(timezone.utc)
+        resolver = getattr(self, "_resolver", None)
+        if resolver is None:
+            return None
+        fetchers = ("list_instruments", "get_instruments", "instruments")
+        instruments: list[Mapping[str, Any]] = []
+        def _call_instrument_fetcher(fetcher: Callable[..., Any]) -> list[Mapping[str, Any]]:
+            attempts = (lambda: fetcher(), lambda: fetcher("NFO"), lambda: fetcher(exchange="NFO"))
+            for call in attempts:
+                try:
+                    raw = call() or []
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+                if isinstance(raw, Mapping):
+                    raw = raw.values()
+                if isinstance(raw, Iterable):
+                    rows = [item for item in raw if isinstance(item, Mapping)]
+                    if rows:
+                        return rows
+            return []
+        for fetcher_name in fetchers:
+            fetcher = getattr(resolver, fetcher_name, None)
+            if callable(fetcher):
+                instruments = _call_instrument_fetcher(fetcher)
+                if instruments:
+                    break
+        best_symbol: str | None = None
+        best_expiry: datetime | None = None
+        for row in instruments:
+            if not _is_nifty_index_future_row(row):
+                continue
+            tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
+            expiry = _parse_instrument_expiry(row.get("expiry"))
+            if expiry is None or expiry < ref_now:
+                continue
+            if best_expiry is None or expiry < best_expiry:
+                best_expiry = expiry
+                best_symbol = f"NFO:{tradingsymbol}"
+        return best_symbol
+
+    def maybe_rotate_nifty_futures_context(
+        self,
+        current_symbol: str | None,
+        *,
+        reason: str,
+        trace_id: str | None = None,
+        now: datetime | None = None,
+    ) -> str | None:
+        active = self.resolve_active_nifty_future_symbol(now=now)
+        if not active:
+            self._logger.warning(
+                "FUTURES_CONTEXT_STALE_OR_UNRESOLVED current_symbol=%s reason=%s",
+                current_symbol,
+                reason,
+                extra={
+                    "event": "FUTURES_CONTEXT_STALE_OR_UNRESOLVED",
+                    "current_symbol": current_symbol,
+                    "reason": reason,
+                    "trace_id": trace_id,
+                },
+            )
+            return current_symbol
+        if current_symbol and self._canonical_symbol(current_symbol) == self._canonical_symbol(active):
+            return current_symbol
+        old_symbol = current_symbol
+        self.request_symbol_subscription(active)
+        self._logger.warning(
+            "FUTURES_CONTEXT_SYMBOL_ROTATED old_symbol=%s new_symbol=%s reason=%s",
+            old_symbol,
+            active,
+            reason,
+            extra={
+                "event": "FUTURES_CONTEXT_SYMBOL_ROTATED",
+                "old_symbol": old_symbol,
+                "new_symbol": active,
+                "reason": reason,
+                "trace_id": trace_id,
+            },
+        )
+        return active
 
     def get_symbol_snapshot(self, symbol: str) -> MarketSnapshot:
         """Return a unified MarketSnapshot for one symbol."""
