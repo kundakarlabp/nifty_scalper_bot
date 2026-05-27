@@ -324,6 +324,34 @@ def test_symbol_live_entry_ready_false_when_context_stale(monkeypatch) -> None:
     assert reason == "context_stale"
 
 
+def test_ce_signal_blocked_when_direction_bias_pe() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._runtime_indicators = {"NFO:NIFTY26JUN23800CE": {"direction_bias": "PE"}}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800CE")
+    assert ready is False
+    assert reason == "context_direction_conflict"
+
+
+def test_pe_signal_allowed_when_direction_bias_pe_and_other_gates_pass() -> None:
+    runner = _make_runner()
+    runner._is_tradable_symbol = lambda _s: True
+    runner._order_manager_kill_switch_status_for_entry = lambda: (False, {})
+    runner._runtime_indicators = {"NFO:NIFTY26JUN23800PE": {"direction_bias": "PE"}}
+    ready, reason, _details = runner._symbol_live_entry_ready("NFO:NIFTY26JUN23800PE")
+    assert ready is True
+    assert reason == "symbol_live_ready"
+
+
+def test_runner_ignores_stale_strategy_decision() -> None:
+    runner = _make_runner()
+    stale = SimpleNamespace(symbol="NFO:CE", category="strategy_single_vote_disabled", reason="single_vote_scalp_disabled", created_ts=time.time() - 10)
+    runner._strategy_manager = SimpleNamespace(get_last_no_signal_decision=lambda _sym: stale)
+    category, _reason = runner._classify_no_trade_decision(symbol="NFO:CE", signal=None, indicators_ctx={}, option_count=10, option_required=5, broker_attempted=False, trace_id="t1")
+    assert category == "context_direction_unavailable"
+
+
 def test_runner_emits_no_trade_decision_on_signal_none_strategy_no_trigger(caplog) -> None:
     runner = _make_runner()
     with caplog.at_level(logging.INFO):

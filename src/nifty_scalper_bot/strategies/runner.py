@@ -6610,6 +6610,45 @@ class StrategyRunner:
             return False
         return True
 
+    def _contract_side_from_symbol(self, symbol: str) -> str | None:
+        upper = str(symbol or "").upper()
+        if upper.endswith("CE"):
+            return "CE"
+        if upper.endswith("PE"):
+            return "PE"
+        return None
+
+    def _order_manager_kill_switch_status_for_entry(self) -> tuple[bool, dict[str, Any]]:
+        om = getattr(self, "_order_manager", None)
+        if om is None:
+            return False, {}
+        try:
+            checker = getattr(om, "is_kill_switch_active", None)
+            active = bool(checker()) if callable(checker) else False
+            status_fn = getattr(om, "get_kill_switch_status", None)
+            status = dict(status_fn() or {}) if callable(status_fn) else {}
+            status["active"] = active
+            return active, status
+        except Exception as exc:
+            return True, {"active": True, "kill_reason": "kill_switch_status_check_failed", "last_exception_type": type(exc).__name__, "last_exception_message": str(exc)}
+
+    def _strategy_decision_is_current(self, decision: Any, *, symbol: str, trace_id: str | None, max_age_s: float = 3.0) -> bool:
+        if decision is None:
+            return False
+        if str(getattr(decision, "symbol", "")).upper() != str(symbol).upper():
+            return False
+        decision_trace = getattr(decision, "trace_id", None)
+        if trace_id and decision_trace and str(decision_trace) != str(trace_id):
+            return False
+        created_ts = getattr(decision, "created_ts", None)
+        if created_ts is not None:
+            try:
+                if time.time() - float(created_ts) > max_age_s:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
     def _update_symbol_execution_phase(self, symbol: str, new_phase: str, reason: str) -> None:
         old_phase = self._symbol_execution_phase.get(symbol)
         if old_phase == new_phase:
@@ -6638,10 +6677,19 @@ class StrategyRunner:
             return False, "execution_not_armed", details
         if not self._is_tradable_symbol(symbol):
             return False, "non_tradable_symbol", details
-        ks_active = self._safe_kill_switch_active_for_diagnostics()
+        ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
         details["kill_switch_active"] = ks_active
+        details["kill_switch_status"] = ks_status
         if ks_active:
             return False, "order_manager_kill_switch_active", details
+        ctx = self._runtime_indicators.get(symbol, {}) or {}
+        contract_side = self._contract_side_from_symbol(symbol)
+        direction_bias = str(ctx.get("underlying_direction_bias") or ctx.get("direction_bias") or "").upper()
+        details["contract_side"] = contract_side
+        details["direction_bias"] = direction_bias
+        details["underlying_direction_bias"] = ctx.get("underlying_direction_bias")
+        if direction_bias in {"CE", "PE"} and contract_side in {"CE", "PE"} and direction_bias != contract_side:
+            return False, "context_direction_conflict", details
         required_bars = max(self._required_bars_for_symbol(symbol), safe_positive_int_env("OPTION_EXECUTION_MIN_BARS", 5, minimum=1))
         history_count = len(self._indicator_engine.get_history(symbol) or [])
         details["history_count"] = history_count
@@ -6653,7 +6701,7 @@ class StrategyRunner:
         if not quote_fresh:
             return False, "option_tick_stale", details
         max_context_age = safe_positive_float_env("MAX_CONTEXT_AGE_SECONDS", 5.0, minimum=0.1)
-        ctx_age = _extract_float(self._runtime_indicators.get(symbol, {}), "context_age_seconds")
+        ctx_age = _extract_float(ctx, "context_age_seconds")
         details["context_age_seconds"] = ctx_age
         if ctx_age is not None and ctx_age > max_context_age:
             return False, "context_stale", details
@@ -6669,6 +6717,7 @@ class StrategyRunner:
         option_count: int,
         option_required: int,
         broker_attempted: bool = False,
+        trace_id: str | None = None,
     ) -> tuple[str, str]:
         if broker_attempted:
             return "broker_placement_failed", "broker_attempted_failed"
@@ -6678,7 +6727,7 @@ class StrategyRunner:
             latest_decision_getter = getattr(self._strategy_manager, "get_last_no_signal_decision", None)
             if callable(latest_decision_getter):
                 decision = latest_decision_getter(symbol)
-                if decision is not None:
+                if self._strategy_decision_is_current(decision, symbol=symbol, trace_id=trace_id):
                     return str(getattr(decision, "category", "strategy_no_trigger")), str(getattr(decision, "reason", "strategy_no_trigger"))
         conflict = bool(indicators_ctx.get("direction_conflict") or indicators_ctx.get("underlying_direction_conflict"))
         if conflict:
@@ -8808,6 +8857,7 @@ class StrategyRunner:
                                 option_count=option_count,
                                 option_required=option_required,
                                 broker_attempted=False,
+                                trace_id=trace_id,
                             )
                             self._emit_runner_eval_decision(
                                 symbol=symbol,
@@ -9077,12 +9127,13 @@ class StrategyRunner:
                     extra={"event": "signal_executing", "symbol": symbol,
                            "action": signal.action},
                 )
-                if self._safe_kill_switch_active_for_diagnostics():
+                ks_active, ks_status = self._order_manager_kill_switch_status_for_entry()
+                if ks_active:
                     self._logger.warning(
                         "RUNNER_KILL_SWITCH_PRECHECK_BLOCK symbol=%s trace_id=%s",
                         symbol,
                         trace_id,
-                        extra={"event": "RUNNER_KILL_SWITCH_PRECHECK_BLOCK", "symbol": symbol, "trace_id": trace_id, "reason": "order_manager_kill_switch_active"},
+                        extra={"event": "RUNNER_KILL_SWITCH_PRECHECK_BLOCK", "symbol": symbol, "trace_id": trace_id, "reason": "order_manager_kill_switch_active", "kill_switch_status": ks_status, "broker_attempted": False, "consecutive_failures": ks_status.get("consecutive_failures"), "kill_reason": ks_status.get("kill_reason"), "last_exception_type": (ks_status.get("last_failure") or {}).get("exception_type"), "last_exception_message": (ks_status.get("last_failure") or {}).get("exception_message"), "recent_failures": ks_status.get("recent_failures")},
                     )
                     self._logger.info(
                         "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
