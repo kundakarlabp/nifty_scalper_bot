@@ -5,6 +5,7 @@ from collections import deque
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
+import time
 from types import SimpleNamespace
 import threading
 from unittest.mock import AsyncMock, MagicMock
@@ -13,6 +14,24 @@ import pytest
 from nifty_scalper_bot.strategies.runner import ExecutionReadinessResult, SignalExecutionResult, StrategyRunner
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
+
+
+def _wait_until(predicate, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+async def _wait_until_async(predicate, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return bool(predicate())
 
 
 class _SilentLogger:
@@ -251,9 +270,7 @@ def test_selected_option_prewarm_accepts_sync_hydrator_list_result(caplog) -> No
     runner._data_hub = SimpleNamespace(hydrate_symbol_history=lambda *a, **k: [1, 2, 3, 4, 5])
     with caplog.at_level("INFO"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t1")
-    import time as _t
-    _t.sleep(0.05)
-    assert "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight
+    assert _wait_until(lambda: "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight)
     rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
     assert rec.success is True
     assert rec.bars_after == 5
@@ -274,8 +291,7 @@ async def test_selected_option_prewarm_sync_hydrator_runs_off_event_loop() -> No
         return [1, 2, 3]
     runner._data_hub = SimpleNamespace(hydrate_symbol_history=_hydrate)
     runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t2")
-    await asyncio.sleep(0.05)
-    assert called_thread["name"]
+    assert await _wait_until_async(lambda: bool(called_thread["name"]))
     assert called_thread["name"] != threading.current_thread().name
 
 
@@ -292,7 +308,7 @@ async def test_selected_option_prewarm_accepts_async_hydrator_list_result(caplog
     runner._data_hub = SimpleNamespace(hydrate_symbol_history=_hydrate)
     with caplog.at_level("INFO"):
         runner._request_selected_option_history_prewarm("NFO:NIFTY26JUN24000CE", bars_before=1, required_bars=5, trace_id="t3")
-        await asyncio.sleep(0.05)
+        assert await _wait_until_async(lambda: "NFO:NIFTY26JUN24000CE" not in runner._selected_option_prewarm_inflight)
     rec = next(r for r in caplog.records if getattr(r, "event", "") == "SELECTED_OPTION_HISTORY_PREWARM_RESULT")
     assert rec.success is True
 
