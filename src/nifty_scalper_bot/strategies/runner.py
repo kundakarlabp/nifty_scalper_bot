@@ -6742,8 +6742,13 @@ class StrategyRunner:
         near_atm = False
         near_atm_threshold = safe_positive_float_env("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", 50.0, minimum=0.0)
         details["near_atm_threshold"] = near_atm_threshold
-        if strike is not None and self._active_atm_strike:
-            near_atm = abs(float(strike) - float(self._active_atm_strike)) <= near_atm_threshold
+        active_atm_strike = getattr(self, "_active_atm_strike", None)
+        details["active_atm_strike"] = active_atm_strike
+        if strike is not None and active_atm_strike is not None:
+            try:
+                near_atm = abs(float(strike) - float(active_atm_strike)) <= near_atm_threshold
+            except (TypeError, ValueError):
+                near_atm = False
         details["selected_option"] = selected_option
         details["near_atm"] = near_atm
         if strike is None and not selected_option:
@@ -6751,14 +6756,17 @@ class StrategyRunner:
         if not (selected_option or near_atm):
             return False, "candidate_not_selected_or_near_atm", details
         quote = self._get_cached_quote_for_live_entry(symbol_norm)
+        if not quote:
+            details["tradable_quote"] = False
+            details["depth_available"] = False
+            details["spread_pct"] = None
+            return False, "quote_missing", details
         tradable_quote = bool(quote.get("tradable_quote"))
         depth_available = bool(quote.get("depth_available") or quote.get("depth"))
         spread_pct = _extract_float(quote, "spread_pct")
         details["tradable_quote"] = tradable_quote
         details["depth_available"] = depth_available
         details["spread_pct"] = spread_pct
-        if not quote:
-            return False, "quote_missing", details
         if not tradable_quote:
             return False, "quote_not_tradable", details
         if _env_bool("LIVE_REQUIRE_OPTION_DEPTH", True) and not depth_available:
