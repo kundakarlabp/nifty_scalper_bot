@@ -1313,22 +1313,53 @@ class DataHub:
 
 
     def get_active_futures_symbol(self) -> str | None:
-        """Return authoritative active NIFTY future from MDM."""
+        """Return canonical active NIFTY future from MDM runtime state."""
         mdm = getattr(self, "_mdm", None)
-        for method_name in ("get_active_nifty_future_symbol_cached", "resolve_active_nifty_future_symbol"):
-            method = getattr(mdm, method_name, None)
-            if not callable(method):
-                continue
+
+        cached = getattr(mdm, "get_active_nifty_future_symbol_cached", None)
+        if callable(cached):
             try:
-                symbol = method()
+                canonical = canonical_nifty_future_symbol(cached())
             except TypeError:
                 try:
-                    symbol = method(now=None)
+                    canonical = canonical_nifty_future_symbol(cached(now=None))
                 except Exception:
-                    continue
+                    canonical = None
             except Exception:
-                continue
-            canonical = canonical_nifty_future_symbol(symbol)
+                canonical = None
+            if canonical:
+                return canonical
+
+        for attr_name in ("active_trading_universe", "_active_trading_universe"):
+            universe = getattr(mdm, attr_name, None)
+            if isinstance(universe, Mapping):
+                canonical = canonical_nifty_future_symbol(
+                    universe.get("futures_symbol") or universe.get("future_symbol")
+                )
+                if canonical:
+                    return canonical
+
+        requirements = getattr(mdm, "_readiness_requirements", None)
+        if isinstance(requirements, Mapping):
+            canonical = canonical_nifty_future_symbol(
+                requirements.get("futures")
+                or requirements.get("futures_symbol")
+                or requirements.get("future_symbol")
+            )
+            if canonical:
+                return canonical
+
+        resolve = getattr(mdm, "resolve_active_nifty_future_symbol", None)
+        if callable(resolve):
+            try:
+                canonical = canonical_nifty_future_symbol(resolve())
+            except TypeError:
+                try:
+                    canonical = canonical_nifty_future_symbol(resolve(now=None))
+                except Exception:
+                    canonical = None
+            except Exception:
+                canonical = None
             if canonical:
                 return canonical
         return None
