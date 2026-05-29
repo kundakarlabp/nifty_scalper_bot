@@ -7,7 +7,7 @@ from nifty_scalper_bot.instruments.active_contracts import (
 )
 
 
-def test_parse_nifty_future_expiry_last_thursday() -> None:
+def test_parse_nifty_future_expiry_last_thursday_fallback_calendar_only() -> None:
     assert parse_nifty_future_expiry("NFO:NIFTY26MAYFUT") == date(2026, 5, 28)
 
 

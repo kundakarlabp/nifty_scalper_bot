@@ -1327,8 +1327,9 @@ class DataHub:
                     continue
             except Exception:
                 continue
-            if symbol:
-                return str(symbol).strip().upper()
+            canonical = canonical_nifty_future_symbol(symbol)
+            if canonical:
+                return canonical
         return None
 
     def pull_quote(self, symbol: str) -> Dict[str, Any]:

@@ -7519,7 +7519,7 @@ def _commit_active_dynamic_basket(
     if callable(rotate_result):
         try:
             rotate_result(
-                requested_futures_symbol,
+                active_futures_symbol,
                 reason="active_dynamic_basket_commit",
                 selected_option_symbols=list(current_options),
             )
@@ -8554,7 +8554,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 dict.fromkeys(
                     [
                         "NSE:NIFTY",
-                        requested_futures_symbol,
+                        active_futures_symbol,
                         *selected_symbols,
                         *other_option_symbols,
                     ]
@@ -8805,6 +8805,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     )
 
             basket = normalize_active_basket_schema(basket)
+            active_futures_symbol = str(basket.get("futures_symbol") or "")
             active_option_symbols = select_active_option_symbols(
                 option_symbols=basket.get("option_symbols", []) or [],
                 atm=basket.get("atm_strike"),
@@ -8812,7 +8813,7 @@ async def startup_sequence(ctx: BotContext) -> None:
             )
             readiness_symbols = list(dict.fromkeys([
                 basket.get("spot_symbol"),
-                requested_futures_symbol,
+                active_futures_symbol,
                 *active_option_symbols,
             ]))
             readiness_symbols = [str(sym) for sym in readiness_symbols if sym]
@@ -8820,14 +8821,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                 "READINESS_SYMBOLS_SELECTED count=%d spot=%s futures=%s option_count=%d symbols=%s",
                 len(readiness_symbols),
                 basket.get("spot_symbol"),
-                requested_futures_symbol,
+                active_futures_symbol,
                 len(basket.get("option_symbols", []) or []),
                 readiness_symbols,
                 extra={
                     "event": "READINESS_SYMBOLS_SELECTED",
                     "count": len(readiness_symbols),
                     "spot": basket.get("spot_symbol"),
-                    "futures": basket.get("futures_symbol"),
+                    "futures": active_futures_symbol,
                     "option_count": len(basket.get("option_symbols", []) or []),
                     "symbols": readiness_symbols,
                 },
